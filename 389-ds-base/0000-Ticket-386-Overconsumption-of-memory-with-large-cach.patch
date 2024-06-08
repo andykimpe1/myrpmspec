@@ -1,0 +1,55 @@
+From 6d6fa2888fc450dd21a36445d9defa93ea2155ee Mon Sep 17 00:00:00 2001
+From: Mark Reynolds <mreynolds@redhat.com>
+Date: Thu, 6 Sep 2012 13:21:27 -0400
+Subject: [PATCH] Ticket 386 - Overconsumption of memory with large cachememsize and heavy use of ldapmodify
+
+Bug Description:  With very large entry cache setting, the memory process grows using just
+                  simple ldapmodifies.
+
+Fix Description:  The growth is caused by memory fragmentation.   On Linux, we can set a
+                  malloc option that impacts this fragmentation, but impacts performance.
+
+https://fedorahosted.org/389/ticket/386
+
+Reviewed by: richm(Thanks!)
+(cherry picked from commit 20dc4bc00b2660e951c1b50008115ef5611a5e24)
+---
+ ldap/servers/slapd/main.c |   15 ++++++++++++++-
+ 1 files changed, 14 insertions(+), 1 deletions(-)
+
+diff --git a/ldap/servers/slapd/main.c b/ldap/servers/slapd/main.c
+index 3455852..285cf2c 100644
+--- a/ldap/servers/slapd/main.c
++++ b/ldap/servers/slapd/main.c
+@@ -40,7 +40,7 @@
+ #  include <config.h>
+ #endif
+ 
+-
++#include <malloc.h>
+ #include <ldap.h>
+ #undef OFF
+ #undef LITTLE_ENDIAN
+@@ -662,6 +662,19 @@ main( int argc, char **argv)
+ 		ldap_set_option( 0x1, LDAP_OPT_MEMALLOC_FN_PTRS, &memalloc_fns );
+ 	}
+ #endif
++
++#ifdef LINUX
++	char *m = getenv( "SLAPD_MXFAST" );
++	if(m){
++		int val = atoi(m);
++		int max = 80 * (sizeof(size_t) / 4);
++
++		if(val >= 0 && val <= max){
++			mallopt(M_MXFAST, val);
++		}
++	}
++#endif
++
+ 	/*
+ 	 * Initialize NSPR very early. NSPR supports implicit initialization,
+ 	 * but it is not bulletproof -- so it is better to be explicit.
+-- 
+1.7.1
+
