@@ -103,10 +103,10 @@ Requires(post): /sbin/chkconfig
 Requires(preun): /sbin/chkconfig
 Requires(preun): /sbin/service
 
-Source0:          http://port389.org/binaries/%{name}-%{version}%{?prerel}.tar.bz2
+Source0:          https://fedorapeople.org/groups/389ds/binaries/%{name}-%{version}%{?prerel}.tar.bz2
 # 389-ds-git.sh should be used to generate the source tarball from git
-Source1:          %{name}-git.sh
-Source2:          %{name}-devel.README
+Source1:          https://github.com/andykimpe/myrpmspec/raw/el6/389-ds-base/%{name}-git.sh
+Source2:          https://github.com/andykimpe/myrpmspec/raw/el6/389-ds-base/%{name}-devel.README
 
 %description
 389 Directory Server is an LDAPv3 compliant server.  The base package includes
