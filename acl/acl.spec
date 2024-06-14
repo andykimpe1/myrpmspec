@@ -6,7 +6,7 @@ BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildRequires: libattr-devel >= 2.4.1
 BuildRequires: autoconf, libtool >= 1.5, gettext, gawk
 Requires: libacl = %{version}-%{release}
-Source: http://download-mirror.savannah.gnu.org/releases/acl/acl-%{version}.src.tar.gz
+Source: https://download-mirror.savannah.gnu.org/releases/acl/acl-%{version}.src.tar.gz
 Patch0: https://github.com/andykimpe/myrpmspec/raw/el6/acl/acl-2.2.3-multilib.patch
 Patch1: https://github.com/andykimpe/myrpmspec/raw/el6/acl/acl-2.2.39-build.patch
 Patch2: https://github.com/andykimpe/myrpmspec/raw/el6/acl/acl-2.2.49-setfacl-walk.patch
