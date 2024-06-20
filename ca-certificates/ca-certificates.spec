@@ -91,7 +91,7 @@ BuildRequires: asciidoc
 BuildRequires: libxslt
 
 #for /usr/bin/keytool
-BuildRequires: java--devel
+BuildRequires: java-devel
 
 %description
 This package contains the set of CA certificates chosen by the
