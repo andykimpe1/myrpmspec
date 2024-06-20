@@ -376,5 +376,4 @@ for tobj in objects:
             f.write("\n\n")
         f.close()
         print " -> written as '%s', trust = %s, openssl-trust = %s, distrust = %s, openssl-distrust = %s" % (fname, trustbits, openssl_trustflags, distrustbits, openssl_distrustflags)
-
-
+      
