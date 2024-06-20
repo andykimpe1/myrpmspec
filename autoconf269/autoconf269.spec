@@ -10,9 +10,6 @@ URL:        http://www.gnu.org/software/autoconf/
 BuildArch: noarch
 BuildRoot:  %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
-# run "make check" by default
-%bcond_without check
-
 # m4 >= 1.4.6 is required, >= 1.4.14 is recommended:
 BuildRequires:      m4 >= 1.4.12
 Requires:           m4 >= 1.4.12
