@@ -18,7 +18,7 @@ BuildRequires:      m4 >= 1.4.12
 Requires:           m4 >= 1.4.12
 BuildRequires:      emacs
 # the filtering macros are currently in /etc/rpm/macros.perl:
-BuildRequires:      perl-macros
+BuildRequires:      perl-devel
 BuildRequires:      perl(Data::Dumper)
 # from f19, Text::ParseWords is not the part of 'perl' package
 BuildRequires:      perl(Text::ParseWords)
