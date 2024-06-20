@@ -4,9 +4,9 @@ Version:    2.69
 Release:    11%{?dist}
 License:    GPLv2+ and GFDL
 Group:      Development/Tools
-Source0:    http://ftpmirror.gnu.org/autoconf/autoconf-%{version}.tar.xz
+Source0:    https://ftpmirror.gnu.org/autoconf/autoconf-%{version}.tar.xz
 Source1:    https://raw.githubusercontent.com/andykimpe/myrpmspec/el6/autoconf269/config.site
-URL:        http://www.gnu.org/software/autoconf/
+URL:        https://www.gnu.org/software/autoconf/
 BuildArch: noarch
 BuildRoot:  %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
