@@ -64,6 +64,7 @@ mv %{buildroot}/usr/share/info/autoconf.info %{buildroot}/usr/share/info/autocon
 mv %{buildroot}/usr/share/emacs/site-lisp/autoconf-mode.el %{buildroot}/usr/share/emacs/site-lisp/autoconf269-mode.el
 mv %{buildroot}/usr/share/emacs/site-lisp/autoconf-mode.elc %{buildroot}/usr/share/emacs/site-lisp/autoconf269-mode.elc
 mv %{buildroot}/usr/share/emacs/site-lisp/autotest-mode.el %{buildroot}/usr/share/emacs/site-lisp/autotest269-mode.elc
+mv %{buildroot}/usr/share/emacs/site-lisp/autotest-mode.elc %{buildroot}/usr/share/emacs/site-lisp/autotest269-mode.elc
 
 %post
 /sbin/install-info %{_infodir}/autoconf2.69.info %{_infodir}/dir || :
