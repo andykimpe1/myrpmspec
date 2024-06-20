@@ -47,7 +47,7 @@ Name: ca-certificates
 # to have increasing version numbers. However, the new scheme will work, 
 # because all future versions will start with 2013 or larger.)
 
-Version: 2020.2.41
+Version: 2023.2.60_v7.0.306
 # On RHEL 6.x, please keep the release version < 70
 # When rebasing on Y-Stream (6.y), use 65.1, 65.2, 65.3, ...
 # When rebasing on Z-Stream (6.y.z), use 65.0, 65.0.1, 65.0.2, ...
@@ -58,24 +58,24 @@ Group: System Environment/Base
 URL: http://www.mozilla.org/
 
 #Please always update both certdata.txt and nssckbi.h
-Source0: certdata.txt
-Source1: nssckbi.h
-Source2: update-ca-trust
-Source3: trust-fixes
-Source4: certdata2pem.py
-Source5: generate-cacerts.pl
-Source6: ca-legacy.conf
-Source7: ca-legacy
-Source9: ca-legacy.8.txt
-Source10: update-ca-trust.8.txt
-Source11: README.usr
-Source12: README.etc
-Source13: README.extr
-Source14: README.java
-Source15: README.openssl
-Source16: README.pem
-Source17: README.src
-Source18: README.ca-certificates
+Source0: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/certdata.txt
+Source1: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/nssckbi.h
+Source2: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/update-ca-trust
+Source3: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/trust-fixes
+Source4: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/certdata2pem.py
+Source5: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/generate-cacerts.pl
+Source6: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/ca-legacy.conf
+Source7: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/ca-legacy
+Source9: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/ca-legacy.8.txt
+Source10: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/update-ca-trust.8.txt
+Source11: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/README.usr
+Source12: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/README.etc
+Source13: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/README.extr
+Source14: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/README.java
+Source15: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/README.openssl
+Source16: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/README.pem
+Source17: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/README.src
+Source18: https://github.com/andykimpe/myrpmspec/raw/el6/ca-certificates/README.ca-certificates
 
 BuildArch: noarch
 
@@ -91,7 +91,7 @@ BuildRequires: asciidoc
 BuildRequires: libxslt
 
 #for /usr/bin/keytool
-BuildRequires: java-1.6.0-openjdk
+BuildRequires: java-devel
 
 %description
 This package contains the set of CA certificates chosen by the
@@ -146,38 +146,6 @@ EOF
    echo '#';
  ) > %{trusted_all_bundle}
  touch %{neutral_bundle}
- for f in certs/*.crt; do 
-   echo "processing $f"
-   tbits=`sed -n '/^# openssl-trust/{s/^.*=//;p;}' $f`
-   distbits=`sed -n '/^# openssl-distrust/{s/^.*=//;p;}' $f`
-   alias=`sed -n '/^# alias=/{s/^.*=//;p;q;}' $f | sed "s/'//g" | sed 's/"//g'`
-   case $tbits in
-     *serverAuth*) openssl x509 -text -in "$f" >> %{classic_tls_bundle} ;;
-   esac
-   targs=""
-   if [ -n "$tbits" ]; then
-      for t in $tbits; do
-         targs="${targs} -addtrust $t"
-      done
-   fi
-   if [ -n "$distbits" ]; then
-      for t in $distbits; do
-         targs="${targs} -addreject $t"
-      done
-   fi
-   if [ -n "$targs" ]; then
-      echo "trust flags $targs for $f" >> info.trust
-      openssl x509 -text -in "$f" -trustout $targs -setalias "$alias" >> %{trusted_all_bundle}
-   else
-      echo "no trust flags for $f" >> info.notrust
-      # p11-kit-trust defines empty trust lists as "rejected for all purposes".
-      # That's why we use the simple file format
-      #   (BEGIN CERTIFICATE, no trust information)
-      # because p11-kit-trust will treat it as a certificate with neutral trust.
-      # This means we cannot use the -setalias feature for neutral trust certs.
-      openssl x509 -text -in "$f" >> %{neutral_bundle}
-   fi
- done
 
  touch %{legacy_default_bundle}
  NUM_LEGACY_DEFAULT=`find certs/legacy-default -type f | wc -l`
