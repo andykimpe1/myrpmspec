@@ -52,10 +52,10 @@ their use.
 %build
 %configure --program-suffix=2.69
 # not parallel safe
-%make
+make -j$(nproc)
 
 %install
-%make_install
+%make install -j$(nproc) DESTDIR=%{buildroot}
 mkdir -p %{buildroot}/share
 # disable until it may cause too much mess in build system
 # install -m 0644 %%{SOURCE1} %%{buildroot}%%{_datadir}
