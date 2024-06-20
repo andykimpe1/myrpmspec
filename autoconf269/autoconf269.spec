@@ -60,6 +60,7 @@ mkdir -p %{buildroot}/share
 # disable until it may cause too much mess in build system
 # install -m 0644 %%{SOURCE1} %%{buildroot}%%{_datadir}
 mv %{buildroot}/usr/share/autoconf %{buildroot}/usr/share/autoconf2.69
+%{buildroot}/usr/share/info/autoconf.info.gz %{buildroot}/usr/share/info/autoconf2.69.info.gz
 
 %post
 /sbin/install-info %{_infodir}/autoconf2.69.info %{_infodir}/dir || :
