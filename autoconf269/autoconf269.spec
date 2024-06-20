@@ -55,7 +55,7 @@ their use.
 make -j$(nproc)
 
 %install
-%make install -j$(nproc) DESTDIR=%{buildroot}
+make install -j$(nproc) DESTDIR=%{buildroot}
 mkdir -p %{buildroot}/share
 # disable until it may cause too much mess in build system
 # install -m 0644 %%{SOURCE1} %%{buildroot}%%{_datadir}
