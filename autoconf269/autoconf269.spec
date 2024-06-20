@@ -59,6 +59,7 @@ make install -j$(nproc) DESTDIR=%{buildroot}
 mkdir -p %{buildroot}/share
 # disable until it may cause too much mess in build system
 # install -m 0644 %%{SOURCE1} %%{buildroot}%%{_datadir}
+mv %{buildroot}/usr/share/autoconf %{buildroot}/usr/share/autoconf2.69
 
 %post
 /sbin/install-info %{_infodir}/autoconf2.69.info %{_infodir}/dir || :
