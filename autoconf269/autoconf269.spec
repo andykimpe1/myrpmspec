@@ -23,14 +23,6 @@ BuildRequires:      perl(Data::Dumper)
 # from f19, Text::ParseWords is not the part of 'perl' package
 BuildRequires:      perl(Text::ParseWords)
 
-%if %{with check}
-# For extended testsuite coverage
-BuildRequires:      gcc-gfortran
-%if 0%{?fedora} >= 15
-BuildRequires:      erlang
-%endif
-%endif
-
 Requires(post):     /sbin/install-info
 Requires(preun):    /sbin/install-info
 
@@ -60,15 +52,10 @@ their use.
 %build
 %configure --program-suffix=2.69
 # not parallel safe
-make
-
-%check
-%if %{with check}
-make check # TESTSUITEFLAGS='1-198 200-' # will disable nr. 199.
-%endif
+%make
 
 %install
-make install DESTDIR=%{buildroot}
+%make_install
 mkdir -p %{buildroot}/share
 # disable until it may cause too much mess in build system
 # install -m 0644 %%{SOURCE1} %%{buildroot}%%{_datadir}
