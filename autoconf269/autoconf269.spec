@@ -14,8 +14,8 @@ BuildRoot:  %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 %bcond_without check
 
 # m4 >= 1.4.6 is required, >= 1.4.14 is recommended:
-BuildRequires:      m4 >= 1.4.14
-Requires:           m4 >= 1.4.14
+BuildRequires:      m4 >= 1.4.12
+Requires:           m4 >= 1.4.12
 BuildRequires:      emacs
 # the filtering macros are currently in /etc/rpm/macros.perl:
 BuildRequires:      perl-macros
