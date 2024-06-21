@@ -1,0 +1,49 @@
+From 1c3a79543488399081a00f9405d5c64af62aa6c5 Mon Sep 17 00:00:00 2001
+From: Peter Hutterer <peter.hutterer@who-t.net>
+Date: Tue, 22 Dec 2015 09:02:46 +1000
+Subject: [PATCH libevdev 3/3] uinput: fix race condition in uinput syspath
+ check
+
+In theory, the device could change between stat() call and open(), resulting
+in us opening the new device. Change to open() first, then fstat() on the fd.
+
+Signed-off-by: Peter Hutterer <peter.hutterer@who-t.net>
+---
+ libevdev/libevdev-uinput.c | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/libevdev/libevdev-uinput.c b/libevdev/libevdev-uinput.c
+index ba323ed..24e049f 100644
+--- a/libevdev/libevdev-uinput.c
++++ b/libevdev/libevdev-uinput.c
+@@ -225,19 +225,19 @@ fetch_syspath_and_devnode(struct libevdev_uinput *uinput_dev)
+ 			continue;
+ 		}
+ 
+-		if (stat(buf, &st) == -1)
+-			continue;
+-
+-		/* created before UI_DEV_CREATE, or after it finished */
+-		if (st.st_ctime < uinput_dev->ctime[0] ||
+-		    st.st_ctime > uinput_dev->ctime[1])
+-			continue;
+-
+ 		/* created within time frame */
+ 		fd = open(buf, O_RDONLY);
+ 		if (fd < 0)
+ 			continue;
+ 
++		/* created before UI_DEV_CREATE, or after it finished */
++		if (fstat(fd, &st) == -1 ||
++		    st.st_ctime < uinput_dev->ctime[0] ||
++		    st.st_ctime > uinput_dev->ctime[1]) {
++			close(fd);
++			continue;
++		}
++
+ 		len = read(fd, buf, sizeof(buf));
+ 		close(fd);
+ 		if (len <= 0)
+-- 
+2.5.0
+
