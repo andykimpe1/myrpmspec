@@ -1,0 +1,123 @@
+diff -up createrepo-0.9.9/createrepo/merge.py.old createrepo-0.9.9/createrepo/merge.py
+--- createrepo-0.9.9/createrepo/merge.py.old	2016-11-03 13:04:11.552597733 +0100
++++ createrepo-0.9.9/createrepo/merge.py	2016-11-03 13:04:26.220316633 +0100
+@@ -146,3 +146,4 @@ class RepoMergeBase:
+         mdgen.doPkgMetadata()
+         mdgen.doRepoMetadata()
+         mdgen.doFinalMove()
++        mdgen.cleanup()
+diff -up createrepo-0.9.9/createrepo/readMetadata.py.old createrepo-0.9.9/createrepo/readMetadata.py
+--- createrepo-0.9.9/createrepo/readMetadata.py.old	2016-11-03 13:04:43.302989252 +0100
++++ createrepo-0.9.9/createrepo/readMetadata.py	2016-11-03 13:06:00.587508131 +0100
+@@ -16,6 +16,7 @@
+ # Copyright 2006 Red Hat
+ 
+ import os
++import shutil
+ import stat
+ from utils import errorprint, _
+ 
+@@ -118,7 +119,11 @@ class MetadataIndex(object):
+                         return po
+         return None
+ 
+-    
++    def cleanup(self):
++        """Delete temporary files in /var/tmp."""
++        shutil.rmtree(self._repo.basecachedir, ignore_errors=True)
++        shutil.rmtree(self._repo.base_persistdir, ignore_errors=True)    
++
+ 
+ if __name__ == "__main__":
+     cwd = os.getcwd()
+@@ -131,4 +136,5 @@ if __name__ == "__main__":
+         print po.xml_dump_primary_metadata()
+         print po.xml_dump_filelists_metadata()
+         print po.xml_dump_other_metadata()
++    idx.cleanup()
+ 
+diff -up createrepo-0.9.9/genpkgmetadata.py.old createrepo-0.9.9/genpkgmetadata.py
+--- createrepo-0.9.9/genpkgmetadata.py.old	2016-11-03 13:06:11.196304818 +0100
++++ createrepo-0.9.9/genpkgmetadata.py	2016-11-03 13:09:50.273106316 +0100
+@@ -274,13 +274,25 @@ def main(args):
+         mdgen.doFinalMove()
+         if conf.profile:
+             print ('fm time: %0.3f' % (time.time() - fm_st))
++        cl_st = time.time()
++        mdgen.cleanup()
++        if conf.profile:
++            print ('cl time: %0.3f' % (time.time() - cl_st))
+ 
+ 
+     except MDError, errormsg:
+         errorprint(_('%s') % errormsg)
++        # cleanup
++        tmp = os.path.join(conf.outputdir, conf.tempdir)
++        if os.path.exists(tmp):
++            for name in os.listdir(tmp):
++                os.unlink(os.path.join(tmp, name))
++            os.rmdir(tmp)
++        if mdgen:
++            mdgen.cleanup()
+         sys.exit(1)
+ 
+ 
+ if __name__ == "__main__":
+     if len(sys.argv) > 1:
+         if sys.argv[1] == 'profile':
+diff -up createrepo-0.9.9/createrepo/__init__.py.old createrepo-0.9.9/createrepo/__init__.py
+--- createrepo-0.9.9/createrepo/__init__.py.old	2016-11-03 16:40:01.749252966 +0100
++++ createrepo-0.9.9/createrepo/__init__.py	2016-11-03 16:41:57.891921862 +0100
+@@ -1200,18 +1200,18 @@ class MetaDataGenerator:
+                     msg = _('Could not restore old non-metadata file: %s -> %s') % (oldfile, finalfile)
+                     msg += _('Error was %s') % e
+                     raise MDError, msg
++        self._write_out_read_pkgs_list()
++ 
+ 
++    def cleanup(self):
+         self._cleanup_tmp_repodata_dir()
+-        self._cleanup_update_tmp_dir()        
+-        self._write_out_read_pkgs_list()
++        self._cleanup_update_tmp_dir()
+ 
+ 
+     def _cleanup_update_tmp_dir(self):
+-        if not self.conf.update:
+-            return
+-        
+-        shutil.rmtree(self.oldData._repo.basecachedir, ignore_errors=True)
+-        shutil.rmtree(self.oldData._repo.base_persistdir, ignore_errors=True)
++        if self.conf.update:
++            self.oldData.cleanup()
++    
+         
+     def _write_out_read_pkgs_list(self):
+         # write out the read_pkgs_list file with self.read_pkgs
+diff -up createrepo-0.9.9/genpkgmetadata.py.old createrepo-0.9.9/genpkgmetadata.py
+--- createrepo-0.9.9/genpkgmetadata.py.old	2016-11-03 16:42:28.369310149 +0100
++++ createrepo-0.9.9/genpkgmetadata.py	2016-11-03 16:42:43.902998371 +0100
+@@ -247,6 +247,7 @@ def main(args):
+ 
+     mid_st = time.time()
+     try:
++        mdgen = None
+         if conf.split:
+             mdgen = createrepo.SplitMetaDataGenerator(config_obj=conf,
+                                                       callback=MDCallBack())
+diff -up createrepo-0.9.9/genpkgmetadata.py.old createrepo-0.9.9/genpkgmetadata.py
+--- createrepo-0.9.9/genpkgmetadata.py.old	2016-11-04 11:19:52.786521433 +0100
++++ createrepo-0.9.9/genpkgmetadata.py	2016-11-04 11:21:17.828649796 +0100
+@@ -289,9 +289,11 @@ def main(args):
+             for name in os.listdir(tmp):
+                 os.unlink(os.path.join(tmp, name))
+             os.rmdir(tmp)
++        sys.exit(1)
++
++    finally:
+         if mdgen:
+             mdgen.cleanup()
+-        sys.exit(1)
+ 
+ 
+ if __name__ == "__main__":

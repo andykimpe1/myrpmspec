@@ -1,0 +1,122 @@
+commit df2aa15487a497d69b00578be671f885efc8ffa2
+Author: Zdenek Pavlas <zpavlas@redhat.com>
+Date:   Fri Apr 5 15:26:16 2013 +0200
+
+    modifyrepo: add --checksum and --{unique,simple}-md-filenames options
+
+diff --git a/modifyrepo.py b/modifyrepo.py
+index acdde77..b6129b7 100755
+--- a/modifyrepo.py
++++ b/modifyrepo.py
+@@ -44,7 +44,6 @@ class RepoMetadata:
+         """ Parses the repomd.xml file existing in the given repo directory. """
+         self.repodir = os.path.abspath(repo)
+         self.repomdxml = os.path.join(self.repodir, 'repomd.xml')
+-        self.checksum_type = 'sha256'
+         self.compress = False
+         self.compress_type = _available_compression[-1] # best available
+ 
+@@ -130,7 +129,10 @@ class RepoMetadata:
+         print "Wrote:", destmd
+ 
+         open_csum = checksum(self.checksum_type, metadata)
+-        csum, destmd = checksum_and_rename(destmd, self.checksum_type)
++        if self.unique_md_filenames:
++            csum, destmd = checksum_and_rename(destmd, self.checksum_type)
++        else:
++            csum = checksum(self.checksum_type, destmd)
+         base_destmd = os.path.basename(destmd)
+ 
+         # Remove any stale metadata
+@@ -179,6 +181,14 @@ def main(args):
+                       help="compress the new repodata before adding it to the repo")
+     parser.add_option("--compress-type", dest='compress_type', default='gz',
+                       help="compression format to use")
++    parser.add_option("-s", "--checksum", default='sha256', dest='sumtype',
++        help="specify the checksum type to use (default: sha256)")
++    parser.add_option("--unique-md-filenames", dest="unique_md_filenames",
++        help="include the file's checksum in the filename, helps with proxies (default)",
++        default=True, action="store_true")
++    parser.add_option("--simple-md-filenames", dest="unique_md_filenames",
++        help="do not include the file's checksum in the filename",
++        action="store_false")
+     parser.usage = "modifyrepo [options] [--remove] <input_metadata> <output repodata>"
+     
+     (opts, argsleft) = parser.parse_args(args)
+@@ -194,6 +204,8 @@ def main(args):
+         return 1
+ 
+ 
++    repomd.checksum_type = opts.sumtype
++    repomd.unique_md_filenames = opts.unique_md_filenames
+     repomd.compress = opts.compress
+     if opts.compress_type in _available_compression:
+         repomd.compress_type = opts.compress_type
+commit e9407244f389d227744c13e30392d676fccfbcbc
+Author: Ville Skyttä <ville.skytta@iki.fi>
+Date:   Fri Apr 5 18:24:03 2013 +0300
+
+    createrepo: Fix --checksum arg completion.
+
+diff --git a/createrepo.bash b/createrepo.bash
+index f5a8bb7..8cef728 100644
+--- a/createrepo.bash
++++ b/createrepo.bash
+@@ -24,7 +24,7 @@ _cr_createrepo()
+             COMPREPLY=( $( compgen -f -o plusdirs -X '!*.xml' -- "$2" ) )
+             return 0
+             ;;
+-        -s|--sumtype)
++        -s|--checksum)
+             COMPREPLY=( $( compgen -W 'md5 sha1 sha256 sha512' -- "$2" ) )
+             return 0
+             ;;
+commit 9b75c361142758989f069ae230583ad63755c34c
+Author: Ville Skyttä <ville.skytta@iki.fi>
+Date:   Fri Apr 5 18:25:39 2013 +0300
+
+    modifyrepo: Add --checksum and --{unique,simple}-md-filenames to completions.
+
+diff --git a/createrepo.bash b/createrepo.bash
+index 8cef728..4b2cc36 100644
+--- a/createrepo.bash
++++ b/createrepo.bash
+@@ -6,6 +6,11 @@ _cr_compress_type()
+         | sed -ne 's/,/ /g' -ne 's/.*[Cc]ompression.*://p' )" -- "$2" ) )
+ }
+ 
++_cr_checksum_type()
++{
++    COMPREPLY=( $( compgen -W 'md5 sha1 sha256 sha512' -- "$1" ) )
++}
++
+ _cr_createrepo()
+ {
+     COMPREPLY=()
+@@ -25,7 +30,7 @@ _cr_createrepo()
+             return 0
+             ;;
+         -s|--checksum)
+-            COMPREPLY=( $( compgen -W 'md5 sha1 sha256 sha512' -- "$2" ) )
++            _cr_checksum_type "$2"
+             return 0
+             ;;
+         -i|--pkglist|--read-pkgs-list)
+@@ -106,11 +111,16 @@ _cr_modifyrepo()
+             _cr_compress_type "" "$2"
+             return 0
+             ;;
++        -s|--checksum)
++            _cr_checksum_type "$2"
++            return 0
++            ;;
+     esac
+ 
+     if [[ $2 == -* ]] ; then
+         COMPREPLY=( $( compgen -W '--version --help --mdtype --remove
+-            --compress --compress-type' -- "$2" ) )
++            --compress --compress-type --checksum --unique-md-filenames
++            --simple-md-filenames' -- "$2" ) )
+         return 0
+     fi
+ 
