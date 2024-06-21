@@ -1,0 +1,89 @@
+diff -up ORBit2-2.14.17/linc2/src/linc-server.c.fix-crash-on-exit ORBit2-2.14.17/linc2/src/linc-server.c
+--- ORBit2-2.14.17/linc2/src/linc-server.c.fix-crash-on-exit	2012-08-08 11:43:37.568722654 -0400
++++ ORBit2-2.14.17/linc2/src/linc-server.c	2012-08-08 11:43:49.311885085 -0400
+@@ -71,17 +71,55 @@ link_server_init (LinkServer *srv)
+ 	srv->priv->fd = -1;
+ }
+ 
++typedef struct
++{
++	LinkServer     *server;
++	LinkConnection *connection;
++} LinkServerConnection;
++
++static gboolean
++schedule_connection_removal (LinkServerConnection *server_connection)
++{
++	LinkConnection *connection = server_connection->connection;
++	LinkServer *server = server_connection->server;
++	GSList *node;
++
++	node = g_slist_find (server->priv->connections, connection);
++
++	if (node != NULL) {
++		server->priv->connections = g_slist_delete_link (server->priv->connections,
++								 node);
++		link_connection_unref (connection);
++	}
++
++	return FALSE;
++}
++
++static void
++free_server_connection (LinkServerConnection *server_connection)
++{
++	g_object_unref (server_connection->server);
++	link_connection_unref (server_connection->connection);
++	g_free (server_connection);
++}
+ 
+ static void
+ link_server_client_connection_broken (LinkConnection *connection,
+ 				      gpointer        user_data)
+ {
+ 	LinkServer *server = user_data;
++	LinkServerConnection *server_connection;
+ 
+-	server->priv->connections =
+-		g_slist_remove (server->priv->connections, connection);
+-
+-	link_connection_unref (connection);
++	server_connection = g_new0 (LinkServerConnection, 1);
++	server_connection->server = g_object_ref (server);
++	server_connection->connection = g_object_ref (connection);
++
++	g_idle_add_full (G_PRIORITY_DEFAULT_IDLE,
++			 (GSourceFunc)
++			 schedule_connection_removal,
++			 server_connection,
++			 (GDestroyNotify)
++			 free_server_connection);
+ }
+ 
+ static void
+@@ -100,6 +138,14 @@ link_server_dispose (GObject *obj)
+ 		link_io_remove_watch (thewatch);
+ 	}
+ 
++	l = srv->priv->connections;
++	while (l != NULL) {
++		GObject *o = l->data;
++		g_signal_handlers_disconnect_by_func (o,
++						      link_server_client_connection_broken,
++						      srv);
++		l = l->next;
++	}
+ 	link_protocol_destroy_cnx (srv->proto,
+ 				   srv->priv->fd, 
+ 				   srv->local_host_info,
+@@ -109,10 +155,6 @@ link_server_dispose (GObject *obj)
+ 	while ((l = srv->priv->connections)) {
+ 		GObject *o = l->data;
+ 
+-		g_signal_handlers_disconnect_by_func (o,
+-						      link_server_client_connection_broken,
+-						      srv);
+-
+ 		srv->priv->connections = l->next;
+ 		g_slist_free_1 (l);
+ 		link_connection_unref (LINK_CONNECTION (o));
