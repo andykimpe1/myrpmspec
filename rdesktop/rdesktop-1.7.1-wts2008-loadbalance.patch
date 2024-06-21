@@ -1,0 +1,170 @@
+#
+#
+# reimplements server redirect pdu handling according to:
+# http://msdn.microsoft.com/en-us/library/ee443575%28prot.20%29.aspx
+# 2.2.13.1 Server Redirection Packet (RDP_SERVER_REDIRECTION_PACKET) 
+#
+# 9 Oct 2012 Jaroslaw.Polok@cern.ch
+#
+#
+diff -Naur rdesktop-1.7.1.org/constants.h rdesktop-1.7.1.lb/constants.h
+--- rdesktop-1.7.1.org/constants.h	2010-12-27 13:11:35.000000000 +0100
++++ rdesktop-1.7.1.lb/constants.h	2012-10-08 17:11:17.596288710 +0200
+@@ -462,7 +462,7 @@
+ enum RDP_PDU_REDIRECT_FLAGS
+ {
+ 	PDU_REDIRECT_HAS_IP = 0x1,
+-	PDU_REDIRECT_HAS_COOKIE = 0x2,
++	PDU_REDIRECT_HAS_LB_INFO = 0x2,
+ 	PDU_REDIRECT_HAS_USERNAME = 0x4,
+ 	PDU_REDIRECT_HAS_DOMAIN = 0x8,
+ 	PDU_REDIRECT_HAS_PASSWORD = 0x10,
+diff -Naur rdesktop-1.7.1.org/rdesktop.c rdesktop-1.7.1.lb/rdesktop.c
+--- rdesktop-1.7.1.org/rdesktop.c	2011-11-25 11:03:03.000000000 +0100
++++ rdesktop-1.7.1.lb/rdesktop.c	2012-10-08 17:10:01.643288128 +0200
+@@ -111,6 +111,7 @@
+ char g_redirect_password[64];
+ char *g_redirect_username;
+ char g_redirect_cookie[128];
++uint32 g_redirect_cookie_len = 0;
+ uint32 g_redirect_flags = 0;
+ 
+ uint32 g_reconnect_logonid = 0;
+diff -Naur rdesktop-1.7.1.org/rdp.c rdesktop-1.7.1.lb/rdp.c
+--- rdesktop-1.7.1.org/rdp.c	2011-10-26 12:53:39.000000000 +0200
++++ rdesktop-1.7.1.lb/rdp.c	2012-10-09 08:39:48.847289715 +0200
+@@ -67,6 +67,7 @@
+ extern char g_redirect_password[64];
+ extern char *g_redirect_username;
+ extern char g_redirect_cookie[128];
++extern uint32 g_redirect_cookie_len;
+ extern uint32 g_redirect_flags;
+ /* END Session Directory support */
+ 
+@@ -363,9 +364,18 @@
+ 	}
+ 	else
+ 	{
+-
+ 		flags |= RDP_LOGON_BLOB;
+-		DEBUG_RDP5(("Sending RDP5-style Logon packet\n"));
++		
++		if (g_redirect) 
++		{
++			DEBUG_RDP5(("Sending RDP5-style logon packet with password cookie\n"));
++			len_password = g_redirect_cookie_len + 2; /* wts 2008 seems to need double null byte after the cookie ... */ 
++		} 
++		else 
++		{
++			DEBUG_RDP5(("Sending RDP5-style Logon packet\n"));
++		}
++
+ 		packetlen = 4 +	/* Unknown uint32 */
+ 			4 +	/* flags */
+ 			2 +	/* len_domain */
+@@ -398,7 +408,14 @@
+ 		out_uint16_le(s, len_user);
+ 		if (flags & RDP_LOGON_AUTO)
+ 		{
+-			out_uint16_le(s, len_password);
++			if (g_redirect)
++                        {
++				out_uint16_le(s, g_redirect_cookie_len);
++			}
++			else 
++			{	
++				out_uint16_le(s, len_password);
++			}
+ 
+ 		}
+ 		if (flags & RDP_LOGON_BLOB && !(flags & RDP_LOGON_AUTO))
+@@ -414,7 +431,15 @@
+ 		rdp_out_unistr(s, user, len_user);
+ 		if (flags & RDP_LOGON_AUTO)
+ 		{
+-			rdp_out_unistr(s, password, len_password);
++			if (g_redirect) 
++			{
++				out_uint8a(s,g_redirect_cookie,g_redirect_cookie_len);
++				out_uint16_le(s, 0); 
++			} 
++			else
++			{
++				rdp_out_unistr(s, password, len_password);
++			}
+ 		}
+ 		if (flags & RDP_LOGON_BLOB && !(flags & RDP_LOGON_AUTO))
+ 		{
+@@ -1491,7 +1516,33 @@
+ 		rdp_in_unistr(s, g_redirect_server, sizeof(g_redirect_server), len);
+ 	}
+ 
+-	if (g_redirect_flags & PDU_REDIRECT_HAS_COOKIE)
++	if (g_redirect_flags & PDU_REDIRECT_HAS_LB_INFO)
++	{
++		in_uint32_le(s,len);
++		/* what for could the load balance info be used ?... */
++		in_uint8s(s,len);
++	}
++
++	if (g_redirect_flags & PDU_REDIRECT_HAS_USERNAME)
++        {
++                /* read length of username string */
++                in_uint32_le(s, len);
++
++                /* read username string */
++                g_redirect_username = (char *) xmalloc(len + 1);
++                rdp_in_unistr(s, g_redirect_username, len + 1, len);
++        }
++
++        if (g_redirect_flags & PDU_REDIRECT_HAS_DOMAIN)
++        {
++                /* read length of domain string */
++                in_uint32_le(s, len);
++
++                /* read domain string */
++                rdp_in_unistr(s, g_redirect_domain, sizeof(g_redirect_domain), len);
++        }
++
++	if (g_redirect_flags & PDU_REDIRECT_HAS_PASSWORD)
+ 	{
+ 		/* read length of cookie string */
+ 		in_uint32_le(s, len);
+@@ -1510,35 +1561,8 @@
+ 		{
+ 			in_uint8a(s, g_redirect_cookie, len);
+ 		}
+-		g_redirect_cookie[len] = 0;
+-	}
+-
+-	if (g_redirect_flags & PDU_REDIRECT_HAS_USERNAME)
+-	{
+-		/* read length of username string */
+-		in_uint32_le(s, len);
+-
+-		/* read username string */
+-		g_redirect_username = (char *) xmalloc(len + 1);
+-		rdp_in_unistr(s, g_redirect_username, len + 1, len);
+-	}
+-
+-	if (g_redirect_flags & PDU_REDIRECT_HAS_DOMAIN)
+-	{
+-		/* read length of domain string */
+-		in_uint32_le(s, len);
+-
+-		/* read domain string */
+-		rdp_in_unistr(s, g_redirect_domain, sizeof(g_redirect_domain), len);
+-	}
+-
+-	if (g_redirect_flags & PDU_REDIRECT_HAS_PASSWORD)
+-	{
+-		/* read length of password string */
+-		in_uint32_le(s, len);
+-
+-		/* read password string */
+-		rdp_in_unistr(s, g_redirect_password, sizeof(g_redirect_password), len);
++		/* g_redirect_cookie[len] = 0; */
++		g_redirect_cookie_len = len;
+ 	}
+ 
+ 	if (g_redirect_flags & PDU_REDIRECT_DONT_STORE_USERNAME)
