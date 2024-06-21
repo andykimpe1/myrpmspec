@@ -1,0 +1,103 @@
+From d0968bf50451005c61306e61165b35d166d87a19 Mon Sep 17 00:00:00 2001
+From: "Richard W.M. Jones" <rjones@redhat.com>
+Date: Thu, 12 Jun 2014 13:28:03 +0100
+Subject: [PATCH 040/118] fuse: UID 0 should override all permissions checks
+ (RHBZ#1106548).
+
+Previously if you were root, and you tried to change directory into a
+directory which was not owned by you and not readable (eg. 0700
+bin:bin), it would fail.
+
+This doesn't fail on regular directories because when you are root the
+kernel just ignores permissions.
+
+Although libguestfs in general tries not to duplicate kernel code, in
+the case where we emulate the FUSE access(2) system call,
+unfortunately we have to do it by stat-ing the object and performing
+some (half-arsed) heuristics.
+
+This commit modifies the FUSE access(2) system call, so root is now
+able to chdir to any directory.
+
+It also adds some debugging so we can debug these complex permissions
+checks in the field if some other problem arises in future.
+
+(cherry picked from commit 9b5cdc874784437d7a59bd024043c2abd930b6c3)
+---
+ src/fuse.c | 55 +++++++++++++++++++++++++++++++++++++++----------------
+ 1 file changed, 39 insertions(+), 16 deletions(-)
+
+diff --git a/src/fuse.c b/src/fuse.c
+index e65be13..5e9378e 100644
+--- a/src/fuse.c
++++ b/src/fuse.c
+@@ -289,27 +289,50 @@ mount_local_access (const char *path, int mask)
+     return -EROFS;
+ 
+   r = mount_local_getattr (path, &statbuf);
+-  if (r < 0 || mask == F_OK)
++  if (r < 0 || mask == F_OK) {
++    debug (g, "%s: mount_local_getattr returned r = %d", path, r);
+     return r;
++  }
+ 
+   struct fuse_context *fuse = fuse_get_context ();
+   int ok = 1;
+ 
+-  if (mask & R_OK)
+-    ok = ok &&
+-      (  fuse->uid == statbuf.st_uid ? statbuf.st_mode & S_IRUSR
+-       : fuse->gid == statbuf.st_gid ? statbuf.st_mode & S_IRGRP
+-       : statbuf.st_mode & S_IROTH);
+-  if (mask & W_OK)
+-    ok = ok &&
+-      (  fuse->uid == statbuf.st_uid ? statbuf.st_mode & S_IWUSR
+-       : fuse->gid == statbuf.st_gid ? statbuf.st_mode & S_IWGRP
+-       : statbuf.st_mode & S_IWOTH);
+-  if (mask & X_OK)
+-    ok = ok &&
+-      (  fuse->uid == statbuf.st_uid ? statbuf.st_mode & S_IXUSR
+-       : fuse->gid == statbuf.st_gid ? statbuf.st_mode & S_IXGRP
+-       : statbuf.st_mode & S_IXOTH);
++  /* Root user should be able to access everything, so only bother
++   * with these fine-grained tests for non-root.  (RHBZ#1106548).
++   */
++  if (fuse->uid != 0) {
++    if (mask & R_OK)
++      ok = ok &&
++        (  fuse->uid == statbuf.st_uid ? statbuf.st_mode & S_IRUSR
++           : fuse->gid == statbuf.st_gid ? statbuf.st_mode & S_IRGRP
++           : statbuf.st_mode & S_IROTH);
++    if (mask & W_OK)
++      ok = ok &&
++        (  fuse->uid == statbuf.st_uid ? statbuf.st_mode & S_IWUSR
++           : fuse->gid == statbuf.st_gid ? statbuf.st_mode & S_IWGRP
++           : statbuf.st_mode & S_IWOTH);
++    if (mask & X_OK)
++      ok = ok &&
++        (  fuse->uid == statbuf.st_uid ? statbuf.st_mode & S_IXUSR
++           : fuse->gid == statbuf.st_gid ? statbuf.st_mode & S_IXGRP
++           : statbuf.st_mode & S_IXOTH);
++  }
++
++  debug (g, "%s: "
++         "testing access mask%s%s%s%s: "
++         "caller UID:GID = %d:%d, "
++         "file UID:GID = %d:%d, "
++         "file mode = %o, "
++         "result = %s",
++         path,
++         mask & R_OK ? " R_OK" : "",
++         mask & W_OK ? " W_OK" : "",
++         mask & X_OK ? " X_OK" : "",
++         mask == 0 ? " 0" : "",
++         fuse->uid, fuse->gid,
++         statbuf.st_uid, statbuf.st_gid,
++         statbuf.st_mode,
++         ok ? "OK" : "EACCESS");
+ 
+   return ok ? 0 : -EACCES;
+ }
+-- 
+2.7.4
+

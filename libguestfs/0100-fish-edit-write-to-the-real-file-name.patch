@@ -1,0 +1,156 @@
+From f994faadd4ad27793c6a8b8e6350d0fc2e3c86f5 Mon Sep 17 00:00:00 2001
+From: Pino Toscano <ptoscano@redhat.com>
+Date: Mon, 1 Sep 2014 11:46:57 +0200
+Subject: [PATCH 100/118] fish: edit: write to the real file name
+
+When saving, resolve the path of the file being edited and use that as
+real target to write to. Otherwise, if the file name is a symlink then
+it will be replaced by a regular file with the new content, leaving the
+old file untouched.
+
+Extend test-edit.sh to check for this situation.
+---
+ edit/virt-edit.c  | 23 ++++++++++++++++++-----
+ fish/edit.c       | 17 +++++++++++++++--
+ fish/test-edit.sh | 12 +++++++++++-
+ 3 files changed, 44 insertions(+), 8 deletions(-)
+
+diff --git a/edit/virt-edit.c b/edit/virt-edit.c
+index 115d7c0..57a7acd 100644
+--- a/edit/virt-edit.c
++++ b/edit/virt-edit.c
+@@ -310,6 +310,7 @@ edit (const char *filename, const char *root)
+   CLEANUP_FREE char *upload_from = NULL;
+   CLEANUP_FREE char *newname = NULL;
+   CLEANUP_FREE char *backupname = NULL;
++  CLEANUP_FREE char *newdestfilename = NULL;
+ 
+   /* Windows?  Special handling is required. */
+   if (is_windows (g, root))
+@@ -341,12 +342,24 @@ edit (const char *filename, const char *root)
+    * the user closed the editor without changing the file.
+    */
+   if (upload_from) {
++    /* Resolve the file name and write to the actual target, since
++     * that is the file it was opened earlier; otherwise, if it is
++     * a symlink it will be overwritten by a regular file with the
++     * new content.
++     *
++     * Theoretically realpath should work, but just check again
++     * to be safe.
++     */
++    newdestfilename = guestfs_realpath (g, filename);
++    if (newdestfilename == NULL)
++      goto error;
++
+     /* Upload to a new file in the same directory, so if it fails we
+      * don't end up with a partially written file.  Give the new file
+      * a completely random name so we have only a tiny chance of
+      * overwriting some existing file.
+      */
+-    newname = generate_random_name (filename);
++    newname = generate_random_name (newdestfilename);
+ 
+     if (guestfs_upload (g, upload_from, newname) == -1)
+       goto error;
+@@ -354,16 +367,16 @@ edit (const char *filename, const char *root)
+     /* Set the permissions, UID, GID and SELinux context of the new
+      * file to match the old file (RHBZ#788641).
+      */
+-    if (copy_attributes (filename, newname) == -1)
++    if (copy_attributes (newdestfilename, newname) == -1)
+       goto error;
+ 
+     /* Backup or overwrite the file. */
+     if (backup_extension) {
+-      backupname = generate_backup_name (filename);
+-      if (guestfs_mv (g, filename, backupname) == -1)
++      backupname = generate_backup_name (newdestfilename);
++      if (guestfs_mv (g, newdestfilename, backupname) == -1)
+         goto error;
+     }
+-    if (guestfs_mv (g, newname, filename) == -1)
++    if (guestfs_mv (g, newname, newdestfilename) == -1)
+       goto error;
+   }
+ 
+diff --git a/fish/edit.c b/fish/edit.c
+index 05a272b..107a8fc 100644
+--- a/fish/edit.c
++++ b/fish/edit.c
+@@ -44,6 +44,7 @@ run_edit (const char *cmd, size_t argc, char *argv[])
+   char buf[256];
+   const char *editor;
+   CLEANUP_FREE char *remotefilename = NULL, *newname = NULL;
++  CLEANUP_FREE char *newdestfilename = NULL;
+   struct stat oldstat, newstat;
+   int r, fd;
+ 
+@@ -119,12 +120,24 @@ run_edit (const char *cmd, size_t argc, char *argv[])
+       oldstat.st_size == newstat.st_size)
+     return 0;
+ 
++  /* Resolve the file name and write to the actual target, since
++   * that is the file it was opened earlier; otherwise, if it is
++   * a symlink it will be overwritten by a regular file with the
++   * new content.
++   *
++   * Theoretically realpath should work, but just check again
++   * to be safe.
++   */
++  newdestfilename = guestfs_realpath (g, remotefilename);
++  if (newdestfilename == NULL)
++    return -1;
++
+   /* Upload to a new file in the same directory, so if it fails we
+    * don't end up with a partially written file.  Give the new file
+    * a completely random name so we have only a tiny chance of
+    * overwriting some existing file.
+    */
+-  newname = generate_random_name (remotefilename);
++  newname = generate_random_name (newdestfilename);
+   if (!newname)
+     return -1;
+ 
+@@ -138,7 +151,7 @@ run_edit (const char *cmd, size_t argc, char *argv[])
+   if (copy_attributes (remotefilename, newname) == -1)
+     return -1;
+ 
+-  if (guestfs_mv (g, newname, remotefilename) == -1)
++  if (guestfs_mv (g, newname, newdestfilename) == -1)
+     return -1;
+ 
+   return 0;
+diff --git a/fish/test-edit.sh b/fish/test-edit.sh
+index b9acf45..6f5bda4 100755
+--- a/fish/test-edit.sh
++++ b/fish/test-edit.sh
+@@ -43,6 +43,12 @@ cat /file.txt
+ stat /file.txt | grep mode:
+ stat /file.txt | grep uid:
+ stat /file.txt | grep gid:
++echo ==========
++write /file-2.txt "symlink test\n"
++ln-s /file-2.txt /symlink-2.txt
++edit /symlink-2.txt
++is-symlink /symlink-2.txt
++cat /symlink-2.txt
+ EOF
+ )
+ 
+@@ -51,7 +57,11 @@ second line of text
+ 
+ mode: 33152
+ uid: 10
+-gid: 11" ]; then
++gid: 11
++==========
++true
++symlink test
++second line of text" ]; then
+     echo "$0: error: output of guestfish after edit command did not match expected output"
+     echo "$output"
+     exit 1
+-- 
+2.7.4
+

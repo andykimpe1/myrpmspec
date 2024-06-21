@@ -1,0 +1,95 @@
+From c79cc9de1b1720ab24956a509afb24306dd2aa19 Mon Sep 17 00:00:00 2001
+From: Pino Toscano <ptoscano@redhat.com>
+Date: Wed, 14 Jan 2015 18:59:57 +0100
+Subject: [PATCH 096/118] daemon: use ntfslabel(1) to get ntfs labels
+
+blkid(1) (or actually, libblkid) seems to handle filesystem labels up
+to 127 characters. Considering that btrfs labels can be up to 128
+characters, this means long labels are not read correctly (i.e. get
+truncated) by blkid.  Furthermore, ntfs labels are actually unicode,
+and libblkid seems to not decode them correctly.
+
+Hence, if ntfsprogs is available invoke `ntfslabel` to get the label
+of ntfs filesystems.
+
+Related to RHBZ#1164708.
+
+(cherry picked from commit 8ad667f1983e98347f4d292c07f971d5362ff052)
+---
+ daemon/blkid.c  |  2 ++
+ daemon/daemon.h |  3 +++
+ daemon/ntfs.c   | 24 ++++++++++++++++++++++++
+ 3 files changed, 29 insertions(+)
+
+diff --git a/daemon/blkid.c b/daemon/blkid.c
+index 01cdf92..735e4e9 100644
+--- a/daemon/blkid.c
++++ b/daemon/blkid.c
+@@ -81,6 +81,8 @@ do_vfs_label (const char *device)
+   if (type) {
+     if (STREQ (type, "btrfs") && optgroup_btrfs_available ())
+       return btrfs_get_label (device);
++    if (STREQ (type, "ntfs") && optgroup_ntfsprogs_available ())
++      return ntfs_get_label (device);
+   }
+ 
+   return get_blkid_tag (device, "LABEL");
+diff --git a/daemon/daemon.h b/daemon/daemon.h
+index 5087091..40d5bc7 100644
+--- a/daemon/daemon.h
++++ b/daemon/daemon.h
+@@ -213,6 +213,9 @@ extern void main_loop (int sock) __attribute__((noreturn));
+ /*-- in btrfs.c --*/
+ extern char *btrfs_get_label (const char *device);
+ 
++/*-- in ntfs.c --*/
++extern char *ntfs_get_label (const char *device);
++
+ /* ordinary daemon functions use these to indicate errors
+  * NB: you don't need to prefix the string with the current command,
+  * it is added automatically by the client-side RPC stubs.
+diff --git a/daemon/ntfs.c b/daemon/ntfs.c
+index e48670e..9a8e045 100644
+--- a/daemon/ntfs.c
++++ b/daemon/ntfs.c
+@@ -33,6 +33,7 @@
+ GUESTFSD_EXT_CMD(str_ntfs3g_probe, ntfs-3g.probe);
+ GUESTFSD_EXT_CMD(str_ntfsresize, ntfsresize);
+ GUESTFSD_EXT_CMD(str_ntfsfix, ntfsfix);
++GUESTFSD_EXT_CMD(str_ntfslabel, ntfslabel);
+ 
+ int
+ optgroup_ntfs3g_available (void)
+@@ -46,6 +47,29 @@ optgroup_ntfsprogs_available (void)
+   return prog_exists (str_ntfsresize);
+ }
+ 
++char *
++ntfs_get_label (const char *device)
++{
++  int r;
++  CLEANUP_FREE char *err = NULL;
++  char *out = NULL;
++  size_t len;
++
++  r = command (&out, &err, str_ntfslabel, device, NULL);
++  if (r == -1) {
++    reply_with_error ("%s", err);
++    free (out);
++    return NULL;
++  }
++
++  /* Trim trailing \n if present. */
++  len = strlen (out);
++  if (len > 0 && out[len-1] == '\n')
++    out[len-1] = '\0';
++
++  return out;
++}
++
+ int
+ do_ntfs_3g_probe (int rw, const char *device)
+ {
+-- 
+2.7.4
+

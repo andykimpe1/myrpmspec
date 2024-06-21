@@ -1,0 +1,105 @@
+From fbd92a079b58880eec3eba48a36bdeef19e2c7ed Mon Sep 17 00:00:00 2001
+From: "Richard W.M. Jones" <rjones@redhat.com>
+Date: Mon, 4 Aug 2014 10:21:18 -0400
+Subject: [PATCH 046/118] launch: Close file descriptors after fork
+ (RHBZ#1123007).
+
+This refactors existing code to close file descriptors in the recovery
+process, and also adds code to close file descriptors between the
+fork() and exec() of QEMU or User-Mode Linux.
+
+The reason is to avoid leaking main process file descriptors where the
+main process (or other libraries in the main process) are not setting
+O_CLOEXEC at all or not setting it atomically.  Python is a particular
+culprit.
+
+See also this OpenStack Nova bug report:
+https://bugs.launchpad.net/nova/+bug/1313477
+
+Thanks: Qin Zhao for identifying and characterizing the problem in Nova.
+
+This is version 2 of this commit.  This commit is identical to the
+reverted commit 115fcc34325f965ac3723683e4462fc667dcd254 except that
+we don't close stderr.
+
+(cherry picked from commit e1c508c29f929134bfcb0f83b402a02e8ff94caa)
+---
+ src/guestfs-internal-frontend.h | 16 +++++++++++++++-
+ src/launch-appliance.c          | 17 +++++++++--------
+ 2 files changed, 24 insertions(+), 9 deletions(-)
+
+diff --git a/src/guestfs-internal-frontend.h b/src/guestfs-internal-frontend.h
+index c8d8da0..26ae84d 100644
+--- a/src/guestfs-internal-frontend.h
++++ b/src/guestfs-internal-frontend.h
+@@ -1,5 +1,5 @@
+ /* libguestfs
+- * Copyright (C) 2013 Red Hat Inc.
++ * Copyright (C) 2013-2014 Red Hat Inc.
+  *
+  * This library is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU Lesser General Public
+@@ -141,4 +141,18 @@ extern int guestfs___for_each_disk (guestfs_h *g, virDomainPtr dom, int (*)(gues
+ #  define program_name "libguestfs"
+ #endif
+ 
++/* Close all file descriptors matching the condition. */
++#define close_file_descriptors(cond) do {                               \
++    int max_fd = sysconf (_SC_OPEN_MAX);                                \
++    int fd;                                                             \
++    if (max_fd == -1)                                                   \
++      max_fd = 1024;                                                    \
++    if (max_fd > 65536)                                                 \
++      max_fd = 65536;          /* bound the amount of work we do here */ \
++    for (fd = 0; fd < max_fd; ++fd) {                                   \
++      if (cond)                                                         \
++        close (fd);                                                     \
++    }                                                                   \
++  } while (0)
++
+ #endif /* GUESTFS_INTERNAL_FRONTEND_H_ */
+diff --git a/src/launch-appliance.c b/src/launch-appliance.c
+index 67f967d..89c01ac 100644
+--- a/src/launch-appliance.c
++++ b/src/launch-appliance.c
+@@ -526,6 +526,13 @@ launch_appliance (guestfs_h *g, const char *arg)
+ 
+       close (wfd[0]);
+       close (rfd[1]);
++
++      /* Close any other file descriptors that we don't want to pass
++       * to qemu.  This prevents file descriptors which didn't have
++       * O_CLOEXEC set properly from leaking into the subprocess.  See
++       * RHBZ#1123007.
++       */
++      close_file_descriptors (fd > 2);
+     }
+ 
+     /* Dump the command line (after setting up stderr above). */
+@@ -555,7 +562,7 @@ launch_appliance (guestfs_h *g, const char *arg)
+   if (g->recovery_proc) {
+     r = fork ();
+     if (r == 0) {
+-      int i, fd, max_fd;
++      int i;
+       struct sigaction sa;
+       pid_t qemu_pid = g->app.pid;
+       pid_t parent_pid = getppid ();
+@@ -575,13 +582,7 @@ launch_appliance (guestfs_h *g, const char *arg)
+       /* Close all other file descriptors.  This ensures that we don't
+        * hold open (eg) pipes from the parent process.
+        */
+-      max_fd = sysconf (_SC_OPEN_MAX);
+-      if (max_fd == -1)
+-        max_fd = 1024;
+-      if (max_fd > 65536)
+-        max_fd = 65536; /* bound the amount of work we do here */
+-      for (fd = 0; fd < max_fd; ++fd)
+-        close (fd);
++      close_file_descriptors (1);
+ 
+       /* It would be nice to be able to put this in the same process
+        * group as qemu (ie. setpgid (0, qemu_pid)).  However this is
+-- 
+2.7.4
+

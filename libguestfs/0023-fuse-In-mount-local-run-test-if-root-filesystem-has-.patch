@@ -1,0 +1,56 @@
+From 19bea5e464388cab00adf1b84199eb408deca4a4 Mon Sep 17 00:00:00 2001
+From: "Richard W.M. Jones" <rjones@redhat.com>
+Date: Fri, 24 Jan 2014 10:20:14 +0000
+Subject: [PATCH 023/118] fuse: In mount-local-run, test if root filesystem has
+ been mounted (RHBZ#1057504).
+
+It is never normally valid to use the mount-local* APIs when you
+haven't mounted some filesystems in the libguestfs namespace.
+
+If you try it, it results in some odd errors.  The mount-local-run
+call is successful, but subsequent operations fail:
+
+$ mkdir -p /tmp/mnt
+$ guestfish -x -N fs mount-local /tmp/mnt : mount-local-run
+libguestfs: error: lstat: lstat_stub: you must call 'mount' first to mount the root filesystem
+libguestfs: error: lstat: lstat_stub: you must call 'mount' first to mount the root filesystem
+
+With this commit, the mount-local-run call gives an error:
+
+libguestfs: error: you must call 'guestfs_mount' first to mount a filesystem on '/'.
+Note: '/tmp/mnt' is still mounted.  Use 'guestunmount /tmp/mnt' to clean up.
+
+The error is implemented by calling guestfs_exists (g, "/") which has
+the side effect of running the NEED_ROOT macro in the daemon.  (There
+is no simple equivalent of NEED_ROOT on the library side.)
+(cherry picked from commit 0e2489974b91e4728d544fe2aa08c2a1c9deb365)
+---
+ src/fuse.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/fuse.c b/src/fuse.c
+index 6edb757..1a31153 100644
+--- a/src/fuse.c
++++ b/src/fuse.c
+@@ -1011,6 +1011,18 @@ guestfs__mount_local_run (guestfs_h *g)
+     return -1;
+   }
+ 
++  /* Test if root is mounted.  We do this by using a side-effect of
++   * guestfs_exists (which is that it calls NEED_ROOT).
++   */
++  guestfs_push_error_handler (g, NULL, NULL);
++  r = guestfs_exists (g, "/");
++  guestfs_pop_error_handler (g);
++  if (r == -1) {
++    error (g, _("you must call 'guestfs_mount' first to mount a filesystem on '/'.\nNote: '%s' is still mounted.  Use 'guestunmount %s' to clean up."),
++           g->localmountpoint, g->localmountpoint);
++    return -1;
++  }
++
+   debug (g, "%s: entering fuse_loop", __func__);
+ 
+   /* Enter the main loop. */
+-- 
+2.7.4
+

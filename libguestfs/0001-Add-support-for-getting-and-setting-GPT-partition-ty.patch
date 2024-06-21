@@ -1,0 +1,250 @@
+From e328b0227d3a11e81bf217d389c66e5d1c98e54c Mon Sep 17 00:00:00 2001
+From: Matthew Booth <mbooth@redhat.com>
+Date: Fri, 14 Dec 2012 15:53:27 +0000
+Subject: [PATCH 001/118] Add support for getting and setting GPT partition
+ type GUIDs
+
+New APIs:
+  part_set_gpt_type
+  part_get_gpt_type
+
+Cherry picked from commit 956e30effa25eee00fb9e8f5303a6a1fe7409037.
+---
+ appliance/packagelist.in |   1 +
+ daemon/parted.c          | 125 +++++++++++++++++++++++++++++++++++++++++++++++
+ generator/actions.ml     |  31 ++++++++++++
+ generator/tests_c_api.ml |   7 +++
+ generator/types.ml       |   5 ++
+ 5 files changed, 169 insertions(+)
+
+diff --git a/appliance/packagelist.in b/appliance/packagelist.in
+index 1ba5bf3..9b13500 100644
+--- a/appliance/packagelist.in
++++ b/appliance/packagelist.in
+@@ -120,6 +120,7 @@ dosfstools
+ file
+ findutils
+ gawk
++gdisk
+ grep
+ gzip
+ jfsutils
+diff --git a/daemon/parted.c b/daemon/parted.c
+index d69250d..5a6d84f 100644
+--- a/daemon/parted.c
++++ b/daemon/parted.c
+@@ -30,6 +30,7 @@
+ 
+ GUESTFSD_EXT_CMD(str_parted, parted);
+ GUESTFSD_EXT_CMD(str_sfdisk, sfdisk);
++GUESTFSD_EXT_CMD(str_sgdisk, sgdisk);
+ 
+ /* Notes:
+  *
+@@ -749,3 +750,127 @@ do_part_set_mbr_id (const char *device, int partnum, int idbyte)
+ 
+   return 0;
+ }
++
++int
++do_part_set_gpt_type(const char *device, int partnum, const char *guid)
++{
++  if (partnum <= 0) {
++    reply_with_error ("partition number must be >= 1");
++    return -1;
++  }
++
++  char *typecode = NULL;
++  if (asprintf (&typecode, "%i:%s", partnum, guid) == -1) {
++    reply_with_perror ("asprintf");
++    return -1;
++  }
++
++  char *err = NULL;
++  int r = commandf (NULL, &err, COMMAND_FLAG_FOLD_STDOUT_ON_STDERR,
++                    str_sgdisk, device, "-t", typecode, NULL);
++
++  if (r == -1) {
++    reply_with_error ("%s %s -t %s: %s", str_sgdisk, device, typecode, err);
++    free (typecode);
++    free (err);
++    return -1;
++  }
++  free (typecode);
++  free (err);
++
++  return 0;
++}
++
++char *
++do_part_get_gpt_type(const char *device, int partnum)
++{
++  if (partnum <= 0) {
++    reply_with_error ("partition number must be >= 1");
++    return NULL;
++  }
++
++  char *partnum_str = NULL;
++  if (asprintf (&partnum_str, "%i", partnum) == -1) {
++    reply_with_perror ("asprintf");
++    return NULL;
++  }
++
++  char *err = NULL;
++  int r = commandf (NULL, &err, COMMAND_FLAG_FOLD_STDOUT_ON_STDERR,
++                    str_sgdisk, device, "-i", partnum_str, NULL);
++
++  if (r == -1) {
++    reply_with_error ("%s %s -i %s: %s", str_sgdisk, device, partnum_str, err);
++    free (partnum_str);
++    free (err);
++    return NULL;
++  }
++  free (partnum_str);
++
++  char **lines = split_lines (err);
++  if (lines == NULL) {
++    reply_with_error ("'%s %s -i %i' returned no output",
++                      str_sgdisk, device, partnum);
++    free (err);
++    return NULL;
++  }
++
++  /* Parse the output of sgdisk -i:
++   * Partition GUID code: 21686148-6449-6E6F-744E-656564454649 (BIOS boot partition)
++   * Partition unique GUID: 19AEC5FE-D63A-4A15-9D37-6FCBFB873DC0
++   * First sector: 2048 (at 1024.0 KiB)
++   * Last sector: 411647 (at 201.0 MiB)
++   * Partition size: 409600 sectors (200.0 MiB)
++   * Attribute flags: 0000000000000000
++   * Partition name: 'EFI System Partition'
++   */
++  for (char **i = lines; *i != NULL; i++) {
++    char *line = *i;
++
++    /* Skip blank lines */
++    if (line[0] == '\0') continue;
++
++    /* Split the line in 2 at the colon */
++    char *colon = strchr (line, ':');
++    if (colon) {
++#define SEARCH "Partition GUID code"
++      if (colon - line == strlen(SEARCH) &&
++          memcmp (line, SEARCH, strlen(SEARCH)) == 0)
++      {
++#undef SEARCH
++        /* The value starts after the colon */
++        char *value = colon + 1;
++
++        /* Skip any leading whitespace */
++        value += strspn (value, " \t");
++
++        /* The value contains only valid GUID characters */
++        size_t value_len = strspn (value, "-0123456789ABCDEF");
++
++        char *ret = malloc (value_len + 1);
++        if (ret == NULL) {
++          reply_with_perror ("malloc");
++          return NULL;
++        }
++
++        memcpy (ret, value, value_len);
++        ret[value_len] = '\0';
++        free (err);
++        return ret;
++      }
++    } else {
++      /* Ignore lines with no colon. Log to stderr so it will show up in
++       * LIBGUESTFS_DEBUG. */
++      if (verbose) {
++        fprintf (stderr, "get-gpt-type: unexpected sgdisk output ignored: %s\n",
++                 line);
++      }
++    }
++  }
++  free (err);
++
++  /* If we got here it means we didn't find the Partition GUID code */
++  reply_with_error ("sgdisk output did not contain Partition GUID code. "
++                    "See LIBGUESTFS_DEBUG output for more details");
++  return NULL;
++}
+diff --git a/generator/actions.ml b/generator/actions.ml
+index b0f93d2..e479f03 100644
+--- a/generator/actions.ml
++++ b/generator/actions.ml
+@@ -10728,6 +10728,37 @@ Rename a file to a new place on the same filesystem.  This is
+ the same as the Linux L<rename(2)> system call.  In most cases
+ you are better to use C<guestfs_mv> instead." };
+ 
++  { defaults with
++    name = "part_set_gpt_type";
++    style = RErr, [Device "device"; Int "partnum"; String "guid"], [];
++    proc_nr = Some 392;
++    tests = [];
++    shortdesc = "set the type GUID of a GPT partition";
++    longdesc = "\
++Set the type GUID of numbered GPT partition C<partnum> to C<guid>. Return an
++error if the partition table of C<device> isn't GPT, or if C<guid> is not a
++valid GUID.
++
++See L<http://en.wikipedia.org/wiki/GUID_Partition_Table#Partition_type_GUIDs>
++for a useful list of type GUIDs." };
++
++  { defaults with
++    name = "part_get_gpt_type";
++    style = RString "guid", [Device "device"; Int "partnum"], [];
++    proc_nr = Some 393;
++    tests = [
++      InitGPT, Always, TestOutput (
++        [["part_set_gpt_type"; "/dev/sda"; "1";
++          "01234567-89AB-CDEF-0123-456789ABCDEF"];
++         ["part_get_gpt_type"; "/dev/sda"; "1"]],
++         "01234567-89AB-CDEF-0123-456789ABCDEF");
++    ];
++    shortdesc = "get the type GUID of a GPT partition";
++    longdesc = "\
++Return the type GUID of numbered GPT partition C<partnum>. For MBR partitions,
++return an appropriate GUID corresponding to the MBR type. Behaviour is undefined
++for other partition types." };
++
+ ]
+ 
+ (* Non-API meta-commands available only in guestfish.
+diff --git a/generator/tests_c_api.ml b/generator/tests_c_api.ml
+index 1926679..2d05535 100644
+--- a/generator/tests_c_api.ml
++++ b/generator/tests_c_api.ml
+@@ -408,6 +408,13 @@ and generate_one_test_body name i test_name init test =
+           ["umount_all"];
+           ["lvm_remove_all"];
+           ["part_disk"; "/dev/sda"; "mbr"]]
++   | InitGPT ->
++       pr "  /* InitGPT for %s: create /dev/sda1 */\n" test_name;
++       List.iter (generate_test_command_call test_name)
++         [["blockdev_setrw"; "/dev/sda"];
++          ["umount_all"];
++          ["lvm_remove_all"];
++          ["part_disk"; "/dev/sda"; "gpt"]]
+    | InitBasicFS ->
+        pr "  /* InitBasicFS for %s: create ext2 on /dev/sda1 */\n" test_name;
+        List.iter (generate_test_command_call test_name)
+diff --git a/generator/types.ml b/generator/types.ml
+index bc97af3..b7eb0c0 100644
+--- a/generator/types.ml
++++ b/generator/types.ml
+@@ -317,6 +317,11 @@ and test_init =
+      *)
+   | InitPartition
+ 
++    (* Identical to InitPartition, except that the partition table is GPT
++     * instead of MBR.
++     *)
++  | InitGPT
++
+     (* /dev/sda contains a single partition /dev/sda1, which is formatted
+      * as ext2, empty [except for lost+found] and mounted on /.
+      * No LVM.
+-- 
+2.7.4
+

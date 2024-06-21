@@ -1,0 +1,182 @@
+From 895fed6cc081dc8c49169ee8aa6ea823e384e1c9 Mon Sep 17 00:00:00 2001
+From: "Richard W.M. Jones" <rjones@redhat.com>
+Date: Fri, 28 Jun 2013 11:23:55 +0100
+Subject: [PATCH 004/118] Augeas >= 1.0.0 is now required. (cherry picked from
+ commit 2c4e7ad135b0a14021fad2b942f66b78af0041e0)
+
+---
+ README                |  2 +-
+ configure.ac          | 16 +++-------------
+ daemon/augeas.c       | 36 ++++++------------------------------
+ src/inspect-fs-unix.c |  4 ----
+ 4 files changed, 10 insertions(+), 48 deletions(-)
+
+diff --git a/README b/README
+index 7a19413..aca97d5 100644
+--- a/README
++++ b/README
+@@ -82,7 +82,7 @@ For basic functionality and the C tools:
+ 
+ - libconfig (optional)
+ 
+-- augeas >= 0.5.0 (http://augeas.net/) (optional)
++- augeas >= 1.0.0 (http://augeas.net/) (required)
+ 
+ - Berkeley DB 'db_dump' and 'db_load' utilities
+   (db4-utils or db4.X-util or similar) (optional)
+diff --git a/configure.ac b/configure.ac
+index c20b978..57bef84 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -526,19 +526,6 @@ AM_CONDITIONAL([HAVE_XDR_U_INT64_T],
+ AM_CONDITIONAL([HAVE_XDR_UINT64_T],
+                [test "x$ac_cv_search_xdr_uint64_t" != "xno"])
+ 
+-dnl Check for Augeas (optional).
+-PKG_CHECK_MODULES([AUGEAS],[augeas],[
+-    AC_SUBST([AUGEAS_CFLAGS])
+-    AC_SUBST([AUGEAS_LIBS])
+-    AC_DEFINE([HAVE_AUGEAS],[1],[Define to 1 if you have Augeas.])
+-
+-    old_LIBS="$LIBS"
+-    LIBS="$LIBS $AUGEAS_LIBS"
+-    dnl Check for functions not available in earlier versions of Augeas.
+-    AC_CHECK_FUNCS([aug_load aug_defvar aug_defnode])
+-    LIBS="$old_LIBS"
+-],[AC_MSG_WARN([augeas not found, some core features will be disabled])])
+-
+ dnl Check for libselinux (optional).
+ AC_CHECK_HEADERS([selinux/selinux.h])
+ AC_CHECK_LIB([selinux],[setexeccon],[
+@@ -792,6 +779,9 @@ AS_IF([test "x$with_readline" != xno],[
+ dnl Check for PCRE (required)
+ PKG_CHECK_MODULES([PCRE], [libpcre])
+ 
++dnl Check for Augeas >= 1.0.0 (required).
++PKG_CHECK_MODULES([AUGEAS],[augeas >= 1.0.0])
++
+ dnl libmagic (highly recommended)
+ AC_CHECK_LIB([magic],[magic_file],[
+     AC_CHECK_HEADER([magic.h],[
+diff --git a/daemon/augeas.c b/daemon/augeas.c
+index b2d1eb2..03a56f4 100644
+--- a/daemon/augeas.c
++++ b/daemon/augeas.c
+@@ -23,15 +23,18 @@
+ #include <string.h>
+ #include <unistd.h>
+ 
+-#ifdef HAVE_AUGEAS
+ #include <augeas.h>
+-#endif
+ 
+ #include "daemon.h"
+ #include "actions.h"
+ #include "optgroups.h"
+ 
+-#ifdef HAVE_AUGEAS
++int
++optgroup_augeas_available (void)
++{
++  return 1;
++}
++
+ /* The Augeas handle.  We maintain a single handle per daemon, which
+  * is all that is necessary and reduces the complexity of the API
+  * considerably.
+@@ -58,12 +61,6 @@ aug_finalize (void)
+   }									\
+   while (0)
+ 
+-int
+-optgroup_augeas_available (void)
+-{
+-  return 1;
+-}
+-
+ /* Calls reply_with_error, but includes the Augeas error details. */
+ #define AUGEAS_ERROR(fs,...)                                            \
+   do {                                                                  \
+@@ -122,7 +119,6 @@ do_aug_close (void)
+ int
+ do_aug_defvar (const char *name, const char *expr)
+ {
+-#ifdef HAVE_AUG_DEFVAR
+   int r;
+ 
+   NEED_AUG (-1);
+@@ -133,16 +129,11 @@ do_aug_defvar (const char *name, const char *expr)
+     return -1;
+   }
+   return r;
+-#else
+-  reply_with_error ("function not available");
+-  return -1;
+-#endif
+ }
+ 
+ guestfs_int_int_bool *
+ do_aug_defnode (const char *name, const char *expr, const char *val)
+ {
+-#ifdef HAVE_AUG_DEFNODE
+   guestfs_int_int_bool *r;
+   int i, created;
+ 
+@@ -164,10 +155,6 @@ do_aug_defnode (const char *name, const char *expr, const char *val)
+   r->b = created;
+ 
+   return r;
+-#else
+-  reply_with_error ("function not available");
+-  return NULL;
+-#endif
+ }
+ 
+ char *
+@@ -334,7 +321,6 @@ do_aug_save (void)
+ int
+ do_aug_load (void)
+ {
+-#ifdef HAVE_AUG_LOAD
+   NEED_AUG (-1);
+ 
+   if (aug_load (aug) == -1) {
+@@ -343,10 +329,6 @@ do_aug_load (void)
+   }
+ 
+   return 0;
+-#else
+-  reply_with_error ("function not available");
+-  return -1;
+-#endif
+ }
+ 
+ /* Simpler version of aug-match, which also sorts the output. */
+@@ -392,9 +374,3 @@ do_aug_ls (const char *path)
+   sort_strings (matches, count_strings ((void *) matches));
+   return matches;		/* Caller frees. */
+ }
+-
+-#else /* !HAVE_AUGEAS */
+-
+-OPTGROUP_AUGEAS_NOT_AVAILABLE
+-
+-#endif
+diff --git a/src/inspect-fs-unix.c b/src/inspect-fs-unix.c
+index c2f8dba..d18e2e2 100644
+--- a/src/inspect-fs-unix.c
++++ b/src/inspect-fs-unix.c
+@@ -1495,10 +1495,6 @@ inspect_with_augeas (guestfs_h *g, struct inspect_fs *fs,
+     }
+   }
+ 
+-  /* If !feature_available (g, "augeas") then the next call will fail.
+-   * Arguably we might want to fall back to a non-Augeas method in
+-   * this case.
+-   */
+   if (guestfs_aug_init (g, "/", 16|32) == -1)
+     return -1;
+ 
+-- 
+2.7.4
+

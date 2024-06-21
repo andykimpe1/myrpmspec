@@ -1,0 +1,77 @@
+From a049873d7b37c481075ab4ec32af13157b6225d7 Mon Sep 17 00:00:00 2001
+From: Pino Toscano <ptoscano@redhat.com>
+Date: Fri, 15 Jan 2016 11:27:48 +0100
+Subject: [PATCH 099/118] daemon: resolve paths for ll and llz
+
+Resolve in the guest the given path, so absolute symlinks can be listed
+using appliance tools without resolution errors.
+Also remove the note about the possibility to escape the sysroot using
+ll and llz, since realpath won't return paths outside sysroot.
+
+Fixes part of RHBZ#1293276.
+
+(cherry picked from commit 40b5698388689b54cf8b213a0adc72b35d6014b2)
+---
+ daemon/ls.c | 30 +++++++++++++++++++++---------
+ 1 file changed, 21 insertions(+), 9 deletions(-)
+
+diff --git a/daemon/ls.c b/daemon/ls.c
+index 96e7bf2..0e2f110 100644
+--- a/daemon/ls.c
++++ b/daemon/ls.c
+@@ -95,21 +95,24 @@ do_ls0 (const char *path)
+   return 0;
+ }
+ 
+-/* Because we can't chroot and run the ls command (since 'ls' won't
+- * necessarily exist in the chroot), this command can be used to escape
+- * from the sysroot (eg. 'll /..').  This command is not meant for
+- * serious use anyway, just for quick interactive sessions.
+- */
+-
+ char *
+ do_ll (const char *path)
+ {
+   int r;
+   char *out;
+   CLEANUP_FREE char *err = NULL;
++  CLEANUP_FREE char *rpath = NULL;
+   CLEANUP_FREE char *spath = NULL;
+ 
+-  spath = sysroot_path (path);
++  CHROOT_IN;
++  rpath = realpath (path, NULL);
++  CHROOT_OUT;
++  if (rpath == NULL) {
++    reply_with_perror ("%s", path);
++    return NULL;
++  }
++
++  spath = sysroot_path (rpath);
+   if (!spath) {
+     reply_with_perror ("malloc");
+     return NULL;
+@@ -131,9 +134,18 @@ do_llz (const char *path)
+   int r;
+   char *out;
+   CLEANUP_FREE char *err = NULL;
+-  CLEANUP_FREE char *spath;
++  CLEANUP_FREE char *rpath = NULL;
++  CLEANUP_FREE char *spath = NULL;
++
++  CHROOT_IN;
++  rpath = realpath (path, NULL);
++  CHROOT_OUT;
++  if (rpath == NULL) {
++    reply_with_perror ("%s", path);
++    return NULL;
++  }
+ 
+-  spath = sysroot_path (path);
++  spath = sysroot_path (rpath);
+   if (!spath) {
+     reply_with_perror ("malloc");
+     return NULL;
+-- 
+2.7.4
+

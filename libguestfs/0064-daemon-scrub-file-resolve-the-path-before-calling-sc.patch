@@ -1,0 +1,62 @@
+From 915ba9801bdbcde8ddafdecb07552704bd42489c Mon Sep 17 00:00:00 2001
+From: Pino Toscano <ptoscano@redhat.com>
+Date: Wed, 21 May 2014 15:03:17 +0200
+Subject: [PATCH 064/118] daemon: scrub-file: resolve the path before calling
+ scrub (RHBZ#1099490).
+
+Resolve the given path within the chroot, so scrub can be invoked
+outside the chroot on an already-resolved path.
+
+Add few tests in scrub-file for this and other similar issues.
+
+(cherry picked from commit 5d5e66ce334bf61bcc2e672d17d84dd0dd0dd364)
+---
+ daemon/scrub.c       |  7 +++++--
+ generator/actions.ml | 13 ++++++++++++-
+ 2 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/daemon/scrub.c b/daemon/scrub.c
+index cd880b9..c10b0a0 100644
+--- a/daemon/scrub.c
++++ b/daemon/scrub.c
+@@ -58,8 +58,11 @@ do_scrub_file (const char *file)
+   CLEANUP_FREE char *err = NULL;
+   int r;
+ 
+-  /* Make the path relative to /sysroot. */
+-  buf = sysroot_path (file);
++  /* Resolve the path to the file, and make the result relative to /sysroot.
++   * If it fails, then the file most probably does not exist or "file" is
++   * a symlink pointing outside the chroot.
++   */
++  buf = sysroot_realpath (file);
+   if (!buf) {
+     reply_with_perror ("malloc");
+     return -1;
+diff --git a/generator/actions.ml b/generator/actions.ml
+index 4d16db4..8786c4a 100644
+--- a/generator/actions.ml
++++ b/generator/actions.ml
+@@ -5141,7 +5141,18 @@ manual page for more details." };
+     tests = [
+       InitScratchFS, Always, TestRun (
+         [["write"; "/scrub_file"; "content"];
+-         ["scrub_file"; "/scrub_file"]])
++         ["scrub_file"; "/scrub_file"]]);
++      InitScratchFS, Always, TestRun (
++        [["write"; "/scrub_file_2"; "content"];
++         ["ln_s"; "/scrub_file_2"; "/scrub_file_2_link"];
++         ["scrub_file"; "/scrub_file_2_link"]]);
++      InitScratchFS, Always, TestLastFail (
++        [["ln_s"; "/scrub_file_3_notexisting"; "/scrub_file_3_link"];
++         ["scrub_file"; "/scrub_file_3_link"]]);
++      InitScratchFS, Always, TestLastFail (
++        [["write"; "/scrub_file_4"; "content"];
++         ["ln_s"; "../sysroot/scrub_file_4"; "/scrub_file_4_link"];
++         ["scrub_file"; "/scrub_file_4_link"]]);
+     ];
+     shortdesc = "scrub (securely wipe) a file";
+     longdesc = "\
+-- 
+2.7.4
+

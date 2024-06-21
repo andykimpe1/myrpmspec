@@ -1,0 +1,293 @@
+From 0fb49d7afe04278edc8dd8b6648cb8c3df98e0de Mon Sep 17 00:00:00 2001
+From: "Richard W.M. Jones" <rjones@redhat.com>
+Date: Thu, 19 Jun 2014 10:37:36 -0400
+Subject: [PATCH 041/118] sparsify: Get free space on TMPDIR and give a warning
+ if we estimate it is too little.
+
+(cherry picked from commit 7c463ac477168df5d4e4eb472ba01fa18b89c1a6)
+---
+ TODO                       |  5 ----
+ po/POTFILES                |  1 +
+ sparsify/Makefile.am       |  4 ++-
+ sparsify/sparsify.ml       | 71 ++++++++++++++++++++++++++++++++++++++++++++--
+ sparsify/statvfs-c.c       | 47 ++++++++++++++++++++++++++++++
+ sparsify/virt-sparsify.pod | 34 ++++++++++++++++++++++
+ 6 files changed, 153 insertions(+), 9 deletions(-)
+ create mode 100644 sparsify/statvfs-c.c
+
+diff --git a/TODO b/TODO
+index c84d71c..20fef9e 100644
+--- a/TODO
++++ b/TODO
+@@ -465,11 +465,6 @@ opened with O_CLOEXEC.  Therefore we need to examine every call to:
+ virt-sparsify enhancements
+ --------------------------
+ 
+-TMPDIR should be checked to ensure that we won't run out of space
+-during the conversion, since current behaviour is very bad when this
+-happens (it usually causes virt-sparsify to hang).  This requires
+-writing a small C binding to statvfs for OCaml.
+-
+ 'virt-sparsify --whitelist' option to generate skeletons (for
+ debugging, bug forensics, diagnosis).  The whilelist option would
+ specify a list of files to be *preserved*.  All other files in the
+diff --git a/po/POTFILES b/po/POTFILES
+index f539a0f..74fdecf 100644
+--- a/po/POTFILES
++++ b/po/POTFILES
+@@ -223,6 +223,7 @@ python/guestfs-py.c
+ rescue/test-virt-rescue.pl
+ rescue/virt-rescue.c
+ ruby/ext/guestfs/_guestfs.c
++sparsify/statvfs-c.c
+ src/actions-0.c
+ src/actions-1.c
+ src/actions-2.c
+diff --git a/sparsify/Makefile.am b/sparsify/Makefile.am
+index 2df0dbf..9d155e4 100644
+--- a/sparsify/Makefile.am
++++ b/sparsify/Makefile.am
+@@ -26,7 +26,8 @@ CLEANFILES = *~ *.cmi *.cmo *.cmx *.cmxa *.o virt-sparsify test.img
+ 
+ # Alphabetical order.
+ SOURCES = \
+-	sparsify.ml
++	sparsify.ml \
++	statvfs-c.c
+ 
+ if HAVE_OCAML
+ 
+@@ -39,6 +40,7 @@ OBJECTS = \
+ 	$(top_builddir)/mllib/common_utils.cmx \
+ 	$(top_builddir)/mllib/tTY.cmx \
+ 	$(top_builddir)/mllib/progress.cmx \
++	statvfs-c.o \
+ 	sparsify.cmx
+ 
+ bin_SCRIPTS = virt-sparsify
+diff --git a/sparsify/sparsify.ml b/sparsify/sparsify.ml
+index f6c404e..869dd09 100644
+--- a/sparsify/sparsify.ml
++++ b/sparsify/sparsify.ml
+@@ -26,13 +26,16 @@ module G = Guestfs
+ 
+ open Common_utils
+ 
++external statvfs_free_space : string -> int64 =
++  "virt_sparsify_statvfs_free_space"
++
+ let () = Random.self_init ()
+ 
+ (* Command line argument parsing. *)
+ let prog = Filename.basename Sys.executable_name
+ let error fs = error ~prog fs
+ 
+-let indisk, outdisk, compress, convert, debug_gc,
++let indisk, outdisk, check_tmpdir, compress, convert, debug_gc,
+   format, ignores, machine_readable,
+   option, quiet, verbose, trace, zeroes =
+   let display_version () =
+@@ -45,6 +48,17 @@ let indisk, outdisk, compress, convert, debug_gc,
+ 
+   let add xs s = xs := s :: !xs in
+ 
++  let check_tmpdir = ref `Warn in
++  let set_check_tmpdir = function
++    | "ignore" | "i" -> check_tmpdir := `Ignore
++    | "continue" | "cont" | "c" -> check_tmpdir := `Continue
++    | "warn" | "warning" | "w" -> check_tmpdir := `Warn
++    | "fail" | "f" | "error" -> check_tmpdir := `Fail
++    | str ->
++      eprintf (f_"--check-tmpdir: unknown argument `%s'\n") str;
++      exit 1
++  in
++
+   let compress = ref false in
+   let convert = ref "" in
+   let debug_gc = ref false in
+@@ -58,6 +72,7 @@ let indisk, outdisk, compress, convert, debug_gc,
+   let zeroes = ref [] in
+ 
+   let argspec = Arg.align [
++    "--check-tmpdir", Arg.String set_check_tmpdir,  "ignore|..." ^ " " ^ s_"Check there is enough space in $TMPDIR";
+     "--compress", Arg.Set compress,         " " ^ s_"Compressed output format";
+     "--convert", Arg.Set_string convert,    s_"format" ^ " " ^ s_"Format of output disk (default: same as input)";
+     "--debug-gc", Arg.Set debug_gc,         " " ^ s_"Debug GC and memory allocations";
+@@ -89,6 +104,7 @@ read the man page virt-sparsify(1).
+   Arg.parse argspec anon_fun usage_msg;
+ 
+   (* Dereference the rest of the args. *)
++  let check_tmpdir = !check_tmpdir in
+   let compress = !compress in
+   let convert = match !convert with "" -> None | str -> Some str in
+   let debug_gc = !debug_gc in
+@@ -159,7 +175,7 @@ read the man page virt-sparsify(1).
+     error (f_"output '%s' cannot be a character device, it must be a regular file")
+       outdisk;
+ 
+-  indisk, outdisk, compress, convert,
++  indisk, outdisk, check_tmpdir, compress, convert,
+     debug_gc, format, ignores, machine_readable,
+     option, quiet, verbose, trace, zeroes
+ 
+@@ -221,9 +237,58 @@ let () =
+   if output_format = "raw" && compress then
+     error (f_"--compress cannot be used for raw output.  Remove this option or use --convert qcow2.")
+ 
++(* Get virtual size of the input disk. *)
++let virtual_size = (new G.guestfs ())#disk_virtual_size indisk
++let () =
++  if not quiet then
++    printf (f_"Input disk virtual size = %Ld bytes (%s)\n%!")
++      virtual_size (human_size virtual_size)
++
++(* Check there is enough space in $TMPDIR. *)
++let tmpdir = Filename.get_temp_dir_name ()
++
++let () =
++  let print_warning () =
++    let free_space = statvfs_free_space tmpdir in
++    let extra_needed = virtual_size -^ free_space in
++    if extra_needed > 0L then (
++      eprintf (f_"\
++
++WARNING: There may not be enough free space on %s.
++You may need to set TMPDIR to point to a directory with more free space.
++
++Max needed: %s.  Free: %s.  May need another %s.
++
++Note this is an overestimate.  If the guest disk is full of data
++then not as much free space would be required.
++
++You can ignore this warning or change it to a hard failure using the
++--check-tmpdir=(ignore|continue|warn|fail) option.  See virt-sysprep(1).
++
++%!")
++        tmpdir (human_size virtual_size)
++        (human_size free_space) (human_size extra_needed);
++      true
++    ) else false
++  in
++
++  match check_tmpdir with
++  | `Ignore -> ()
++  | `Continue -> ignore (print_warning ())
++  | `Warn ->
++    if print_warning () then (
++      eprintf "Press RETURN to continue or ^C to quit.\n%!";
++      ignore (read_line ())
++    );
++  | `Fail ->
++    if print_warning () then (
++      eprintf "Exiting because --check-tmpdir=fail was set.\n%!";
++      exit 2
++    )
++
+ let () =
+   if not quiet then
+-    printf (f_"Create overlay file to protect source disk ...\n%!")
++    printf (f_"Create overlay file in %s to protect source disk ...\n%!") tmpdir
+ 
+ (* Create the temporary overlay file. *)
+ let overlaydisk =
+diff --git a/sparsify/statvfs-c.c b/sparsify/statvfs-c.c
+new file mode 100644
+index 0000000..ce72d5b
+--- /dev/null
++++ b/sparsify/statvfs-c.c
+@@ -0,0 +1,47 @@
++/* virt-sparsify - interface to statvfs
++ * Copyright (C) 2013 Red Hat Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ */
++
++#include <config.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <sys/statvfs.h>
++
++#include <caml/alloc.h>
++#include <caml/fail.h>
++#include <caml/memory.h>
++#include <caml/mlvalues.h>
++
++value
++virt_sparsify_statvfs_free_space (value pathv)
++{
++  CAMLparam1 (pathv);
++  CAMLlocal1 (rv);
++  struct statvfs buf;
++  int64_t free_space;
++
++  if (statvfs (String_val (pathv), &buf) == -1) {
++    perror ("statvfs");
++    caml_failwith ("statvfs");
++  }
++
++  free_space = (int64_t) buf.f_bsize * buf.f_bavail;
++  rv = caml_copy_int64 (free_space);
++
++  CAMLreturn (rv);
++}
+diff --git a/sparsify/virt-sparsify.pod b/sparsify/virt-sparsify.pod
+index b6c4cce..84e94c5 100644
+--- a/sparsify/virt-sparsify.pod
++++ b/sparsify/virt-sparsify.pod
+@@ -113,6 +113,40 @@ image.
+ 
+ Display help.
+ 
++=item B<--check-tmpdir=ignore>
++
++=item B<--check-tmpdir=continue>
++
++=item B<--check-tmpdir=warn>
++
++=item B<--check-tmpdir=fail>
++
++Check if L</TMPDIR> has enough space to complete the operation.  This
++is just an estimate.
++
++If the check indicates a problem, then you can either:
++
++=over 4
++
++=item *
++
++B<ignore> it,
++
++=item *
++
++print a warning and B<continue>,
++
++=item *
++
++B<warn> and wait for the user to press the Return key
++(this is the default), or:
++
++=item *
++
++B<fail> and exit.
++
++=back
++
+ =item B<--compress>
+ 
+ Compress the output file.  This I<only> works if the output format is
+-- 
+2.7.4
+

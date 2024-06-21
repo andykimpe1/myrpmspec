@@ -1,0 +1,91 @@
+From 13671bbf26e08d25e4e2da5016bd07575e1a6a01 Mon Sep 17 00:00:00 2001
+From: Pino Toscano <ptoscano@redhat.com>
+Date: Fri, 16 Jan 2015 10:52:56 -0500
+Subject: [PATCH 082/118] drives: Remove check for ':' in filename
+ (RHBZ#1128942).
+
+Modern qemu can now handle this properly.  ':' is only special if what
+precedes it looks like a transport, so:
+
+  qemu-system-x86_64 -drive foo:bar     .. fails
+  qemu-system-x86_64 -drive ./foo:bar   .. works
+
+Thus by adding ./ in front of relative paths that contain ':' we can
+work around this.
+
+In addition, this broke iscsi:// URIs because iSCSI target names
+routinely contain ':' characters.
+
+This is a modified version of upstream
+commit a95214b1985e694946e3426120a6fdc13a3f081f, which fixed upstream
+RHBZ#811649.
+---
+ src/drives.c                    | 6 ------
+ src/launch-appliance.c          | 7 +++++++
+ tests/regressions/rhbz811649.sh | 8 ++++----
+ 3 files changed, 11 insertions(+), 10 deletions(-)
+
+diff --git a/src/drives.c b/src/drives.c
+index bf3b338..0eb2c01 100644
+--- a/src/drives.c
++++ b/src/drives.c
+@@ -276,12 +276,6 @@ guestfs__add_drive_opts (guestfs_h *g, const char *filename,
+   const char *cachemode;
+   struct drive *drv;
+ 
+-  if (strchr (filename, ':') != NULL) {
+-    error (g, _("filename cannot contain ':' (colon) character. "
+-                "This is a limitation of qemu."));
+-    return -1;
+-  }
+-
+   readonly = optargs->bitmask & GUESTFS_ADD_DRIVE_OPTS_READONLY_BITMASK
+              ? optargs->readonly : false;
+   format = optargs->bitmask & GUESTFS_ADD_DRIVE_OPTS_FORMAT_BITMASK
+diff --git a/src/launch-appliance.c b/src/launch-appliance.c
+index 17ae036..73af6d2 100644
+--- a/src/launch-appliance.c
++++ b/src/launch-appliance.c
+@@ -1007,6 +1007,7 @@ qemu_drive_param (guestfs_h *g, const struct drive *drv, size_t index)
+   const char *iface;
+ 
+   len += strlen (drv->path) * 2; /* every "," could become ",," */
++  len += 2; /* may need to prepend "./" to the path */
+   if (drv->iface)
+     len += strlen (drv->iface);
+   if (drv->format)
+@@ -1019,6 +1020,12 @@ qemu_drive_param (guestfs_h *g, const struct drive *drv, size_t index)
+   strcpy (r, "file=");
+   i = 5;
+ 
++  /* We might need to rewrite the path if it contains a ':' character. */
++  if (drv->path[0] != '/' && strchr (drv->path, ':') != NULL) {
++    r[i++] = '.';
++    r[i++] = '/';
++  }
++
+   /* Copy the path in, escaping any "," as ",,". */
+   for (p = drv->path; *p; p++) {
+     if (*p == ',') {
+diff --git a/tests/regressions/rhbz811649.sh b/tests/regressions/rhbz811649.sh
+index cc0b8a1..016d62f 100755
+--- a/tests/regressions/rhbz811649.sh
++++ b/tests/regressions/rhbz811649.sh
+@@ -29,10 +29,10 @@ filenames[2]='='
+ filenames[3]='水'
+ filenames[4]='-'
+ filenames[5]='-hda'
+-#filenames[6]=':'     # a future version of qemu may allow colon
+-#filenames[7]='http:'
+-#filenames[8]='file:'
+-#filenames[9]='raw:'
++filenames[6]=':'     # a future version of qemu may allow colon
++filenames[7]='http:'
++filenames[8]='file:'
++filenames[9]='raw:'
+ 
+ rm -f -- test1.img "${filenames[@]}"
+ 
+-- 
+2.7.4
+

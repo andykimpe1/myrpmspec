@@ -1,0 +1,74 @@
+From e0202a9d7db922223ef6b3293e9b8ed6abaa8eea Mon Sep 17 00:00:00 2001
+From: "Richard W.M. Jones" <rjones@redhat.com>
+Date: Fri, 7 Jun 2013 11:46:01 +0100
+Subject: [PATCH 115/118] RHEL 6: Pipe 'yes' into ntfsresize (RHBZ#971326).
+
+This works around a problem in ntfsresize on RHEL 6.  See:
+https://bugzilla.redhat.com/show_bug.cgi?id=971326#c4
+---
+ daemon/ntfs.c | 38 +++++++++++++++++++++-----------------
+ 1 file changed, 21 insertions(+), 17 deletions(-)
+
+diff --git a/daemon/ntfs.c b/daemon/ntfs.c
+index 9a8e045..45a5833 100644
+--- a/daemon/ntfs.c
++++ b/daemon/ntfs.c
+@@ -93,13 +93,9 @@ int
+ do_ntfsresize (const char *device, int64_t size, int force)
+ {
+   CLEANUP_FREE char *err = NULL;
++  CLEANUP_FREE char *cmd = NULL;
+   int r;
+-  const char *argv[MAX_ARGS];
+-  size_t i = 0;
+-  char size_str[32];
+-
+-  ADD_ARG (argv, i, str_ntfsresize);
+-  ADD_ARG (argv, i, "-P");
++  char size_str[64];
+ 
+   if (optargs_bitmask & GUESTFS_NTFSRESIZE_SIZE_BITMASK) {
+     if (size <= 0) {
+@@ -107,20 +103,28 @@ do_ntfsresize (const char *device, int64_t size, int force)
+       return -1;
+     }
+ 
+-    snprintf (size_str, sizeof size_str, "%" PRIi64, size);
+-    ADD_ARG (argv, i, "--size");
+-    ADD_ARG (argv, i, size_str);
++    snprintf (size_str, sizeof size_str, " --size %" PRIi64, size);
++  }
++  else
++    size_str[0] = '\0';
++
++  if (!(optargs_bitmask & GUESTFS_NTFSRESIZE_FORCE_BITMASK))
++    force = 0;
++
++  if (asprintf_nowarn (&cmd, "yes | %s -P%s%s %Q",
++		       str_ntfsresize,
++		       size_str,
++		       force ? " --force" : "",
++		       device) == -1) {
++    reply_with_perror ("asprintf");
++    return -1;
+   }
+ 
+-  if (optargs_bitmask & GUESTFS_NTFSRESIZE_FORCE_BITMASK && force)
+-    ADD_ARG (argv, i, "--force");
++  printf ("%s\n", cmd);
+ 
+-  ADD_ARG (argv, i, device);
+-  ADD_ARG (argv, i, NULL);
+-
+-  r = commandv (NULL, &err, argv);
+-  if (r == -1) {
+-    reply_with_error ("%s: %s", device, err);
++  r = system (cmd);
++  if (r == -1 || !WIFEXITED (r) || WEXITSTATUS (r) != 0) {
++    reply_with_error ("command failed: %s (enable debug to see the full error message)", cmd);
+     return -1;
+   }
+ 
+-- 
+2.7.4
+

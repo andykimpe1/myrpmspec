@@ -1,0 +1,123 @@
+From 11b256a69c20d6055a243adf2ebcf04bfe62f539 Mon Sep 17 00:00:00 2001
+From: "Richard W.M. Jones" <rjones@redhat.com>
+Date: Mon, 10 Jan 2011 16:07:12 +0000
+Subject: [PATCH 102/118] RHEL 6: Emphasize libguestfs-winsupport package
+ (RHBZ#627468).
+
+This RHEL 6.1-only patch changes the error messages when the
+inspection code cannot find an operating system inside the guest
+image.  For a Windows guest this may happen because the user has not
+installed the separate 'libguestfs-winsupport' package.  Therefore we
+emphasize that the user may need to install this package.
+
+Notes:
+
+(1) In RHEL 6.1 there are two pieces of inspection code, the old Perl
+code (deprecated upstream) and the new C core inspection API.
+Therefore this patch has to touch two places with essentially the same
+change.
+
+(2) This patch doesn't try to be clever and detect if it was a Windows
+guest.  This should reduce the chance of failure.
+
+Output from (Perl) virt-inspector now looks like this:
+
+ $ virt-inspector disk.img
+ No operating system could be detected inside this disk image.
+
+ This may be because the file is not a disk image, or is not a virtual machine
+ image, or because the OS type is not understood by virt-inspector.
+
+ If you feel this is an error, please file a bug report including as much
+ information about the disk image as possible.
+
+ RHEL 6 notice
+ -------------
+ libguestfs will return this error for Microsoft Windows guests if the
+ separate 'libguestfs-winsupport' package is not installed. If the
+ guest is running Microsoft Windows, please try again after installing
+ 'libguestfs-winsupport'.
+
+Output from guestfish (ie. C core inspection API) now looks like this:
+
+ $ guestfish -i disk.img
+ guestfish: no operating system was found on this disk
+
+ RHEL 6 notice
+ -------------
+ libguestfs will return this error for Microsoft Windows guests if the
+ separate 'libguestfs-winsupport' package is not installed. If the
+ guest is running Microsoft Windows, please try again after installing
+ 'libguestfs-winsupport'.
+---
+ fish/inspect.c              | 15 +++++++++++++++
+ perl/lib/Sys/Guestfs/Lib.pm | 13 ++++++++++++-
+ 2 files changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/fish/inspect.c b/fish/inspect.c
+index 12ceaa7..ecccc71 100644
+--- a/fish/inspect.c
++++ b/fish/inspect.c
+@@ -23,6 +23,7 @@
+ #include <string.h>
+ #include <errno.h>
+ #include <libintl.h>
++#include <unistd.h>
+ 
+ #include "c-ctype.h"
+ 
+@@ -68,6 +69,10 @@ inspect_mount (void)
+     exit (EXIT_FAILURE);
+ 
+   if (roots[0] == NULL) {
++    int libguestfs_winsupport_installed =
++      access ("/usr/lib/guestfs/supermin.d/ntfs.img", F_OK) == 0 ||
++      access ("/usr/lib64/guestfs/supermin.d/ntfs.img", F_OK) == 0;
++
+     fprintf (stderr,
+       _("%s: no operating system was found on this disk\n"
+         "\n"
+@@ -84,6 +89,16 @@ inspect_mount (void)
+         "with these tools.  Use the guestfish equivalent commands\n"
+         "(see the virt tool manual page).\n"),
+              program_name);
++
++    if (!libguestfs_winsupport_installed)
++      fprintf (stderr,
++    _("\nRHEL 6 notice\n"
++      "-------------\n"
++      "libguestfs will return this error for Microsoft Windows guests if the\n"
++      "separate 'libguestfs-winsupport' package is not installed. If the\n"
++      "guest is running Microsoft Windows, please try again after installing\n"
++      "'libguestfs-winsupport'.\n"));
++
+     guestfs___free_string_list (roots);
+     exit (EXIT_FAILURE);
+   }
+diff --git a/perl/lib/Sys/Guestfs/Lib.pm b/perl/lib/Sys/Guestfs/Lib.pm
+index e9a91e3..808115a 100644
+--- a/perl/lib/Sys/Guestfs/Lib.pm
++++ b/perl/lib/Sys/Guestfs/Lib.pm
+@@ -836,7 +836,18 @@ sub inspect_operating_systems
+ 
+     # If we didn't find any operating systems then it's an error (RHBZ#591142).
+     if (0 == keys %oses) {
+-        die __"No operating system could be detected inside this disk image.\n\nThis may be because the file is not a disk image, or is not a virtual machine\nimage, or because the OS type is not understood by virt-inspector.\n\nIf you feel this is an error, please file a bug report including as much\ninformation about the disk image as possible.\n";
++	my $libguestfs_winsupport_installed =
++	    -f "/usr/lib/guestfs/supermin.d/ntfs.img" ||
++	    -f "/usr/lib64/guestfs/supermin.d/ntfs.img";
++
++	my $msg =
++	    __"No operating system could be detected inside this disk image.\n\nThis may be because the file is not a disk image, or is not a virtual machine\nimage, or because the OS type is not understood by virt-inspector.\n\nIf you feel this is an error, please file a bug report including as much\ninformation about the disk image as possible.\n";
++
++	if (!$libguestfs_winsupport_installed) {
++	    $msg .= __"\nRHEL 6 notice\n-------------\nlibguestfs will return this error for Microsoft Windows guests if the\nseparate 'libguestfs-winsupport' package is not installed. If the\nguest is running Microsoft Windows, please try again after installing\n'libguestfs-winsupport'.\n";
++	}
++
++	die $msg;
+     }
+ 
+     return \%oses;
+-- 
+2.7.4
+

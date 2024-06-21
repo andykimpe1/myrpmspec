@@ -1,0 +1,81 @@
+From ee2edd789b8e8b315682c6d9a09231c62cbc4e41 Mon Sep 17 00:00:00 2001
+From: Pino Toscano <ptoscano@redhat.com>
+Date: Mon, 2 Jun 2014 21:24:35 +0200
+Subject: [PATCH 065/118] fish: list also aliases in the guestfish help
+ (RHBZ#1103877).
+
+Output also the aliases (telling which function they refer to) in
+`guestfish -h`, together with non-alias functions.
+
+(cherry picked from commit 5efbc8922ff3f338deb17b42bc7b63cc1545fcc0)
+---
+ generator/fish.ml | 38 ++++++++++++++++++++++++++++++++++----
+ 1 file changed, 34 insertions(+), 4 deletions(-)
+
+diff --git a/generator/fish.ml b/generator/fish.ml
+index 90408b0..b4a536d 100644
+--- a/generator/fish.ml
++++ b/generator/fish.ml
+@@ -31,6 +31,14 @@ open Prepopts
+ open C
+ open Events
+ 
++type func =
++  | Function of string           (* The description. *)
++  | Alias of string              (* The function of which it is one the
++                                  * aliases.
++                                  *)
++
++let func_compare (n1, _) (n2, _) = compare n1 n2
++
+ let fish_functions_and_commands_sorted =
+   List.sort action_compare (fish_functions_sorted @ fish_commands)
+ 
+@@ -46,6 +54,21 @@ let get_aliases { fish_alias = fish_alias; non_c_aliases = non_c_aliases } =
+     List.map (fun n -> replace_char n '_' '-') non_c_aliases in
+   fish_alias @ non_c_aliases
+ 
++let all_functions_commands_and_aliases_sorted =
++  let all =
++    List.fold_right (
++      fun ({ name = name; shortdesc = shortdesc } as f) acc ->
++        let aliases = get_aliases f in
++        let aliases = List.filter (
++          fun x ->
++            Filename.check_suffix x "-opts" <> true
++        ) aliases in
++        let aliases = List.map (fun x -> x, Alias name) aliases in
++        let foo = (name, Function shortdesc) :: aliases in
++        foo @ acc
++    ) (fish_functions_sorted @ fish_commands) [] in
++  List.sort func_compare all
++
+ (* Generate a lot of different functions for guestfish. *)
+ let generate_fish_cmds () =
+   generate_header CStyle GPLv2plus;
+@@ -179,11 +202,18 @@ Guestfish will prompt for these separately."
+   pr "  printf (\"    %%-16s     %%s\\n\", _(\"Command\"), _(\"Description\"));\n";
+   pr "  list_builtin_commands ();\n";
+   List.iter (
+-    fun { name = name; shortdesc = shortdesc } ->
++    fun (name, f) ->
+       let name = replace_char name '_' '-' in
+-      pr "  printf (\"%%-20s %%s\\n\", \"%s\", _(\"%s\"));\n"
+-        name shortdesc
+-  ) fish_functions_and_commands_sorted;
++      match f with
++      | Function shortdesc ->
++        pr "  printf (\"%%-20s %%s\\n\", \"%s\", _(\"%s\"));\n"
++          name shortdesc
++      | Alias f ->
++        let f = replace_char f '_' '-' in
++        pr "  printf (\"%%-20s \", \"%s\");\n" name;
++        pr "  printf (_(\"alias for '%%s'\"), \"%s\");\n" f;
++        pr "  putchar ('\\n');\n"
++  ) all_functions_commands_and_aliases_sorted;
+   pr "  printf (\"    %%s\\n\",";
+   pr "          _(\"Use -h <cmd> / help <cmd> to show detailed help for a command.\"));\n";
+   pr "}\n";
+-- 
+2.7.4
+

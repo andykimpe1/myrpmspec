@@ -1,0 +1,335 @@
+From 4d503e38f3ece700269e360ea876379d1c459976 Mon Sep 17 00:00:00 2001
+From: "Richard W.M. Jones" <rjones@redhat.com>
+Date: Sat, 31 Aug 2013 22:24:40 +0100
+Subject: [PATCH 075/118] add_drive: Introduce 'cachemode' parameter to control
+ drive caching.
+
+This commit adds an optional 'cachemode' parameter to the 'add_drive'
+API to control caching.  This corresponds approximately to the
+'-drive ...,cache=' parameter in qemu, but the choices are much more
+restrictive, just 'writeback' or 'unsafe', for reasons outlined below.
+
+The caching modes supported by recent QEMU are:
+
+  writeback:
+   - Reports data writes completed when data is present in the host
+     page cache.
+     Only safe provided guest correctly issues flush operations.
+
+  writethrough:
+   - Reports data writes completed only when each write has been
+     flushed to disk.  Performance is reported as not good.
+
+  none:
+   - Uses O_DIRECT (avoids all interaction with host cache), but does
+     not ensure every write is flushed to disk.
+     Only safe provided guest correctly issues flush operations.
+
+  directsync:
+   - Uses O_DIRECT (avoids all interaction with host cache), and
+     ensures every write has been flushed to disk.
+
+  unsafe:
+   - No special handling.
+
+Since the libguestfs appliance kernel always issues flush operations
+(eg. for filesystem journalling and for sync) the following modes can
+be ignored: 'directsync', 'writethrough'.
+
+That leaves 'writeback', 'none' and 'unsafe'.  However 'none' is both
+a constant source of pain (RHBZ#994517), is inefficient because it
+doesn't use the host cache, and does not give us any safety guarantees
+over and above 'writeback'.  Therefore we should ignore 'none'.
+
+This leaves 'writeback' (safe) and 'unsafe' (fast, useful for scratch
+disks), which is what we implement in this patch.
+
+Note that the previous behaviour was to use 'none' if possible, else
+to use 'writeback'.  The new behaviour is to use 'writeback' only
+which is (in safety terms) equivalent to 'none', and also faster and
+less painful (RHBZ#994517).
+
+This patch also allows you to specify a cache mode for network drives
+which also previously defaulted to 'writeback'.
+
+There is a considerable performance benefit to using unsafe (for
+scratch disks only, of course).  The C API tests only use scratch
+disks (since they are just tests, the final state of the disk doesn't
+matter), and this decreases total run time from 202 seconds to 163
+seconds, about 25% faster.
+
+(cherry picked from commit 749e947bb0103f19feda0f29b6cbbf3cbfa350da)
+---
+ generator/actions.ml   | 30 ++++++++++++++++++-
+ src/drives.c           | 80 +++++++++++++-------------------------------------
+ src/guestfs-internal.h |  2 +-
+ src/launch-appliance.c |  4 +--
+ src/launch-libvirt.c   | 11 +++----
+ 5 files changed, 58 insertions(+), 69 deletions(-)
+
+diff --git a/generator/actions.ml b/generator/actions.ml
+index 8cdb6a3..2e412c4 100644
+--- a/generator/actions.ml
++++ b/generator/actions.ml
+@@ -1244,7 +1244,7 @@ not all belong to a single logical operating system
+ 
+   { defaults with
+     name = "add_drive";
+-    style = RErr, [String "filename"], [OBool "readonly"; OString "format"; OString "iface"; OString "name"; OString "label"];
++    style = RErr, [String "filename"], [OBool "readonly"; OString "format"; OString "iface"; OString "name"; OString "label"; OString "cachemode"];
+     once_had_no_optargs = true;
+     blocking = false;
+     fish_alias = ["add"];
+@@ -1316,6 +1316,34 @@ the drive will also be named C</dev/disk/guestfs/I<label>>.
+ 
+ See L<guestfs(3)/DISK LABELS>.
+ 
++=item C<cachemode>
++
++Choose whether or not libguestfs will obey sync operations (safe but slow)
++or not (unsafe but fast).  The possible values for this string are:
++
++=over 4
++
++=item C<cachemode = \"writeback\">
++
++This is the default.
++
++Write operations in the API do not return until a L<write(2)>
++call has completed in the host [but note this does not imply
++that anything gets written to disk].
++
++Sync operations in the API, including implicit syncs caused by
++filesystem journalling, will not return until an L<fdatasync(2)>
++call has completed in the host, indicating that data has been
++committed to disk.
++
++=item C<cachemode = \"unsafe\">
++
++In this mode, there are no guarantees.  Libguestfs may cache
++anything and ignore sync requests.  This is suitable only
++for scratch or temporary disks.
++
++=back
++
+ =back" };
+ 
+   { defaults with
+diff --git a/src/drives.c b/src/drives.c
+index d082193..bf3b338 100644
+--- a/src/drives.c
++++ b/src/drives.c
+@@ -44,8 +44,7 @@ static struct drive *
+ create_drive_struct (guestfs_h *g, const char *path,
+                      bool readonly, const char *format,
+                      const char *iface, const char *name,
+-                     const char *disk_label,
+-                     bool use_cache_none)
++                     const char *disk_label, const char *cachemode)
+ {
+   struct drive *drv = safe_malloc (g, sizeof (struct drive));
+ 
+@@ -55,7 +54,7 @@ create_drive_struct (guestfs_h *g, const char *path,
+   drv->iface = iface ? safe_strdup (g, iface) : NULL;
+   drv->name = name ? safe_strdup (g, name) : NULL;
+   drv->disk_label = disk_label ? safe_strdup (g, disk_label) : NULL;
+-  drv->use_cache_none = use_cache_none;
++  drv->cachemode = cachemode ? safe_strdup (g, cachemode) : NULL;
+   drv->priv = drv->free_priv = NULL;
+ 
+   return drv;
+@@ -108,7 +107,7 @@ create_null_drive_struct (guestfs_h *g, bool readonly, const char *format,
+   }
+ 
+   return create_drive_struct (g, tmpfile, readonly, format, iface, name,
+-                              disk_label, 0);
++                              disk_label, NULL);
+ }
+ 
+ static struct drive *
+@@ -126,6 +125,7 @@ free_drive_struct (struct drive *drv)
+   free (drv->iface);
+   free (drv->name);
+   free (drv->disk_label);
++  free (drv->cachemode);
+   if (drv->priv && drv->free_priv)
+     drv->free_priv (drv->priv);
+   free (drv);
+@@ -183,47 +183,6 @@ guestfs___free_drives (guestfs_h *g)
+   g->nr_drives = 0;
+ }
+ 
+-/* cache=none improves reliability in the event of a host crash.
+- *
+- * However this option causes qemu to try to open the file with
+- * O_DIRECT.  This fails on some filesystem types (notably tmpfs).
+- * So we check if we can open the file with or without O_DIRECT,
+- * and use cache=none (or not) accordingly.
+- *
+- * Notes:
+- *
+- * (1) In qemu, cache=none and cache=off are identical.
+- *
+- * (2) cache=none does not disable caching entirely.  qemu still
+- * maintains a writeback cache internally, which will be written out
+- * when qemu is killed (with SIGTERM).  It disables *host kernel*
+- * caching by using O_DIRECT.  To disable caching entirely in kernel
+- * and qemu we would need to use cache=directsync but there is a
+- * performance penalty for that.
+- *
+- * (3) This function is only called on the !readonly path.  We must
+- * try to open with O_RDWR to test that the file is readable and
+- * writable here.
+- */
+-static int
+-test_cache_none (guestfs_h *g, const char *filename)
+-{
+-  int fd = open (filename, O_RDWR|O_DIRECT);
+-  if (fd >= 0) {
+-    close (fd);
+-    return 1;
+-  }
+-
+-  fd = open (filename, O_RDWR);
+-  if (fd >= 0) {
+-    close (fd);
+-    return 0;
+-  }
+-
+-  perrorf (g, "%s", filename);
+-  return -1;
+-}
+-
+ /* Check string parameter matches ^[-_[:alnum:]]+$ (in C locale). */
+ static int
+ valid_format_iface (const char *str)
+@@ -314,7 +273,7 @@ guestfs__add_drive_opts (guestfs_h *g, const char *filename,
+   const char *iface;
+   const char *name;
+   const char *disk_label;
+-  int use_cache_none;
++  const char *cachemode;
+   struct drive *drv;
+ 
+   if (strchr (filename, ':') != NULL) {
+@@ -333,6 +292,8 @@ guestfs__add_drive_opts (guestfs_h *g, const char *filename,
+          ? optargs->name : NULL;
+   disk_label = optargs->bitmask & GUESTFS_ADD_DRIVE_OPTS_LABEL_BITMASK
+          ? optargs->label : NULL;
++  cachemode = optargs->bitmask & GUESTFS_ADD_DRIVE_OPTS_CACHEMODE_BITMASK
++    ? optargs->cachemode : NULL;
+ 
+   if (format && !valid_format_iface (format)) {
+     error (g, _("%s parameter is empty or contains disallowed characters"),
+@@ -348,28 +309,26 @@ guestfs__add_drive_opts (guestfs_h *g, const char *filename,
+     error (g, _("label parameter is empty, too long, or contains disallowed characters"));
+     return -1;
+   }
++  if (cachemode &&
++      !(STREQ (cachemode, "writeback") || STREQ (cachemode, "unsafe"))) {
++    error (g, _("cachemode parameter must be 'writeback' (default) or 'unsafe'"));
++    return -1;
++  }
+ 
+   if (STREQ (filename, "/dev/null"))
+     drv = create_null_drive_struct (g, readonly, format, iface, name,
+                                     disk_label);
+   else {
+-    /* For writable files, see if we can use cache=none.  This also
+-     * checks for the existence of the file.  For readonly we have
+-     * to do the check explicitly.
++    /* We have to check for the existence of the file since that's
++     * required by the API.
+      */
+-    use_cache_none = readonly ? false : test_cache_none (g, filename);
+-    if (use_cache_none == -1)
++    if (access (filename, R_OK) == -1) {
++      perrorf (g, "%s", filename);
+       return -1;
+-
+-    if (readonly) {
+-      if (access (filename, R_OK) == -1) {
+-        perrorf (g, "%s", filename);
+-        return -1;
+-      }
+     }
+ 
+     drv = create_drive_struct (g, filename, readonly, format, iface, name,
+-                               disk_label, use_cache_none);
++                               disk_label, cachemode);
+   }
+ 
+   if (drv == NULL)
+@@ -531,7 +490,7 @@ guestfs__debug_drives (guestfs_h *g)
+   count = 0;
+   ITER_DRIVES (g, i, drv) {
+     ret[count++] =
+-      safe_asprintf (g, "path=%s%s%s%s%s%s%s%s%s",
++      safe_asprintf (g, "path=%s%s%s%s%s%s%s%s%s%s",
+                      drv->path,
+                      drv->readonly ? " readonly" : "",
+                      drv->format ? " format=" : "",
+@@ -540,7 +499,8 @@ guestfs__debug_drives (guestfs_h *g)
+                      drv->iface ? : "",
+                      drv->name ? " name=" : "",
+                      drv->name ? : "",
+-                     drv->use_cache_none ? " cache=none" : "");
++                     drv->cachemode ? " cache=" : "",
++                     drv->cachemode ? : "");
+   }
+ 
+   ret[count] = NULL;
+diff --git a/src/guestfs-internal.h b/src/guestfs-internal.h
+index 0675123..a98681b 100644
+--- a/src/guestfs-internal.h
++++ b/src/guestfs-internal.h
+@@ -120,7 +120,7 @@ struct drive {
+   char *iface;
+   char *name;
+   char *disk_label;
+-  bool use_cache_none;
++  char *cachemode;
+ 
+   void *priv;                   /* Data used by attach method. */
+   void (*free_priv) (void *);
+diff --git a/src/launch-appliance.c b/src/launch-appliance.c
+index 89c01ac..17ae036 100644
+--- a/src/launch-appliance.c
++++ b/src/launch-appliance.c
+@@ -1035,9 +1035,9 @@ qemu_drive_param (guestfs_h *g, const struct drive *drv, size_t index)
+   else
+     iface = "virtio";
+ 
+-  snprintf (&r[i], len-i, "%s%s%s%s%s%s,id=hd%zu,if=%s",
++  snprintf (&r[i], len-i, "%s,cache=%s%s%s%s%s,id=hd%zu,if=%s",
+             drv->readonly ? ",snapshot=on" : "",
+-            drv->use_cache_none ? ",cache=none" : "",
++            drv->cachemode ? drv->cachemode : "writeback",
+             drv->format ? ",format=" : "",
+             drv->format ? drv->format : "",
+             drv->disk_label ? ",serial=" : "",
+diff --git a/src/launch-libvirt.c b/src/launch-libvirt.c
+index 6188671..a19d5ba 100644
+--- a/src/launch-libvirt.c
++++ b/src/launch-libvirt.c
+@@ -1125,11 +1125,12 @@ construct_libvirt_xml_disk (guestfs_h *g,
+               xmlTextWriterWriteAttribute (xo, BAD_CAST "type",
+                                            BAD_CAST format));
+   }
+-  if (drv->use_cache_none) {
+-    XMLERROR (-1,
+-              xmlTextWriterWriteAttribute (xo, BAD_CAST "cache",
+-                                           BAD_CAST "none"));
+-  }
++  XMLERROR (-1,
++            xmlTextWriterWriteAttribute (xo, BAD_CAST "cache",
++                                         BAD_CAST (drv->cachemode ?
++                                                   drv->cachemode :
++                                                   "writeback")));
++
+   XMLERROR (-1, xmlTextWriterEndElement (xo));
+ 
+   if (drv->disk_label) {
+-- 
+2.7.4
+

@@ -1,0 +1,346 @@
+From c62dfde5e9133b5cd2f2ed89050aa0116f8f2d9b Mon Sep 17 00:00:00 2001
+From: "Richard W.M. Jones" <rjones@redhat.com>
+Date: Mon, 4 Mar 2013 13:28:15 +0000
+Subject: [PATCH 078/118] generator: Generate guestfs_user_cancel.
+
+This function is now generated, so bindings in various languages
+are made automatically.
+
+Note that the function previously returned void, but now it returns
+int (although always 0).  We don't believe that this is an ABI break
+since existing programs will continue to work.
+
+(cherry picked from commit d08f5ebd9a926f6ecca7498f8f0c2eff9273d313)
+---
+ generator/actions.ml | 33 +++++++++++++++++++++++++++++++++
+ generator/c.ml       |  6 ------
+ generator/lua.ml     | 13 -------------
+ generator/ocaml.ml   |  8 --------
+ generator/perl.ml    | 11 -----------
+ generator/ruby.ml    | 22 ----------------------
+ ocaml/guestfs-c.c    | 11 -----------
+ src/guestfs.pod      | 33 ++-------------------------------
+ src/handle.c         |  6 ------
+ src/proto.c          |  7 +++++++
+ 10 files changed, 42 insertions(+), 108 deletions(-)
+
+diff --git a/generator/actions.ml b/generator/actions.ml
+index 2e412c4..cc18036 100644
+--- a/generator/actions.ml
++++ b/generator/actions.ml
+@@ -2742,6 +2742,39 @@ the default.  Else C</var/tmp> is the default." };
+     longdesc = "\
+ Get the directory used by the handle to store the appliance cache." };
+ 
++  { defaults with
++    name = "user_cancel";
++    style = RErr, [], [];
++    blocking = false;
++    shortdesc = "cancel the current upload or download operation";
++    longdesc = "\
++This function cancels the current upload or download operation.
++
++Unlike most other libguestfs calls, this function is signal safe and
++thread safe.  You can call it from a signal handler or from another
++thread, without needing to do any locking.
++
++The transfer that was in progress (if there is one) will stop shortly
++afterwards, and will return an error.  The errno (see
++L</guestfs_last_errno>) is set to C<EINTR>, so you can test for this
++to find out if the operation was cancelled or failed because of
++another error.
++
++No cleanup is performed: for example, if a file was being uploaded
++then after cancellation there may be a partially uploaded file.  It is
++the caller's responsibility to clean up if necessary.
++
++There are two common places that you might call C<guestfs_user_cancel>:
++
++In an interactive text-based program, you might call it from a
++C<SIGINT> signal handler so that pressing C<^C> cancels the current
++operation.  (You also need to call L</guestfs_set_pgroup> so that
++child processes don't receive the C<^C> signal).
++
++In a graphical program, when the main thread is displaying a progress
++bar with a cancel button, wire up the cancel button to call this
++function." };
++
+ ]
+ 
+ (* daemon_functions are any functions which cause some action
+diff --git a/generator/c.ml b/generator/c.ml
+index 45dad8f..9240d07 100644
+--- a/generator/c.ml
++++ b/generator/c.ml
+@@ -546,10 +546,6 @@ extern GUESTFS_DLL_PUBLIC void guestfs_set_close_callback (guestfs_h *g, guestfs
+ extern GUESTFS_DLL_PUBLIC void guestfs_set_progress_callback (guestfs_h *g, guestfs_progress_cb cb, void *opaque)
+   GUESTFS_DEPRECATED_BY(\"set_event_callback\");
+ 
+-/* User cancellation. */
+-#define GUESTFS_HAVE_USER_CANCEL 1
+-extern GUESTFS_DLL_PUBLIC void guestfs_user_cancel (guestfs_h *g);
+-
+ /* Private data area. */
+ #define GUESTFS_HAVE_SET_PRIVATE 1
+ extern GUESTFS_DLL_PUBLIC void guestfs_set_private (guestfs_h *g, const char *key, void *data);
+@@ -726,7 +722,6 @@ pr "\
+ #define LIBGUESTFS_HAVE_DELETE_EVENT_CALLBACK 1
+ #define LIBGUESTFS_HAVE_SET_CLOSE_CALLBACK 1
+ #define LIBGUESTFS_HAVE_SET_PROGRESS_CALLBACK 1
+-#define LIBGUESTFS_HAVE_USER_CANCEL 1
+ #define LIBGUESTFS_HAVE_SET_PRIVATE 1
+ #define LIBGUESTFS_HAVE_GET_PRIVATE 1
+ #define LIBGUESTFS_HAVE_FIRST_PRIVATE 1
+@@ -1749,7 +1744,6 @@ and generate_linker_script () =
+     "guestfs_set_private";
+     "guestfs_set_progress_callback";
+     "guestfs_set_subprocess_quit_callback";
+-    "guestfs_user_cancel";
+ 
+     (* Unofficial parts of the API: the bindings code use these
+      * functions, so it is useful to export them.
+diff --git a/generator/lua.ml b/generator/lua.ml
+index 8e735c9..b2e5f33 100644
+--- a/generator/lua.ml
++++ b/generator/lua.ml
+@@ -292,18 +292,6 @@ free_per_handle_table (lua_State *L, guestfs_h *g)
+   lua_settable (L, LUA_REGISTRYINDEX);
+ }
+ 
+-/* User cancel. */
+-static int
+-guestfs_lua_user_cancel (lua_State *L)
+-{
+-  struct userdata *u = get_handle (L, 1);
+-
+-  if (u->g)
+-    guestfs_user_cancel (u->g);
+-
+-  return 0;
+-}
+-
+ /* Set an event callback. */
+ static int
+ guestfs_lua_set_event_callback (lua_State *L)
+@@ -882,7 +870,6 @@ static luaL_Reg functions[] = {
+ /* Methods. */
+ static luaL_Reg methods[] = {
+   { \"close\", guestfs_lua_close },
+-  { \"user_cancel\", guestfs_lua_user_cancel },
+   { \"set_event_callback\", guestfs_lua_set_event_callback },
+   { \"delete_event_callback\", guestfs_lua_delete_event_callback },
+ 
+diff --git a/generator/ocaml.ml b/generator/ocaml.ml
+index 6883180..708fed3 100644
+--- a/generator/ocaml.ml
++++ b/generator/ocaml.ml
+@@ -121,10 +121,6 @@ val last_errno : t -> int
+     so if you want to capture the errno correctly, you must call this
+     in the {!Error} exception handler, before any other operation on [g]. *)
+ 
+-val user_cancel : t -> unit
+-(** Cancel current transfer.  This is safe to call from OCaml signal
+-    handlers and threads. *)
+-
+ ";
+   generate_ocaml_structure_decls ();
+ 
+@@ -182,7 +178,6 @@ class guestfs : ?environment:bool -> ?close_on_exit:bool -> unit -> object
+   method set_event_callback : event_callback -> event list -> event_handle
+   method delete_event_callback : event_handle -> unit
+   method last_errno : unit -> int
+-  method user_cancel : unit -> unit
+   method ocaml_handle : t
+ ";
+ 
+@@ -252,8 +247,6 @@ external delete_event_callback : t -> event_handle -> unit
+ 
+ external last_errno : t -> int = \"ocaml_guestfs_last_errno\"
+ 
+-external user_cancel : t -> unit = \"ocaml_guestfs_user_cancel\" \"noalloc\"
+-
+ (* Give the exceptions names, so they can be raised from the C code. *)
+ let () =
+   Callback.register_exception \"ocaml_guestfs_error\" (Error \"\");
+@@ -279,7 +272,6 @@ class guestfs ?environment ?close_on_exit () =
+     method set_event_callback = set_event_callback g
+     method delete_event_callback = delete_event_callback g
+     method last_errno () = last_errno g
+-    method user_cancel () = user_cancel g
+     method ocaml_handle = g
+ ";
+ 
+diff --git a/generator/perl.ml b/generator/perl.ml
+index db11cb6..e754c73 100644
+--- a/generator/perl.ml
++++ b/generator/perl.ml
+@@ -305,12 +305,6 @@ PREINIT:
+  OUTPUT:
+       RETVAL
+ 
+-void
+-user_cancel (g)
+-      guestfs_h *g;
+- PPCODE:
+-      guestfs_user_cancel (g);
+-
+ ";
+ 
+   List.iter (
+@@ -847,11 +841,6 @@ errnos:
+    # mkdir failed because the directory exists already.
+  }
+ 
+-=item $g->user_cancel ();
+-
+-Cancel current transfer.  This is safe to call from Perl signal
+-handlers and threads.
+-
+ =cut
+ 
+ ";
+diff --git a/generator/ruby.ml b/generator/ruby.ml
+index 899b50b..4bbc5f0 100644
+--- a/generator/ruby.ml
++++ b/generator/ruby.ml
+@@ -430,26 +430,6 @@ get_all_event_callbacks (guestfs_h *g, size_t *len_rtn)
+   return r;
+ }
+ 
+-/*
+- * call-seq:
+- *   g.user_cancel() -> nil
+- *
+- * Call
+- * +guestfs_user_cancel+[http://libguestfs.org/guestfs.3.html#guestfs_user_cancel]
+- * to cancel the current transfer.  This is safe to call from Ruby
+- * signal handlers and threads.
+- */
+-static VALUE
+-ruby_user_cancel (VALUE gv)
+-{
+-  guestfs_h *g;
+-
+-  Data_Get_Struct (gv, guestfs_h, g);
+-  if (g)
+-    guestfs_user_cancel (g);
+-  return Qnil;
+-}
+-
+ ";
+ 
+   List.iter (
+@@ -757,8 +737,6 @@ Init__guestfs (void)
+                     ruby_set_event_callback, 2);
+   rb_define_method (c_guestfs, \"delete_event_callback\",
+                     ruby_delete_event_callback, 1);
+-  rb_define_method (c_guestfs, \"user_cancel\",
+-                    ruby_user_cancel, 0);
+ 
+   /* For backwards compatibility with older code, define a ::create
+    * module function.
+diff --git a/ocaml/guestfs-c.c b/ocaml/guestfs-c.c
+index a421298..5544069 100644
+--- a/ocaml/guestfs-c.c
++++ b/ocaml/guestfs-c.c
+@@ -54,7 +54,6 @@ value ocaml_guestfs_close (value gv);
+ value ocaml_guestfs_set_event_callback (value gv, value closure, value events);
+ value ocaml_guestfs_delete_event_callback (value gv, value eh);
+ value ocaml_guestfs_last_errno (value gv);
+-value ocaml_guestfs_user_cancel (value gv);
+ 
+ /* Allocate handles and deal with finalization. */
+ static void
+@@ -410,13 +409,3 @@ ocaml_guestfs_last_errno (value gv)
+   rv = Val_int (r);
+   CAMLreturn (rv);
+ }
+-
+-/* NB: This is and must remain a "noalloc" function. */
+-value
+-ocaml_guestfs_user_cancel (value gv)
+-{
+-  guestfs_h *g = Guestfs_val (gv);
+-  if (g)
+-    guestfs_user_cancel (g);
+-  return Val_unit;
+-}
+diff --git a/src/guestfs.pod b/src/guestfs.pod
+index 15bcd0e..9f67167 100644
+--- a/src/guestfs.pod
++++ b/src/guestfs.pod
+@@ -2742,37 +2742,8 @@ progress.  Currently only operations that involve uploading or
+ downloading data can be cancelled (technically: operations that have
+ C<FileIn> or C<FileOut> parameters in the generator).
+ 
+-=head2 guestfs_user_cancel
+-
+- void guestfs_user_cancel (guestfs_h *g);
+-
+-C<guestfs_user_cancel> cancels the current upload or download
+-operation.
+-
+-Unlike most other libguestfs calls, this function is signal safe and
+-thread safe.  You can call it from a signal handler or from another
+-thread, without needing to do any locking.
+-
+-The transfer that was in progress (if there is one) will stop shortly
+-afterwards, and will return an error.  The errno (see
+-L</guestfs_last_errno>) is set to C<EINTR>, so you can test for this
+-to find out if the operation was cancelled or failed because of
+-another error.
+-
+-No cleanup is performed: for example, if a file was being uploaded
+-then after cancellation there may be a partially uploaded file.  It is
+-the caller's responsibility to clean up if necessary.
+-
+-There are two common places that you might call C<guestfs_user_cancel>.
+-
+-In an interactive text-based program, you might call it from a
+-C<SIGINT> signal handler so that pressing C<^C> cancels the current
+-operation.  (You also need to call L</guestfs_set_pgroup> so that
+-child processes don't receive the C<^C> signal).
+-
+-In a graphical program, when the main thread is displaying a progress
+-bar with a cancel button, wire up the cancel button to call this
+-function.
++To cancel the transfer, call L</guestfs_user_cancel>.  For more
++information, read the description of L</guestfs_user_cancel>.
+ 
+ =head1 PRIVATE DATA AREA
+ 
+diff --git a/src/handle.c b/src/handle.c
+index c630daf..4443b39 100644
+--- a/src/handle.c
++++ b/src/handle.c
+@@ -392,12 +392,6 @@ close_handles (void)
+   while (handles) guestfs_close (handles);
+ }
+ 
+-void
+-guestfs_user_cancel (guestfs_h *g)
+-{
+-  g->user_cancel = 1;
+-}
+-
+ int
+ guestfs__set_verbose (guestfs_h *g, int v)
+ {
+diff --git a/src/proto.c b/src/proto.c
+index 93f5517..820c39c 100644
+--- a/src/proto.c
++++ b/src/proto.c
+@@ -1226,3 +1226,10 @@ receive_file_data (guestfs_h *g, void **buf_r)
+ 
+   return chunk.data.data_len;
+ }
++
++int
++guestfs__user_cancel (guestfs_h *g)
++{
++  g->user_cancel = 1;
++  return 0;
++}
+-- 
+2.7.4
+
