@@ -1,0 +1,983 @@
+diff --git a/Mailman/Bouncers/SimpleMatch.py b/Mailman/Bouncers/SimpleMatch.py
+index a6a952a..0901b50 100644
+--- a/Mailman/Bouncers/SimpleMatch.py
++++ b/Mailman/Bouncers/SimpleMatch.py
+@@ -42,7 +42,7 @@ PATTERNS = [
+     # sz-sb.de, corridor.com, nfg.nl
+     (_c('the following addresses had'),
+      _c('transcript of session follows'),
+-     _c(r'<(?P<fulladdr>[^>]*)>|\(expanded from: <?(?P<addr>[^>)]*)>?\)')),
++     _c(r'^ *(\(expanded from: )?<?(?P<addr>[^\s@]+@[^\s@>]+?)>?\)?\s*$')),
+     # robanal.demon.co.uk
+     (_c('this message was created automatically by mail delivery software'),
+      _c('original message follows'),
+diff --git a/Mailman/Bouncers/Yahoo.py b/Mailman/Bouncers/Yahoo.py
+index b3edf4f..08ede54 100644
+--- a/Mailman/Bouncers/Yahoo.py
++++ b/Mailman/Bouncers/Yahoo.py
+@@ -20,9 +20,15 @@ import re
+ import email
+ from email.Utils import parseaddr
+ 
+-tcre = re.compile(r'message\s+from\s+yahoo\.\S+', re.IGNORECASE)
++tcre = (re.compile(r'message\s+from\s+yahoo\.\S+', re.IGNORECASE),
++        re.compile(r'Sorry, we were unable to deliver your message to '
++                   r'the following address(\(es\))?\.',
++                   re.IGNORECASE),
++        )
+ acre = re.compile(r'<(?P<addr>[^>]*)>:')
+-ecre = re.compile(r'--- Original message follows')
++ecre = (re.compile(r'--- Original message follows'),
++        re.compile(r'--- Below this line is a copy of the message'),
++        )
+ 
+ 
+ 
+@@ -36,18 +42,26 @@ def process(msg):
+     # simple state machine
+     #     0 == nothing seen
+     #     1 == tag line seen
++    #     2 == end line seen
+     state = 0
+     for line in email.Iterators.body_line_iterator(msg):
+         line = line.strip()
+-        if state == 0 and tcre.match(line):
+-            state = 1
++        if state == 0:
++            for cre in tcre:
++                if cre.match(line):
++                    state = 1
++                    break
+         elif state == 1:
+             mo = acre.match(line)
+             if mo:
+                 addrs.append(mo.group('addr'))
+                 continue
+-            mo = ecre.match(line)
+-            if mo:
+-                # we're at the end of the error response
+-                break
++            for cre in ecre:
++                mo = cre.match(line)
++                if mo:
++                    # we're at the end of the error response
++                    state = 2
++                    break
++        elif state == 2:
++            break
+     return addrs
+diff --git a/Mailman/Defaults.py.in b/Mailman/Defaults.py.in
+old mode 100644
+new mode 100755
+index 4fe63db..8e42f54
+--- a/Mailman/Defaults.py.in
++++ b/Mailman/Defaults.py.in
+@@ -505,6 +505,7 @@ GLOBAL_PIPELINE = [
+     # (outgoing) path, finally leaving the message in the outgoing queue.
+     'AfterDelivery',
+     'Acknowledge',
++    'WrapMessage',
+     'ToOutgoing',
+     ]
+ 
+@@ -914,6 +915,29 @@ DEFAULT_DEFAULT_MEMBER_MODERATION = No
+ # moderators?
+ DEFAULT_FORWARD_AUTO_DISCARDS = Yes
+ 
++# Shall dmarc_moderation_action be applied to messages From: domains with
++# a DMARC policy of quarantine as well as reject?  This sets the default for
++# the list setting that controls it.
++DEFAULT_DMARC_QUARANTINE_MODERATION_ACTION = Yes
++
++# Default action for posts whose From: address domain has a DMARC policy of
++# reject or quarantine.  See DEFAULT_FROM_IS_LIST below.  Whatever is set as
++# the default here precludes the list owner from setting a lower value.
++# 0 = Accept
++# 1 = Munge From
++# 2 = Wrap Message
++# 3 = Reject
++# 4 = Discard
++DEFAULT_DMARC_MODERATION_ACTION = 0
++
++# Parameters for DMARC DNS lookups. If you are seeing 'DNSException:
++# Unable to query DMARC policy ...' entries in your error log, you may need
++# to adjust these.
++# The time to wait for a response from a name server before timeout.
++DMARC_RESOLVER_TIMEOUT = seconds(3)
++# The total time to spend trying to get an answer to the question.
++DMARC_RESOLVER_LIFETIME = seconds(5)
++
+ # What shold happen to non-member posts which are do not match explicit
+ # non-member actions?
+ # 0 = Accept
+@@ -950,6 +974,25 @@ DEFAULT_SEND_WELCOME_MSG = Yes
+ # Send goodbye messages to unsubscribed members?
+ DEFAULT_SEND_GOODBYE_MSG = Yes
+ 
++# Some list posts and mail to the -owner address may contain DomainKey or
++# DomainKeys Identified Mail (DKIM) signature headers <http://www.dkim.org/>.
++# Various list transformations to the message such as adding a list header or
++# footer or scrubbing attachments or even reply-to munging can break these
++# signatures.  It is generally felt that these signatures have value, even if
++# broken and even if the outgoing message is resigned.  However, some sites
++# may wish to remove these headers by setting this to Yes.
++REMOVE_DKIM_HEADERS = No
++
++# The following is a three way setting.  It sets the default for the list's
++# from_is_list policy which is applied to all posts except those for which a
++# dmarc_moderation_action other than accept applies.
++# 0 -> Do not rewrite the From: or wrap the message.
++# 1 -> Rewrite the From: header of posts replacing the posters address with
++#      that of the list.  Also see REMOVE_DKIM_HEADERS above.
++# 2 -> Do not modify the From: of the message, but wrap the message in an outer
++#      message From the list address.
++DEFAULT_FROM_IS_LIST = 0
++
+ # Wipe sender information, and make it look like the list-admin
+ # address sends all messages
+ DEFAULT_ANONYMOUS_LIST = No
+diff --git a/Mailman/Gui/General.py b/Mailman/Gui/General.py
+index 8271a30..05dc9ba 100644
+--- a/Mailman/Gui/General.py
++++ b/Mailman/Gui/General.py
+@@ -153,6 +153,72 @@ class General(GUIBase):
+                             (listname %%05d) -> (listname 00123)
+              """)),
+ 
++            ('from_is_list', mm_cfg.Radio,
++             (_('No'), _('Munge From'), _('Wrap Message')), 0,
++             _("""Replace the From: header address with the list's posting
++             address to mitigate issues stemming from the original From:
++             domain's DMARC or similar policies."""),
++             _("""Several protocols now in wide use attempt to ensure that use
++             of the domain in the author's address (ie, in the From: header
++             field) is authorized by that domain.  These protocols may be
++             incompatible with common list features such as footers, causing
++             participating email services to bounce list traffic merely
++             because of the address in the From: field.  <b>This has resulted
++             in members being unsubscribed despite being perfectly able to
++             receive mail.</b>
++             <p>
++             The following actions are applied to all list messages when
++             selected here.  To apply these actions only to messages where the
++             domain in the From: header is determined to use such a protocol,
++             see the <a
++             href="?VARHELP=privacy/sender/dmarc_moderation_action">
++             dmarc_moderation_action</a> settings under Privacy options...
++             -&gt; Sender filters.
++             <p>Settings:<p>
++             <dl>
++             <dt>No</dt>
++             <dd>Do nothing special.  This is appropriate for anonymous lists.
++             It is appropriate for dedicated announcement lists, unless the
++             From: address of authorized posters might be in a domain with a
++             DMARC or similar policy. It is also appropriate if you choose to
++             use dmarc_moderation_action other than Accept for this list.</dd>
++             <dt>Munge From</dt>
++             <dd>This action replaces the poster's address in the From: header
++             with the list's posting address and adds the poster's address to
++             the addresses in the original Reply-To: header.</dd>
++             <dt>Wrap Message</dt>
++             <dd>Just wrap the message in an outer message with the From:
++             header containing the list's posting address and with the original
++             From: address added to the addresses in the original Reply-To:
++             header and with Content-Type: message/rfc822.  This is effectively
++             a one message MIME format digest.</dd>
++             </dl>
++             <p>The transformations for anonymous_list are applied before
++             any of these actions. It is not useful to apply actions other
++             than No to an anonymous list, and if you do so, the result may
++             be surprising.
++             <p>The Reply-To: header munging actions below interact with these
++             actions as follows:
++             <p> first_strip_reply_to = Yes will remove all the incoming
++             Reply-To: addresses but will still add the poster's address to
++             Reply-To: for all three settings of reply_goes_to_list which
++             respectively will result in just the poster's address, the
++             poster's address and the list posting address or the poster's
++             address and the explicit reply_to_address in the outgoing
++             Reply-To: header. If first_strip_reply_to = No the poster's
++             address in the original From: header, if not already included in
++             the Reply-To:, will be added to any existing Reply-To:
++             address(es).
++             <p>These actions, whether selected here or via <a
++             href="?VARHELP=privacy/sender/dmarc_moderation_action">
++             dmarc_moderation_action</a>, do not apply to messages in digests
++             or archives or sent to usenet via the Mail&lt;-&gt;News gateways.
++             <p>If <a
++             href="?VARHELP=privacy/sender/dmarc_moderation_action">
++             dmarc_moderation_action</a> applies to this message with an
++             action other than Accept, that action rather than this is
++             applied""")),
++
+             ('anonymous_list', mm_cfg.Radio, (_('No'), _('Yes')), 0,
+              _("""Hide the sender of a message, replacing it with the list
+              address (Removes From, Sender and Reply-To fields)""")),
+diff --git a/Mailman/Gui/NonDigest.py b/Mailman/Gui/NonDigest.py
+old mode 100644
+new mode 100755
+diff --git a/Mailman/Gui/Privacy.py b/Mailman/Gui/Privacy.py
+index 75eff2b..5d717bb 100644
+--- a/Mailman/Gui/Privacy.py
++++ b/Mailman/Gui/Privacy.py
+@@ -158,6 +158,11 @@ class Privacy(GUIBase):
+             ]
+ 
+         adminurl = mlist.GetScriptURL('admin', absolute=1)
++    
++        if mlist.dmarc_quarantine_moderation_action:
++            quarantine = _('/Quarantine')
++        else:
++            quarantine = ''
+         sender_rtn = [
+             _("""When a message is posted to the list, a series of
+             moderation steps are taken to decide whether a moderator must
+@@ -235,6 +240,59 @@ class Privacy(GUIBase):
+              >rejection notice</a> to
+              be sent to moderated members who post to this list.""")),
+ 
++            ('dmarc_moderation_action', mm_cfg.Radio,
++             (_('Accept'), _('Munge From'), _('Wrap Message'), _('Reject'),
++                 _('Discard')), 0,
++             _("""Action to take when anyone posts to the
++             list from a domain with a DMARC Reject%(quarantine)s Policy."""),
++
++             _("""<ul><li><b>Munge From</b> -- applies the <a
++             href="?VARHELP=general/from_is_list">from_is_list Munge From</a>
++             transformation to these messages.
++
++             <p><li><b>Wrap Message</b> -- applies the <a
++             href="?VARHELP=general/from_is_list">from_is_list Wrap
++             Message</a> transformation to these messages.
++
++             <p><li><b>Reject</b> -- this automatically rejects the message by
++             sending a bounce notice to the post's author.  The text of the
++             bounce notice can be <a
++             href="?VARHELP=privacy/sender/dmarc_moderation_notice"
++             >configured by you</a>.
++
++             <p><li><b>Discard</b> -- this simply discards the message, with
++             no notice sent to the post's author.
++             </ul>
++
++             <p>This setting takes precedence over the <a
++             href="?VARHELP=general/from_is_list"> from_is_list</a> setting
++             if the message is From: an affected domain and the setting is
++             other than Accept.""")),
++
++            ('dmarc_quarantine_moderation_action', mm_cfg.Radio,
++             (_('No'), _('Yes')), 0,
++             _("""Shall the above dmarc_moderation_action apply to messages
++               From: domains with DMARC p=quarantine as well as p=reject"""),
++
++             _("""<ul><li><b>No</b> -- this applies dmarc_moderation_action to
++               only those posts From: a domain with DMARC p=reject.  This is
++               appropriate if you are concerned about bounced messages, but
++               want to apply dmarc_moderation_action to as few messages as
++               possible.
++               <p><li><b>Yes</b> -- this applies dmarc_moderation_action to
++               posts From: a domain with DMARC p=reject or p=quarantine.
++               </ul><p>If a message is From: a domain with DMARC p=quarantine
++               and dmarc_moderation_action is not applied (this set to No)
++               the message will likely not bounce, but will be delivered to
++               recipients' spam folders or other hard to find places.""")),
++
++            ('dmarc_moderation_notice', mm_cfg.Text, (10, WIDTH), 1,
++             _("""Text to include in any
++             <a href="?VARHELP=privacy/sender/dmarc_moderation_action"
++             >rejection notice</a> to
++             be sent to anyone who posts to this list from a domain
++             with a DMARC Reject%(quarantine)s Policy.""")),
++
+             _('Non-member filters'),
+ 
+             ('accept_these_nonmembers', mm_cfg.EmailListEx, (10, WIDTH), 1,
+@@ -399,7 +457,7 @@ class Privacy(GUIBase):
+              case, each rule is matched in turn, with processing stopped after
+              the first match.
+ 
+-             Note that headers are collected from all the attachments 
++             Note that headers are collected from all the attachments
+              (except for the mailman administrivia message) and
+              matched against the regular expressions. With this feature,
+              you can effectively sort out messages with dangerous file
+@@ -442,6 +500,11 @@ class Privacy(GUIBase):
+         # an option.
+         if property == 'subscribe_policy' and not mm_cfg.ALLOW_OPEN_SUBSCRIBE:
+             val += 1
++        if (property == 'dmarc_moderation_action' and
++                val < mm_cfg.DEFAULT_DMARC_MODERATION_ACTION):
++            doc.addError(_("""dmarc_moderation_action must be >= the configured
++                           default value."""))
++            val = mm_cfg.DEFAULT_DMARC_MODERATION_ACTION
+         setattr(mlist, property, val)
+ 
+     # We need to handle the header_filter_rules widgets specially, but
+diff --git a/Mailman/Handlers/AvoidDuplicates.py b/Mailman/Handlers/AvoidDuplicates.py
+index 038034c..549d8e7 100644
+--- a/Mailman/Handlers/AvoidDuplicates.py
++++ b/Mailman/Handlers/AvoidDuplicates.py
+@@ -24,6 +24,7 @@ warning header, or pass it through, depending on the user's preferences.
+ 
+ from email.Utils import getaddresses, formataddr
+ from Mailman import mm_cfg
++from Mailman.Handlers.CookHeaders import change_header
+ 
+ COMMASPACE = ', '
+ 
+@@ -95,6 +96,10 @@ def process(mlist, msg, msgdata):
+     # Set the new list of recipients
+     msgdata['recips'] = newrecips
+     # RFC 2822 specifies zero or one CC header
+-    del msg['cc']
+     if ccaddrs:
+-        msg['Cc'] = COMMASPACE.join([formataddr(i) for i in ccaddrs.values()])
++        change_header('Cc',
++        COMMASPACE.join([formataddr(i) for i in ccaddrs.values()]),
++        mlist, msg, msgdata)
++    else:
++        del msg['cc']
++
+diff --git a/Mailman/Handlers/CookHeaders.py b/Mailman/Handlers/CookHeaders.py
+old mode 100644
+new mode 100755
+index 8e7e668..c556967
+--- a/Mailman/Handlers/CookHeaders.py
++++ b/Mailman/Handlers/CookHeaders.py
+@@ -64,13 +64,23 @@ def uheader(mlist, s, header_name=None, continuation_ws='\t', maxlinelen=None):
+         charset = 'us-ascii'
+     return Header(s, charset, maxlinelen, header_name, continuation_ws)
+ 
++def change_header(name, value, mlist, msg, msgdata, delete=True, repl=True):
++    if ((msgdata.get('from_is_list') == 2 or
++        (msgdata.get('from_is_list') == 0 and mlist.from_is_list == 2)) and 
++        not msgdata.get('_fasttrack')
++       ) or name.lower() in ('from', 'reply-to'):
++        msgdata.setdefault('add_header', {})[name] = value
++    elif repl or not msg.has_key(name):
++        if delete:
++            del msg[name]
++        msg[name] = value
++
+ 
+ 
+ def process(mlist, msg, msgdata):
+     # Set the "X-Ack: no" header if noack flag is set.
+     if msgdata.get('noack'):
+-        del msg['x-ack']
+-        msg['X-Ack'] = 'no'
++        change_header('X-Ack', 'no', mlist, msg, msgdata)
+     # Because we're going to modify various important headers in the email
+     # message, we want to save some of the information in the msgdata
+     # dictionary for later.  Specifically, the sender header will get waxed,
+@@ -87,7 +97,8 @@ def process(mlist, msg, msgdata):
+             pass
+     # Mark message so we know we've been here, but leave any existing
+     # X-BeenThere's intact.
+-    msg['X-BeenThere'] = mlist.GetListEmail()
++    change_header('X-BeenThere', mlist.GetListEmail(),
++                  mlist, msg, msgdata, delete=False)
+     # Add Precedence: and other useful headers.  None of these are standard
+     # and finding information on some of them are fairly difficult.  Some are
+     # just common practice, and we'll add more here as they become necessary.
+@@ -101,12 +112,31 @@ def process(mlist, msg, msgdata):
+     # known exploits in a particular version of Mailman and we know a site is
+     # using such an old version, they may be vulnerable.  It's too easy to
+     # edit the code to add a configuration variable to handle this.
+-    if not msg.has_key('x-mailman-version'):
+-        msg['X-Mailman-Version'] = mm_cfg.VERSION
++    change_header('X-Mailman-Version', mm_cfg.VERSION,
++                  mlist, msg, msgdata, repl=False)
+     # We set "Precedence: list" because this is the recommendation from the
+     # sendmail docs, the most authoritative source of this header's semantics.
+-    if not msg.has_key('precedence'):
+-        msg['Precedence'] = 'list'
++    change_header('Precedence', 'list',
++                  mlist, msg, msgdata, repl=False)
++    # Do we change the from so the list takes ownership of the email
++    if (msgdata.get('from_is_list') or mlist.from_is_list) and not fasttrack:
++        realname, email = parseaddr(msg['from'])
++        if not realname:
++            if mlist.isMember(email):
++                realname = mlist.getMemberName(email) or email
++            else:
++                realname = email
++        # Remove domain from realname if it looks like an email address
++        realname = re.sub(r'@([^ .]+\.)+[^ .]+$', '---', realname)
++        # Remember the original From: here for adding to Reply-To: below.
++        o_from = parseaddr(msg['from'])
++        change_header('From',
++                      formataddr(('%s via %s' % (realname, mlist.real_name),
++                                 mlist.GetListEmail())),
++                      mlist, msg, msgdata)
++    else:
++        # Use this as a flag
++        o_from = None
+     # Reply-To: munging.  Do not do this if the message is "fast tracked",
+     # meaning it is internally crafted and delivered to a specific user.  BAW:
+     # Yuck, I really hate this feature but I've caved under the sheer pressure
+@@ -136,18 +166,23 @@ def process(mlist, msg, msgdata):
+             orig = msg.get_all('reply-to', [])
+             for pair in getaddresses(orig):
+                 add(pair)
++        # We also need to put the old From: in Reply-To: in all cases.
++        if o_from:
++            add(o_from)
+         # Set Reply-To: header to point back to this list.  Add this last
+         # because some folks think that some MUAs make it easier to delete
+         # addresses from the right than from the left.
+         if mlist.reply_goes_to_list == 1:
+             i18ndesc = uheader(mlist, mlist.description, 'Reply-To')
+             add((str(i18ndesc), mlist.GetListEmail()))
+-        del msg['reply-to']
+         # Don't put Reply-To: back if there's nothing to add!
+         if new:
+             # Preserve order
+-            msg['Reply-To'] = COMMASPACE.join(
+-                [formataddr(pair) for pair in new])
++            change_header('Reply-To', 
++                          COMMASPACE.join([formataddr(pair) for pair in new]),
++                          mlist, msg, msgdata)
++        else:
++            del msg['reply-to']
+         # The To field normally contains the list posting address.  However
+         # when messages are fully personalized, that header will get
+         # overwritten with the address of the recipient.  We need to get the
+@@ -158,18 +193,31 @@ def process(mlist, msg, msgdata):
+         # above code?
+         # Also skip Cc if this is an anonymous list as list posting address
+         # is already in From and Reply-To in this case.
+-        if mlist.personalize == 2 and mlist.reply_goes_to_list <> 1 \
+-           and not mlist.anonymous_list:
++        # We do add the Cc in cases where From: header munging is being done
++        # because even though the list address is in From:, the Reply-To:
++        # poster will override it. Brain dead MUAs may then address the list
++        # twice on a 'reply all', but reasonable MUAs should do the right
++        # thing.
++        if (mlist.personalize == 2 and mlist.reply_goes_to_list <> 1 and
++            not mlist.anonymous_list):
+             # Watch out for existing Cc headers, merge, and remove dups.  Note
+             # that RFC 2822 says only zero or one Cc header is allowed.
+             new = []
+             d = {}
+-            for pair in getaddresses(msg.get_all('cc', [])):
+-                add(pair)
++            # AvoidDuplicates may have set a new Cc: in msgdata.add_header,
++            # so check that.
++            if (msgdata.has_key('add_header') and
++                    msgdata['add_header'].has_key('Cc')):
++                for pair in getaddresses([msgdata['add_header']['Cc']]):
++                    add(pair)
++            else:
++                for pair in getaddresses(msg.get_all('cc', [])):
++                    add(pair)
+             i18ndesc = uheader(mlist, mlist.description, 'Cc')
+             add((str(i18ndesc), mlist.GetListEmail()))
+-            del msg['Cc']
+-            msg['Cc'] = COMMASPACE.join([formataddr(pair) for pair in new])
++            change_header('Cc',
++                          COMMASPACE.join([formataddr(pair) for pair in new]),
++                          mlist, msg, msgdata)
+     # Add list-specific headers as defined in RFC 2369 and RFC 2919, but only
+     # if the message is being crafted for a specific list (e.g. not for the
+     # password reminders).
+@@ -191,8 +239,7 @@ def process(mlist, msg, msgdata):
+         # without desc we need to ensure the MUST brackets
+         listid_h = '<%s>' % listid
+     # We always add a List-ID: header.
+-    del msg['list-id']
+-    msg['List-Id'] = listid_h
++    change_header('List-Id', listid_h, mlist, msg, msgdata)
+     # For internally crafted messages, we also add a (nonstandard),
+     # "X-List-Administrivia: yes" header.  For all others (i.e. those coming
+     # from list posts), we add a bunch of other RFC 2369 headers.
+@@ -219,13 +266,12 @@ def process(mlist, msg, msgdata):
+     # First we delete any pre-existing headers because the RFC permits only
+     # one copy of each, and we want to be sure it's ours.
+     for h, v in headers.items():
+-        del msg[h]
+         # Wrap these lines if they are too long.  78 character width probably
+         # shouldn't be hardcoded, but is at least text-MUA friendly.  The
+         # adding of 2 is for the colon-space separator.
+         if len(h) + 2 + len(v) > 78:
+             v = CONTINUATION.join(v.split(', '))
+-        msg[h] = v
++        change_header(h, v, mlist, msg, msgdata)
+ 
+ 
+ 
+@@ -302,8 +348,7 @@ def prefix_subject(mlist, msg, msgdata):
+                     h = u' '.join([prefix, subject])
+             h = h.encode('us-ascii')
+             h = uheader(mlist, h, 'Subject', continuation_ws=ws)
+-            del msg['subject']
+-            msg['Subject'] = h
++            change_header('Subject', h, mlist, msg, msgdata)
+             ss = u' '.join([recolon, subject])
+             ss = ss.encode('us-ascii')
+             ss = uheader(mlist, ss, 'Subject', continuation_ws=ws)
+@@ -321,8 +366,7 @@ def prefix_subject(mlist, msg, msgdata):
+     # TK: Subject is concatenated and unicode string.
+     subject = subject.encode(cset, 'replace')
+     h.append(subject, cset)
+-    del msg['subject']
+-    msg['Subject'] = h
++    change_header('Subject', h, mlist, msg, msgdata)
+     ss = uheader(mlist, recolon, 'Subject', continuation_ws=ws)
+     ss.append(subject, cset)
+     msgdata['stripped_subject'] = ss
+diff --git a/Mailman/Handlers/Moderate.py b/Mailman/Handlers/Moderate.py
+index a362d96..2f1f38f 100644
+--- a/Mailman/Handlers/Moderate.py
++++ b/Mailman/Handlers/Moderate.py
+@@ -21,6 +21,7 @@
+ import re
+ from email.MIMEMessage import MIMEMessage
+ from email.MIMEText import MIMEText
++from email.Utils import parseaddr
+ 
+ from Mailman import mm_cfg
+ from Mailman import Utils
+@@ -47,9 +48,34 @@ class ModeratedMemberPost(Hold.ModeratedPost):
+ 
+ 
+ def process(mlist, msg, msgdata):
+-    if msgdata.get('approved') or msgdata.get('fromusenet'):
++    if msgdata.get('approved'):
+         return
+-    # First of all, is the poster a member or not?
++    # Before anything else, check DMARC if necessary.
++    msgdata['from_is_list'] = 0
++    dn, addr = parseaddr(msg.get('from'))
++    if addr and mlist.dmarc_moderation_action > 0:
++        if Utils.IsDMARCProhibited(mlist, addr):
++            # Note that for dmarc_moderation_action, 0 = Accept, 
++            #    1 = Munge, 2 = Wrap, 3 = Reject, 4 = Discard
++            if mlist.dmarc_moderation_action == 1:
++                msgdata['from_is_list'] = 1
++            elif mlist.dmarc_moderation_action == 2:
++                msgdata['from_is_list'] = 2
++            elif mlist.dmarc_moderation_action == 3:
++                # Reject
++                text = mlist.dmarc_moderation_notice
++                if text:
++                    text = Utils.wrap(text)
++                else:
++                    text = Utils.wrap(_(
++"""You are not allowed to post to this mailing list From: a domain which
++publishes a DMARC policy of reject or quarantine, and your message has been
++automatically rejected.  If you think that your messages are being rejected in
++error, contact the mailing list owner at %(listowner)s."""))
++                raise Errors.RejectMessage, text
++            elif mlist.dmarc_moderation_action == 4:
++                raise Errors.DiscardMessage
++    # Then, is the poster a member or not?
+     for sender in msg.get_senders():
+         if mlist.isMember(sender):
+             break
+@@ -105,7 +131,7 @@ def process(mlist, msg, msgdata):
+     # moderation configuration variables.  Handle by way of generic non-member
+     # action.
+     assert 0 <= mlist.generic_nonmember_action <= 4
+-    if mlist.generic_nonmember_action == 0:
++    if mlist.generic_nonmember_action == 0 or msgdata.get('fromusenet'):
+         # Accept
+         return
+     elif mlist.generic_nonmember_action == 1:
+diff --git a/Mailman/Handlers/Tagger.py b/Mailman/Handlers/Tagger.py
+index 0d3ce49..2117290 100644
+--- a/Mailman/Handlers/Tagger.py
++++ b/Mailman/Handlers/Tagger.py
+@@ -24,6 +24,7 @@ import email.Iterators
+ import email.Parser
+ 
+ from Mailman.Logging.Syslog import syslog
++from Mailman.Handlers.CookHeaders import change_header
+ 
+ CRNL = '\r\n'
+ EMPTYSTRING = ''
+@@ -60,8 +61,9 @@ def process(mlist, msg, msgdata):
+                 break
+     if hits:
+         msgdata['topichits'] = hits.keys()
+-        msg['X-Topics'] = NLTAB.join(hits.keys())
+-    
++        change_header('X-Topics', NLTAB.join(hits.keys()),
++                      mlist, msg, msgdata, delete=False)
++
+ 
+ 
+ def scanbody(msg, numlines=None):
+diff --git a/Mailman/Handlers/WrapMessage.py b/Mailman/Handlers/WrapMessage.py
+new file mode 100644
+index 0000000..9678f6f
+--- /dev/null
++++ b/Mailman/Handlers/WrapMessage.py
+@@ -0,0 +1,72 @@
++# Copyright (C) 2013-2014 by the Free Software Foundation, Inc.
++#
++# This program is free software; you can redistribute it and/or
++# modify it under the terms of the GNU General Public License
++# as published by the Free Software Foundation; either version 2
++# of the License, or (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program; if not, write to the Free Software
++# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,
++# USA.
++
++"""Wrap the message in an outer message/rfc822 part and transfer/add
++some headers from the original.
++
++Also, in the case of Munge From, replace the From: and Reply-To: in the
++original message.
++"""
++
++import copy
++
++from Mailman import mm_cfg
++from Mailman.Utils import unique_message_id
++from Mailman.Message import Message
++
++# Headers from the original that we want to keep in the wrapper.
++KEEPERS = ('to',
++           'in-reply-to',
++           'references',
++           'x-mailman-approved-at',
++          )
++
++
++
++def process(mlist, msg, msgdata):
++    # This is the negation of we're wrapping because dmarc_moderation_action
++    # is wrap this message or from_is_list applies and is wrap.
++    if not (msgdata.get('from_is_list') == 2 or
++            (mlist.from_is_list == 2 and msgdata.get('from_is_list') == 0)):
++        # Now see if we need to add a From: and/or Reply-To: without wrapping.
++        a_h = msgdata.get('add_header')
++        if a_h:
++            if a_h.get('From'):
++                del msg['from']
++                msg['From'] = a_h.get('From')
++            if a_h.get('Reply-To'):
++                del msg['reply-to']
++                msg['Reply-To'] = a_h.get('Reply-To')
++        return
++
++    # There are various headers in msg that we don't want, so we basically
++    # make a copy of the msg, then delete almost everything and set/copy
++    # what we want.
++    omsg = copy.deepcopy(msg)
++    for key in msg.keys():
++        if key.lower() not in KEEPERS:
++            del msg[key]
++    msg['MIME-Version'] = '1.0'
++    msg['Content-Type'] = 'message/rfc822'
++    msg['Content-Disposition'] = 'inline'
++    msg['Message-ID'] = unique_message_id(mlist)
++    # Add the headers from CookHeaders.
++    for k, v in msgdata['add_header'].items():
++        msg[k] = v
++    # And set the payload.
++    msg.set_payload(omsg.as_string())
++
+diff --git a/Mailman/MailList.py b/Mailman/MailList.py
+old mode 100644
+new mode 100755
+index 6083fb1..f948b69
+--- a/Mailman/MailList.py
++++ b/Mailman/MailList.py
+@@ -346,6 +346,7 @@ class MailList(HTMLFormatter, Deliverer, ListAdmin,
+         self.bounce_matching_headers = \
+                 mm_cfg.DEFAULT_BOUNCE_MATCHING_HEADERS
+         self.header_filter_rules = []
++        self.from_is_list = mm_cfg.DEFAULT_FROM_IS_LIST
+         self.anonymous_list = mm_cfg.DEFAULT_ANONYMOUS_LIST
+         internalname = self.internal_name()
+         self.real_name = internalname[0].upper() + internalname[1:]
+@@ -386,6 +387,10 @@ class MailList(HTMLFormatter, Deliverer, ListAdmin,
+         # 2==Discard
+         self.member_moderation_action = 0
+         self.member_moderation_notice = ''
++        self.dmarc_moderation_action = mm_cfg.DEFAULT_DMARC_MODERATION_ACTION
++        self.dmarc_quarantine_moderation_action = (
++            mm_cfg.DEFAULT_DMARC_QUARANTINE_MODERATION_ACTION)
++        self.dmarc_moderation_notice = ''
+         self.accept_these_nonmembers = []
+         self.hold_these_nonmembers = []
+         self.reject_these_nonmembers = []
+@@ -712,7 +717,14 @@ class MailList(HTMLFormatter, Deliverer, ListAdmin,
+     def CheckVersion(self, stored_state):
+         """Auto-update schema if necessary."""
+         if self.data_version >= mm_cfg.DATA_FILE_VERSION:
+-            return
++            # Some lists could have been created by newer Mailman version than
++            # this one. We are adding just few variables, so check for these
++            # variables explicitely.
++            if (hasattr(self, "from_is_list")
++                and hasattr(self, "dmarc_moderation_action")
++                and hasattr(self, "dmarc_moderation_notice")
++                and hasattr(self, "dmarc_quarantine_moderation_action")):
++                return
+         # Initialize any new variables
+         self.InitVars()
+         # Then reload the database (but don't recurse).  Force a reload even
+@@ -1025,7 +1030,8 @@ class MailList(HTMLFormatter, Deliverer, ListAdmin,
+         # And send an acknowledgement to the user...
+         if userack:
+             self.SendUnsubscribeAck(emailaddr, userlang)
+-        # ...and to the administrator
++        # ...and to the administrator in the correct language.  (LP: #1308655)
++        i18n.set_language(self.preferred_language)
+         if admin_notif:
+             realname = self.real_name
+             subject = _('%(realname)s unsubscribe notification')
+diff --git a/Mailman/Message.py b/Mailman/Message.py
+index 84e4aa2..13e7ff2 100644
+--- a/Mailman/Message.py
++++ b/Mailman/Message.py
+@@ -61,6 +61,43 @@ class Generator(email.Generator.Generator):
+ 
+ 
+ 
++class Generator(email.Generator.Generator):
++    """Generates output from a Message object tree, keeping signatures.
++
++       Headers will by default _not_ be folded in attachments.
++    """
++    def __init__(self, outfp, mangle_from_=True,
++                 maxheaderlen=78, children_maxheaderlen=0):
++        email.Generator.Generator.__init__(self, outfp,
++                mangle_from_=mangle_from_, maxheaderlen=maxheaderlen)
++        self.__children_maxheaderlen = children_maxheaderlen
++
++    def clone(self, fp):
++        """Clone this generator with maxheaderlen set for children"""
++        return self.__class__(fp, self._mangle_from_,
++                self.__children_maxheaderlen, self.__children_maxheaderlen)
++
++    # This is the _handle_message method with the fix for bug 7970.
++    def _handle_message(self, msg):
++        s = StringIO()
++        g = self.clone(s)
++        # The payload of a message/rfc822 part should be a multipart sequence
++        # of length 1.  The zeroth element of the list should be the Message
++        # object for the subpart.  Extract that object, stringify it, and
++        # write it out.
++        # Except, it turns out, when it's a string instead, which happens when
++        # and only when HeaderParser is used on a message of mime type
++        # message/rfc822.  Such messages are generated by, for example,
++        # Groupwise when forwarding unadorned messages.  (Issue 7970.)  So
++        # in that case we just emit the string body.
++        payload = msg.get_payload()
++        if isinstance(payload, list):
++            g.flatten(msg.get_payload(0), unixfrom=False)
++            payload = s.getvalue()
++        self._fp.write(payload)
++
++
++
+ class Message(email.Message.Message):
+     def __init__(self):
+         # We need a version number so that we can optimize __setstate__()
+@@ -243,6 +280,20 @@ class Message(email.Message.Message):
+         return fp.getvalue()
+ 
+ 
++    def as_string(self, unixfrom=False, mangle_from_=True):
++        """Return entire formatted message as a string using
++        Mailman.Message.Generator.
++
++        Operates like email.Message.Message.as_string, only
++	using Mailman's Message.Generator class. Only the top headers will
++        get folded.
++        """
++        fp = StringIO()
++        g = Generator(fp, mangle_from_=mangle_from_)
++        g.flatten(self, unixfrom=unixfrom)
++        return fp.getvalue()
++
++
+ 
+ class UserNotification(Message):
+     """Class for internally crafted messages."""
+diff --git a/Mailman/Utils.py b/Mailman/Utils.py
+index c8275df..8021942 100644
+--- a/Mailman/Utils.py
++++ b/Mailman/Utils.py
+@@ -71,6 +71,14 @@ except NameError:
+     True = 1
+     False = 0
+ 
++try:
++    import dns.resolver
++    import dns.rdatatype
++    from dns.exception import DNSException
++    dns_resolver = True
++except ImportError:
++    dns_resolver = False
++
+ EMPTYSTRING = ''
+ UEMPTYSTRING = u''
+ NL = '\n'
+@@ -1047,3 +1055,91 @@ def suspiciousHTML(html):
+     else:
+         return False
+ 
++
++
++
++# This takes an email address, and returns True if DMARC policy is p=reject
++# or possibly quarantine.
++def IsDMARCProhibited(mlist, email):
++    if not dns_resolver:
++         return False
++
++    email = email.lower()
++    at_sign = email.find('@')
++    if at_sign < 1:
++        return False
++    dmarc_domain = '_dmarc.' + email[at_sign+1:]
++
++    try:
++        resolver = dns.resolver.Resolver()
++        resolver.timeout = float(mm_cfg.DMARC_RESOLVER_TIMEOUT)
++        resolver.lifetime = float(mm_cfg.DMARC_RESOLVER_LIFETIME)
++        txt_recs = resolver.query(dmarc_domain, dns.rdatatype.TXT)
++    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
++        return False
++    except DNSException, e:
++        syslog('error',
++               'DNSException: Unable to query DMARC policy for %s (%s). %s',
++              email, dmarc_domain, e.__class__)
++        return False
++    else:
++# people are already being dumb, don't trust them to provide honest DNS
++# where the answer section only contains what was asked for, nor to include
++# CNAMEs before the values they point to.
++        full_record = ""
++        results_by_name = {}
++        cnames = {}
++        want_names = set([dmarc_domain + '.'])
++        for txt_rec in txt_recs.response.answer:
++            if txt_rec.rdtype == dns.rdatatype.CNAME:
++                cnames[txt_rec.name.to_text()] = (
++                    txt_rec.items[0].target.to_text())
++            if txt_rec.rdtype != dns.rdatatype.TXT:
++                continue
++            results_by_name.setdefault(txt_rec.name.to_text(), []).append(
++                "".join(txt_rec.items[0].strings))
++        expands = list(want_names)
++        seen = set(expands)
++        while expands:
++            item = expands.pop(0)
++            if item in cnames:
++                if cnames[item] in seen:
++                    continue # cname loop
++                expands.append(cnames[item])
++                seen.add(cnames[item])
++                want_names.add(cnames[item])
++                want_names.discard(item)
++
++        if len(want_names) != 1:
++            syslog('error',
++                   """multiple DMARC entries in results for %s,
++                   processing each to be strict""",
++                   dmarc_domain)
++        for name in want_names:
++            if name not in results_by_name:
++                continue
++            dmarcs = filter(lambda n: n.startswith('v=DMARC1;'),
++                            results_by_name[name])
++            if len(dmarcs) == 0:
++                return False
++            if len(dmarcs) > 1:
++                syslog('error',
++                       """RRset of TXT records for %s has %d v=DMARC1 entries;
++                       testing them all""",
++                        dmarc_domain, len(dmarc))
++            for entry in dmarcs:
++                if re.search(r'\bp=reject\b', entry, re.IGNORECASE):
++                    syslog('vette',
++                        'DMARC lookup for %s (%s) found p=reject in %s = %s',
++                        email, dmarc_domain, name, entry)
++                    return True
++
++                if (mlist.dmarc_quarantine_moderation_action and
++                    re.search(r'\bp=quarantine\b', entry, re.IGNORECASE)):
++                    syslog('vette',
++                      'DMARC lookup for %s (%s) found p=quarantine in %s = %s',
++                            email, dmarc_domain, name, entry)
++                    return True
++
++    return False
++
+diff --git a/Mailman/Version.py b/Mailman/Version.py
+index 05e6500..af4a2df 100644
+--- a/Mailman/Version.py
++++ b/Mailman/Version.py
+@@ -37,7 +37,7 @@ HEX_VERSION = ((MAJOR_REV << 24) | (MINOR_REV << 16) | (MICRO_REV << 8) |
+                (REL_LEVEL << 4)  | (REL_SERIAL << 0))
+ 
+ # config.pck schema version number
+-DATA_FILE_VERSION = 97
++DATA_FILE_VERSION = 98
+ 
+ # qfile/*.db schema version number
+ QFILE_SCHEMA_VERSION = 3
+diff --git a/Mailman/__init__.py b/Mailman/__init__.py
+index f569e43..e773b2e 100644
+--- a/Mailman/__init__.py
++++ b/Mailman/__init__.py
+@@ -13,3 +13,6 @@
+ # You should have received a copy of the GNU General Public License
+ # along with this program; if not, write to the Free Software 
+ # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
++
++import sys                                                                                                                                                                                                                                   
++sys.path.append("/usr/lib/mailman/Mailman")
+diff --git a/Mailman/versions.py b/Mailman/versions.py
+old mode 100644
+new mode 100755
+index 81fafd5..138e770
+--- a/Mailman/versions.py
++++ b/Mailman/versions.py
+@@ -313,6 +313,9 @@ def UpdateOldVars(l, stored_state):
+             pass
+         else:
+             l.digest_members[k] = 0
++    # from_is_list was called author_is_list in 2.1.16rc2 (only).
++    PreferStored('author_is_list', 'from_is_list',
++                 mm_cfg.DEFAULT_FROM_IS_LIST)
+ 
+ 
+ 
+@@ -383,6 +386,11 @@ def NewVars(l):
+     # the current GUI description model.  So, 0==Hold, 1==Reject, 2==Discard
+     add_only_if_missing('member_moderation_action', 0)
+     add_only_if_missing('member_moderation_notice', '')
++    add_only_if_missing('dmarc_moderation_action', 
++                       mm_cfg.DEFAULT_DMARC_MODERATION_ACTION)
++    add_only_if_missing('dmarc_quarantine_moderation_action',
++                       mm_cfg.DEFAULT_DMARC_QUARANTINE_MODERATION_ACTION)
++    add_only_if_missing('dmarc_moderation_notice', '')
+     add_only_if_missing('new_member_options',
+                         mm_cfg.DEFAULT_NEW_MEMBER_OPTIONS)
+     # Emergency moderation flag
+diff --git a/contrib/majordomo2mailman.pl b/contrib/majordomo2mailman.pl
+index c874862..770dc57 100644
+--- a/contrib/majordomo2mailman.pl
++++ b/contrib/majordomo2mailman.pl
+@@ -480,6 +480,7 @@ sub init_defaultmmconf {
+ 		  'max_num_recipients', "10",
+ 		  'forbidden_posters', "[]",
+ 		  'bounce_matching_headers',  "\"\"\"\n\"\"\"\n",
++		  'from_is_list', "0",
+ 		  'anonymous_list', "0",
+ 		  'nondigestable', "1",
+ 		  'digestable', "1",

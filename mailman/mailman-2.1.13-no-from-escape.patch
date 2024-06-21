@@ -1,0 +1,149 @@
+=== modified file 'Mailman/Handlers/SMTPDirect.py'
+--- Mailman/Handlers/SMTPDirect.py	2005-12-30 18:50:08 +0000
++++ Mailman/Handlers/SMTPDirect.py	2009-08-01 23:15:35 +0000
+@@ -1,4 +1,4 @@
+-# Copyright (C) 1998-2005 by the Free Software Foundation, Inc.
++# Copyright (C) 1998-2009 by the Free Software Foundation, Inc.
+ #
+ # This program is free software; you can redistribute it and/or
+ # modify it under the terms of the GNU General Public License
+@@ -360,7 +360,9 @@
+     msg['Sender'] = envsender
+     msg['Errors-To'] = envsender
+     # Get the plain, flattened text of the message, sans unixfrom
+-    msgtext = msg.as_string()
++    # using our as_string() method to not mangle From_ and not fold
++    # sub-part headers possibly breaking signatures.
++    msgtext = msg.as_string(mangle_from_=False)
+     refused = {}
+     recips = msgdata['recips']
+     msgid = msg['message-id']
+
+=== modified file 'Mailman/Handlers/Scrubber.py'
+--- Mailman/Handlers/Scrubber.py	2009-07-31 22:37:29 +0000
++++ Mailman/Handlers/Scrubber.py	2009-08-01 23:15:35 +0000
+@@ -90,27 +90,6 @@
+     return all and all[0]
+ 
+ 
+-
+-# We're using a subclass of the standard Generator because we want to suppress
+-# headers in the subparts of multiparts.  We use a hack -- the ctor argument
+-# skipheaders to accomplish this.  It's set to true for the outer Message
+-# object, but false for all internal objects.  We recognize that
+-# sub-Generators will get created passing only mangle_from_ and maxheaderlen
+-# to the ctors.
+-#
+-# This isn't perfect because we still get stuff like the multipart boundaries,
+-# but see below for how we corrupt that to our nefarious goals.
+-class ScrubberGenerator(Generator):
+-    def __init__(self, outfp, mangle_from_=True,
+-                 maxheaderlen=78, skipheaders=True):
+-        Generator.__init__(self, outfp, mangle_from_=False)
+-        self.__skipheaders = skipheaders
+-
+-    def _write_headers(self, msg):
+-        if not self.__skipheaders:
+-            Generator._write_headers(self, msg)
+-
+-
+ def safe_strftime(fmt, t):
+     try:
+         return time.strftime(fmt, t)
+
+=== modified file 'Mailman/Mailbox.py'
+--- Mailman/Mailbox.py	2005-08-27 01:40:17 +0000
++++ Mailman/Mailbox.py	2009-08-01 23:15:35 +0000
+@@ -1,4 +1,4 @@
+-# Copyright (C) 1998-2003 by the Free Software Foundation, Inc.
++# Copyright (C) 1998-2009 by the Free Software Foundation, Inc.
+ #
+ # This program is free software; you can redistribute it and/or
+ # modify it under the terms of the GNU General Public License
+@@ -22,10 +22,10 @@
+ 
+ import email
+ from email.Parser import Parser
+-from email.Generator import Generator
+ from email.Errors import MessageParseError
+ 
+ from Mailman import mm_cfg
++from Mailman.Message import Generator
+ from Mailman.Message import Message
+ 
+ try:
+
+=== modified file 'Mailman/Message.py'
+--- Mailman/Message.py	2007-06-29 21:24:32 +0000
++++ Mailman/Message.py	2009-08-01 23:15:35 +0000
+@@ -1,4 +1,4 @@
+-# Copyright (C) 1998-2007 by the Free Software Foundation, Inc.
++# Copyright (C) 1998-2009 by the Free Software Foundation, Inc.
+ #
+ # This program is free software; you can redistribute it and/or
+ # modify it under the terms of the GNU General Public License
+@@ -17,12 +17,15 @@
+ 
+ """Standard Mailman message object.
+ 
+-This is a subclass of mimeo.Message but provides a slightly extended interface
++This is a subclass of email.Message but provides a slightly extended interface
+ which is more convenient for use inside Mailman.
+ """
+ 
+ import re
++from cStringIO import StringIO
++
+ import email
++import email.Generator
+ import email.Message
+ import email.Utils
+ from email.Charset import Charset
+@@ -40,6 +43,24 @@
+ 
+ 
+ 
++class Generator(email.Generator.Generator):
++    """Generates output from a Message object tree, keeping signatures.
++
++       Headers will by default _not_ be folded in attachments.
++    """
++    def __init__(self, outfp, mangle_from_=True,
++                 maxheaderlen=78, children_maxheaderlen=0):
++        email.Generator.Generator.__init__(self, outfp,
++                mangle_from_=mangle_from_, maxheaderlen=maxheaderlen)
++        self.__children_maxheaderlen = children_maxheaderlen
++
++    def clone(self, fp):
++        """Clone this generator with maxheaderlen set for children"""
++        return self.__class__(fp, self._mangle_from_,
++                self.__children_maxheaderlen, self.__children_maxheaderlen)
++
++
++
+ class Message(email.Message.Message):
+     def __init__(self):
+         # We need a version number so that we can optimize __setstate__()
+@@ -208,6 +229,20 @@
+             return failobj
+ 
+ 
++    def as_string(self, unixfrom=False, mangle_from_=True):
++        """Return entire formatted message as a string using
++        Mailman.Message.Generator.
++
++        Operates like email.Message.Message.as_string, only
++	using Mailman's Message.Generator class. Only the top headers will
++        get folded.
++        """
++        fp = StringIO()
++        g = Generator(fp, mangle_from_=mangle_from_)
++        g.flatten(self, unixfrom=unixfrom)
++        return fp.getvalue()
++
++
+ 
+ class UserNotification(Message):
+     """Class for internally crafted messages."""
+
+
