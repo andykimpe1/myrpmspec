@@ -1,0 +1,180 @@
+From e3e335c306f1bfad59ec1dcf5dc668b703c989bd Mon Sep 17 00:00:00 2001
+From: Olivier Fourdan <ofourdan@redhat.com>
+Date: Mon, 1 Oct 2012 16:14:23 +0200
+Subject: [PATCH] wacom: write to status_led{0,1}_select only
+
+if a device has only one ring/strip, use status_led0_select;
+otherwise the left ring/strip is controlled by status_led1_select
+and the right ring/strip by status_led0_select.
+
+https://bugzilla.gnome.org/show_bug.cgi?id=676558
+---
+diff --git a/plugins/wacom/gsd-wacom-device.c b/plugins/wacom/gsd-wacom-device.c
+index c0a1742..79eae68 100644
+--- a/plugins/wacom/gsd-wacom-device.c
++++ b/plugins/wacom/gsd-wacom-device.c
+@@ -350,6 +350,8 @@ struct GsdWacomDevicePrivate
+ 	GList *styli;
+ 	GsdWacomStylus *last_stylus;
+ 	GList *buttons;
++	gint num_rings;
++	gint num_strips;
+ 	GHashTable *modes; /* key = int (group), value = int (index) */
+ 	GHashTable *num_modes; /* key = int (group), value = int (index) */
+ 	char *settings_path;
+@@ -1160,6 +1162,21 @@ gsd_wacom_device_add_buttons (GsdWacomDevice	*device,
+ }
+ 
+ static void
++gsd_wacom_device_get_modeswitches (WacomDevice      *wacom_device,
++				   gint             *num_rings,
++				   gint             *num_strips)
++{
++	*num_strips = libwacom_get_num_strips (wacom_device);
++
++	if (libwacom_has_ring2 (wacom_device))
++		*num_rings = 2;
++	else if  (libwacom_has_ring (wacom_device))
++		*num_rings = 1;
++	else
++		*num_rings = 0;
++}
++
++static void
+ gsd_wacom_device_add_modes (GsdWacomDevice *device,
+ 			    WacomDevice    *wacom_device)
+ {
+@@ -1220,6 +1237,9 @@ gsd_wacom_device_update_from_db (GsdWacomDevice *device,
+ 	}
+ 
+ 	if (device->priv->type == WACOM_TYPE_PAD) {
++		gsd_wacom_device_get_modeswitches (wacom_device,
++						   &device->priv->num_rings,
++						   &device->priv->num_strips);
+ 		gsd_wacom_device_add_buttons (device, wacom_device, settings_path);
+ 		gsd_wacom_device_add_modes (device, wacom_device);
+ 	}
+@@ -1557,6 +1577,22 @@ gsd_wacom_device_is_screen_tablet (GsdWacomDevice *device)
+ 	return device->priv->is_screen_tablet;
+ }
+ 
++gint
++gsd_wacom_device_get_num_strips (GsdWacomDevice *device)
++{
++	g_return_val_if_fail (GSD_IS_WACOM_DEVICE (device), 0);
++
++	return device->priv->num_strips;
++}
++
++gint
++gsd_wacom_device_get_num_rings (GsdWacomDevice *device)
++{
++	g_return_val_if_fail (GSD_IS_WACOM_DEVICE (device), 0);
++
++	return device->priv->num_rings;
++}
++
+ const char *
+ gsd_wacom_device_get_settings_path (GsdWacomDevice *device)
+ {
+diff --git a/plugins/wacom/gsd-wacom-device.h b/plugins/wacom/gsd-wacom-device.h
+index e74c019..a0e63f4 100644
+--- a/plugins/wacom/gsd-wacom-device.h
++++ b/plugins/wacom/gsd-wacom-device.h
+@@ -162,6 +162,8 @@ const char	* gsd_wacom_device_get_icon_name	(GsdWacomDevice	*device);
+ const char	* gsd_wacom_device_get_tool_name	(GsdWacomDevice	*device);
+ gboolean	  gsd_wacom_device_reversible		(GsdWacomDevice	*device);
+ gboolean	  gsd_wacom_device_is_screen_tablet	(GsdWacomDevice	*device);
++gint              gsd_wacom_device_get_num_strips	(GsdWacomDevice *device);
++gint              gsd_wacom_device_get_num_rings	(GsdWacomDevice *device);
+ const char	* gsd_wacom_device_get_settings_path	(GsdWacomDevice	*device);
+ const char	* gsd_wacom_device_get_schemas_path	(GsdWacomDevice	*device);
+ void		  gsd_wacom_device_set_current_stylus	(GsdWacomDevice *device,
+diff --git a/plugins/wacom/gsd-wacom-manager.c b/plugins/wacom/gsd-wacom-manager.c
+index 1b06bda..9a45ecf 100644
+--- a/plugins/wacom/gsd-wacom-manager.c
++++ b/plugins/wacom/gsd-wacom-manager.c
+@@ -404,6 +404,52 @@ apply_stylus_settings (GsdWacomDevice *device)
+ 	gconf_value_free (value);
+ }
+ 
++/*
++ * The rule to determine the status LED to use is as follow:
++ *
++ * "[...] if a device has only one ring/strip, use status_led0_select;
++ *  otherwise the left ring/strip is controlled by status_led1_select and
++ *  the right ring/strip by status_led0_select."
++ *
++ * http://sourceforge.net/mailarchive/message.php?msg_id=29898591
++ */
++static int
++get_led_group_id(GsdWacomDevice *device,
++		 int             group_id)
++{
++	gint num_rings;
++	gint num_strips;
++
++	num_rings = gsd_wacom_device_get_num_rings (device);
++	num_strips = gsd_wacom_device_get_num_strips (device);
++
++	/* Given group_id is in {1..4} as follow
++	 * WACOM_BUTTON_RING_MODESWITCH        => group_id == 1
++	 * WACOM_BUTTON_RING2_MODESWITCH       => group_id == 2
++	 * WACOM_BUTTON_TOUCHSTRIP_MODESWITCH  => group_id == 3
++	 * WACOM_BUTTON_TOUCHSTRIP2_MODESWITCH => group_id == 4
++	 *
++	 * see function flags_to_group() in gsd-wacom-device.c
++	 */
++
++	if ((num_rings == 1) && (group_id == 1))
++		return 0;
++
++	if ((num_strips == 1) && (group_id == 3))
++		return 0;
++
++	if ((num_rings == 2) && (group_id == 1 ||  group_id == 2))
++		return (group_id & 1);
++
++	if ((num_strips == 2) && (group_id == 3 ||  group_id == 4))
++		return (group_id & 1);
++
++	g_debug ("Group ID %d not applicable for %d ring(s) and %d strip(s)",
++		 group_id, num_rings, num_strips);
++
++	return -1;
++}
++
+ static void
+ set_led (GsdWacomDevice *device,
+ 	 int             group_id,
+@@ -412,6 +458,7 @@ set_led (GsdWacomDevice *device,
+ 	GError *error = NULL;
+ 	const char *path;
+ 	char *command;
++	gint status_led;
+ 	gboolean ret;
+ 
+ #ifndef HAVE_GUDEV
+@@ -421,11 +468,18 @@ set_led (GsdWacomDevice *device,
+ 	g_return_if_fail (index >= 1);
+ 
+ 	path = gsd_wacom_device_get_path (device);
++	status_led = get_led_group_id (device, group_id);
++
++	if (status_led < 0) {
++		g_debug ("Ignoring group ID %d for device %s",
++		         group_id, gsd_wacom_device_get_name (device));
++		return;
++	}
+ 
+ 	g_debug ("Switching group ID %d to index %d for device %s", group_id, index, path);
+ 
+ 	command = g_strdup_printf ("pkexec " LIBEXECDIR "/gsd-wacom-led-helper --path %s --group %d --led %d",
+-				   path, group_id - 1, index - 1);
++				   path, status_led, index - 1);
+ 	ret = g_spawn_command_line_sync (command,
+ 					 NULL,
+ 					 NULL,
+-- 
+1.7.1
+

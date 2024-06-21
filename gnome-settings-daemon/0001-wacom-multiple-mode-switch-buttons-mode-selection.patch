@@ -1,0 +1,122 @@
+From fc1608ab26dde6ae0aefad6fb27bb91d49a13528 Mon Sep 17 00:00:00 2001
+From: Olivier Fourdan <ofourdan@redhat.com>
+Date: Thu, 13 Dec 2012 15:08:00 +0100
+Subject: [PATCH] wacom: multiple mode-switch buttons mode selection
+
+The Cintiq 24HD has three modes per side, but also
+3 different buttons to select modes. So you can go
+from mode 1 to mode 3 without cycling through mode
+2, you just hit the individual button.
+
+Currently, when you hit any of the mode switch
+buttons it just cycles through them like the other
+tablets do.
+
+To allow selecting a given mode, check if there are
+multiple mode-switch buttons present on the device
+and if so set the mode based on the index of that
+button in the list of mode-switches.
+
+https://bugzilla.gnome.org/show_bug.cgi?id=690157
+---
+ plugins/wacom/gsd-wacom-device.c  |   45 +++++++++++++++++++++++++++++++-----
+ plugins/wacom/gsd-wacom-device.h  |    5 ++-
+ plugins/wacom/gsd-wacom-manager.c |    2 +-
+ 3 files changed, 42 insertions(+), 10 deletions(-)
+
+diff --git a/plugins/wacom/gsd-wacom-device.c b/plugins/wacom/gsd-wacom-device.c
+index 79eae68..ee28af5 100644
+--- a/plugins/wacom/gsd-wacom-device.c
++++ b/plugins/wacom/gsd-wacom-device.c
+@@ -943,21 +943,52 @@ add_stylus_to_device (GsdWacomDevice *device,
+ }
+ 
+ int
+-gsd_wacom_device_set_next_mode (GsdWacomDevice *device,
+-				int             group_id)
++gsd_wacom_device_set_next_mode (GsdWacomDevice       *device,
++				GsdWacomTabletButton *button)
+ {
++	GList *l;
+ 	int current_idx;
+ 	int num_modes;
++	int num_switches;
++	int group_id;
+ 
+ 	g_return_val_if_fail (GSD_IS_WACOM_DEVICE (device), -1);
+-	current_idx = GPOINTER_TO_INT (g_hash_table_lookup (device->priv->modes, GINT_TO_POINTER(group_id)));
+-	/* That means that the mode doesn't exist, see gsd_wacom_device_add_modes() */
+-	g_return_val_if_fail (current_idx != 0, -1);
+-
+-	current_idx++;
+ 
++	group_id = button->group_id;
++	current_idx = 0;
++	num_switches = 0;
+ 	num_modes = GPOINTER_TO_INT (g_hash_table_lookup (device->priv->num_modes, GINT_TO_POINTER(group_id)));
+ 
++	/*
++	 * Check if we have multiple mode-switch buttons for that
++	 * group, and if so, compute the current index based on
++	 * the position in the list...
++	 */
++	for (l = device->priv->buttons; l != NULL; l = l->next) {
++		GsdWacomTabletButton *b = l->data;
++		if (b->type != WACOM_TABLET_BUTTON_TYPE_HARDCODED)
++			continue;
++		if (button->group_id == b->group_id)
++			num_switches++;
++		if (g_strcmp0 (button->id, b->id) == 0)
++			current_idx = num_switches;
++	}
++
++	/* We should at least have found the current mode-switch button...
++	 * If not, then it means that the given button is not a valid
++	 * mode-switch.
++	 */
++	g_return_val_if_fail (num_switches != 0, -1);
++
++	/* Only one mode-switch? cycle through the modes */
++	if (num_switches == 1) {
++		current_idx = GPOINTER_TO_INT (g_hash_table_lookup (device->priv->modes, GINT_TO_POINTER(group_id)));
++		/* That means that the mode doesn't exist, see gsd_wacom_device_add_modes() */
++		g_return_val_if_fail (current_idx != 0, -1);
++
++		current_idx++;
++	}
++
+ 	if (current_idx > num_modes)
+ 		current_idx = 1;
+ 
+diff --git a/plugins/wacom/gsd-wacom-device.h b/plugins/wacom/gsd-wacom-device.h
+index a0e63f4..d5aeb58 100644
+--- a/plugins/wacom/gsd-wacom-device.h
++++ b/plugins/wacom/gsd-wacom-device.h
+@@ -180,8 +180,9 @@ GList		* gsd_wacom_device_get_buttons		(GsdWacomDevice	*device);
+ GsdWacomTabletButton *gsd_wacom_device_get_button	(GsdWacomDevice	*device,
+ 							 int		 button,
+ 							 GtkDirectionType *dir);
+-int gsd_wacom_device_set_next_mode			(GsdWacomDevice *device,
+-							 int		 group_id);
++int gsd_wacom_device_set_next_mode                      (GsdWacomDevice       *device,
++						         GsdWacomTabletButton *button);
++
+ /* Helper and debug functions */
+ GsdWacomDevice * gsd_wacom_device_create_fake		(GsdWacomDeviceType type,
+ 							 const char	*name,
+diff --git a/plugins/wacom/gsd-wacom-manager.c b/plugins/wacom/gsd-wacom-manager.c
+index 9a45ecf..ec5c258 100644
+--- a/plugins/wacom/gsd-wacom-manager.c
++++ b/plugins/wacom/gsd-wacom-manager.c
+@@ -1098,7 +1098,7 @@ filter_button_events (XEvent          *xevent,
+ 			return GDK_FILTER_REMOVE;
+ 		}
+ 
+-		new_mode = gsd_wacom_device_set_next_mode (device, wbutton->group_id);
++		new_mode = gsd_wacom_device_set_next_mode (device, wbutton);
+ 		set_led (device, wbutton->group_id, new_mode);
+ 		XFreeEventData(dpy, cookie);
+ 		return GDK_FILTER_REMOVE;
+-- 
+1.7.1
+

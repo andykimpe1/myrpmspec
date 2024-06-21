@@ -1,0 +1,132 @@
+commit 81b9bfc9f4bce5b8d0d3306ded450a7730e8d568
+Author: Olivier Fourdan <ofourdan@redhat.com>
+Date:   Mon May 14 11:31:04 2012 +0200
+
+    wacom: Update display mapping on monitor changes
+
+    Update display mapping when the number, size or position
+    of the monitors change.
+
+    https://bugzilla.gnome.org/show_bug.cgi?id=668614
+
+---
+
+diff --git a/plugins/wacom/gsd-wacom-manager.c b/plugins/wacom/gsd-wacom-manager.c
+index 9e2da34..af7dbe5 100644
+--- a/plugins/wacom/gsd-wacom-manager.c
++++ b/plugins/wacom/gsd-wacom-manager.c
+@@ -1229,22 +1229,75 @@ gsd_wacom_manager_idle_cb (GsdWacomManager *manager)
+ 	return FALSE;
+ }
+ 
++/*
++ * The monitors-changed signal is emitted when the number, size or
++ * position of the monitors attached to the screen change.
++ */
+ static void
+-init_screens (GsdWacomManager *manager)
++on_screen_changed_cb (GdkScreen *screen,
++		      GsdWacomManager *manager)
+ {
+-	GdkDisplay *display;
+-	int i;
++	GList *devices, *l;
+ 
+-	display = gdk_display_get_default ();
+-	for (i = 0; i < gdk_display_get_n_screens (display); i++) {
+-		GdkScreen *screen;
++	/*
++	 * A ::changed signal may be received at startup before
++	 * the devices get added, in this case simply ignore the
++	 * notification
++	 */
++	if (manager->priv->devices == NULL)
++		return;
+ 
+-		screen = gdk_display_get_screen (display, i);
+-		if (screen == NULL) {
++	g_debug ("Screen configuration changed");
++	devices = g_hash_table_get_values (manager->priv->devices);
++	for (l = devices; l != NULL; l = l->next) {
++		GsdWacomDevice *device = l->data;
++		GsdWacomDeviceType type;
++		GConfValue *value;
++
++		type = gsd_wacom_device_get_device_type (device);
++		if (type == WACOM_TYPE_CURSOR || type == WACOM_TYPE_PAD)
+ 			continue;
+-		}
+-		manager->priv->screens = g_slist_append (manager->priv->screens, screen);
++
++		value = gsd_gconf_get (gsd_wacom_device_get_settings_path (device),
++				       gsd_wacom_device_get_schemas_path (device),
++				       KEY_DISPLAY);
++		set_display (device, value);
++		gconf_value_free (value);
+ 	}
++	g_list_free (devices);
++}
++
++static void
++init_screens (GsdWacomManager *manager)
++{
++        GdkDisplay *display;
++        int i;
++
++        display = gdk_display_get_default ();
++        for (i = 0; i < gdk_display_get_n_screens (display); i++) {
++                GError *error = NULL;
++                GdkScreen *screen;
++
++                screen = gdk_display_get_screen (display, i);
++                if (screen == NULL) {
++                        continue;
++                }
++                manager->priv->screens = g_slist_append (manager->priv->screens, screen);
++
++		g_signal_connect (screen,
++				  "monitors-changed",
++				  G_CALLBACK (on_screen_changed_cb),
++			          manager);
++
++                /*
++                 * When using GdkScreen, we need to update the input trans-
++                 * formation matrix on overall ::size-changed signal as well
++                 */
++		g_signal_connect (screen,
++				  "size-changed",
++				  G_CALLBACK (on_screen_changed_cb),
++			          manager);
++        }
+ }
+ 
+ gboolean
+@@ -1271,6 +1324,7 @@ void
+ gsd_wacom_manager_stop (GsdWacomManager *manager)
+ {
+ 	GsdWacomManagerPrivate *p = manager->priv;
++	GSList *ls;
+ 
+ 	g_debug ("Stopping wacom manager");
+ 
+@@ -1283,6 +1337,9 @@ gsd_wacom_manager_stop (GsdWacomManager *manager)
+ 	gdk_window_remove_filter (NULL,
+ 				  (GdkFilterFunc) filter_button_events,
+ 				  manager);
++
++	for (ls = p->screens; ls != NULL; ls = ls->next)
++		g_signal_handlers_disconnect_by_func (ls->data, on_screen_changed_cb, manager);
+ }
+ 
+ static void
+@@ -1307,8 +1364,8 @@ gsd_wacom_manager_finalize (GObject *object)
+ 		wacom_manager->priv->screens = NULL;
+ 	}
+ 
+-	if (wacom_manager->priv->start_idle_id != 0)
+-		g_source_remove (wacom_manager->priv->start_idle_id);
++        if (wacom_manager->priv->start_idle_id != 0)
++                g_source_remove (wacom_manager->priv->start_idle_id);
+ 
+ 	G_OBJECT_CLASS (gsd_wacom_manager_parent_class)->finalize (object);
+ }

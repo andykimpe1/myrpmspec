@@ -1,0 +1,161 @@
+diff -up a/plugins/wacom/gsd-wacom-device.c b/plugins/wacom/gsd-wacom-device.c
+--- a/plugins/wacom/gsd-wacom-device.c
++++ b/plugins/wacom/gsd-wacom-device.c
+@@ -402,8 +402,11 @@ filter_events (XEvent	 *xevent,
+ 
+ 	name = XGetAtomName (GDK_DISPLAY_XDISPLAY (gdk_display_get_default ()), pev->property);
+ 	if (name == NULL ||
+-	    g_strcmp0 (name, WACOM_SERIAL_IDS_PROP) != 0)
+-		goto out;
++	    g_strcmp0 (name, WACOM_SERIAL_IDS_PROP) != 0) {
++		if (name)
++			XFree (name);
++		return GDK_FILTER_CONTINUE;
++	}
+ 	XFree (name);
+ 
+ 	tool_id = xdevice_get_last_tool_id (device->priv->device_id);
+@@ -427,7 +430,7 @@ setup_property_notify (GsdWacomDevice *d
+ 
+ 	evmask.deviceid = device->priv->device_id;
+ 	evmask.mask_len = XIMaskLen (XI_PropertyEvent);
+-	evmask.mask = g_malloc0(evmask.mask_len * sizeof(char));
++	evmask.mask = g_new0 (guchar, evmask.mask_len);
+ 	XISetMask (evmask.mask, XI_PropertyEvent);
+ 
+ 	dpy = GDK_DISPLAY_XDISPLAY (gdk_display_get_default ());
+@@ -504,14 +507,14 @@ get_device_type (XDeviceInfo *dev)
+ 
+ 	gdk_error_trap_push ();
+ 
+-	rc = XGetDeviceProperty (GDK_DISPLAY_XDISPLAY (gdk_display_get_default ()),
+-				 device, prop, 0, 1, False,
+-				 XA_ATOM, &realtype, &realformat, &nitems,
+-				 &bytes_after, &data);
+-	if (gdk_error_trap_pop () || rc != Success || realtype == None) {
+-		XCloseDevice (GDK_DISPLAY_XDISPLAY (gdk_display_get_default ()), device);
+-		ret = WACOM_TYPE_INVALID;
+-	}
++        rc = XGetDeviceProperty (GDK_DISPLAY_XDISPLAY (gdk_display_get_default ()),
++                                 device, prop, 0, 1, False,
++                                 XA_ATOM, &realtype, &realformat, &nitems,
++                                 &bytes_after, &data);
++        XCloseDevice (GDK_DISPLAY_XDISPLAY (gdk_display_get_default ()), device);
++
++        if (gdk_error_trap_pop () || rc != Success || realtype == None)
++                ret = WACOM_TYPE_INVALID;
+ 
+ 	XFree (data);
+ 
+@@ -646,30 +649,30 @@ find_output_by_display (GsdWacomDevice *
+ 	gsize n;
+ 	GConfValue *display;
+ 	gchar **edid;
+-	GnomeOutputInfo* info;
++	GnomeOutputInfo* ret;
+ 
+ 	if (device == NULL)
+ 		return NULL;
+ 
++	ret      = NULL;
+ 	display  = gsd_gconf_get (device->priv->settings_path, device->priv->schemas_path, "display");
+ 	edid     = gsd_gconf_value_get_strv (display, &n);
+ 	gconf_value_free (display);
+ 
+ 	if (n != 3) {
+ 		g_critical ("Expected 'display' key to store %d values; got %"G_GSIZE_FORMAT".", 3, n);
+-		g_strfreev (edid);
+-		return NULL;
++		goto out;
+ 	}
+ 
+-	if (strlen(edid[0]) == 0 || strlen(edid[1]) == 0 || strlen(edid[2]) == 0) {
+-		g_strfreev (edid);
+-		return NULL;
+-	}
++	if (strlen(edid[0]) == 0 || strlen(edid[1]) == 0 || strlen(edid[2]) == 0)
++		goto out;
+ 
+-	info = find_output_by_edid (edid[0], edid[1], edid[2]);
++	ret = find_output_by_edid (edid[0], edid[1], edid[2]);
++
++out:
+ 	g_strfreev (edid);
+ 
+-	return info;
++	return ret;
+ }
+ 
+ static GnomeOutputInfo*
+@@ -992,6 +995,8 @@ gsd_wacom_device_add_ring_modes (WacomDe
+ 			name = g_strdup_printf (_("Left Ring Mode #%d"), i);
+ 			id = g_strdup_printf ("left-ring-mode-%d", i);
+ 			l = g_list_append (l, gsd_wacom_tablet_button_new (name, id, settings_path, WACOM_TABLET_BUTTON_TYPE_ELEVATOR, flags_to_group (WACOM_BUTTON_RING_MODESWITCH), i - 1));
++			g_free (name);
++			g_free (id);
+ 		}
+ 	} else if ((direction & WACOM_BUTTON_POSITION_RIGHT) && libwacom_has_ring2 (wacom_device)) {
+ 		num_modes = libwacom_get_ring2_num_modes (wacom_device);
+@@ -999,6 +1004,8 @@ gsd_wacom_device_add_ring_modes (WacomDe
+ 			name = g_strdup_printf (_("Right Ring Mode #%d"), i);
+ 			id = g_strdup_printf ("right-ring-mode-%d", i);
+ 			l = g_list_append (l, gsd_wacom_tablet_button_new (name, id, settings_path, WACOM_TABLET_BUTTON_TYPE_ELEVATOR, flags_to_group (WACOM_BUTTON_RING2_MODESWITCH), i - 1));
++			g_free (name);
++			g_free (id);
+ 		}
+ 	}
+ 
+@@ -1027,6 +1034,8 @@ gsd_wacom_device_add_strip_modes (WacomD
+ 			name = g_strdup_printf (_("Left Touchstrip Mode #%d"), i);
+ 			id = g_strdup_printf ("left-strip-mode-%d", i);
+ 			l = g_list_append (l, gsd_wacom_tablet_button_new (name, id, settings_path, WACOM_TABLET_BUTTON_TYPE_ELEVATOR, flags_to_group (WACOM_BUTTON_TOUCHSTRIP_MODESWITCH), i - 1));
++			g_free (name);
++			g_free (id);
+ 		}
+ 	} else if ((direction & WACOM_BUTTON_POSITION_RIGHT) && num_strips >= 2) {
+ 		num_modes = libwacom_get_strips_num_modes (wacom_device);
+@@ -1034,6 +1043,8 @@ gsd_wacom_device_add_strip_modes (WacomD
+ 			name = g_strdup_printf (_("Right Touchstrip Mode #%d"), i);
+ 			id = g_strdup_printf ("right-strip-mode-%d", i);
+ 			l = g_list_append (l, gsd_wacom_tablet_button_new (name, id, settings_path, WACOM_TABLET_BUTTON_TYPE_ELEVATOR, flags_to_group (WACOM_BUTTON_TOUCHSTRIP2_MODESWITCH), i - 1));
++			g_free (name);
++			g_free (id);
+ 		}
+ 	}
+ 
+@@ -1413,12 +1424,15 @@ gsd_wacom_device_finalize (GObject *obje
+ 
+ 	p = device->priv;
+ 
+-	g_list_foreach (p->buttons, (GFunc) gsd_wacom_tablet_button_free, NULL);
+-	g_list_free (p->buttons);
+-
+ 	g_free (p->settings_path);
+ 	p->settings_path = NULL;
+ 
++        g_list_foreach (p->styli, (GFunc) g_object_unref, NULL);
++        g_list_free (p->styli);
++
++        g_list_foreach (p->buttons, (GFunc) gsd_wacom_tablet_button_free, NULL);
++        g_list_free (p->buttons);
++
+ 	g_free (p->name);
+ 	p->name = NULL;
+ 
+diff -up a/plugins/wacom/gsd-wacom-manager.c b/plugins/wacom/gsd-wacom-manager.c
+--- a/plugins/wacom/gsd-wacom-manager.c
++++ b/plugins/wacom/gsd-wacom-manager.c
+@@ -797,6 +797,13 @@ device_removed_cb (GsdDeviceManager *dev
+ 		}
+ 	}
+ 	g_hash_table_remove (manager->priv->devices, device_info);
++
++	/* Enable this chunk of code if you want to valgrind
++	 * test-wacom. It will exit when there are no Wacom devices left */
++#if 0
++	if (g_hash_table_size (manager->priv->devices) == 0)
++		gtk_main_quit ();
++#endif
+ }
+ 
+ static GsdWacomDevice *

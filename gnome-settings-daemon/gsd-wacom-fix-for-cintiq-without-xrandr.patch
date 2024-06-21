@@ -1,0 +1,94 @@
+diff --git a/plugins/wacom/gsd-wacom-device.c b/plugins/wacom/gsd-wacom-device.c
+index 503b54c..97f2c00 100644
+--- a/plugins/wacom/gsd-wacom-device.c
++++ b/plugins/wacom/gsd-wacom-device.c
+@@ -582,6 +582,46 @@ find_output_by_edid (const gchar *vendor, const gchar *product, const gchar *ser
+ }
+ 
+ static GnomeOutputInfo*
++find_single_output (void)
++{
++	GError *error = NULL;
++	GnomeRRScreen *rr_screen = NULL;
++	GnomeRRConfig *rr_config = NULL;
++	GnomeOutputInfo **rr_output_info, **outputs;
++	GnomeOutputInfo *retval = NULL;
++	gint noutputs = 0;
++
++	rr_screen = gsd_rr_screen_new (gdk_screen_get_default (),
++					 NULL, NULL,
++					 &error);
++	if (rr_screen == NULL) {
++		g_warning ("Failed to create GnomeRRScreen: %s", error->message);
++		g_error_free (error);
++	} else
++		rr_config = gnome_rr_config_new_current (rr_screen);
++
++	/* gsd_rr_config_compat_outputs_get() should return something even if rr_config in NULL */
++	rr_output_info = gsd_rr_config_compat_outputs_get (rr_config);
++
++	for (outputs = rr_output_info; *outputs != NULL; outputs++)
++		noutputs++;
++
++	if (noutputs == 1)
++		retval = gsd_rr_compat_output_deep_copy (*rr_output_info);
++
++	gsd_rr_config_compat_outputs_free (rr_output_info);
++	if (rr_config)
++		gnome_rr_config_free (rr_config);
++	if (rr_screen)
++		gnome_rr_screen_destroy (rr_screen);
++
++	if (retval == NULL)
++		g_debug ("More than one monitor found.");
++
++	return retval;
++}
++
++static GnomeOutputInfo*
+ find_output_by_heuristic (GsdWacomDevice *device)
+ {
+ 	GnomeOutputInfo *rr_output_info;
+@@ -591,6 +631,10 @@ find_output_by_heuristic (GsdWacomDevice *device)
+ 	 * display tablets are connected.
+ 	 */
+ 	rr_output_info = find_output_by_edid("WAC", NULL, NULL);
++
++	if (!rr_output_info)
++		rr_output_info = find_single_output ();
++
+ 	return rr_output_info;
+ }
+ 
+@@ -632,7 +676,7 @@ find_output_by_monitor (GdkScreen *screen,
+ {
+ 	GError *error = NULL;
+ 	GnomeRRScreen *rr_screen = NULL;
+-	GnomeRRConfig *rr_config;
++	GnomeRRConfig *rr_config = NULL;
+ 	GnomeOutputInfo **rr_output_infos;
+ 	GnomeOutputInfo *ret;
+ 	guint i;
+@@ -1576,6 +1620,9 @@ gsd_wacom_device_get_area (GsdWacomDevice *device)
+ 
+ 	g_return_val_if_fail (GSD_IS_WACOM_DEVICE (device), NULL);
+ 
++	if (device->priv->device_info == NULL)
++		return NULL;
++
+ 	id = device->priv->device_info->id;
+ 
+ 	area = XInternAtom (GDK_DISPLAY_XDISPLAY (gdk_display_get_default ()), "Wacom Tablet Area", False);
+diff --git a/plugins/wacom/gsd-wacom-rr-helpers.c b/plugins/wacom/gsd-wacom-rr-helpers.c
+index ce2906e..240a094 100644
+--- a/plugins/wacom/gsd-wacom-rr-helpers.c
++++ b/plugins/wacom/gsd-wacom-rr-helpers.c
+@@ -266,7 +266,7 @@ copy_rr_config_outputs (GnomeRRConfig *configuration)
+ {
+ 	GnomeOutputInfo **outputs = NULL;
+ 	GnomeOutputInfo **p1, **p2;
+-	gsize nitems;
++	gsize nitems = 0;
+ 
+ 	g_return_val_if_fail (configuration != NULL, NULL);
+ 

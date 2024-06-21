@@ -1,0 +1,150 @@
+diff -up a/plugins/wacom/gsd-wacom-device.c b/plugins/wacom/gsd-wacom-device.c
+--- a/plugins/wacom/gsd-wacom-device.c
++++ b/plugins/wacom/gsd-wacom-device.c
+@@ -584,14 +584,14 @@ find_output_by_edid (const gchar *vendor
+ }
+ 
+ static GnomeOutputInfo*
+-find_single_output (void)
++find_builtin_output (void)
+ {
+ 	GError *error = NULL;
+ 	GnomeRRScreen *rr_screen = NULL;
+ 	GnomeRRConfig *rr_config = NULL;
+-	GnomeOutputInfo **rr_output_info, **outputs;
++	GnomeOutputInfo **rr_output_info;
+ 	GnomeOutputInfo *retval = NULL;
+-	gint noutputs = 0;
++	guint i;
+ 
+ 	rr_screen = gsd_rr_screen_new (gdk_screen_get_default (),
+ 					 NULL, NULL,
+@@ -605,11 +605,15 @@ find_single_output (void)
+ 	/* gsd_rr_config_compat_outputs_get() should return something even if rr_config in NULL */
+ 	rr_output_info = gsd_rr_config_compat_outputs_get (rr_config);
+ 
+-	for (outputs = rr_output_info; *outputs != NULL; outputs++)
+-		noutputs++;
++	for (i = 0; rr_output_info[i] != NULL; i++) {
++		if (!gsd_rr_output_info_is_connected (rr_output_info[i]))
++			continue;
+ 
+-	if (noutputs == 1)
+-		retval = gsd_rr_compat_output_deep_copy (*rr_output_info);
++		if (gsd_rr_compat_output_is_laptop (rr_output_info[i])) {
++			retval = gsd_rr_compat_output_deep_copy (rr_output_info[i]);
++			break;
++		}
++	}
+ 
+ 	gsd_rr_config_compat_outputs_free (rr_output_info);
+ 	if (rr_config)
+@@ -618,7 +622,7 @@ find_single_output (void)
+ 		gnome_rr_screen_destroy (rr_screen);
+ 
+ 	if (retval == NULL)
+-		g_debug ("More than one monitor found.");
++		g_debug ("Did not find a built-in monitor");
+ 
+ 	return retval;
+ }
+@@ -634,9 +638,6 @@ find_output_by_heuristic (GsdWacomDevice
+ 	 */
+ 	rr_output_info = find_output_by_edid("WAC", NULL, NULL);
+ 
+-	if (!rr_output_info)
+-		rr_output_info = find_single_output ();
+-
+ 	return rr_output_info;
+ }
+ 
+@@ -799,6 +800,7 @@ find_output (GsdWacomDevice *device)
+ 			rr_output_info = find_output_by_heuristic (device);
+ 			if (rr_output_info == NULL) {
+ 				g_warning ("No fuzzy match based on heuristics was found.");
++				rr_output_info = find_builtin_output ();
+ 			} else {
+ 				g_warning("Automatically mapping tablet to heuristically-found display.");
+ 				set_display_by_output (device, rr_output_info);
+diff -up a/plugins/wacom/gsd-wacom-rr-helpers.c b/plugins/wacom/gsd-wacom-rr-helpers.c
+--- a/plugins/wacom/gsd-wacom-rr-helpers.c
++++ b/plugins/wacom/gsd-wacom-rr-helpers.c
+@@ -314,6 +314,14 @@ gsd_rr_output_info_is_active (GnomeOutpu
+ 	return self->on;
+ }
+ 
++gboolean
++gsd_rr_output_info_is_connected (GnomeOutputInfo *self)
++{
++	g_return_val_if_fail (self != NULL, FALSE);
++
++	return self->connected;
++}
++
+ void
+ gsd_rr_output_info_get_vendor (GnomeOutputInfo *self,
+ 			       gchar* vendor)
+@@ -371,6 +379,39 @@ gsd_rr_output_info_get_display_name (Gno
+ 	return self->display_name ? self->display_name : _("Unknown");
+ }
+ 
++/* Copied from gnome-desktop-3.x */
++static gboolean
++_gsd_rr_compat_output_name_is_laptop (const char *name)
++{
++	if (!name)
++		return FALSE;
++
++	if (strstr (name, "lvds") ||  /* Most drivers use an "LVDS" prefix... */
++	    strstr (name, "LVDS") ||
++	    strstr (name, "Lvds") ||
++	    strstr (name, "LCD")  ||  /* ... but fglrx uses "LCD" in some versions.  Shoot me now, kthxbye. */
++	    strstr (name, "eDP")  ||  /* eDP is for internal laptop panel connections */
++	    strstr (name, "DFP-0") || /* NV-CONTROL uses DFP-0 as the first flat panel */
++	    strstr (name, "default")) /* Finally, NVidia and all others that don't bother to do RANDR properly */
++		return TRUE;
++
++	return FALSE;
++}
++
++gboolean
++gsd_rr_compat_output_is_laptop (GnomeOutputInfo *output)
++{
++	g_return_val_if_fail (output != NULL, FALSE);
++
++	if (!output->connected)
++		return FALSE;
++
++	if (_gsd_rr_compat_output_name_is_laptop (output->name))
++		return TRUE;
++
++	return FALSE;
++}
++
+ GnomeOutputInfo *
+ gsd_rr_compat_output_deep_copy (const GnomeOutputInfo *output)
+ {
+@@ -597,3 +638,4 @@ gsd_rr_config_compat_outputs_free (Gnome
+ 
+ 	g_free (outputs);
+ }
++
+diff -up a/plugins/wacom/gsd-wacom-rr-helpers.h b/plugins/wacom/gsd-wacom-rr-helpers.h
+--- a/plugins/wacom/gsd-wacom-rr-helpers.h
++++ b/plugins/wacom/gsd-wacom-rr-helpers.h
+@@ -42,6 +42,7 @@ GnomeRRScreen *		gsd_rr_screen_new 			(G
+ 								 gpointer,
+ 								 GError **);
+ gboolean		gsd_rr_output_info_is_active		(GnomeOutputInfo *);
++gboolean		gsd_rr_output_info_is_connected		(GnomeOutputInfo *);
+ void			gsd_rr_output_info_get_vendor		(GnomeOutputInfo *,
+ 								 gchar *);
+ guint			gsd_rr_output_info_get_product		(GnomeOutputInfo *);
+@@ -53,6 +54,7 @@ void			gsd_rr_output_info_get_geometry		
+ 								 int *height);
+ const char *		gsd_rr_output_info_get_name 		(GnomeOutputInfo *);
+ const char *		gsd_rr_output_info_get_display_name	(GnomeOutputInfo *);
++gboolean		gsd_rr_compat_output_is_laptop		(GnomeOutputInfo *);
+ GnomeOutputInfo *	gsd_rr_compat_output_deep_copy		(const GnomeOutputInfo *);
+ void			gsd_rr_compat_output_free		(GnomeOutputInfo *);
+ GnomeOutputInfo **	gsd_rr_config_compat_outputs_get	(GnomeRRConfig *);

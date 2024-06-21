@@ -1,0 +1,83 @@
+commit 0246c0cc9eb7dd9291ac1e09942f900dbfe594ee
+Author: Bastien Nocera <hadess@hadess.net>
+Date:   Wed Apr 25 19:59:09 2012 +0100
+
+    wacom: Make tablet configuration be per-machine
+    
+    As well as per-tablet, we apparently also need to be per-machine
+    
+    https://bugzilla.gnome.org/show_bug.cgi?id=674792
+
+diff --git a/plugins/wacom/README.config-storage b/plugins/wacom/README.config-storage
+index beab771..0360829 100644
+--- a/plugins/wacom/README.config-storage
++++ b/plugins/wacom/README.config-storage
+@@ -13,9 +13,11 @@ configurations, whether on a single machine, or using a shared home directory.
+ 
+ The configuration scheme is:
+ schema: /schemas/desktop/gnome/peripherals/wacom/
+-path: /desktop/gnome/peripherals/wacom/<device ID>/
++path: /desktop/gnome/peripherals/wacom/<machine ID>-<device ID>/
++
++where <machine ID> is the D-Bus machine-id for the machine, and
++<device ID> is a unique identifier for the tablet.
+ 
+-where <device ID> is a unique identifier for the tablet.
+ 
+ Stylus
+ ------
+diff --git a/plugins/wacom/gsd-wacom-device.c b/plugins/wacom/gsd-wacom-device.c
+index a25d292..d774692 100644
+--- a/plugins/wacom/gsd-wacom-device.c
++++ b/plugins/wacom/gsd-wacom-device.c
+@@ -42,7 +42,7 @@
+ 
+ #define GSD_WACOM_STYLUS_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), GSD_TYPE_WACOM_STYLUS, GsdWacomStylusPrivate))
+ 
+-#define WACOM_DEVICE_CONFIG_BASE "/desktop/gnome/peripherals/wacom"
++#define WACOM_DEVICE_CONFIG_BASE "/desktop/gnome/peripherals/wacom/%s-%s"
+ #define WACOM_TABLET_SCHEMA	 "/schemas/desktop/gnome/peripherals/wacom"
+ #define WACOM_STYLUS_SCHEMA	 "/schemas/desktop/gnome/peripherals/wacom/stylus"
+ #define WACOM_ERASER_SCHEMA	 "/schemas/desktop/gnome/peripherals/wacom/eraser"
+@@ -342,6 +342,7 @@ struct GsdWacomDevicePrivate
+ 	GsdWacomDeviceType type;
+ 	char *name;
+ 	char *path;
++	char *machine_id;
+ 	const char *icon_name;
+ 	char *tool_name;
+ 	gboolean reversible;
+@@ -1186,7 +1187,9 @@ gsd_wacom_device_update_from_db (GsdWacomDevice *device,
+ 	char *settings_path;
+ 
+ 	schemas_path =  g_strdup (WACOM_TABLET_SCHEMA);
+-	settings_path = gsd_gconf_build_path (WACOM_DEVICE_CONFIG_BASE, libwacom_get_match (wacom_device));
++	settings_path = g_strdup_printf (WACOM_DEVICE_CONFIG_BASE,
++					 device->priv->machine_id,
++					 libwacom_get_match (wacom_device));
+ 
+ 	device->priv->name = g_strdup (libwacom_get_name (wacom_device));
+ 	device->priv->schemas_path = schemas_path;
+@@ -1387,6 +1390,12 @@ gsd_wacom_device_init (GsdWacomDevice *device)
+ {
+ 	device->priv = GSD_WACOM_DEVICE_GET_PRIVATE (device);
+ 	device->priv->type = WACOM_TYPE_INVALID;
++
++	if (g_file_get_contents ("/etc/machine-id", &device->priv->machine_id, NULL, NULL) == FALSE)
++		if (g_file_get_contents ("/var/lib/dbus/machine-id", &device->priv->machine_id, NULL, NULL) == FALSE)
++			device->priv->machine_id = g_strdup ("00000000000000000000000000000000");
++
++	device->priv->machine_id = g_strstrip (device->priv->machine_id);
+ }
+ 
+ static void
+@@ -1419,6 +1428,9 @@ gsd_wacom_device_finalize (GObject *object)
+ 	g_free (p->path);
+ 	p->path = NULL;
+ 
++	g_free (p->machine_id);
++	p->machine_id = NULL;
++
+ 	if (p->modes) {
+ 		g_hash_table_destroy (p->modes);
+ 		p->modes = NULL;
