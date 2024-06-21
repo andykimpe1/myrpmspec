@@ -1,0 +1,168 @@
+diff -up nautilus-2.28.4/libnautilus-private/nautilus-autorun.c.volume-busy nautilus-2.28.4/libnautilus-private/nautilus-autorun.c
+--- nautilus-2.28.4/libnautilus-private/nautilus-autorun.c.volume-busy	2009-12-08 10:50:42.000000000 +0100
++++ nautilus-2.28.4/libnautilus-private/nautilus-autorun.c	2011-01-04 10:47:14.000000000 +0100
+@@ -776,6 +776,7 @@ autorun_dialog_response (GtkDialog *dial
+ 	case AUTORUN_DIALOG_RESPONSE_EJECT:
+ 		nautilus_file_operations_unmount_mount (GTK_WINDOW (dialog),
+ 							data->mount,
++							NULL,
+ 							data->should_eject,
+ 							FALSE);
+ 		break;
+diff -up nautilus-2.28.4/libnautilus-private/nautilus-desktop-icon-file.c.volume-busy nautilus-2.28.4/libnautilus-private/nautilus-desktop-icon-file.c
+--- nautilus-2.28.4/libnautilus-private/nautilus-desktop-icon-file.c.volume-busy	2009-12-09 12:03:51.000000000 +0100
++++ nautilus-2.28.4/libnautilus-private/nautilus-desktop-icon-file.c	2011-01-04 10:47:14.000000000 +0100
+@@ -319,7 +319,7 @@ nautilus_desktop_icon_file_unmount (Naut
+ 	if (desktop_file) {
+ 		mount = nautilus_desktop_link_get_mount (desktop_file->details->link);
+ 		if (mount != NULL) {
+-			nautilus_file_operations_unmount_mount (NULL, mount, FALSE, TRUE);
++			nautilus_file_operations_unmount_mount (NULL, mount, mount_op, FALSE, TRUE);
+ 		}
+ 	}
+ 	
+@@ -339,7 +339,7 @@ nautilus_desktop_icon_file_eject (Nautil
+ 	if (desktop_file) {
+ 		mount = nautilus_desktop_link_get_mount (desktop_file->details->link);
+ 		if (mount != NULL) {
+-			nautilus_file_operations_unmount_mount (NULL, mount, TRUE, TRUE);
++			nautilus_file_operations_unmount_mount (NULL, mount, mount_op, TRUE, TRUE);
+ 		}
+ 	}
+ }
+diff -up nautilus-2.28.4/libnautilus-private/nautilus-file.c.volume-busy nautilus-2.28.4/libnautilus-private/nautilus-file.c
+--- nautilus-2.28.4/libnautilus-private/nautilus-file.c.volume-busy	2011-01-04 10:47:13.000000000 +0100
++++ nautilus-2.28.4/libnautilus-private/nautilus-file.c	2011-01-04 10:47:14.000000000 +0100
+@@ -1239,7 +1239,7 @@ nautilus_file_unmount (NautilusFile     
+ 		}
+ 	} else if (file->details->mount != NULL &&
+ 		   g_mount_can_unmount (file->details->mount)) {
+-		nautilus_file_operations_unmount_mount (NULL, file->details->mount, FALSE, TRUE);
++		nautilus_file_operations_unmount_mount (NULL, file->details->mount, mount_op, FALSE, TRUE);
+ 	}
+ }
+ 
+@@ -1266,7 +1266,7 @@ nautilus_file_eject (NautilusFile       
+ 		}
+ 	} else if (file->details->mount != NULL &&
+ 		   g_mount_can_eject (file->details->mount)) {
+-		nautilus_file_operations_unmount_mount (NULL, file->details->mount, TRUE, TRUE);
++		nautilus_file_operations_unmount_mount (NULL, file->details->mount, mount_op, TRUE, TRUE);
+ 	}
+ }
+ 
+diff -up nautilus-2.28.4/libnautilus-private/nautilus-file-operations.c.volume-busy nautilus-2.28.4/libnautilus-private/nautilus-file-operations.c
+--- nautilus-2.28.4/libnautilus-private/nautilus-file-operations.c.volume-busy	2011-01-04 10:47:13.000000000 +0100
++++ nautilus-2.28.4/libnautilus-private/nautilus-file-operations.c	2011-01-04 11:22:45.000000000 +0100
+@@ -1999,6 +1999,7 @@ nautilus_file_operations_delete (GList  
+ typedef struct {
+ 	gboolean eject;
+ 	GMount *mount;
++	GMountOperation *mount_op;
+ 	GtkWindow *parent_window;
+ } UnmountData;
+ 
+@@ -2044,25 +2045,25 @@ unmount_mount_callback (GObject *source_
+ static void
+ do_unmount (UnmountData *data)
+ {
+-	GMountOperation *mount_op;
+-
+-	mount_op = gtk_mount_operation_new (data->parent_window);
++	if (data->mount_op == NULL) {
++		data->mount_op = gtk_mount_operation_new (data->parent_window);
++	}
+ 	if (data->eject) {
+ 		g_mount_eject_with_operation (data->mount,
+ 					      0,
+-					      mount_op,
++					      data->mount_op,
+ 					      NULL,
+ 					      unmount_mount_callback,
+ 					      data);
+ 	} else {
+ 		g_mount_unmount_with_operation (data->mount,
+ 						0,
+-						mount_op,
++						data->mount_op,
+ 						NULL,
+ 						unmount_mount_callback,
+ 						data);
+ 	}
+-	g_object_unref (mount_op);
++	g_object_unref (data->mount_op);
+ }
+ 
+ static gboolean
+@@ -2210,6 +2211,7 @@ prompt_empty_trash (GtkWindow *parent_wi
+ void
+ nautilus_file_operations_unmount_mount (GtkWindow                      *parent_window,
+ 					GMount                         *mount,
++					GMountOperation                *mount_op,
+ 					gboolean                        eject,
+ 					gboolean                        check_trash)
+ {
+@@ -2224,6 +2226,9 @@ nautilus_file_operations_unmount_mount (
+ 	}
+ 	data->eject = eject;
+ 	data->mount = g_object_ref (mount);
++	if (mount_op) {
++		data->mount_op = g_object_ref (mount_op);
++	}
+ 
+ 	if (check_trash && has_trash_files (mount)) {
+ 		response = prompt_empty_trash (parent_window);
+@@ -2245,6 +2250,9 @@ nautilus_file_operations_unmount_mount (
+ 		} else if (response == GTK_RESPONSE_CANCEL) {
+ 			eel_remove_weak_pointer (&data->parent_window);
+ 			g_object_unref (data->mount);
++			if (data->mount_op) {
++				g_object_unref (data->mount_op);
++			}
+ 			g_free (data);
+ 			return;
+ 		}
+diff -up nautilus-2.28.4/libnautilus-private/nautilus-file-operations.h.volume-busy nautilus-2.28.4/libnautilus-private/nautilus-file-operations.h
+--- nautilus-2.28.4/libnautilus-private/nautilus-file-operations.h.volume-busy	2011-01-04 10:47:13.000000000 +0100
++++ nautilus-2.28.4/libnautilus-private/nautilus-file-operations.h	2011-01-04 10:47:14.000000000 +0100
+@@ -91,6 +91,7 @@ void nautilus_file_set_permissions_recur
+ 
+ void nautilus_file_operations_unmount_mount (GtkWindow                      *parent_window,
+ 					     GMount                         *mount,
++					     GMountOperation                *mount_op,
+ 					     gboolean                        eject,
+ 					     gboolean                        check_trash);
+ void nautilus_file_operations_mount_volume  (GtkWindow                      *parent_window,
+diff -up nautilus-2.28.4/src/file-manager/fm-tree-view.c.volume-busy nautilus-2.28.4/src/file-manager/fm-tree-view.c
+--- nautilus-2.28.4/src/file-manager/fm-tree-view.c.volume-busy	2009-12-15 10:10:43.000000000 +0100
++++ nautilus-2.28.4/src/file-manager/fm-tree-view.c	2011-01-04 10:47:14.000000000 +0100
+@@ -1130,7 +1130,7 @@ fm_tree_view_unmount_cb (GtkWidget *menu
+ 	
+ 	if (mount != NULL) {
+ 		nautilus_file_operations_unmount_mount (fm_tree_view_get_containing_window (view),
+-							mount, FALSE, TRUE);
++							mount, NULL, FALSE, TRUE);
+ 	}
+ }
+ 
+@@ -1149,7 +1149,7 @@ fm_tree_view_eject_cb (GtkWidget *menu_i
+ 	
+ 	if (mount != NULL) {
+ 		nautilus_file_operations_unmount_mount (fm_tree_view_get_containing_window (view),
+-							mount, TRUE, TRUE);
++							mount, NULL, TRUE, TRUE);
+ 	}
+ }
+ 
+diff -up nautilus-2.28.4/src/nautilus-places-sidebar.c.volume-busy nautilus-2.28.4/src/nautilus-places-sidebar.c
+--- nautilus-2.28.4/src/nautilus-places-sidebar.c.volume-busy	2009-12-15 10:10:43.000000000 +0100
++++ nautilus-2.28.4/src/nautilus-places-sidebar.c	2011-01-04 10:47:14.000000000 +0100
+@@ -1738,7 +1738,7 @@ do_unmount (GMount *mount,
+ 	    NautilusPlacesSidebar *sidebar)
+ {
+ 	if (mount != NULL) {
+-		nautilus_file_operations_unmount_mount (NULL, mount, FALSE, TRUE);
++		nautilus_file_operations_unmount_mount (NULL, mount, NULL, FALSE, TRUE);
+ 	}
+ }
+ 
