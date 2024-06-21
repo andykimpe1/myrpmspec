@@ -1,0 +1,521 @@
+From cdb73286fec6ce815259c91416452d96be4fc79f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Thu, 26 Feb 2015 10:27:37 +0100
+Subject: [PATCH] Test for ridiculous values of starting offsets
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This is a port of this upstream commit:
+
+From: ph10 <ph10@2f5784b3-3f2a-0410-8824-cb99058d5e15>
+Date: Sat, 6 Nov 2010 17:10:00 +0000
+Subject: [PATCH] Test for ridiculous values of starting offsets; tidy UTF-8
+ code.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+git-svn-id: svn://vcs.exim.org/pcre/code/trunk@567 2f5784b3-3f2a-0410-8824-cb99058d5e15
+
+to pcre-7.8. It includes only changes needed for checking that
+starting offset is in valid range (not before and not after the
+subject string) and accompanaying pcretest(1) and documentation
+changes.
+
+Signed-off-by: Petr Písař <ppisar@redhat.com>
+---
+ doc/html/pcreapi.html  | 30 ++++++++++++++++++++----------
+ doc/html/pcretest.html |  4 ++--
+ doc/pcre.txt           | 39 ++++++++++++++++++++++++---------------
+ doc/pcreapi.3          | 28 +++++++++++++++++++---------
+ doc/pcretest.1         |  7 +++----
+ doc/pcretest.txt       |  6 +++---
+ pcre.h.in              |  1 +
+ pcre_dfa_exec.c        |  1 +
+ pcre_exec.c            |  1 +
+ pcretest.c             |  7 +++++++
+ testdata/testinput2    |  8 ++++++++
+ testdata/testinput5    |  8 ++++++++
+ testdata/testinput7    |  8 ++++++++
+ testdata/testinput8    |  8 ++++++++
+ testdata/testoutput2   | 14 ++++++++++++++
+ testdata/testoutput5   | 14 ++++++++++++++
+ testdata/testoutput7   | 17 +++++++++++++++++
+ testdata/testoutput8   | 16 ++++++++++++++++
+ 18 files changed, 174 insertions(+), 43 deletions(-)
+
+diff --git a/doc/html/pcreapi.html b/doc/html/pcreapi.html
+index d6a1612..670fc31 100644
+--- a/doc/html/pcreapi.html
++++ b/doc/html/pcreapi.html
+@@ -1345,7 +1345,8 @@ strings in the
+ in the main
+ <a href="pcre.html"><b>pcre</b></a>
+ page. If an invalid UTF-8 sequence of bytes is found, <b>pcre_exec()</b> returns
+-the error PCRE_ERROR_BADUTF8. If <i>startoffset</i> contains an invalid value,
++the error PCRE_ERROR_BADUTF8. If <i>startoffset</i> contains a value that does 
++not point to the start of a UTF-8 character (or to the end of the subject),
+ PCRE_ERROR_BADUTF8_OFFSET is returned.
+ </P>
+ <P>
+@@ -1354,10 +1355,10 @@ checks for performance reasons, you can set the PCRE_NO_UTF8_CHECK option when
+ calling <b>pcre_exec()</b>. You might want to do this for the second and
+ subsequent calls to <b>pcre_exec()</b> if you are making repeated calls to find
+ all the matches in a single subject string. However, you should be sure that
+-the value of <i>startoffset</i> points to the start of a UTF-8 character. When
+-PCRE_NO_UTF8_CHECK is set, the effect of passing an invalid UTF-8 string as a
+-subject, or a value of <i>startoffset</i> that does not point to the start of a
+-UTF-8 character, is undefined. Your program may crash.
++the value of <i>startoffset</i> points to the start of a UTF-8 character (or the
++end of the subject). When PCRE_NO_UTF8_CHECK is set, the effect of passing an
++invalid UTF-8 string as a subject or an invalid value of <i>startoffset</i> is
++undefined. Your program may crash.
+ <pre>
+   PCRE_PARTIAL
+ </pre>
+@@ -1376,11 +1377,15 @@ The string to be matched by <b>pcre_exec()</b>
+ </b><br>
+ <P>
+ The subject string is passed to <b>pcre_exec()</b> as a pointer in
+-<i>subject</i>, a length (in bytes) in <i>length</i>, and a starting byte offset
+-in <i>startoffset</i>. In UTF-8 mode, the byte offset must point to the start of
+-a UTF-8 character. Unlike the pattern string, the subject may contain binary
+-zero bytes. When the starting offset is zero, the search for a match starts at
+-the beginning of the subject, and this is by far the most common case.
++in <i>startoffset</i>. If this is negative or greater than the length of the 
++subject, <b>pcre_exec()</b> returns PCRE_ERROR_BADOFFSET.
++</P>
++<P>
++In UTF-8 mode, the byte offset must point to the start of a UTF-8 character (or
++the end of the subject). Unlike the pattern string, the subject may contain
++binary zero bytes. When the starting offset is zero, the search for a match
++starts at the beginning of the subject, and this is by far the most common
++case.
+ </P>
+ <P>
+ A non-zero starting offset is useful when searching for another match in the
+@@ -1591,6 +1596,11 @@ description above.
+   PCRE_ERROR_BADNEWLINE     (-23)
+ </pre>
+ An invalid combination of PCRE_NEWLINE_<i>xxx</i> options was given.
++<pre>
++  PCRE_ERROR_BADOFFSET      (-24)
++</pre>
++The value of <i>startoffset</i> was negative or greater than the length of the 
++subject, that is, the value in <i>length</i>.
+ </P>
+ <P>
+ Error numbers -16 to -20 and -22 are not used by <b>pcre_exec()</b>.
+diff --git a/doc/html/pcretest.html b/doc/html/pcretest.html
+index 5482eae..c2531ea 100644
+--- a/doc/html/pcretest.html
++++ b/doc/html/pcretest.html
+@@ -372,8 +372,8 @@ recognized:
+   \S         output details of memory get/free calls during matching
+   \Z         pass the PCRE_NOTEOL option to <b>pcre_exec()</b> or <b>pcre_dfa_exec()</b>
+   \?         pass the PCRE_NO_UTF8_CHECK option to <b>pcre_exec()</b> or <b>pcre_dfa_exec()</b>
+-  \&#62;dd       start the match at offset dd (any number of digits);
+-               this sets the <i>startoffset</i> argument for <b>pcre_exec()</b> or <b>pcre_dfa_exec()</b>
++  \&#62;dd       start the match at offset dd (optional "-"; then any number of digits); this sets the <i>startoffset</i> 
++               argument for <b>pcre_exec()</b> or <b>pcre_dfa_exec()</b>
+   \&#60;cr&#62;      pass the PCRE_NEWLINE_CR option to <b>pcre_exec()</b> or <b>pcre_dfa_exec()</b>
+   \&#60;lf&#62;      pass the PCRE_NEWLINE_LF option to <b>pcre_exec()</b> or <b>pcre_dfa_exec()</b>
+   \&#60;crlf&#62;    pass the PCRE_NEWLINE_CRLF option to <b>pcre_exec()</b> or <b>pcre_dfa_exec()</b>
+diff --git a/doc/pcre.txt b/doc/pcre.txt
+index d07bfea..09ef572 100644
+--- a/doc/pcre.txt
++++ b/doc/pcre.txt
+@@ -2014,13 +2014,14 @@ MATCHING A PATTERN: THE TRADITIONAL FUNCTION
+          PCRE_NO_UTF8_CHECK
+ 
+        When PCRE_UTF8 is set at compile time, the validity of the subject as a
+-       UTF-8  string is automatically checked when pcre_exec() is subsequently
+-       called.  The value of startoffset is also checked  to  ensure  that  it
+-       points  to  the start of a UTF-8 character. There is a discussion about
+-       the validity of UTF-8 strings in the section on UTF-8  support  in  the
+-       main  pcre  page.  If  an  invalid  UTF-8  sequence  of bytes is found,
+-       pcre_exec() returns the error PCRE_ERROR_BADUTF8. If  startoffset  con-
+-       tains an invalid value, PCRE_ERROR_BADUTF8_OFFSET is returned.
++       UTF-8 string is automatically checked when pcre_exec() is  subsequently
++       called.   The  value  of  startoffset is also checked to ensure that it
++       points to the start of a UTF-8 character. There is a  discussion  about
++       the  validity  of  UTF-8 strings in the section on UTF-8 support in the
++       main pcre page. If  an  invalid  UTF-8  sequence  of  bytes  is  found,
++       pcre_exec()  returns  the error PCRE_ERROR_BADUTF8. If startoffset con-
++       tains a value that does not point to the start of a UTF-8 character (or
++       to the end of the subject), PCRE_ERROR_BADUTF8_OFFSET is returned.
+ 
+        If  you  already  know that your subject is valid, and you want to skip
+        these   checks   for   performance   reasons,   you   can    set    the
+@@ -2028,10 +2029,10 @@ MATCHING A PATTERN: THE TRADITIONAL FUNCTION
+        do this for the second and subsequent calls to pcre_exec() if  you  are
+        making  repeated  calls  to  find  all  the matches in a single subject
+        string. However, you should be  sure  that  the  value  of  startoffset
+-       points  to  the  start of a UTF-8 character. When PCRE_NO_UTF8_CHECK is
+-       set, the effect of passing an invalid UTF-8 string as a subject,  or  a
+-       value  of startoffset that does not point to the start of a UTF-8 char-
+-       acter, is undefined. Your program may crash.
++       points  to  the start of a UTF-8 character (or the end of the subject).
++       When PCRE_NO_UTF8_CHECK is set, the effect of passing an invalid  UTF-8
++       string  as  a  subject or an invalid value of startoffset is undefined.
++       Your program may crash.
+ 
+          PCRE_PARTIAL
+ 
+@@ -2048,11 +2049,14 @@ MATCHING A PATTERN: THE TRADITIONAL FUNCTION
+ 
+        The  subject string is passed to pcre_exec() as a pointer in subject, a
+        length (in bytes) in length, and a starting byte offset in startoffset.
++       If this is  negative  or  greater  than  the  length  of  the  subject,
++       pcre_exec() returns PCRE_ERROR_BADOFFSET.
++
+        In UTF-8 mode, the byte offset must point to the start of a UTF-8 char-
+-       acter. Unlike the pattern string, the subject may contain  binary  zero
+-       bytes.  When the starting offset is zero, the search for a match starts
+-       at the beginning of the subject, and this is by  far  the  most  common
+-       case.
++       acter (or the end of the subject). Unlike the pattern string, the  sub-
++       ject  may  contain binary zero bytes. When the starting offset is zero,
++       the search for a match starts at the beginning of the subject, and this
++       is by far the most common case.
+ 
+        A  non-zero  starting offset is useful when searching for another match
+        in the same subject by calling pcre_exec() again after a previous  suc-
+@@ -2251,6 +2255,11 @@ MATCHING A PATTERN: THE TRADITIONAL FUNCTION
+ 
+        An invalid combination of PCRE_NEWLINE_xxx options was given.
+ 
++         PCRE_ERROR_BADOFFSET      (-24)
++
++       The value of startoffset was negative or greater than the length of the
++       subject, that is, the value in length.
++
+        Error numbers -16 to -20 and -22 are not used by pcre_exec().
+ 
+ 
+diff --git a/doc/pcreapi.3 b/doc/pcreapi.3
+index 840eb5e..7caab40 100644
+--- a/doc/pcreapi.3
++++ b/doc/pcreapi.3
+@@ -1340,7 +1340,8 @@ in the main
+ \fBpcre\fP
+ .\"
+ page. If an invalid UTF-8 sequence of bytes is found, \fBpcre_exec()\fP returns
+-the error PCRE_ERROR_BADUTF8. If \fIstartoffset\fP contains an invalid value,
++the error PCRE_ERROR_BADUTF8. If \fIstartoffset\fP contains a value that does 
++not point to the start of a UTF-8 character (or to the end of the subject),
+ PCRE_ERROR_BADUTF8_OFFSET is returned.
+ .P
+ If you already know that your subject is valid, and you want to skip these
+@@ -1348,10 +1349,10 @@ checks for performance reasons, you can set the PCRE_NO_UTF8_CHECK option when
+ calling \fBpcre_exec()\fP. You might want to do this for the second and
+ subsequent calls to \fBpcre_exec()\fP if you are making repeated calls to find
+ all the matches in a single subject string. However, you should be sure that
+-the value of \fIstartoffset\fP points to the start of a UTF-8 character. When
+-PCRE_NO_UTF8_CHECK is set, the effect of passing an invalid UTF-8 string as a
+-subject, or a value of \fIstartoffset\fP that does not point to the start of a
+-UTF-8 character, is undefined. Your program may crash.
++the value of \fIstartoffset\fP points to the start of a UTF-8 character (or the
++end of the subject). When PCRE_NO_UTF8_CHECK is set, the effect of passing an
++invalid UTF-8 string as a subject or an invalid value of \fIstartoffset\fP is
++undefined. Your program may crash.
+ .sp
+   PCRE_PARTIAL
+ .sp
+@@ -1372,10 +1373,14 @@ documentation.
+ .sp
+ The subject string is passed to \fBpcre_exec()\fP as a pointer in
+ \fIsubject\fP, a length (in bytes) in \fIlength\fP, and a starting byte offset
+-in \fIstartoffset\fP. In UTF-8 mode, the byte offset must point to the start of
+-a UTF-8 character. Unlike the pattern string, the subject may contain binary
+-zero bytes. When the starting offset is zero, the search for a match starts at
+-the beginning of the subject, and this is by far the most common case.
++in \fIstartoffset\fP. If this is negative or greater than the length of the 
++subject, \fBpcre_exec()\fP returns PCRE_ERROR_BADOFFSET.
++.P
++In UTF-8 mode, the byte offset must point to the start of a UTF-8 character (or
++the end of the subject). Unlike the pattern string, the subject may contain
++binary zero bytes. When the starting offset is zero, the search for a match
++starts at the beginning of the subject, and this is by far the most common
++case.
+ .P
+ A non-zero starting offset is useful when searching for another match in the
+ same subject by calling \fBpcre_exec()\fP again after a previous success.
+@@ -1579,6 +1584,11 @@ description above.
+   PCRE_ERROR_BADNEWLINE     (-23)
+ .sp
+ An invalid combination of PCRE_NEWLINE_\fIxxx\fP options was given.
++.sp
++  PCRE_ERROR_BADOFFSET      (-24)
++.sp
++The value of \fIstartoffset\fP was negative or greater than the length of the 
++subject, that is, the value in \fIlength\fP.
+ .P
+ Error numbers -16 to -20 and -22 are not used by \fBpcre_exec()\fP.
+ .
+diff --git a/doc/pcretest.1 b/doc/pcretest.1
+index ce49569..82b819f 100644
+--- a/doc/pcretest.1
++++ b/doc/pcretest.1
+@@ -369,10 +369,9 @@ recognized:
+ .\" JOIN
+   \e?         pass the PCRE_NO_UTF8_CHECK option to
+                \fBpcre_exec()\fP or \fBpcre_dfa_exec()\fP
+-  \e>dd       start the match at offset dd (any number of digits);
+-.\" JOIN
+-               this sets the \fIstartoffset\fP argument for \fBpcre_exec()\fP
+-               or \fBpcre_dfa_exec()\fP
++  \e>dd       start the match at offset dd (optional "-"; then
++               any number of digits); this sets the \fIstartoffset\fP 
++               argument for \fBpcre_exec()\fP or \fBpcre_dfa_exec()\fP
+ .\" JOIN
+   \e<cr>      pass the PCRE_NEWLINE_CR option to \fBpcre_exec()\fP
+                or \fBpcre_dfa_exec()\fP
+diff --git a/doc/pcretest.txt b/doc/pcretest.txt
+index 43adab3..07cbbc9 100644
+--- a/doc/pcretest.txt
++++ b/doc/pcretest.txt
+@@ -331,9 +331,9 @@ DATA LINES
+                       or pcre_dfa_exec()
+          \?         pass the PCRE_NO_UTF8_CHECK option to
+                       pcre_exec() or pcre_dfa_exec()
+-         \>dd       start the match at offset dd (any number of digits);
+-                      this sets the startoffset argument for pcre_exec()
+-                      or pcre_dfa_exec()
++         \>dd       start the match at offset dd (optional "-"; then
++                      any number of digits); this sets the startoffset
++                      argument for pcre_exec() or pcre_dfa_exec()
+          \<cr>      pass the PCRE_NEWLINE_CR option to pcre_exec()
+                       or pcre_dfa_exec()
+          \<lf>      pass the PCRE_NEWLINE_LF option to pcre_exec()
+diff --git a/pcre.h.in b/pcre.h.in
+index bb82c82..cdbd290 100644
+--- a/pcre.h.in
++++ b/pcre.h.in
+@@ -152,6 +152,7 @@ extern "C" {
+ #define PCRE_ERROR_RECURSIONLIMIT (-21)
+ #define PCRE_ERROR_NULLWSLIMIT    (-22)  /* No longer actually used */
+ #define PCRE_ERROR_BADNEWLINE     (-23)
++#define PCRE_ERROR_BADOFFSET      (-24)
+ 
+ /* Request types for pcre_fullinfo() */
+ 
+diff --git a/pcre_dfa_exec.c b/pcre_dfa_exec.c
+index 61bf0ce..054b583 100644
+--- a/pcre_dfa_exec.c
++++ b/pcre_dfa_exec.c
+@@ -2536,6 +2536,7 @@ if (re == NULL || subject == NULL || workspace == NULL ||
+    (offsets == NULL && offsetcount > 0)) return PCRE_ERROR_NULL;
+ if (offsetcount < 0) return PCRE_ERROR_BADCOUNT;
+ if (wscount < 20) return PCRE_ERROR_DFA_WSSIZE;
++if (start_offset < 0 || start_offset > length) return PCRE_ERROR_BADOFFSET;
+ 
+ /* We need to find the pointer to any study data before we test for byte
+ flipping, so we scan the extra_data block first. This may set two fields in the
+diff --git a/pcre_exec.c b/pcre_exec.c
+index c5fa173..2bf308f 100644
+--- a/pcre_exec.c
++++ b/pcre_exec.c
+@@ -4428,6 +4428,7 @@ if ((options & ~PUBLIC_EXEC_OPTIONS) != 0) return PCRE_ERROR_BADOPTION;
+ if (re == NULL || subject == NULL ||
+    (offsets == NULL && offsetcount > 0)) return PCRE_ERROR_NULL;
+ if (offsetcount < 0) return PCRE_ERROR_BADCOUNT;
++if (start_offset < 0 || start_offset > length) return PCRE_ERROR_BADOFFSET;
+ 
+ /* Fish out the optional data from the extra_data structure, first setting
+ the default values. */
+diff --git a/pcretest.c b/pcretest.c
+index ead6e90..5c6975c 100644
+--- a/pcretest.c
++++ b/pcretest.c
+@@ -1713,6 +1713,7 @@ while (!done)
+     int getlist = 0;
+     int gmatched = 0;
+     int start_offset = 0;
++    int start_offset_sign = 1; 
+     int g_notempty = 0;
+     int use_dfa = 0;
+ 
+@@ -1841,7 +1842,13 @@ while (!done)
+         continue;
+ 
+         case '>':
++        if (*p == '-') 
++          {
++          start_offset_sign = -1;
++          p++;
++          }   
+         while(isdigit(*p)) start_offset = start_offset * 10 + *p++ - '0';
++        start_offset *= start_offset_sign; 
+         continue;
+ 
+         case 'A':  /* Option setting */
+diff --git a/testdata/testinput2 b/testdata/testinput2
+index 2b64546..cc6f8e8 100644
+--- a/testdata/testinput2
++++ b/testdata/testinput2
+@@ -2726,4 +2726,12 @@ a random value. /Ix
+ 
+ /(abc|pqr|123){0}[xyz]/SI
+ 
++/.+/
++    abc\>0
++    abc\>1
++    abc\>2
++    abc\>3
++    abc\>4
++    abc\>-4 
++
+ / End of testinput2 /
+diff --git a/testdata/testinput5 b/testdata/testinput5
+index 7d64b43..17dbe32 100644
+--- a/testdata/testinput5
++++ b/testdata/testinput5
+@@ -480,4 +480,12 @@ can't tell the difference.) --/
+ /X/8f<any> 
+     A\x{1ec5}ABCXYZ
+ 
++/a+/8
++    a\x{123}aa\>1
++    a\x{123}aa\>2
++    a\x{123}aa\>3
++    a\x{123}aa\>4
++    a\x{123}aa\>5
++    a\x{123}aa\>6
++
+ / End of testinput5 /
+diff --git a/testdata/testinput7 b/testdata/testinput7
+index 5ec4827..549ca13 100644
+--- a/testdata/testinput7
++++ b/testdata/testinput7
+@@ -4392,4 +4392,12 @@
+     ** Failers
+     ab  
+ 
++/.+/
++    abc\>0
++    abc\>1
++    abc\>2
++    abc\>3
++    abc\>4
++    abc\>-4 
++
+ / End of testinput7 /
+diff --git a/testdata/testinput8 b/testdata/testinput8
+index 11884ad..cc9cddb 100644
+--- a/testdata/testinput8
++++ b/testdata/testinput8
+@@ -667,4 +667,12 @@
+ /X/8f<any> 
+     A\x{1ec5}ABCXYZ
+ 
++/a+/8
++    a\x{123}aa\>1
++    a\x{123}aa\>2
++    a\x{123}aa\>3
++    a\x{123}aa\>4
++    a\x{123}aa\>5
++    a\x{123}aa\>6
++
+ / End of testinput 8 / 
+diff --git a/testdata/testoutput2 b/testdata/testoutput2
+index 2ac018b..9f1db65 100644
+--- a/testdata/testoutput2
++++ b/testdata/testoutput2
+@@ -9638,4 +9638,18 @@ No first char
+ No need char
+ Starting byte set: x y z 
+ 
++/.+/
++    abc\>0
++ 0: abc
++    abc\>1
++ 0: bc
++    abc\>2
++ 0: c
++    abc\>3
++No match
++    abc\>4
++Error -24
++    abc\>-4 
++Error -24
++
+ / End of testinput2 /
+diff --git a/testdata/testoutput5 b/testdata/testoutput5
+index 9567233..f801dec 100644
+--- a/testdata/testoutput5
++++ b/testdata/testoutput5
+@@ -1641,4 +1641,18 @@ No match
+     A\x{1ec5}ABCXYZ
+  0: X
+ 
++/a+/8
++    a\x{123}aa\>1
++ 0: aa
++    a\x{123}aa\>2
++Error -11
++    a\x{123}aa\>3
++ 0: aa
++    a\x{123}aa\>4
++ 0: a
++    a\x{123}aa\>5
++No match
++    a\x{123}aa\>6
++Error -24
++
+ / End of testinput5 /
+diff --git a/testdata/testoutput7 b/testdata/testoutput7
+index aef4b6c..5b07d3a 100644
+--- a/testdata/testoutput7
++++ b/testdata/testoutput7
+@@ -7254,4 +7254,21 @@ No match
+     ab  
+ No match
+ 
++/.+/
++    abc\>0
++ 0: abc
++ 1: ab
++ 2: a
++    abc\>1
++ 0: bc
++ 1: b
++    abc\>2
++ 0: c
++    abc\>3
++No match
++    abc\>4
++Error -24
++    abc\>-4 
++Error -24
++
+ / End of testinput7 /
+diff --git a/testdata/testoutput8 b/testdata/testoutput8
+index af10c4a..8138da6 100644
+--- a/testdata/testoutput8
++++ b/testdata/testoutput8
+@@ -1288,4 +1288,20 @@ No match
+     A\x{1ec5}ABCXYZ
+  0: X
+ 
++/a+/8
++    a\x{123}aa\>1
++ 0: aa
++ 1: a
++    a\x{123}aa\>2
++Error -11
++    a\x{123}aa\>3
++ 0: aa
++ 1: a
++    a\x{123}aa\>4
++ 0: a
++    a\x{123}aa\>5
++No match
++    a\x{123}aa\>6
++Error -24
++
+ / End of testinput 8 / 
+-- 
+2.1.0
+

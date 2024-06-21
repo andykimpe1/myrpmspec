@@ -1,0 +1,1124 @@
+From 1b5b51fd880a20c0e897cc69adbb902547d9d46e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Thu, 26 Feb 2015 15:05:04 +0100
+Subject: [PATCH] Pass back detailed info when UTF-8 check fails at runtime.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Backport commit:
+
+From: ph10 <ph10@2f5784b3-3f2a-0410-8824-cb99058d5e15>
+Date: Sat, 7 May 2011 15:37:31 +0000
+Subject: [PATCH] Pass back detailed info when UTF-8 check fails at runtime.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+git-svn-id: svn://vcs.exim.org/pcre/code/trunk@598 2f5784b3-3f2a-0410-8824-cb99058d5e15
+
+to pcre-7.8. Please note that the PCRE_ERROR_SHORTUTF8 error code is
+not included.
+
+Also please note that:
+
+(1) Private function _pcre_valid_utf8() got third output argument.
+(2) pcretest(1) started printing detailed error code (message and offsets).
+(3) pcre_compile() sets error pointer to first byte of invalid UTF-8
+sequence instead of to the last byte. This is to align with pcre_exec().
+
+Signed-off-by: Petr Pรญsaล <ppisar@redhat.com>
+---
+ doc/pcre.3           |  20 +++--
+ doc/pcreapi.3        | 122 +++++++++++++++++++++++---
+ doc/pcretest.1       |  37 +++++---
+ pcre.h.in            |  27 +++++-
+ pcre_compile.c       |  11 ++-
+ pcre_dfa_exec.c      |  13 ++-
+ pcre_exec.c          |  17 +++-
+ pcre_internal.h      |   2 +-
+ pcre_valid_utf8.c    | 242 ++++++++++++++++++++++++++++++++++++++++-----------
+ pcretest.c           |  51 ++++++++++-
+ testdata/testinput5  |  13 +++
+ testdata/testoutput2 |   4 +-
+ testdata/testoutput5 |  76 ++++++++++------
+ testdata/testoutput7 |   6 +-
+ testdata/testoutput8 |  10 +--
+ 15 files changed, 518 insertions(+), 133 deletions(-)
+
+diff --git a/doc/pcre.3 b/doc/pcre.3
+index 32d9622..57ebd77 100644
+--- a/doc/pcre.3
++++ b/doc/pcre.3
+@@ -207,13 +207,17 @@ available as independent code points in the UTF-8 encoding. (In other words,
+ the whole surrogate thing is a fudge for UTF-16 which unfortunately messes up
+ UTF-8.)
+ .P
+-If an invalid UTF-8 string is passed to PCRE, an error return
+-(PCRE_ERROR_BADUTF8) is given. In some situations, you may already know that
+-your strings are valid, and therefore want to skip these checks in order to
+-improve performance. If you set the PCRE_NO_UTF8_CHECK flag at compile time or
+-at run time, PCRE assumes that the pattern or subject it is given
+-(respectively) contains only valid UTF-8 codes. In this case, it does not
+-diagnose an invalid UTF-8 string.
++If an invalid UTF-8 string is passed to PCRE, an error return is given. At 
++compile time, the only additional information is the offset to the first byte 
++of the failing character. The runtime functions (\fBpcre_exec()\fP and
++\fBpcre_dfa_exec()\fP), pass back this information as well as a more detailed
++reason code if the caller has provided memory in which to do this.
++.P
++In some situations, you may already know that your strings are valid, and
++therefore want to skip these checks in order to improve performance. If you set
++the PCRE_NO_UTF8_CHECK flag at compile time or at run time, PCRE assumes that
++the pattern or subject it is given (respectively) contains only valid UTF-8
++codes. In this case, it does not diagnose an invalid UTF-8 string.
+ .P
+ If you pass an invalid UTF-8 string when PCRE_NO_UTF8_CHECK is set, what
+ happens depends on why the string is invalid. If the string conforms to the
+@@ -290,5 +294,5 @@ two digits 10, at the domain cam.ac.uk.
+ .sp
+ .nf
+ Last updated: 12 April 2008
+-Copyright (c) 1997-2008 University of Cambridge.
++Copyright (c) 1997-2011 University of Cambridge.
+ .fi
+diff --git a/doc/pcreapi.3 b/doc/pcreapi.3
+index 7caab40..4fedea2 100644
+--- a/doc/pcreapi.3
++++ b/doc/pcreapi.3
+@@ -419,9 +419,16 @@ If \fIerrptr\fP is NULL, \fBpcre_compile()\fP returns NULL immediately.
+ Otherwise, if compilation of a pattern fails, \fBpcre_compile()\fP returns
+ NULL, and sets the variable pointed to by \fIerrptr\fP to point to a textual
+ error message. This is a static string that is part of the library. You must
+-not try to free it. The offset from the start of the pattern to the character
+-where the error was discovered is placed in the variable pointed to by
+-\fIerroffset\fP, which must not be NULL. If it is, an immediate error is given.
++not try to free it. Normally, the offset from the start of the pattern to the
++byte that was being processed when the error was discovered is placed in the
++variable pointed to by \fIerroffset\fP, which must not be NULL (if it is, an
++immediate error is given). However, for an invalid UTF-8 string, the offset is
++that of the first byte of the failing character. Also, some errors are not
++detected until checks are carried out when the whole pattern has been scanned;
++in these cases the offset passed back is the length of the pattern.
++.P
++Note that the offset is in bytes, not characters, even in UTF-8 mode. It may
++sometimes point into the middle of a UTF-8 character.
+ .P
+ If \fBpcre_compile2()\fP is used instead of \fBpcre_compile()\fP, and the
+ \fIerrorcodeptr\fP argument is not NULL, a non-zero error code number is
+@@ -854,6 +861,7 @@ one in which it was compiled. Passing table pointers at run time is discussed
+ below in the section on matching a pattern.
+ .
+ .
++.\" HTML <a name="infoaboutpattern"></a>
+ .SH "INFORMATION ABOUT A PATTERN"
+ .rs
+ .sp
+@@ -1340,9 +1348,16 @@ in the main
+ \fBpcre\fP
+ .\"
+ page. If an invalid UTF-8 sequence of bytes is found, \fBpcre_exec()\fP returns
+-the error PCRE_ERROR_BADUTF8. If \fIstartoffset\fP contains a value that does 
+-not point to the start of a UTF-8 character (or to the end of the subject),
+-PCRE_ERROR_BADUTF8_OFFSET is returned.
++the error PCRE_ERROR_BADUTF8. Information about the precise nature of the error
++may also be returned (see the descriptions of these errors in the section
++entitled \fIError return values from\fP \fBpcre_exec()\fP
++.\" HTML <a href="#errorlist">
++.\" </a>
++below).
++.\"
++If \fIstartoffset\fP contains a value that does not point to the start of a
++UTF-8 character (or to the end of the subject), PCRE_ERROR_BADUTF8_OFFSET is
++returned.
+ .P
+ If you already know that your subject is valid, and you want to skip these
+ checks for performance reasons, you can set the PCRE_NO_UTF8_CHECK option when
+@@ -1542,12 +1557,20 @@ documentation for details.
+ .sp
+   PCRE_ERROR_BADUTF8        (-10)
+ .sp
+-A string that contains an invalid UTF-8 byte sequence was passed as a subject.
++A string that contains an invalid UTF-8 byte sequence was passed as a subject,
++and the PCRE_NO_UTF8_CHECK option was not set. If the size of the output vector
++(\fIovecsize\fP) is at least 2, the byte offset to the start of the the invalid
++UTF-8 character is placed in the first element, and a reason code is placed in
++the second element. The reason codes are listed in the
++.\" HTML <a href="#badutf8reasons">
++.\" </a>
++following section.
+ .sp
+   PCRE_ERROR_BADUTF8_OFFSET (-11)
+ .sp
+-The UTF-8 byte sequence that was passed as a subject was valid, but the value
+-of \fIstartoffset\fP did not point to the beginning of a UTF-8 character.
++The UTF-8 byte sequence that was passed as a subject was checked and found to 
++be valid (the PCRE_NO_UTF8_CHECK option was not set), but the value of
++\fIstartoffset\fP did not point to the beginning of a UTF-8 character.
+ .sp
+   PCRE_ERROR_PARTIAL        (-12)
+ .sp
+@@ -1593,6 +1616,80 @@ subject, that is, the value in \fIlength\fP.
+ Error numbers -16 to -20 and -22 are not used by \fBpcre_exec()\fP.
+ .
+ .
++.\" HTML <a name="badutf8reasons"></a>
++.SS "Reason codes for invalid UTF-8 strings"
++.rs
++.sp
++When \fBpcre_exec()\fP returns either PCRE_ERROR_BADUTF8 or 
++PCRE_ERROR_SHORTUTF8, and the size of the output vector (\fIovecsize\fP) is at 
++least 2, the offset of the start of the invalid UTF-8 character is placed in 
++the first output vector element (\fIovector[0]\fP) and a reason code is placed 
++in the second element (\fIovector[1]\fP). The reason codes are given names in
++the \fBpcre.h\fP header file:
++.sp
++  PCRE_UTF8_ERR1
++  PCRE_UTF8_ERR2
++  PCRE_UTF8_ERR3
++  PCRE_UTF8_ERR4
++  PCRE_UTF8_ERR5
++.sp
++The string ends with a truncated UTF-8 character; the code specifies how many 
++bytes are missing (1 to 5). Although RFC 3629 restricts UTF-8 characters to be
++no longer than 4 bytes, the encoding scheme (originally defined by RFC 2279)
++allows for up to 6 bytes, and this is checked first; hence the possibility of 
++4 or 5 missing bytes.
++.sp
++  PCRE_UTF8_ERR6
++  PCRE_UTF8_ERR7
++  PCRE_UTF8_ERR8
++  PCRE_UTF8_ERR9
++  PCRE_UTF8_ERR10
++.sp
++The two most significant bits of the 2nd, 3rd, 4th, 5th, or 6th byte of the 
++character do not have the binary value 0b10 (that is, either the most
++significant bit is 0, or the next bit is 1).
++.sp 
++  PCRE_UTF8_ERR11
++  PCRE_UTF8_ERR12
++.sp
++A character that is valid by the RFC 2279 rules is either 5 or 6 bytes long; 
++these code points are excluded by RFC 3629.  
++.sp 
++  PCRE_UTF8_ERR13
++.sp
++A 4-byte character has a value greater than 0x10fff; these code points are 
++excluded by RFC 3629.
++.sp 
++  PCRE_UTF8_ERR14
++.sp
++A 3-byte character has a value in the range 0xd800 to 0xdfff; this range of
++code points are reserved by RFC 3629 for use with UTF-16, and so are excluded 
++from UTF-8.
++.sp 
++  PCRE_UTF8_ERR15
++  PCRE_UTF8_ERR16
++  PCRE_UTF8_ERR17
++  PCRE_UTF8_ERR18
++  PCRE_UTF8_ERR19
++.sp
++A 2-, 3-, 4-, 5-, or 6-byte character is "overlong", that is, it codes for a 
++value that can be represented by fewer bytes, which is invalid. For example, 
++the two bytes 0xc0, 0xae give the value 0x2e, whose correct coding uses just
++one byte.
++.sp
++  PCRE_UTF8_ERR20
++.sp
++The two most significant bits of the first byte of a character have the binary 
++value 0b10 (that is, the most significant bit is 1 and the second is 0). Such a 
++byte can only validly occur as the second or subsequent byte of a multi-byte
++character.
++.sp
++  PCRE_UTF8_ERR21
++.sp
++The first byte of a character has the value 0xfe or 0xff. These values can
++never occur in a valid UTF-8 string.
++.
++.
+ .SH "EXTRACTING CAPTURED SUBSTRINGS BY NUMBER"
+ .rs
+ .sp
+@@ -1772,6 +1869,11 @@ has run, they point to the first and last entries in the name-to-number table
+ for the given name. The function itself returns the length of each entry, or
+ PCRE_ERROR_NOSUBSTRING (-7) if there are none. The format of the table is
+ described above in the section entitled \fIInformation about a pattern\fP.
++described above in the section entitled \fIInformation about a pattern\fP
++.\" HTML <a href="#infoaboutpattern">
++.\" </a>
++above.
++.\"
+ Given all the relevant entries for the name, you can extract each of their
+ numbers, and hence the captured data, if any.
+ .
+@@ -1989,5 +2091,5 @@ Cambridge CB2 3QH, England.
+ .sp
+ .nf
+ Last updated: 24 August 2008
+-Copyright (c) 1997-2008 University of Cambridge.
++Copyright (c) 1997-2011 University of Cambridge.
+ .fi
+diff --git a/doc/pcretest.1 b/doc/pcretest.1
+index 82b819f..598f028 100644
+--- a/doc/pcretest.1
++++ b/doc/pcretest.1
+@@ -452,12 +452,17 @@ found. This is always the shortest possible match.
+ This section describes the output when the normal matching function,
+ \fBpcre_exec()\fP, is being used.
+ .P
+-When a match succeeds, pcretest outputs the list of captured substrings that
+-\fBpcre_exec()\fP returns, starting with number 0 for the string that matched
+-the whole pattern. Otherwise, it outputs "No match" or "Partial match"
+-when \fBpcre_exec()\fP returns PCRE_ERROR_NOMATCH or PCRE_ERROR_PARTIAL,
+-respectively, and otherwise the PCRE negative error number. Here is an example
+-of an interactive \fBpcretest\fP run.
++When a match succeeds, \fBpcretest\fP outputs the list of captured substrings
++that \fBpcre_exec()\fP returns, starting with number 0 for the string that
++matched the whole pattern. Otherwise, it outputs "No match" when the return is
++PCRE_ERROR_NOMATCH, and "Partial match:" followed by the partially matching
++substring when \fBpcre_exec()\fP returns PCRE_ERROR_PARTIAL. For any other
++return, \fBpcretest\fP outputs
++the PCRE negative error number and a short descriptive phrase. If the error is
++a failed UTF-8 string check, the byte offset of the start of the failing
++character and the reason code are also output, provided that the size of the 
++output vector is at least two. Here is an example of an interactive
++\fBpcretest\fP run.
+ .sp
+   $ pcretest
+   PCRE version 7.0 30-Nov-2006
+@@ -469,11 +474,11 @@ of an interactive \fBpcretest\fP run.
+   data> xyz
+   No match
+ .sp
+-Note that unset capturing substrings that are not followed by one that is set
+-are not returned by \fBpcre_exec()\fP, and are not shown by \fBpcretest\fP. In
+-the following example, there are two capturing substrings, but when the first
+-data line is matched, the second, unset substring is not shown. An "internal"
+-unset substring is shown as "<unset>", as for the second data line.
++Unset capturing substrings that are not followed by one that is set are not
++returned by \fBpcre_exec()\fP, and are not shown by \fBpcretest\fP. In the
++following example, there are two capturing substrings, but when the first data
++line is matched, the second, unset substring is not shown. An "internal" unset
++substring is shown as "<unset>", as for the second data line.
+ .sp
+     re> /(a)|(b)/
+   data> a
+@@ -507,7 +512,13 @@ matching attempts are output in sequence, like this:
+    0: ipp
+    1: pp
+ .sp
+-"No match" is output only if the first match attempt fails.
++"No match" is output only if the first match attempt fails. Here is an example 
++of a failure message (the offset 4 that is specified by \e>4 is past the end of 
++the subject string):
++.sp
++    re> /xyz/
++  data> xyz\>4
++  Error -24 (bad offset value)      
+ .P
+ If any of the sequences \fB\eC\fP, \fB\eG\fP, or \fB\eL\fP are present in a
+ data line that is successfully matched, the substrings extracted by the
+@@ -718,5 +729,5 @@ Cambridge CB2 3QH, England.
+ .sp
+ .nf
+ Last updated: 12 April 2008
+-Copyright (c) 1997-2008 University of Cambridge.
++Copyright (c) 1997-2011 University of Cambridge.
+ .fi
+diff --git a/pcre.h.in b/pcre.h.in
+index cdbd290..0ff7edf 100644
+--- a/pcre.h.in
++++ b/pcre.h.in
+@@ -5,7 +5,7 @@
+ /* This is the public header file for the PCRE library, to be #included by
+ applications that call the PCRE functions.
+ 
+-           Copyright (c) 1997-2008 University of Cambridge
++           Copyright (c) 1997-2011 University of Cambridge
+ 
+ -----------------------------------------------------------------------------
+ Redistribution and use in source and binary forms, with or without
+@@ -154,6 +154,31 @@ extern "C" {
+ #define PCRE_ERROR_BADNEWLINE     (-23)
+ #define PCRE_ERROR_BADOFFSET      (-24)
+ 
++/* Specific error codes for UTF-8 validity checks */
++
++#define PCRE_UTF8_ERR0               0
++#define PCRE_UTF8_ERR1               1
++#define PCRE_UTF8_ERR2               2
++#define PCRE_UTF8_ERR3               3
++#define PCRE_UTF8_ERR4               4
++#define PCRE_UTF8_ERR5               5
++#define PCRE_UTF8_ERR6               6
++#define PCRE_UTF8_ERR7               7
++#define PCRE_UTF8_ERR8               8
++#define PCRE_UTF8_ERR9               9
++#define PCRE_UTF8_ERR10             10
++#define PCRE_UTF8_ERR11             11
++#define PCRE_UTF8_ERR12             12
++#define PCRE_UTF8_ERR13             13
++#define PCRE_UTF8_ERR14             14
++#define PCRE_UTF8_ERR15             15
++#define PCRE_UTF8_ERR16             16
++#define PCRE_UTF8_ERR17             17
++#define PCRE_UTF8_ERR18             18
++#define PCRE_UTF8_ERR19             19
++#define PCRE_UTF8_ERR20             20
++#define PCRE_UTF8_ERR21             21
++
+ /* Request types for pcre_fullinfo() */
+ 
+ #define PCRE_INFO_OPTIONS            0
+diff --git a/pcre_compile.c b/pcre_compile.c
+index ef099f2..ebc58a4 100644
+--- a/pcre_compile.c
++++ b/pcre_compile.c
+@@ -6,7 +6,7 @@
+ and semantics are as close as possible to those of the Perl 5 language.
+ 
+                        Written by Philip Hazel
+-           Copyright (c) 1997-2008 University of Cambridge
++           Copyright (c) 1997-2011 University of Cambridge
+ 
+ -----------------------------------------------------------------------------
+ Redistribution and use in source and binary forms, with or without
+@@ -6013,12 +6013,17 @@ if (erroroffset == NULL)
+ 
+ *erroroffset = 0;
+ 
+-/* Can't support UTF8 unless PCRE has been compiled to include the code. */
++/* Can't support UTF8 unless PCRE has been compiled to include the code. The 
++return of an error code from _pcre_valid_utf8() is a new feature, introduced in 
++release 8.13. The only use we make of it here is to adjust the offset value to 
++the end of the string for a short string error, for compatibility with previous 
++versions. */
+ 
+ #ifdef SUPPORT_UTF8
+ utf8 = (options & PCRE_UTF8) != 0;
+ if (utf8 && (options & PCRE_NO_UTF8_CHECK) == 0 &&
+-     (*erroroffset = _pcre_valid_utf8((uschar *)pattern, -1)) >= 0)
++     (*erroroffset = _pcre_valid_utf8((USPTR)pattern, -1, &errorcode)) >= 0)
++
+   {
+   errorcode = ERR44;
+   goto PCRE_EARLY_ERROR_RETURN2;
+diff --git a/pcre_dfa_exec.c b/pcre_dfa_exec.c
+index 054b583..4941c76 100644
+--- a/pcre_dfa_exec.c
++++ b/pcre_dfa_exec.c
+@@ -6,7 +6,7 @@
+ and semantics are as close as possible to those of the Perl 5 language.
+ 
+                        Written by Philip Hazel
+-           Copyright (c) 1997-2008 University of Cambridge
++           Copyright (c) 1997-2011 University of Cambridge
+ 
+ -----------------------------------------------------------------------------
+ Redistribution and use in source and binary forms, with or without
+@@ -2654,8 +2654,17 @@ back the character offset. */
+ #ifdef SUPPORT_UTF8
+ if (utf8 && (options & PCRE_NO_UTF8_CHECK) == 0)
+   {
+-  if (_pcre_valid_utf8((uschar *)subject, length) >= 0)
++  int errorcode; 
++  int tb = _pcre_valid_utf8((uschar *)subject, length, &errorcode);
++  if (tb >= 0)
++    {
++    if (offsetcount >= 2)
++      {
++      offsets[0] = tb;
++      offsets[1] = errorcode;
++      }    
+     return PCRE_ERROR_BADUTF8;
++    }  
+   if (start_offset > 0 && start_offset < length)
+     {
+     int tb = ((uschar *)subject)[start_offset];
+diff --git a/pcre_exec.c b/pcre_exec.c
+index 2bf308f..dd50669 100644
+--- a/pcre_exec.c
++++ b/pcre_exec.c
+@@ -6,7 +6,7 @@
+ and semantics are as close as possible to those of the Perl 5 language.
+ 
+                        Written by Philip Hazel
+-           Copyright (c) 1997-2008 University of Cambridge
++           Copyright (c) 1997-2011 University of Cambridge
+ 
+ -----------------------------------------------------------------------------
+ Redistribution and use in source and binary forms, with or without
+@@ -4577,14 +4577,23 @@ moment. */
+ if (md->partial && (re->flags & PCRE_NOPARTIAL) != 0)
+   return PCRE_ERROR_BADPARTIAL;
+ 
+-/* Check a UTF-8 string if required. Unfortunately there's no way of passing
+-back the character offset. */
++/* Check a UTF-8 string if required. Pass back the character offset and error 
++code if a results vector is available. */
+ 
+ #ifdef SUPPORT_UTF8
+ if (utf8 && (options & PCRE_NO_UTF8_CHECK) == 0)
+   {
+-  if (_pcre_valid_utf8((uschar *)subject, length) >= 0)
++  int errorcode; 
++  int tb = _pcre_valid_utf8((USPTR)subject, length, &errorcode);
++  if (tb >= 0)
++    {
++    if (offsetcount >= 2)
++      {
++      offsets[0] = tb;
++      offsets[1] = errorcode;
++      }    
+     return PCRE_ERROR_BADUTF8;
++    }   
+   if (start_offset > 0 && start_offset < length)
+     {
+     int tb = ((uschar *)subject)[start_offset];
+diff --git a/pcre_internal.h b/pcre_internal.h
+index dcded9f..8847baa 100644
+--- a/pcre_internal.h
++++ b/pcre_internal.h
+@@ -1139,7 +1139,7 @@ extern BOOL         _pcre_is_newline(const uschar *, int, const uschar *,
+ extern int          _pcre_ord2utf8(int, uschar *);
+ extern real_pcre   *_pcre_try_flipped(const real_pcre *, real_pcre *,
+                       const pcre_study_data *, pcre_study_data *);
+-extern int          _pcre_valid_utf8(const uschar *, int);
++extern int          _pcre_valid_utf8(const uschar *, int, int *);
+ extern BOOL         _pcre_was_newline(const uschar *, int, const uschar *,
+                       int *, BOOL);
+ extern BOOL         _pcre_xclass(int, const uschar *);
+diff --git a/pcre_valid_utf8.c b/pcre_valid_utf8.c
+index c53da33..72c3049 100644
+--- a/pcre_valid_utf8.c
++++ b/pcre_valid_utf8.c
+@@ -54,28 +54,56 @@ strings. */
+ *************************************************/
+ 
+ /* This function is called (optionally) at the start of compile or match, to
+-validate that a supposed UTF-8 string is actually valid. The early check means
++check that a supposed UTF-8 string is actually valid. The early check means
+ that subsequent code can assume it is dealing with a valid string. The check
+-can be turned off for maximum performance, but the consequences of supplying
+-an invalid string are then undefined.
++can be turned off for maximum performance, but the consequences of supplying an
++invalid string are then undefined.
+ 
+ Originally, this function checked according to RFC 2279, allowing for values in
+ the range 0 to 0x7fffffff, up to 6 bytes long, but ensuring that they were in
+ the canonical format. Once somebody had pointed out RFC 3629 to me (it
+ obsoletes 2279), additional restrictions were applied. The values are now
+ limited to be between 0 and 0x0010ffff, no more than 4 bytes long, and the
+-subrange 0xd000 to 0xdfff is excluded.
++subrange 0xd000 to 0xdfff is excluded. However, the format of 5-byte and 6-byte 
++characters is still checked.
++
++From release 8.13 more information about the details of the error are passed 
++back in the error code:
++
++PCRE_UTF8_ERR0   No error
++PCRE_UTF8_ERR1   Missing 1 byte at the end of the string
++PCRE_UTF8_ERR2   Missing 2 bytes at the end of the string
++PCRE_UTF8_ERR3   Missing 3 bytes at the end of the string
++PCRE_UTF8_ERR4   Missing 4 bytes at the end of the string
++PCRE_UTF8_ERR5   Missing 5 bytes at the end of the string
++PCRE_UTF8_ERR6   2nd-byte's two top bits are not 0x80
++PCRE_UTF8_ERR7   3rd-byte's two top bits are not 0x80
++PCRE_UTF8_ERR8   4th-byte's two top bits are not 0x80
++PCRE_UTF8_ERR9   5th-byte's two top bits are not 0x80
++PCRE_UTF8_ERR10  6th-byte's two top bits are not 0x80
++PCRE_UTF8_ERR11  5-byte character is not permitted by RFC 3629
++PCRE_UTF8_ERR12  6-byte character is not permitted by RFC 3629
++PCRE_UTF8_ERR13  4-byte character with value > 0x10ffff is not permitted
++PCRE_UTF8_ERR14  3-byte character with value 0xd000-0xdfff is not permitted
++PCRE_UTF8_ERR15  Overlong 2-byte sequence
++PCRE_UTF8_ERR16  Overlong 3-byte sequence
++PCRE_UTF8_ERR17  Overlong 4-byte sequence
++PCRE_UTF8_ERR18  Overlong 5-byte sequence (won't ever occur)
++PCRE_UTF8_ERR19  Overlong 6-byte sequence (won't ever occur)
++PCRE_UTF8_ERR20  Isolated 0x80 byte (not within UTF-8 character)
++PCRE_UTF8_ERR21  Byte with the illegal value 0xfe or 0xff
+ 
+ Arguments:
+   string       points to the string
+   length       length of string, or -1 if the string is zero-terminated
++  errp         pointer to an error code variable 
+ 
+ Returns:       < 0    if the string is a valid UTF-8 string
+-               >= 0   otherwise; the value is the offset of the bad byte
++               >= 0   otherwise; the value is the offset of the bad character
+ */
+ 
+ int
+-_pcre_valid_utf8(const uschar *string, int length)
++_pcre_valid_utf8(const uschar *string, int length, int *errorcode)
+ {
+ #ifdef SUPPORT_UTF8
+ register const uschar *p;
+@@ -86,80 +114,188 @@ if (length < 0)
+   length = p - string;
+   }
+ 
++*errorcode = PCRE_UTF8_ERR0;
++
+ for (p = string; length-- > 0; p++)
+   {
+-  register int ab;
+-  register int c = *p;
+-  if (c < 128) continue;
+-  if (c < 0xc0) return p - string;
++  register int ab, c, d;
++  
++  c = *p;
++  if (c < 128) continue;                /* ASCII character */
++   
++  if (c < 0xc0)                         /* Isolated 10xx xxxx byte */
++    {
++    *errorcode = PCRE_UTF8_ERR20; 
++    return p - string;
++    } 
++
++  if (c >= 0xfe)                        /* Invalid 0xfe or 0xff bytes */
++    {
++    *errorcode = PCRE_UTF8_ERR21; 
++    return p - string;
++    } 
++ 
+   ab = _pcre_utf8_table4[c & 0x3f];     /* Number of additional bytes */
+-  if (length < ab || ab > 3) return p - string;
+-  length -= ab;
++  if (length < ab) 
++    {
++    *errorcode = ab - length;           /* Codes ERR1 to ERR5 */
++    return p - string;                  /* Missing bytes */
++    } 
++  length -= ab;                         /* Length remaining */
+ 
+   /* Check top bits in the second byte */
+-  if ((*(++p) & 0xc0) != 0x80) return p - string;
++   
++  if (((d = *(++p)) & 0xc0) != 0x80) 
++    {
++    *errorcode = PCRE_UTF8_ERR6; 
++    return p - string - 1;
++    } 
+ 
+-  /* Check for overlong sequences for each different length, and for the
+-  excluded range 0xd000 to 0xdfff.  */
++  /* For each length, check that the remaining bytes start with the 0x80 bit 
++  set and not the 0x40 bit. Then check for an overlong sequence, and for the
++  excluded range 0xd800 to 0xdfff. */
+ 
+   switch (ab)
+     {
+-    /* Check for xx00 000x (overlong sequence) */
+-
+-    case 1:
+-    if ((c & 0x3e) == 0) return p - string;
+-    continue;   /* We know there aren't any more bytes to check */
+-
+-    /* Check for 1110 0000, xx0x xxxx (overlong sequence) or
+-                 1110 1101, 1010 xxxx (0xd000 - 0xdfff) */
+-
++    /* 2-byte character. No further bytes to check for 0x80. Check first byte
++    for for xx00 000x (overlong sequence). */
++     
++    case 1: if ((c & 0x3e) == 0)  
++      {
++      *errorcode = PCRE_UTF8_ERR15;   
++      return p - string - 1;  
++      } 
++    break; 
++
++    /* 3-byte character. Check third byte for 0x80. Then check first 2 bytes 
++      for 1110 0000, xx0x xxxx (overlong sequence) or
++          1110 1101, 1010 xxxx (0xd800 - 0xdfff) */
++           
+     case 2:
+-    if ((c == 0xe0 && (*p & 0x20) == 0) ||
+-        (c == 0xed && *p >= 0xa0))
+-      return p - string;
++    if ((*(++p) & 0xc0) != 0x80)     /* Third byte */
++      {
++      *errorcode = PCRE_UTF8_ERR7;
++      return p - string - 2;   
++      } 
++    if (c == 0xe0 && (d & 0x20) == 0)
++      {
++      *errorcode = PCRE_UTF8_ERR16; 
++      return p - string - 2;
++      } 
++    if (c == 0xed && d >= 0xa0)
++      {
++      *errorcode = PCRE_UTF8_ERR14;  
++      return p - string - 2;
++      } 
+     break;
+ 
+-    /* Check for 1111 0000, xx00 xxxx (overlong sequence) or
+-       greater than 0x0010ffff (f4 8f bf bf) */
+-
++    /* 4-byte character. Check 3rd and 4th bytes for 0x80. Then check first 2
++       bytes for for 1111 0000, xx00 xxxx (overlong sequence), then check for a
++       character greater than 0x0010ffff (f4 8f bf bf) */
++        
+     case 3:
+-    if ((c == 0xf0 && (*p & 0x30) == 0) ||
+-        (c > 0xf4 ) ||
+-        (c == 0xf4 && *p > 0x8f))
+-      return p - string;
++    if ((*(++p) & 0xc0) != 0x80)     /* Third byte */
++      {
++      *errorcode = PCRE_UTF8_ERR7;
++      return p - string - 2;   
++      } 
++    if ((*(++p) & 0xc0) != 0x80)     /* Fourth byte */
++      {
++      *errorcode = PCRE_UTF8_ERR8;
++      return p - string - 3;   
++      } 
++    if (c == 0xf0 && (d & 0x30) == 0)
++      {
++      *errorcode = PCRE_UTF8_ERR17;  
++      return p - string - 3;
++      } 
++    if (c > 0xf4 || (c == 0xf4 && d > 0x8f))
++      {
++      *errorcode = PCRE_UTF8_ERR13;  
++      return p - string - 3;
++      }
+     break;
+ 
+-#if 0
+-    /* These cases can no longer occur, as we restrict to a maximum of four
+-    bytes nowadays. Leave the code here in case we ever want to add an option
+-    for longer sequences. */
+-
+-    /* Check for 1111 1000, xx00 0xxx */
+-    case 4:
+-    if (c == 0xf8 && (*p & 0x38) == 0) return p - string;
++    /* 5-byte and 6-byte characters are not allowed by RFC 3629, and will be
++    rejected by the length test below. However, we do the appropriate tests 
++    here so that overlong sequences get diagnosed, and also in case there is
++    ever an option for handling these larger code points. */  
++
++    /* 5-byte character. Check 3rd, 4th, and 5th bytes for 0x80. Then check for
++    1111 1000, xx00 0xxx */ 
++    
++    case 4: 
++    if ((*(++p) & 0xc0) != 0x80)     /* Third byte */
++      {
++      *errorcode = PCRE_UTF8_ERR7;
++      return p - string - 2;   
++      } 
++    if ((*(++p) & 0xc0) != 0x80)     /* Fourth byte */
++      {
++      *errorcode = PCRE_UTF8_ERR8;
++      return p - string - 3;   
++      } 
++    if ((*(++p) & 0xc0) != 0x80)     /* Fifth byte */
++      {
++      *errorcode = PCRE_UTF8_ERR9;
++      return p - string - 4;   
++      } 
++    if (c == 0xf8 && (d & 0x38) == 0) 
++      {
++      *errorcode = PCRE_UTF8_ERR18; 
++      return p - string - 4;
++      } 
+     break;
+ 
+-    /* Check for leading 0xfe or 0xff, and then for 1111 1100, xx00 00xx */
++    /* 6-byte character. Check 3rd-6th bytes for 0x80. Then check for
++    1111 1100, xx00 00xx. */
++
+     case 5:
+-    if (c == 0xfe || c == 0xff ||
+-       (c == 0xfc && (*p & 0x3c) == 0)) return p - string;
++    if ((*(++p) & 0xc0) != 0x80)     /* Third byte */
++      {
++      *errorcode = PCRE_UTF8_ERR7;
++      return p - string - 2;   
++      } 
++    if ((*(++p) & 0xc0) != 0x80)     /* Fourth byte */
++      {
++      *errorcode = PCRE_UTF8_ERR8;
++      return p - string - 3;   
++      } 
++    if ((*(++p) & 0xc0) != 0x80)     /* Fifth byte */
++      {
++      *errorcode = PCRE_UTF8_ERR9;
++      return p - string - 4;   
++      } 
++    if ((*(++p) & 0xc0) != 0x80)     /* Sixth byte */
++      {
++      *errorcode = PCRE_UTF8_ERR10;
++      return p - string - 5;   
++      } 
++    if (c == 0xfc && (d & 0x3c) == 0) 
++      {
++      *errorcode = PCRE_UTF8_ERR19; 
++      return p - string - 5;
++      } 
+     break;
+-#endif
+-
+     }
++    
++  /* Character is valid under RFC 2279, but 4-byte and 5-byte characters are
++  excluded by RFC 3629. The pointer p is currently at the last byte of the
++  character. */
+ 
+-  /* Check for valid bytes after the 2nd, if any; all must start 10 */
+-  while (--ab > 0)
++  if (ab > 3) 
+     {
+-    if ((*(++p) & 0xc0) != 0x80) return p - string;
+-    }
++    *errorcode = (ab == 4)? PCRE_UTF8_ERR11 : PCRE_UTF8_ERR12; 
++    return p - string - ab;
++    } 
+   }
+-#else
++   
++#else  /* SUPPORT_UTF8 */
+ (void)(string);  /* Keep picky compilers happy */
+ (void)(length);
+ #endif
+ 
+-return -1;
++return -1;   /* This indicates success */
+ }
+ 
+ /* End of pcre_valid_utf8.c */
+diff --git a/pcretest.c b/pcretest.c
+index 5c6975c..03f5b36 100644
+--- a/pcretest.c
++++ b/pcretest.c
+@@ -183,6 +183,36 @@ static uschar *buffer = NULL;
+ static uschar *dbuffer = NULL;
+ static uschar *pbuffer = NULL;
+ 
++/* Textual explanations for runtime error codes */
++
++static const char *errtexts[] = {
++  NULL,  /* 0 is no error */
++  NULL,  /* NOMATCH is handled specially */
++  "NULL argument passed",
++  "bad option value",
++  "magic number missing",
++  "unknown opcode - pattern overwritten?",
++  "no more memory",
++  NULL,  /* never returned by pcre_exec() or pcre_dfa_exec() */       
++  "match limit exceeded",
++  "callout error code",
++  NULL,  /* BADUTF8 is handled specially */
++  "bad UTF-8 offset",
++  NULL,  /* PARTIAL is handled specially */
++  "not used - internal error",
++  "internal error - pattern overwritten?",
++  "bad count value",
++  "item unsupported for DFA matching",
++  "backreference condition or recursion test not supported for DFA matching",
++  "match limit not supported for DFA matching",
++  "workspace size exceeded in DFA matching",
++  "too much recursion for DFA matching",     
++  "recursion limit exceeded",
++  "not used - internal error",
++  "invalid combination of newline options",
++  "bad offset value",
++  NULL  /* SHORTUTF8 is handled specially */
++};
+ 
+ 
+ /*************************************************
+@@ -2405,11 +2435,26 @@ while (!done)
+           }
+         else
+           {
+-          if (count == PCRE_ERROR_NOMATCH)
+-            {
++          switch(count)
++            {  
++            case PCRE_ERROR_NOMATCH:
+             if (gmatched == 0) fprintf(outfile, "No match\n");
++            break;
++            
++            case PCRE_ERROR_BADUTF8:
++            fprintf(outfile, "Error %d (%s UTF-8 string)", count,
++              "bad");
++            if (use_size_offsets >= 2)
++              fprintf(outfile, " offset=%d reason=%d", use_offsets[0], 
++                use_offsets[1]);
++            fprintf(outfile, "\n");         
++            break;     
++              
++            default:
++            fprintf(outfile, "Error %d (%s)\n", count, errtexts[-count]);
++            break;
+             }
+-          else fprintf(outfile, "Error %d\n", count);
++
+           break;  /* Out of the /g loop */
+           }
+         }
+diff --git a/testdata/testinput5 b/testdata/testinput5
+index 17dbe32..1c24795 100644
+--- a/testdata/testinput5
++++ b/testdata/testinput5
+@@ -219,6 +219,19 @@ can't tell the difference.) --/
+     ร
+     รรร
+     รรร\?
++    XX\xea
++    \O0XX\xea
++    \O1XX\xea
++    \O2XX\xea
++    XX\xf1
++    XX\xf8  
++    XX\xfc
++    ZZ\xea\xaf\x20YY
++    ZZ\xfd\xbf\xbf\x2f\xbf\xbfYY  
++    ZZ\xfd\xbf\xbf\xbf\x2f\xbfYY  
++    ZZ\xfd\xbf\xbf\xbf\xbf\x2fYY  
++    ZZ\xffYY
++    ZZ\xfeYY  
+ 
+ /anything/8
+     \xc0\x80
+diff --git a/testdata/testoutput2 b/testdata/testoutput2
+index 9f1db65..44fa12d 100644
+--- a/testdata/testoutput2
++++ b/testdata/testoutput2
+@@ -9648,8 +9648,8 @@ Starting byte set: x y z
+     abc\>3
+ No match
+     abc\>4
+-Error -24
++Error -24 (bad offset value)
+     abc\>-4 
+-Error -24
++Error -24 (bad offset value)
+ 
+ / End of testinput2 /
+diff --git a/testdata/testoutput5 b/testdata/testoutput5
+index f801dec..c589642 100644
+--- a/testdata/testoutput5
++++ b/testdata/testoutput5
+@@ -829,13 +829,13 @@ No need char
+  0: \x{d6}
+ 
+ /[ร]/8
+-Failed: invalid UTF-8 string at offset 2
++Failed: invalid UTF-8 string at offset 1
+ 
+ /ร/8
+ Failed: invalid UTF-8 string at offset 0
+ 
+ /รรรxxx/8
+-Failed: invalid UTF-8 string at offset 1
++Failed: invalid UTF-8 string at offset 0
+ 
+ /รรรxxx/8?DZ
+ ------------------------------------------------------------------
+@@ -851,31 +851,57 @@ Need char = 'x'
+ 
+ /abc/8
+     ร]
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=6
+     ร
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=1
+     รรร
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=6
+     รรร\?
+ No match
++    XX\xea
++Error -10 (bad UTF-8 string) offset=2 reason=2
++    \O0XX\xea
++Error -10 (bad UTF-8 string)
++    \O1XX\xea
++Error -10 (bad UTF-8 string)
++    \O2XX\xea
++Error -10 (bad UTF-8 string) offset=2 reason=2
++    XX\xf1
++Error -10 (bad UTF-8 string) offset=2 reason=3
++    XX\xf8  
++Error -10 (bad UTF-8 string) offset=2 reason=4
++    XX\xfc
++Error -10 (bad UTF-8 string) offset=2 reason=5
++    ZZ\xea\xaf\x20YY
++Error -10 (bad UTF-8 string) offset=2 reason=7
++    ZZ\xfd\xbf\xbf\x2f\xbf\xbfYY  
++Error -10 (bad UTF-8 string) offset=2 reason=8
++    ZZ\xfd\xbf\xbf\xbf\x2f\xbfYY  
++Error -10 (bad UTF-8 string) offset=2 reason=9
++    ZZ\xfd\xbf\xbf\xbf\xbf\x2fYY  
++Error -10 (bad UTF-8 string) offset=2 reason=10
++    ZZ\xffYY
++Error -10 (bad UTF-8 string) offset=2 reason=21
++    ZZ\xfeYY  
++Error -10 (bad UTF-8 string) offset=2 reason=21
+ 
+ /anything/8
+     \xc0\x80
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=15
+     \xc1\x8f 
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=15
+     \xe0\x9f\x80
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=16
+     \xf0\x8f\x80\x80 
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=17
+     \xf8\x87\x80\x80\x80  
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=18
+     \xfc\x83\x80\x80\x80\x80
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=19
+     \xfe\x80\x80\x80\x80\x80  
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=21
+     \xff\x80\x80\x80\x80\x80  
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=21
+     \xc3\x8f
+ No match
+     \xe0\xaf\x80
+@@ -887,13 +913,13 @@ No match
+     \xf1\x8f\x80\x80 
+ No match
+     \xf8\x88\x80\x80\x80  
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=11
+     \xf9\x87\x80\x80\x80  
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=11
+     \xfc\x84\x80\x80\x80\x80
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=12
+     \xfd\x83\x80\x80\x80\x80
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=12
+     \?\xf8\x88\x80\x80\x80  
+ No match
+     \?\xf9\x87\x80\x80\x80  
+@@ -1491,27 +1517,27 @@ No match
+     \x{0}\x{d7ff}\x{e000}\x{10ffff}
+ No match
+     \x{d800}
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=14
+     \x{d800}\?
+ No match
+     \x{da00}
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=14
+     \x{da00}\?
+ No match
+     \x{dfff}
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=14
+     \x{dfff}\?
+ No match
+     \x{110000}    
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=13
+     \x{110000}\?    
+ No match
+     \x{2000000} 
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=11
+     \x{2000000}\? 
+ No match
+     \x{7fffffff} 
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=12
+     \x{7fffffff}\? 
+ No match
+ 
+@@ -1645,7 +1671,7 @@ No match
+     a\x{123}aa\>1
+  0: aa
+     a\x{123}aa\>2
+-Error -11
++Error -11 (bad UTF-8 offset)
+     a\x{123}aa\>3
+  0: aa
+     a\x{123}aa\>4
+@@ -1653,6 +1679,6 @@ Error -11
+     a\x{123}aa\>5
+ No match
+     a\x{123}aa\>6
+-Error -24
++Error -24 (bad offset value)
+ 
+ / End of testinput5 /
+diff --git a/testdata/testoutput7 b/testdata/testoutput7
+index 5b07d3a..75b6240 100644
+--- a/testdata/testoutput7
++++ b/testdata/testoutput7
+@@ -6430,7 +6430,7 @@ No match
+ 
+ /^(?(2)a|(1)(2))+$/
+     123a
+-Error -17
++Error -17 (backreference condition or recursion test not supported for DFA matching)
+ 
+ /(?<=a|bbbb)c/
+     ac
+@@ -7267,8 +7267,8 @@ No match
+     abc\>3
+ No match
+     abc\>4
+-Error -24
++Error -24 (bad offset value)
+     abc\>-4 
+-Error -24
++Error -24 (bad offset value)
+ 
+ / End of testinput7 /
+diff --git a/testdata/testoutput8 b/testdata/testoutput8
+index 8138da6..4a41edc 100644
+--- a/testdata/testoutput8
++++ b/testdata/testoutput8
+@@ -100,11 +100,11 @@ No match
+ 
+ /abc/8
+     ร]
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=6
+     ร
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=1
+     รรร
+-Error -10
++Error -10 (bad UTF-8 string) offset=0 reason=6
+     รรร\?
+ No match
+ 
+@@ -1293,7 +1293,7 @@ No match
+  0: aa
+  1: a
+     a\x{123}aa\>2
+-Error -11
++Error -11 (bad UTF-8 offset)
+     a\x{123}aa\>3
+  0: aa
+  1: a
+@@ -1302,6 +1302,6 @@ Error -11
+     a\x{123}aa\>5
+ No match
+     a\x{123}aa\>6
+-Error -24
++Error -24 (bad offset value)
+ 
+ / End of testinput 8 / 
+-- 
+2.1.0
+

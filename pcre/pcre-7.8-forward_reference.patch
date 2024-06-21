@@ -1,0 +1,143 @@
+From 846a1298573898b7a50cfc0fb0ec145843e01852 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Tue, 22 Nov 2011 18:28:56 +0100
+Subject: [PATCH] Fix repeated forward reference needed character bug
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+From:
+r762 | ph10 | 2011-11-22 14:36:51 +0100 (Út, 22 lis 2011) | 2 lines
+
+16. A repeated forward reference in a pattern such as (a)(?2){2}(.) was
+    incorrectly expecting the subject to contain another "a" after the start.
+
+Petr Pisar: Changelog removed.
+See <http://lists.pcre.org/lurker/message/20111121.203922.3cfd476e.en.html>.
+---
+ RunTest               |   18 +++++++++++++++++-
+ pcre_compile.c        |    8 ++++++--
+ testdata/testinput11  |    6 ++++++
+ testdata/testoutput11 |    9 +++++++++
+ 4 files changed, 38 insertions(+), 3 deletions(-)
+ create mode 100644 testdata/testinput11
+ create mode 100644 testdata/testoutput11
+
+diff --git a/RunTest b/RunTest
+index 514bb79..14842e8 100755
+--- a/RunTest
++++ b/RunTest
+@@ -44,6 +44,7 @@ do7=no
+ do8=no
+ do9=no
+ do10=no
++do11=no
+ 
+ while [ $# -gt 0 ] ; do
+   case $1 in
+@@ -57,6 +58,7 @@ while [ $# -gt 0 ] ; do
+     8) do8=yes;;
+     9) do9=yes;;
+    10) do10=yes;;
++   11) do11=yes;;
+    valgrind) valgrind="valgrind -q";;
+     *) echo "Unknown test number $1"; exit 1;;
+   esac
+@@ -104,7 +106,7 @@ fi
+ 
+ if [ $do1 = no -a $do2 = no -a $do3 = no -a $do4 = no -a \
+      $do5 = no -a $do6 = no -a $do7 = no -a $do8 = no -a \
+-     $do9 = no -a $do10 = no ] ; then
++     $do9 = no -a $do10 = no -a $do11 = no ] ; then
+   do1=yes
+   do2=yes
+   do3=yes
+@@ -115,6 +117,7 @@ if [ $do1 = no -a $do2 = no -a $do3 = no -a $do4 = no -a \
+   if [ $utf8 -ne 0 ] ; then do8=yes; fi
+   if [ $utf8 -ne 0 -a $ucp -ne 0 ] ; then do9=yes; fi
+   if [ $link_size -eq 2 -a $ucp -ne 0 ] ; then do10=yes; fi
++  do11=yes
+ fi
+ 
+ # Show which release
+@@ -289,4 +292,17 @@ if [ $do10 = yes ] ; then
+   echo "OK"
+ fi
+ 
++# Test of Perl 5.10, 5.11 features
++
++if [ $do11 = yes ] ; then
++  echo "Test 11: Perl 5.10, 5.11 features"
++  $valgrind ./pcretest -q $testdata/testinput11 testtry
++  if [ $? = 0 ] ; then
++    $cf $testdata/testoutput11 testtry
++    if [ $? != 0 ] ; then exit 1; fi
++  else exit 1
++  fi
++  echo "OK"
++fi
++
+ # End
+diff --git a/pcre_compile.c b/pcre_compile.c
+index 6dac21b..ef099f2 100644
+--- a/pcre_compile.c
++++ b/pcre_compile.c
+@@ -3992,7 +3992,8 @@ we set the flag only if there is a literal "\r" or "\n" in the class. */
+             *lengthptr += delta;
+             }
+ 
+-          /* This is compiling for real */
++          /* This is compiling for real. If there is a set first byte for
++          the group, and we have not yet set a "required byte", set it. */
+ 
+           else
+             {
+@@ -4850,7 +4851,9 @@ we set the flag only if there is a literal "\r" or "\n" in the class. */
+ 
+           /* Insert the recursion/subroutine item, automatically wrapped inside
+           "once" brackets. Set up a "previous group" length so that a
+-          subsequent quantifier will work. */
++          subsequent quantifier will work. It does not have a set first
++          byte (relevant if it is repeated, because it will then be wrapped 
++          with ONCE brackets). */
+ 
+           *code = OP_ONCE;
+           PUT(code, 1, 2 + 2*LINK_SIZE);
+@@ -4859,6 +4862,7 @@ we set the flag only if there is a literal "\r" or "\n" in the class. */
+           *code = OP_RECURSE;
+           PUT(code, 1, called - cd->start_code);
+           code += 1 + LINK_SIZE;
++          groupsetfirstbyte = FALSE;
+ 
+           *code = OP_KET;
+           PUT(code, 1, 2 + 2*LINK_SIZE);
+diff --git a/testdata/testinput11 b/testdata/testinput11
+new file mode 100644
+index 0000000..0381d63
+--- /dev/null
++++ b/testdata/testinput11
+@@ -0,0 +1,6 @@
++/-- These tests are for the Perl 5.10 features that PCRE supports. --/
++
++/(a)(?2){2}(.)/
++    abcd
++
++/-- End of testinput11 --/
+diff --git a/testdata/testoutput11 b/testdata/testoutput11
+new file mode 100644
+index 0000000..c8be5fd
+--- /dev/null
++++ b/testdata/testoutput11
+@@ -0,0 +1,9 @@
++/-- These tests are for the Perl 5.10 features that PCRE supports. --/
++
++/(a)(?2){2}(.)/
++    abcd
++ 0: abcd
++ 1: a
++ 2: d
++
++/-- End of testinput11 --/
+-- 
+1.7.7.3
+

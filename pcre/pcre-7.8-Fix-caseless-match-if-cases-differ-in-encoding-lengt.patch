@@ -1,0 +1,128 @@
+From 217ac204f2fc030d4408ebd39f12da19bf286abc Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Fri, 2 Dec 2011 14:15:32 +0100
+Subject: [PATCH] Fix caseless match if cases differ in encoding length
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+From:
+r778 | ph10 | 2011-12-01 18:38:47 +0100 (Čt, 01 pro 2011) | 3 lines
+
+Fix bug with caseless matching of characters of different lengths when
+the shorter is right at the end of the subject.
+
+Petr Pisar: Changelog entry removed, ported to 7.8.
+---
+ pcre_exec.c          |   16 ++++++++++------
+ testdata/testinput6  |   14 ++++++++++++++
+ testdata/testoutput6 |   22 ++++++++++++++++++++++
+ 3 files changed, 46 insertions(+), 6 deletions(-)
+
+diff --git a/pcre_exec.c b/pcre_exec.c
+index 8096f3a..c5fa173 100644
+--- a/pcre_exec.c
++++ b/pcre_exec.c
+@@ -2164,9 +2164,12 @@ for (;;)
+       }
+     break;
+ 
+-    /* Match a single character, caselessly */
++    /* Match a single character, caselessly. If we are at the end of the 
++    subject, give up immediately. */
+ 
+     case OP_CHARNC:
++      if (eptr >= md->end_subject) RRETURN(MATCH_NOMATCH);
++
+ #ifdef SUPPORT_UTF8
+     if (utf8)
+       {
+@@ -2174,17 +2177,19 @@ for (;;)
+       ecode++;
+       GETCHARLEN(fc, ecode, length);
+ 
+-      if (length > md->end_subject - eptr) RRETURN(MATCH_NOMATCH);
+-
+       /* If the pattern character's value is < 128, we have only one byte, and
+-      can use the fast lookup table. */
++      we know that its other case must also be one byte long, so we can use the
++      fast lookup table. We know that there is at least one byte left in the 
++      subject. */
+ 
+       if (fc < 128)
+         {
+         if (md->lcc[*ecode++] != md->lcc[*eptr++]) RRETURN(MATCH_NOMATCH);
+         }
+ 
+-      /* Otherwise we must pick up the subject character */
++      /* Otherwise we must pick up the subject character. Note that we cannot
++      use the value of "length" to check for sufficient bytes left, because the
++      other case of the character may have more or fewer bytes.  */
+ 
+       else
+         {
+@@ -2209,7 +2214,6 @@ for (;;)
+ 
+     /* Non-UTF-8 mode */
+       {
+-      if (md->end_subject - eptr < 1) RRETURN(MATCH_NOMATCH);
+       if (md->lcc[ecode[1]] != md->lcc[*eptr++]) RRETURN(MATCH_NOMATCH);
+       ecode += 2;
+       }
+diff --git a/testdata/testinput6 b/testdata/testinput6
+index a8640f9..5855331 100644
+--- a/testdata/testinput6
++++ b/testdata/testinput6
+@@ -943,4 +943,18 @@ was broken in all cases./
+     \x{10b}\x{10b}
+     \x{10b}\x{10a}
+ 
++/ⱥ/8i
++    ⱥ
++    Ⱥx 
++    Ⱥ 
++
++/[ⱥ]/8i
++    ⱥ
++    Ⱥx 
++    Ⱥ 
++
++/Ⱥ/8i
++    Ⱥ
++    ⱥ
++
+ / End of testinput6 /
+diff --git a/testdata/testoutput6 b/testdata/testoutput6
+index caba466..2f7d8b9 100644
+--- a/testdata/testoutput6
++++ b/testdata/testoutput6
+@@ -1747,4 +1747,26 @@ No match
+  0: \x{10b}\x{10a}
+  1: \x{10b}
+ 
++/ⱥ/8i
++    ⱥ
++ 0: \x{2c65}
++    Ⱥx 
++ 0: \x{23a}
++    Ⱥ 
++ 0: \x{23a}
++
++/[ⱥ]/8i
++    ⱥ
++ 0: \x{2c65}
++    Ⱥx 
++ 0: \x{23a}
++    Ⱥ 
++ 0: \x{23a}
++
++/Ⱥ/8i
++    Ⱥ
++ 0: \x{23a}
++    ⱥ
++ 0: \x{2c65}
++
+ / End of testinput6 /
+-- 
+1.7.7.4
+
