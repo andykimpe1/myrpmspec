@@ -1,0 +1,58 @@
+From 747c39dc991954bec50d7c1202696b7f5b223519 Mon Sep 17 00:00:00 2001
+From: David King <dking@redhat.com>
+Date: Fri, 4 Sep 2015 23:12:44 +0100
+Subject: [PATCH] Improve glibtop_get_proc_affinity_s()
+
+Fix affinity issues with more than 1024 CPUs.
+
+https://bugzilla.gnome.org/show_bug.cgi?id=704034
+https://bugzilla.redhat.com/show_bug.cgi?id=990659
+---
+ sysdeps/linux/procaffinity.c | 15 +++++++++++----
+ 1 file changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/sysdeps/linux/procaffinity.c b/sysdeps/linux/procaffinity.c
+index 6ddf338..92b5fc1 100644
+--- a/sysdeps/linux/procaffinity.c
++++ b/sysdeps/linux/procaffinity.c
+@@ -39,26 +39,33 @@ _glibtop_init_proc_affinity_s(glibtop *server)
+ guint16 *
+ glibtop_get_proc_affinity_s(glibtop *server, glibtop_proc_affinity *buf, pid_t pid)
+ {
+-  cpu_set_t set;
++  cpu_set_t* set;
+   size_t i;
++  int nrcpus;
++  int set_size;
+   GArray* cpus;
+ 
+   memset(buf, 0, sizeof *buf);
++  nrcpus = sysconf(_SC_NPROCESSORS_CONF);
++  set_size = CPU_ALLOC_SIZE(nrcpus);
++  set = CPU_ALLOC(nrcpus);
+ 
+-  if (sched_getaffinity(pid, sizeof set, &set) == -1) {
++  if (sched_getaffinity(pid, set_size, set) == -1) {
+     glibtop_error_r(server, "sched_getaffinity failed");
+     return NULL;
+   }
+ 
+   cpus = g_array_new(FALSE, FALSE, sizeof(guint16));
+ 
+-  for (i = 0; i < MIN(CPU_SETSIZE, (size_t)(server->ncpu + 1)); i++) {
+-    if (CPU_ISSET(i, &set)) {
++  for (i = 0; i < MIN(nrcpus, (size_t)(server->ncpu + 1)); i++) {
++    if (CPU_ISSET_S(i, set_size, set)) {
+       guint16 n = i;
+       g_array_append_val(cpus, n);
+     }
+   }
+ 
++  CPU_FREE(set);
++
+   buf->number = cpus->len;
+   buf->all = (cpus->len == (size_t)(server->ncpu + 1));
+   buf->flags = (1 << GLIBTOP_PROC_AFFINITY_NUMBER)
+-- 
+2.6.2
+
