@@ -1,0 +1,226 @@
+From 514dd9784559feb237af498020bf74cb16091a9e Mon Sep 17 00:00:00 2001
+From: Jan Friesse <jfriesse@redhat.com>
+Date: Mon, 23 Nov 2015 10:03:25 +0100
+Subject: [PATCH] ipcc: Fix ERR_LIBRARY on finalize call in dispatch
+
+This patch is (hopefully) better version of
+67242e15c298abff4f93a7bfcd72372f7ba60270.
+
+Main problem with original patch was masking error on incorrect place.
+If ipc is closed there can still be messages in a buffer (both ipc
+socket and shm). Because error in ipc_sem_wait was masked, socket fd
+wasn't flushed and pointer in shm data wasn't incremented. If user
+application then called dipatch again. old data was read.
+
+This patch uses more steps to handle such behavior:
+- Add new error code CS_ERR_IN_SHUTDOWN returned specifically and only
+  if ipc is closed
+- coroipcc_dispatch_get now tests if ipc is closed and if so it
+  returns CS_ERR_IN_SHUTDOWN
+- If ipc_sem_wait in the coroipcc_dispatch_put function returns
+  CS_ERR_LIBRARY, it's checked if ipc is closed. If so, ipc fd is
+  flushed and CS_ERR_IN_SHUTDOWN is returned.
+- libcfg/confdb/cpg/evs/votequorum tests return code of
+  coroipcc_dispatch_put. If it returns CS_ERR_IN_SHUTDOWN, error
+  is masked and function terminated.
+
+Credit for Christine Caulfield <ccaulfie@redhat.com> for original patch
+and CS_ERR_IN_SHUTDOWN addition.
+
+Signed-off-by: Jan Friesse <jfriesse@redhat.com>
+Reviewed-by: Christine Caulfield <ccaulfie@redhat.com>
+---
+ include/corosync/corotypes.h |    1 +
+ lib/cfg.c                    |    8 ++++++
+ lib/confdb.c                 |    7 +++++
+ lib/coroipcc.c               |   53 ++++++++++++++++++++++++++++++++++++++++++
+ lib/cpg.c                    |    8 ++++++
+ lib/evs.c                    |    7 +++++
+ lib/votequorum.c             |    7 +++++
+ 7 files changed, 91 insertions(+), 0 deletions(-)
+
+diff --git a/include/corosync/corotypes.h b/include/corosync/corotypes.h
+index 57f8b47..ca4c009 100644
+--- a/include/corosync/corotypes.h
++++ b/include/corosync/corotypes.h
+@@ -99,6 +99,7 @@ typedef enum {
+    CS_ERR_NO_SECTIONS = 27,
+    CS_ERR_CONTEXT_NOT_FOUND = 28,
+    CS_ERR_TOO_MANY_GROUPS = 30,
++   CS_ERR_IN_SHUTDOWN = 31,
+    CS_ERR_SECURITY = 100
+ } cs_error_t;
+ 
+diff --git a/lib/cfg.c b/lib/cfg.c
+index be11a53..650db8a 100644
+--- a/lib/cfg.c
++++ b/lib/cfg.c
+@@ -218,6 +218,14 @@ corosync_cfg_dispatch (
+ 			break;
+ 		}
+ 		error = coroipcc_dispatch_put (cfg_instance->handle);
++		if (error == CS_ERR_IN_SHUTDOWN) {
++			/*
++			 * Mask error.
++			 */
++			error = CS_OK;
++			goto error_put;
++		}
++
+ 		if (error != CS_OK) {
+ 			goto error_put;
+ 		}
+diff --git a/lib/confdb.c b/lib/confdb.c
+index ce698e5..4a7c61b 100644
+--- a/lib/confdb.c
++++ b/lib/confdb.c
+@@ -424,6 +424,13 @@ cs_error_t confdb_dispatch (
+ 				break;
+ 		}
+ 		error = coroipcc_dispatch_put (confdb_inst->handle);
++		if (error == CS_ERR_IN_SHUTDOWN) {
++			/*
++			 * Mask error.
++			 */
++			error = CS_OK;
++			goto error_put;
++		}
+ 		if (error != CS_OK) {
+ 			goto error_put;
+ 		}
+diff --git a/lib/coroipcc.c b/lib/coroipcc.c
+index 774e835..ea7f724 100644
+--- a/lib/coroipcc.c
++++ b/lib/coroipcc.c
+@@ -855,6 +855,46 @@ coroipcc_fd_get (
+ 	return (res);
+ }
+ 
++static cs_error_t
++coroipcc_dispatch_flush_fd(int fd)
++{
++	struct pollfd ufds;
++	int poll_events;
++	cs_error_t error = CS_OK;
++	int retry = 1;
++	char buf;
++
++	while (retry) {
++		ufds.fd = fd;
++		ufds.events = POLLIN;
++		ufds.revents = 0;
++
++		poll_events = poll (&ufds, 1, 0);
++		if (poll_events == -1 && errno != EINTR) {
++			error = CS_ERR_LIBRARY;
++			retry = 0;
++		}
++
++		if (poll_events == 0) {
++			retry = 0;
++		}
++
++		if (poll_events == 1 && (ufds.revents & (POLLERR|POLLHUP|POLLNVAL))) {
++			error = CS_ERR_LIBRARY;
++			retry = 0;
++		}
++
++		if (error == CS_OK) {
++			error = socket_recv (fd, &buf, 1);
++			if (error != CS_ERR_TRY_AGAIN) {
++				retry = 0;
++			}
++		}
++	}
++
++	return (error);
++}
++
+ cs_error_t
+ coroipcc_dispatch_get (
+ 	hdb_handle_t handle,
+@@ -874,6 +914,11 @@ coroipcc_dispatch_get (
+ 		return (error);
+ 	}
+ 
++	if (ipc_instance->control_buffer->ipc_closed) {
++		error = CS_ERR_IN_SHUTDOWN;
++		goto error_put;
++	}
++
+ 	if (shared_mem_dispatch_bytes_left (ipc_instance) > (ipc_instance->dispatch_size/2)) {
+ 		/*
+ 		 * Notify coroipcs to flush any pending dispatch messages
+@@ -957,6 +1002,14 @@ coroipcc_dispatch_put (hdb_handle_t handle)
+ retry_ipc_sem_wait:
+ 	res = ipc_sem_wait (ipc_instance->control_buffer, SEMAPHORE_DISPATCH, ipc_instance->fd);
+ 	if (res != CS_OK) {
++	        /*
++		 * IPC was closed earlier in dispatch, flush fd and return CS_ERR_IN_SHUTDOWN
++		 */
++	        if (res == CS_ERR_LIBRARY && ipc_instance->control_buffer->ipc_closed) {
++			coroipcc_dispatch_flush_fd(ipc_instance->fd);
++			res = CS_ERR_IN_SHUTDOWN;
++			goto error_exit;
++		}
+ 		if (res == CS_ERR_TRY_AGAIN) {
+ 			priv_change_send (ipc_instance);
+ 			goto retry_ipc_sem_wait;
+diff --git a/lib/cpg.c b/lib/cpg.c
+index 06137d4..f6ed14a 100644
+--- a/lib/cpg.c
++++ b/lib/cpg.c
+@@ -461,6 +461,14 @@ cs_error_t cpg_dispatch (
+ 			break; /* case CPG_MODEL_V1 */
+ 		} /* - switch (cpg_inst_copy.model_data.model) */
+ 		error = coroipcc_dispatch_put (cpg_inst->handle);
++		if (error == CS_ERR_IN_SHUTDOWN) {
++			/*
++			 * Mask error.
++			 */
++			error = CS_OK;
++			goto error_put;
++		}
++
+ 		if (error != CS_OK) {
+ 			goto error_put;
+ 		}
+diff --git a/lib/evs.c b/lib/evs.c
+index b125dfd..bc860e3 100644
+--- a/lib/evs.c
++++ b/lib/evs.c
+@@ -316,6 +316,13 @@ evs_error_t evs_dispatch (
+ 			break;
+ 		}
+ 		error = coroipcc_dispatch_put (evs_inst->handle);
++		if (error == CS_ERR_IN_SHUTDOWN) {
++			/*
++			 * Mask error.
++			 */
++			error = CS_OK;
++			goto error_put;
++		}
+ 		if (error != CS_OK) {
+ 			goto error_put;
+ 		}
+diff --git a/lib/votequorum.c b/lib/votequorum.c
+index e0a7eb7..7a010b0 100644
+--- a/lib/votequorum.c
++++ b/lib/votequorum.c
+@@ -774,6 +774,13 @@ cs_error_t votequorum_dispatch (
+ 			break;
+ 		}
+ 		error = coroipcc_dispatch_put (votequorum_inst->handle);
++		if (error == CS_ERR_IN_SHUTDOWN) {
++			/*
++			 * Mask error.
++			 */
++			error = CS_OK;
++			goto error_put;
++		}
+ 		if (error != CS_OK) {
+ 			goto error_put;
+ 		}
+-- 
+1.7.1
+

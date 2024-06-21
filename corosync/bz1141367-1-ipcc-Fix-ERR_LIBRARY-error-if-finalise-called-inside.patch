@@ -1,0 +1,46 @@
+From 83bf77e6f42c2a8b01b1d079e8dc792d9cc7d35d Mon Sep 17 00:00:00 2001
+From: Christine Caulfield <ccaulfie@redhat.com>
+Date: Mon, 15 Dec 2014 16:15:10 +0000
+Subject: [PATCH] ipcc: Fix ERR_LIBRARY error if finalise called inside dispatch
+
+In some instances it's possible for cpg_dispatch() to return
+CS_ERR_LIBRARY if cpg_finalise() is called from the callback routine.
+The error isn't a problem but it can cause calling applications to log
+an error where there is no actual problem (this has been seen in
+cmirrord)
+
+The trouble is caused because control_buffer->ipc_closed is (correctly)
+set in this situation which causes ipc_sem_wait() to return
+CS_ERR_LIBRARY.
+
+My solution is to check for control_buffer->ipc_closed in coroipcc_put()
+and instead of simply passing CS_ERR_LIBRARY up the stack, change it to
+a benign CS_OK as it is quite reasonable behaviour when shutting down.
+
+Signed-Off-By: Christine Caulfield <ccaulfie@redhat.com>
+Reviewed-by: Jan Friesse <jfriesse@redhat.com>
+---
+ lib/coroipcc.c |    7 +++++++
+ 1 files changed, 7 insertions(+), 0 deletions(-)
+
+diff --git a/lib/coroipcc.c b/lib/coroipcc.c
+index 774e835..5aff6e0 100644
+--- a/lib/coroipcc.c
++++ b/lib/coroipcc.c
+@@ -957,6 +957,13 @@ coroipcc_dispatch_put (hdb_handle_t handle)
+ retry_ipc_sem_wait:
+ 	res = ipc_sem_wait (ipc_instance->control_buffer, SEMAPHORE_DISPATCH, ipc_instance->fd);
+ 	if (res != CS_OK) {
++	        /*
++		 * IPC was closed earlier in dispatch, return OK
++		 */
++	        if (ipc_instance->control_buffer->ipc_closed) {
++		        res = CS_OK;
++			goto error_exit;
++		}
+ 		if (res == CS_ERR_TRY_AGAIN) {
+ 			priv_change_send (ipc_instance);
+ 			goto retry_ipc_sem_wait;
+-- 
+1.7.1
+

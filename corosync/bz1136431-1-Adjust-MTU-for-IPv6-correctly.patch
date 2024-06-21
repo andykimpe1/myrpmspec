@@ -1,0 +1,110 @@
+From 6fc58377d9f3201a74afedbb53311ff95fde700b Mon Sep 17 00:00:00 2001
+From: Jan Friesse <jfriesse@redhat.com>
+Date: Wed, 1 Oct 2014 15:25:37 +0200
+Subject: [PATCH] Adjust MTU for IPv6 correctly
+
+MTU for IPv6 is 20 bytes larger then IPv4. This fact was not taken into
+account so IPv6 packets were larger then MTU resulting in fragmentation.
+
+Solution is to substract correct IP header size.
+
+(backported from master 03f95ddaa1d223e1e93788a307dc1b36d86b22b5)
+
+Signed-off-by: Jan Friesse <jfriesse@redhat.com>
+Reviewed-by: Christine Caulfield <ccaulfie@redhat.com>
+---
+ exec/totemip.c                   |   22 ++++++++++++++++++++++
+ exec/totemudp.c                  |    7 ++++---
+ exec/totemudpu.c                 |    8 +++++---
+ include/corosync/totem/totemip.h |    2 ++
+ 4 files changed, 33 insertions(+), 6 deletions(-)
+
+diff --git a/exec/totemip.c b/exec/totemip.c
+index ab175a8..cc8e11f 100644
+--- a/exec/totemip.c
++++ b/exec/totemip.c
+@@ -695,3 +695,25 @@ finished:
+ 	return res;
+ }
+ #endif /* COROSYNC_LINUX */
++
++#define TOTEMIP_UDP_HEADER_SIZE		8
++#define TOTEMIP_IPV4_HEADER_SIZE	20
++#define TOTEMIP_IPV6_HEADER_SIZE	40
++
++size_t totemip_udpip_header_size(int family)
++{
++	size_t header_size;
++
++	header_size = 0;
++
++	switch (family) {
++	case AF_INET:
++		header_size = TOTEMIP_UDP_HEADER_SIZE + TOTEMIP_IPV4_HEADER_SIZE;
++		break;
++	case AF_INET6:
++		header_size = TOTEMIP_UDP_HEADER_SIZE + TOTEMIP_IPV6_HEADER_SIZE;
++		break;
++	}
++
++	return (header_size);
++}
+diff --git a/exec/totemudp.c b/exec/totemudp.c
+index 23e8820..ed1d8a1 100644
+--- a/exec/totemudp.c
++++ b/exec/totemudp.c
+@@ -2091,12 +2091,13 @@ extern int totemudp_iface_check (void *udp_context)
+ 
+ extern void totemudp_net_mtu_adjust (void *udp_context, struct totem_config *totem_config)
+ {
+-#define UDPIP_HEADER_SIZE (20 + 8) /* 20 bytes for ip 8 bytes for udp */
++	assert(totem_config->interface_count > 0);
++
+ 	if (totem_config->secauth == 1) {
+ 		totem_config->net_mtu -= sizeof (struct security_header) +
+-			UDPIP_HEADER_SIZE;
++			totemip_udpip_header_size(totem_config->interfaces[0].bindnet.family);
+ 	} else {
+-		totem_config->net_mtu -= UDPIP_HEADER_SIZE;
++		totem_config->net_mtu -= totemip_udpip_header_size(totem_config->interfaces[0].bindnet.family);
+ 	}
+ }
+ 
+diff --git a/exec/totemudpu.c b/exec/totemudpu.c
+index 3888ab8..49ab9b7 100644
+--- a/exec/totemudpu.c
++++ b/exec/totemudpu.c
+@@ -1584,12 +1584,14 @@ extern int totemudpu_iface_check (void *udpu_context)
+ 
+ extern void totemudpu_net_mtu_adjust (void *udpu_context, struct totem_config *totem_config)
+ {
+-#define UDPIP_HEADER_SIZE (20 + 8) /* 20 bytes for ip 8 bytes for udp */
++
++	assert(totem_config->interface_count > 0);
++
+ 	if (totem_config->secauth == 1) {
+ 		totem_config->net_mtu -= sizeof (struct security_header) +
+-			UDPIP_HEADER_SIZE;
++			totemip_udpip_header_size(totem_config->interfaces[0].bindnet.family);
+ 	} else {
+-		totem_config->net_mtu -= UDPIP_HEADER_SIZE;
++		totem_config->net_mtu -= totemip_udpip_header_size(totem_config->interfaces[0].bindnet.family);
+ 	}
+ }
+ 
+diff --git a/include/corosync/totem/totemip.h b/include/corosync/totem/totemip.h
+index c59b4b7..7a8ee60 100644
+--- a/include/corosync/totem/totemip.h
++++ b/include/corosync/totem/totemip.h
+@@ -99,6 +99,8 @@ static inline int totemip_zero_check(const struct totem_ip_address *addr)
+ 	return (addr->family == 0);
+ }
+ 
++extern size_t totemip_udpip_header_size(int family);
++
+ #ifdef __cplusplus
+ }
+ #endif
+-- 
+1.7.1
+

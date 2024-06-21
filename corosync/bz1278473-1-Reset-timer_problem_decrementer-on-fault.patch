@@ -1,0 +1,49 @@
+From c5a5bedf6e086acb9f3bda374ac495670a5fcf25 Mon Sep 17 00:00:00 2001
+From: Jason <huzhijiang@gmail.com>
+Date: Mon, 8 Dec 2014 16:24:22 +0100
+Subject: [PATCH] Reset timer_problem_decrementer on fault
+
+After a heartbeat link's FAULTY and its auto re-enable,
+active_instance->timer_problem_decrementer did not reset to zero. So in
+the next timer_function_active_token_expired() round,
+active_timer_problem_decrementer_start() will not be called. This will
+result in that the active_instance->counter_problems of this link can
+not be decreased any more. Cause rrp lose the ability to tolerate
+network fluctuation.
+
+This problem can be reproduced by the following sequence:
+1) Set RRP in active mode, configure at least 2 heartbeat links.
+2) Unplug one link till corosync-cfgtool -s shows it is FAULTY.
+3) Re-plug this link then corosync-cfgtool -s shows it is active with
+no faults.
+4) Unplug this link again but quicky re-plug it before it becomes
+FAULTY.
+5) Finally, you can see corosync-cfgtool -s shows it is in
+"Incrementing problem counter" state despite it currently is physically
+healthy.
+
+It can be solved by not forget to reset timer_problem_decrementer to
+zero in active_timer_problem_decrementer_cancel().
+
+Signed-off-by: Jason <huzhijiang@gmail.com>
+Reviewed-by: Jan Friesse <jfriesse@redhat.com>
+(cherry picked from commit 8f284b26b3331e1ab252969ba65543e6d9217ab1)
+---
+ exec/totemrrp.c |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/exec/totemrrp.c b/exec/totemrrp.c
+index f3c49c3..affbadc 100644
+--- a/exec/totemrrp.c
++++ b/exec/totemrrp.c
+@@ -1499,6 +1499,7 @@ static void active_timer_problem_decrementer_cancel (
+         poll_timer_delete (
+ 		active_instance->rrp_instance->poll_handle,
+ 		active_instance->timer_problem_decrementer);
++	active_instance->timer_problem_decrementer = 0;
+ }
+ 
+ 
+-- 
+1.7.1
+

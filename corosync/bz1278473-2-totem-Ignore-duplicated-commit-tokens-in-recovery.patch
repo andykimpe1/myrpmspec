@@ -1,0 +1,108 @@
+From 49236f3a16a0980cdb605040f027722b116a8250 Mon Sep 17 00:00:00 2001
+From: Jason <huzhijiang@gmail.com>
+Date: Sat, 10 Jan 2015 17:35:47 +0800
+Subject: [PATCH] totem: Ignore duplicated commit tokens in recovery
+
+In active rrp mode, commit tokens are treated as mcast data messages,
+thus, rrp directly delivers them to srp layer by active_mcast_recv().
+This will result in duplicated commit tokens being received by srp from
+different heartbeat links. If node is in recovery state and has already
+sent out the initial orf token, those duplicated commit tokens will
+cause message_handler_memb_commit_token() to send initial orf token
+again! This is wrong because it resets the orf token content in
+instance->orf_token_retransmit, which breaks the token retransmission
+state.
+
+Furthermore, by sending those initial orf tokens again and again,
+it may lead active_token_recv() to drop some subsequent orf tokens.
+It is OK for rrp because srp will do token retransmission,
+but as said above, srp retransmission state has already been broken,
+so finally we meet a "token lost in recovery state" condition caused
+by software. If token timeout value is large, then it will takes long
+time to create a new ring.
+
+This can be reproduced by having two noded set to active rrp mode, with
+two heartbeat links. Then with one node always on, let the other one do
+stop/start again and again. It has a low probability to reproduce.
+In theory, I think, the more heartbeat links used, the more easily it
+can be reproduced.
+
+This problem can be resolved by letting
+message_handler_memb_commit_token() to ignore duplicated commit tokens
+in recovery state if node (the ring representation) has already sent
+out the initial orf token.
+
+Different from prev take, this version do not depends on stored token
+data but uses originated_orf_token in totemsrp_instance to remember
+if initial orf token has been already originated for current membership.
+
+(backported from master 4ee84c51fa73c4ec7cbee922111a140a3aaf75df)
+
+Signed-off-by: Jason <huzhijiang@gmail.com>
+Reviewed-by: Steven Dake <sdake@redhat.com>
+Reviewed-by: Jan Friesse <jfriesse@redhat.com>
+Reviewed-by: Christine Caulfield <ccaulfie@redhat.com>
+---
+ exec/totemsrp.c |   18 +++++++++++++++++-
+ 1 files changed, 17 insertions(+), 1 deletions(-)
+
+diff --git a/exec/totemsrp.c b/exec/totemsrp.c
+index be2ed0e..9fc5dbf 100644
+--- a/exec/totemsrp.c
++++ b/exec/totemsrp.c
+@@ -504,7 +504,9 @@ struct totemsrp_instance {
+ 	totemsrp_stats_t stats;
+ 
+ 	uint32_t orf_token_discard;
+-	
++
++	uint32_t originated_orf_token;
++
+ 	uint32_t waiting_trans_ack;
+ 
+ 	void * token_recv_event_handle;
+@@ -680,6 +682,8 @@ static void totemsrp_instance_initialize (struct totemsrp_instance *instance)
+ 
+ 	instance->orf_token_discard = 0;
+ 
++	instance->originated_orf_token = 0;
++
+ 	instance->commit_token = (struct memb_commit_token *)instance->commit_token_storage;
+ 
+ 	instance->waiting_trans_ack = 1;
+@@ -1729,6 +1733,8 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
+ 	unsigned int i;
+ 	unsigned int res;
+ 
++	instance->originated_orf_token = 0;
++
+ 	memb_consensus_reset (instance);
+ 
+ 	old_ring_state_reset (instance);
+@@ -1913,6 +1919,8 @@ static void memb_state_gather_enter (
+ {
+ 	instance->orf_token_discard = 1;
+ 
++	instance->originated_orf_token = 0;
++
+ 	memb_set_merge (
+ 		&instance->my_id, 1,
+ 		instance->my_proc_list, &instance->my_proc_list_entries);
+@@ -4349,6 +4357,14 @@ static int message_handler_memb_commit_token (
+ 
+ 		case MEMB_STATE_RECOVERY:
+ 			if (totemip_equal (&instance->my_id.addr[0], &instance->my_ring_id.rep)) {
++
++				/* Filter out duplicated tokens */
++				if (instance->originated_orf_token) {
++					break;
++				}
++
++				instance->originated_orf_token = 1;
++
+ 				log_printf (instance->totemsrp_log_level_debug,
+ 					"Sending initial ORF token\n");
+ 
+-- 
+1.7.1
+
