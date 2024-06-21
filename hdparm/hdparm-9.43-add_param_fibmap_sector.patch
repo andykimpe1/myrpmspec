@@ -1,0 +1,187 @@
+Index: hdparm-9.43/fibmap.c
+===================================================================
+--- hdparm-9.43.orig/fibmap.c
++++ hdparm-9.43/fibmap.c
+@@ -31,7 +31,7 @@ struct file_extent {
+ 	__u64 block_count;
+ };
+ 
+-static void handle_extent (struct file_extent ext, unsigned int sectors_per_block, __u64 start_lba)
++static int handle_extent (struct file_extent ext, unsigned int sectors_per_block, __u64 start_lba, __u64 target_sect, __u64 *target_lba)
+ {
+ 	char lba_info[64], len_info[32];
+ 	__u64 begin_lba, end_lba;
+@@ -44,6 +44,18 @@ static void handle_extent (struct file_e
+ 		begin_lba = end_lba = 0;
+ 	}
+ 
++	if (target_lba) {
++		if (ext.first_block) {
++			__u64 begin_sect = ext.byte_offset / sector_bytes;
++			__u64 end_sect   = begin_sect + nsectors;
++			if (target_sect >= begin_sect && target_sect < end_sect) {
++				*target_lba = begin_lba + (target_sect - begin_sect);
++				return 1;
++			}
++		}
++		return 0;
++	}
++
+ 	if (ext.first_block)
+ 		sprintf(lba_info, "%10llu %10llu", begin_lba, end_lba);
+ 	else
+@@ -53,9 +65,10 @@ static void handle_extent (struct file_e
+ 	else
+ 		sprintf(len_info, "%10llu", nsectors);
+ 	printf("%12llu %s %s\n", ext.byte_offset, lba_info, len_info);
++	return 0;
+ }
+ 
+-static int walk_fibmap (int fd, struct stat *st, unsigned int sectors_per_block, __u64 start_lba)
++static int walk_fibmap (int fd, struct stat *st, unsigned int sectors_per_block, __u64 start_lba, __u64 target_sect, __u64 *target_lba)
+ {
+ 	struct file_extent ext;
+ 	unsigned long num_blocks;
+@@ -108,14 +121,15 @@ static int walk_fibmap (int fd, struct s
+ 			 * New extent: print previous extent (if any), and re-init the extent record.
+ 			 */
+ 			if (blk_idx)
+-				handle_extent(ext, sectors_per_block, start_lba);
++				if (handle_extent(ext, sectors_per_block, start_lba, target_sect, target_lba))
++					return 0;
+ 			ext.first_block = blknum64;
+ 			ext.last_block  = blknum64 ? blknum64 : hole;
+ 			ext.block_count = 1;
+ 			ext.byte_offset = blk_idx * st->st_blksize;
+ 		}
+ 	}
+-	handle_extent(ext, sectors_per_block, start_lba);
++	handle_extent(ext, sectors_per_block, start_lba, target_sect, target_lba);
+ 	return 0;
+ }
+ 
+@@ -152,7 +166,7 @@ struct fs_s {
+ 
+ #define FIEMAP	_IOWR('f', 11, struct fm_s)
+ 
+-static int walk_fiemap (int fd, unsigned int sectors_per_block, __u64 start_lba)
++static int walk_fiemap (int fd, unsigned int sectors_per_block, __u64 start_lba, __u64 target_sect, __u64 *target_lba)
+ {
+ 	unsigned int i, done = 0;
+ 	unsigned int blksize = sectors_per_block * sector_bytes;
+@@ -194,7 +208,8 @@ static int walk_fiemap (int fd, unsigned
+ 					ext.last_block  = phy_blk + ext_len - 1;
+ 					ext.block_count = ext_len;
+ 				}
+-				handle_extent(ext, sectors_per_block, start_lba);
++				if (handle_extent(ext, sectors_per_block, start_lba, target_sect, target_lba))
++					return 0;
+ 
+ 				if (fs.fe[i].flags & FE_FLAG_LAST) {
+ 					/*
+@@ -217,7 +232,7 @@ static int walk_fiemap (int fd, unsigned
+ 	return 0;
+ }
+ 
+-int do_filemap (const char *file_name)
++int do_fibmap (const char *file_name, __u64 target_sect, __u64 *target_lba)
+ {
+ 	int fd, err;
+ 	struct stat st;
+@@ -259,22 +274,30 @@ int do_filemap (const char *file_name)
+ 		return err;
+ 	};
+ 	sectors_per_block = blksize / sector_bytes;
+-	printf("\n%s:\n filesystem blocksize %u, begins at LBA %llu;"
+-	       " assuming %u byte sectors.\n",
+-	       file_name, blksize, start_lba, sector_bytes);
+-	printf("%12s %10s %10s %10s\n", "byte_offset", "begin_LBA", "end_LBA", "sectors");
++	if (!target_lba) {
++		printf("\n%s:\n filesystem blocksize %u, begins at LBA %llu;"
++			   " assuming %u byte sectors.\n",
++			   file_name, blksize, start_lba, sector_bytes);
++		printf("%12s %10s %10s %10s\n", "byte_offset", "begin_LBA", "end_LBA", "sectors");
++	}
+ 
+ 	if (st.st_size == 0) {
+ 		struct file_extent ext;
+ 		memset(&ext, 0, sizeof(ext));
+-		handle_extent(ext, sectors_per_block, start_lba);
++		handle_extent(ext, sectors_per_block, start_lba, target_sect, target_lba);
+ 		close(fd);
+ 		return 0;
+ 	}
+ 
+-	err = walk_fiemap(fd, sectors_per_block, start_lba);
++	err = walk_fiemap(fd, sectors_per_block, start_lba, target_sect, target_lba);
+ 	if (err)
+-		err = walk_fibmap(fd, &st, sectors_per_block, start_lba);
++		err = walk_fibmap(fd, &st, sectors_per_block, start_lba, target_sect, target_lba);
+ 	close (fd);
+ 	return 0;
+ }
++
++int do_filemap (const char *file_name)
++{
++	return do_fibmap(file_name, 0, NULL);
++}
++
+Index: hdparm-9.43/hdparm.h
+===================================================================
+--- hdparm-9.43.orig/hdparm.h
++++ hdparm-9.43/hdparm.h
+@@ -18,6 +18,7 @@ int sysfs_get_attr (int fd, const char *
+ int sysfs_set_attr (int fd, const char *attr, const char *fmt, void *val_p, int verbose);
+ int get_dev_geometry (int fd, __u32 *cyls, __u32 *heads, __u32 *sects, __u64 *start_lba, __u64 *nsectors);
+ int get_dev_t_geometry (dev_t dev, __u32 *cyls, __u32 *heads, __u32 *sects, __u64 *start_lba, __u64 *nsectors);
++int do_fibmap(const char *file_name, __u64 target_sect, __u64 *target_lba);
+ int do_filemap(const char *file_name);
+ int do_fallocate_syscall (const char *name, __u64 bytecount);
+ int fwdownload(int fd, __u16 *id, const char *fwpath, int xfer_mode);
+Index: hdparm-9.43/hdparm.c
+===================================================================
+--- hdparm-9.43.orig/hdparm.c
++++ hdparm-9.43/hdparm.c
+@@ -1491,6 +1491,7 @@ static void usage_help (int clue, int rc
+ 	" --drq-hsm-error   Crash system with a \"stuck DRQ\" error (VERY DANGEROUS)\n"
+ 	" --fallocate       Create a file without writing data to disk\n"
+ 	" --fibmap          Show device extents (and fragmentation) for a file\n"
++	" --fibmap-sector   Show absolute LBA of a specfic sector of a file (DON'T USE)\n"
+ 	" --fwdownload            Download firmware file to drive (EXTREMELY DANGEROUS)\n"
+ 	" --fwdownload-mode3      Download firmware using min-size segments (EXTREMELY DANGEROUS)\n"
+ 	" --fwdownload-mode3-max  Download firmware using max-size segments (EXTREMELY DANGEROUS)\n"
+@@ -2588,6 +2589,25 @@ do_fallocate (const char *name)
+ }
+ 
+ static void
++do_fibmap_sector (const char *name)
++{
++	int err;
++	char *path;
++	__u64 sector, lba;
++
++	get_filename_parm(&path, name);
++	get_u64_parm(0, 0, NULL, &sector, 0, lba_limit, name, lba_emsg);
++	if (num_flags_processed || argc)
++		usage_help(4,EINVAL);
++	err = do_fibmap(path, sector, &lba);
++	if (!err)
++		printf("%s[%llu]: %llu\n", path, sector, lba);
++	else if (err == EBADSLT)
++		fprintf(stderr, "%s[%llu]: unallocated\n", path, sector);
++	exit(err);
++}
++
++static void
+ do_fibmap_file (const char *name)
+ {
+ 	int err;
+@@ -2634,6 +2654,8 @@ get_longarg (void)
+ 		do_dco_identify = 1;
+ 	} else if (0 == strcasecmp(name, "fallocate")) {
+ 		do_fallocate(name);
++	} else if (0 == strcasecmp(name, "fibmap-sector")) {
++		do_fibmap_sector(name);
+ 	} else if (0 == strcasecmp(name, "fibmap")) {
+ 		do_fibmap_file(name);
+ 	} else if (0 == strcasecmp(name, "fwdownload-mode3")) {
