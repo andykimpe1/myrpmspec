@@ -1,0 +1,94 @@
+diff -up ./doc/pstree.1.ori ./doc/pstree.1
+--- ./doc/pstree.1.ori	2016-12-01 20:35:38.528881687 +0100
++++ ./doc/pstree.1	2016-12-01 20:37:10.410455904 +0100
+@@ -53,6 +53,12 @@ with the process name in curly braces, e
+ If \fBpstree\fR is called as \fBpstree.x11\fR then it will prompt the user
+ at the end of the line to press return and will not return until that
+ has happened. This is useful for when \fBpstree\fR is run in a xterminal.
++.PP
++Certain kernel or mount parameters, such as the hidepid option for procfs,
++will hide information for some processes. In these situations
++.B pstree
++will attempt to build the tree without this information, showing process
++names as question marks.
+ 
+ .SH OPTIONS
+ .IP \fB\-a\fP
+diff -up ./src/pstree.c.ori ./src/pstree.c
+--- ./src/pstree.c.ori	2016-12-01 20:21:46.402329606 +0100
++++ ./src/pstree.c	2016-12-01 20:35:10.751006681 +0100
+@@ -135,6 +135,12 @@ static int cur_x = 1;
+ static char last_char = 0;
+ static int dumped = 0;		/* used by dump_by_user */
+ 
++#ifdef WITH_SELINUX
++static void fix_orphans(security_context_t scontext);
++#else  /*WITH_SELINUX*/
++static void fix_orphans(void);
++#endif
++
+ 
+ static void
+ out_char (char c)
+@@ -208,8 +214,8 @@ find_proc (pid_t pid)
+ 
+   for (walk = list; walk; walk = walk->next)
+     if (walk->pid == pid)
+-      break;
+-  return walk;
++        return walk;
++  return NULL;
+ }
+ 
+ #ifdef WITH_SELINUX
+@@ -708,6 +714,11 @@ read_proc (void)
+ 	free (path);
+       }
+   (void) closedir (dir);
++#ifdef WITH_SELINUX
++    fix_orphans(scontext);
++#else  /*WITH_SELINUX*/
++    fix_orphans();
++#endif
+   if (print_args)
+     free (buffer);
+   if (empty)
+@@ -748,6 +759,38 @@ read_stdin (void)
+ #endif
+ 
+ 
++#ifdef WITH_SELINUX
++static void fix_orphans(security_context_t scontext)
++#else  /*WITH_SELINUX*/
++static void fix_orphans(void)
++#endif
++{
++  /* When using kernel 3.3 with hidepid feature enabled on /proc
++   * then we need fake root pid and gather all the orphan processes
++   * that is, processes with no known parent
++   * As we cannot be sure if it is just the root pid or others missing
++   * we gather the lot
++   */
++  PROC *root, *walk;
++
++  if (!(root = find_proc(1))) {
++#ifdef WITH_SELINUX
++    root = new_proc("?", 1, 0, scontext);
++#else                                /*WITH_SELINUX */
++    root = new_proc("?", 1, 0);
++#endif
++  }
++  for (walk = list; walk; walk = walk->next) {
++	if (walk->pid == 1 || walk->pid == 0)
++	  continue;
++	if (walk->parent == NULL) {
++	  add_child(root, walk);
++      walk->parent = root;
++	}
++  }
++}
++
++
+ static void
+ usage (void)
+ {
