@@ -1,0 +1,286 @@
+diff -up man-1.6f/src/glob.c.valgrind man-1.6f/src/glob.c
+--- man-1.6f/src/glob.c.valgrind	2005-08-21 01:26:06.000000000 +0200
++++ man-1.6f/src/glob.c	2012-10-04 13:47:41.010343049 +0200
+@@ -574,7 +574,13 @@ glob_filename (const char *pathname)
+ 	      result = (char **) realloc (result,
+ 					  (result_size + l) * sizeof (char *));
+ 	      if (result == NULL)
++	   {
++		char **a;
++		for (a = array; *a; a++)
++			free(*a);
++		free ((char *) array);
+ 		goto memory_error;
++	   }
+ 
+ 	      for (l = 0; array[l] != NULL; ++l)
+ 		result[result_size++ - 1] = array[l];
+@@ -620,6 +626,8 @@ glob_filename (const char *pathname)
+ 					 (directory_len == 0
+ 					  ? "." : directory_name));
+ 
++      free ((char *) result);
++
+       if (temp_results == NULL || temp_results == (char **) -1)
+ 	{
+ #ifdef NO_ALLOCA
+diff -up man-1.6f/src/man.c.valgrind man-1.6f/src/man.c
+--- man-1.6f/src/man.c.valgrind	2012-10-04 13:47:40.989342247 +0200
++++ man-1.6f/src/man.c	2012-11-16 16:04:54.446715424 +0100
+@@ -342,8 +342,10 @@ again:
+ 	  if (fp == NULL) {
+ 	       perror("popen");
+ 	       gripe (EXPANSION_FAILED, command);
++	       free(command);
+ 	       return (NULL);
+ 	  }
++	  free(command);
+ 	  fgr = fgets (buf, sizeof(buf), fp);
+ 
+           #ifdef __APPLE__
+@@ -717,9 +719,14 @@ make_roff_command (const char *path, con
+ 				    bufh, cat, file, buft);
+      }
+ 
+-     if (strlen(command) >= sizeof(buf))
++     if (strlen(command) >= sizeof(buf)) {
++	  free(command);
+ 	  exit(1);
++     }
+      strcpy(buf, command);
++     if (*command) {
++    	 free(command);
++     }
+ 
+      if (roff_directive != NULL) {
+ 	  if (debug)
+@@ -741,8 +748,10 @@ make_roff_command (const char *path, con
+ 	  if (fp == NULL) {
+ 	       perror("popen");
+ 	       gripe (EXPANSION_FAILED, cmd);
++	       free(cmd);
+ 	       return (NULL);
+ 	  }
++	  free(cmd);
+ 	  fgr = fgets (line, sizeof(line), fp);
+ 	  pclose (fp);
+      } else {
+@@ -914,6 +923,7 @@ static int
+ display_man_file(const char *path, const char *man_file) {
+      char *roff_command;
+      char *command;
++     int result;
+ 
+      if (!different_man_file (man_file))
+ 	  return 0;
+@@ -929,7 +939,10 @@ display_man_file(const char *path, const
+ 	  else 
+ 	      command = my_xsprintf ("(cd \"%S\" && %s)", path, roff_command);
+ 
+-     return !do_system_command (command, 0);
++     result = !do_system_command (command, 0);
++     free(command);
++
++     return result;
+ }
+ 
+ /*
+@@ -964,6 +977,7 @@ make_and_display_cat_file (const char *p
+      if (status == -1 || status == -3) {
+ 	  /* what? man_file does not exist anymore? */
+ 	  gripe (CANNOT_STAT, man_file);
++	  free(cat_file);
+ 	  return(0);
+      }
+ 
+@@ -975,11 +989,14 @@ make_and_display_cat_file (const char *p
+ 	   */
+ 	  if (print_where) {
+ 	       printf ("%s\n", man_file);
++	       free(cat_file);
+ 	       return 1;
+ 	  }
+ 
+-	  if (!make_cat_file (path, man_file, cat_file))
++	  if (!make_cat_file (path, man_file, cat_file)) {
++	       free(cat_file);
+ 	       return 0;
++	  }
+ 
+ 	  /*
+ 	   * If we just created this cat file, unlink any others.
+@@ -998,10 +1015,12 @@ make_and_display_cat_file (const char *p
+ 		    printf("%s\n", man_file);
+ 	       } else
+ 		    printf ("%s (<-- %s)\n", cat_file, man_file);
++		   free(cat_file);
+ 	       return 1;
+ 	  }
+      }
+      (void) display_cat_file (cat_file);
++     free(cat_file);
+      return 1;
+ }
+ 
+@@ -1013,6 +1032,7 @@ make_and_display_cat_file (const char *p
+ static int
+ format_and_display (const char *man_file) {
+      const char *path;
++     int result;
+ 
+      if (access (man_file, R_OK) != 0)
+ 	  return 0;
+@@ -1025,30 +1045,46 @@ format_and_display (const char *man_file
+      /* (in that case we do not want to make a cat file identical
+ 	to cat1/xyzzy.1) */
+      man_file = ultimate_source (man_file);
+-     if (man_file == NULL)
++     if (man_file == NULL) {
++	  free(path);
+ 	  return 0;
++     }
+ 
+      if (do_troff) {
+ 	  char *command;
+ 	  char *roff_command = make_roff_command (path, man_file);
+ 
+-	  if (roff_command == NULL)
++	  if (roff_command == NULL) {
++	       free(path);
++	       free(man_file);
+ 	       return 0;
++	  }
+ 
+ 	  command = my_xsprintf("(cd \"%S\" && %s)", path, roff_command);
++	  free(path);
++	  free(man_file);
+ 	  return !do_system_command (command, 0);
+      }
+ 
+-     if (can_use_cache && make_and_display_cat_file (path, man_file))
++     if (can_use_cache && make_and_display_cat_file (path, man_file)) {
++	  free(path);
++	  free(man_file);
+ 	  return 1;
++     }
+ 
+      /* line length was wrong or could not display cat_file */
+      if (print_where) {
+ 	  printf ("%s\n", man_file);
++	  free(path);
++	  free(man_file);
+ 	  return 1;
+      }
+ 
+-     return display_man_file (path, man_file);
++     result = display_man_file (path, man_file);
++     free(path);
++     free(man_file);
++
++     return result;
+ }
+ 
+ /*
+@@ -1071,7 +1107,7 @@ format_and_display (const char *man_file
+ static int
+ man (const char *name, const char *section) {
+      int found, type, flags;
+-     struct manpage *mp;
++     struct manpage *mp, *to_free, *old;
+ 
+      found = 0;
+ 
+@@ -1160,6 +1196,7 @@ man (const char *name, const char *secti
+ 
+      mp = manfile(name, section, flags, section_list, mandirlist,
+ 		  convert_to_cat);
++     to_free = mp;
+      found = 0;
+      while (mp) {
+           if (mp->type == TYPE_MAN) {
+@@ -1183,6 +1220,14 @@ man (const char *name, const char *secti
+ 	       break;
+ 	  mp = mp->next;
+      }
++
++     while (to_free) {
++          free(to_free->filename);
++          old = to_free;
++          to_free = to_free->next;
++          free(old);
++     }
++
+      return found;
+ }
+ 
+@@ -1415,6 +1460,8 @@ main (int argc, char **argv) {
+ 	free_cat_filelist();
+ 	free_man_filelist();
+ 
++	  free(section);
++	  section = 0;
+      }
+      return status ? EXIT_SUCCESS : EXIT_FAILURE;
+ }
+diff -up man-1.6f/src/manfile.c.valgrind man-1.6f/src/manfile.c
+--- man-1.6f/src/manfile.c.valgrind	2005-08-21 01:26:06.000000000 +0200
++++ man-1.6f/src/manfile.c	2012-10-04 13:47:41.011343088 +0200
+@@ -114,6 +114,7 @@ glob_for_file_ext_glob (const char *dir,
+      if (debug >=2)
+ 	 gripe(ABOUT_TO_GLOB, p);
+      names = glob_filename (p);
++     free(p);
+      if (names == (char **) -1)		/* file system error; print msg? */
+ 	  names = 0;
+      return names;
+@@ -132,11 +133,18 @@ glob_for_file_ext (const char *dir, cons
+      }
+      if (!namesglob)
+ 	  return 0;
++
+      if (*namesglob) {
+ 	  /* we found something - try to get a more precise match */
+ 	  names = glob_for_file_ext_glob(dir,sec,name,ext,hpx,0,type);
+-	  if (names && *names)
++	  if (names && *names) {
++	       char **a;
++	       for (a = namesglob; *a; a++)
++	        free(*a);
++	       free ((char *) namesglob);
+ 	       namesglob = names;
++	  } else
++	    free ((char *) names);
+      }
+      return namesglob;
+ }
+@@ -168,6 +176,7 @@ glob_for_file (const char *dir, const ch
+ 	  char ext[2];
+ 	  ext[0] = sec[0];
+ 	  ext[1] = 0;
++	  free ((char *) names);
+ 	  names = glob_for_file_ext (dir, sec, name, ext, type);
+      }
+ 
+@@ -175,8 +184,10 @@ glob_for_file (const char *dir, const ch
+ 	  return 0;		/* out-of-memory or error */
+ 
+      /* or the extension could be .man */
+-     if (!*names)
++     if (!*names) {
++	  free ((char *) names);
+ 	  names = glob_for_file_ext (dir, sec, name, "man", type);
++     }
+ 
+      if (debug >= 2) {
+ 	 if (!names[0])
+diff -up man-1.6f/src/util.c.valgrind man-1.6f/src/util.c
+--- man-1.6f/src/util.c.valgrind	2007-03-03 01:49:58.000000000 +0100
++++ man-1.6f/src/util.c	2012-10-04 13:47:41.013343161 +0200
+@@ -300,6 +300,7 @@ my_xsprintf (char *format, ...) {
+ 	va_start(p, format);
+ 	vsprintf(s, fm, p);
+ 	va_end(p);
++	free(fm);
+ 
+ 	return s;
+ }
