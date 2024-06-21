@@ -1,0 +1,115 @@
+diff --git a/src/direct_api.c b/src/direct_api.c
+index 68e125f..0a26c9a 100644
+--- a/src/direct_api.c
++++ b/src/direct_api.c
+@@ -1304,26 +1304,31 @@ static int semanage_direct_enable(semanage_handle_t * sh, char *module_name)
+ 			goto cleanup;
+ 		}
+ 		base++;
+-		if (memcmp(module_name, base, name_len) == 0 &&
+-		    strcmp(base + name_len + 3, DISABLESTR) == 0) {
+-			int len = strlen(module_filenames[i]) - strlen(DISABLESTR);
+-			char *enabled_name = calloc(1, len+1);
+-			if (!enabled_name) {
+-				ERR(sh, "Could not allocate memory");
+-				retval = -1;
+-				goto cleanup;
+-			}
++		if (memcmp(module_name, base, name_len) == 0) {
++		    if (strcmp(base + name_len + 3, DISABLESTR) == 0) {
++				int len = strlen(module_filenames[i]) - strlen(DISABLESTR);
++				char *enabled_name = calloc(1, len+1);
++				if (!enabled_name) {
++					ERR(sh, "Could not allocate memory");
++					retval = -1;
++					goto cleanup;
++				}
+ 
+-			strncpy(enabled_name, module_filenames[i],len);
++				strncpy(enabled_name, module_filenames[i],len);
+ 
+-			if (rename(module_filenames[i], enabled_name) == -1) {
+-				ERR(sh, "Could not enable module file %s.",
+-				    enabled_name);
+-				retval = -2;
++				if (rename(module_filenames[i], enabled_name) == -1) {
++					ERR(sh, "Could not enable module file %s.",
++					    enabled_name);
++					retval = -2;
++				}
++				retval = 0;
++				free(enabled_name);
++				goto cleanup;
++			} else if (strcmp(base + name_len, ".pp") == 0) {
++				/* module is already enabled */
++				retval = 0;
++				goto cleanup;
+ 			}
+-			retval = 0;
+-			free(enabled_name);
+-			goto cleanup;
+ 		}
+ 	}
+ 	ERR(sh, "Module %s was not found.", module_name);
+@@ -1356,8 +1361,7 @@ static int semanage_direct_disable(semanage_handle_t * sh, char *module_name)
+ 			goto cleanup;
+ 		}
+ 		base++;
+-		if (memcmp(module_name, base, name_len) == 0 &&
+-		    strcmp(base + name_len, ".pp") == 0) {
++		if (memcmp(module_name, base, name_len) == 0) {
+ 			char disabled_name[PATH_MAX];
+ 			if (snprintf(disabled_name, PATH_MAX, "%s%s", 
+ 				     module_filenames[i], DISABLESTR) == PATH_MAX) {
+@@ -1366,13 +1370,20 @@ static int semanage_direct_disable(semanage_handle_t * sh, char *module_name)
+ 				retval = -2;
+ 				goto cleanup;
+ 			}
+-			if (rename(module_filenames[i], disabled_name) == -1) {
+-				ERR(sh, "Could not disable module file %s.",
+-				    module_filenames[i]);
+-				retval = -2;
++			if (strncmp(base + name_len, ".pp", 3) == 0) {
++				if (strcmp(base + name_len + 3, DISABLESTR) == 0) {
++					/* module is already disabled */
++					retval = 0;
++					goto cleanup;
++				}
++				if (rename(module_filenames[i], disabled_name) == -1) {
++					ERR(sh, "Could not disable module file %s.",
++					    module_filenames[i]);
++					retval = -2;
++				}
++				retval = 0;
++				goto cleanup;
+ 			}
+-			retval = 0;
+-			goto cleanup;
+ 		}
+ 	}
+ 	ERR(sh, "Module %s was not found.", module_name);
+diff --git a/src/semanage_store.h b/src/semanage_store.h
+index 9e8b1fd..6abb2ee 100644
+--- a/src/semanage_store.h
++++ b/src/semanage_store.h
+@@ -84,6 +84,7 @@ int semanage_make_sandbox(semanage_handle_t * sh);
+ int semanage_get_modules_names(semanage_handle_t * sh,
+ 			       char ***filenames, int *len);
+ 
++int semanage_module_enabled(const char *file);
+ /* lock file routines */
+ int semanage_get_trans_lock(semanage_handle_t * sh);
+ int semanage_get_active_lock(semanage_handle_t * sh);
+diff --git a/tests/test_utilities.c b/tests/test_utilities.c
+index 4d25b07..32cc33c 100644
+--- a/tests/test_utilities.c
++++ b/tests/test_utilities.c
+@@ -45,7 +45,7 @@ void test_slurp_file_filter(void);
+ 
+ char fname[] = {
+ 	'T', 'E', 'S', 'T', '_', 'T', 'E', 'M', 'P', '_', 'X', 'X', 'X', 'X',
+-	'X', 'X'
++	'X', 'X', '\0'
+ };
+ int fd;
+ FILE *fptr;
