@@ -1,0 +1,76 @@
+diff -up bash-4.2/builtins/evalfile.c.old bash-4.2/builtins/evalfile.c
+--- bash-4.2/builtins/evalfile.c.old	2015-05-14 20:45:31.402793505 +0200
++++ bash-4.2/builtins/evalfile.c	2015-05-14 20:45:47.632794791 +0200
+@@ -317,6 +317,23 @@ maybe_execute_file (fname, force_noninte
+   return result;
+ }
+ 
++int
++force_execute_file (fname, force_noninteractive)
++     const char *fname;
++     int force_noninteractive;
++{
++  char *filename;
++  int result, flags;
++
++  filename = bash_tilde_expand (fname, 0);
++  flags = 0;
++  if (force_noninteractive)
++    flags |= FEVAL_NONINT;
++  result = _evalfile (filename, flags);
++  free (filename);
++  return result;
++}
++
+ #if defined (HISTORY)
+ int
+ fc_execute_file (filename)
+diff -up bash-4.2/configure.in.old bash-4.2/configure.in
+--- bash-4.2/configure.in.old	2015-05-14 21:27:20.882449456 +0200
++++ bash-4.2/configure.in	2015-05-14 21:19:25.654612738 +0200
+@@ -149,7 +149,7 @@ fi
+ fi
+ 
+ if test -z "${DEBUGGER_START_FILE}"; then
+-	DEBUGGER_START_FILE='${datadir}/bashdb/bashdb-main.inc'
++	DEBUGGER_START_FILE='/usr/share/bashdb/bashdb-main.inc'
+ fi
+ 
+ dnl optional shell features in config.h.in
+diff -up bash-4.2/shell.c.old bash-4.2/shell.c
+--- bash-4.2/shell.c.old	2015-05-14 20:42:54.379781066 +0200
++++ bash-4.2/shell.c	2015-05-14 20:43:04.966781904 +0200
+@@ -1373,12 +1373,19 @@ start_debugger ()
+ {
+ #if defined (DEBUGGER) && defined (DEBUGGER_START_FILE)
+   int old_errexit;
++  int r;
+ 
+   old_errexit = exit_immediately_on_error;
+   exit_immediately_on_error = 0;
+ 
+-  maybe_execute_file (DEBUGGER_START_FILE, 1);
+-  function_trace_mode = 1;
++  r = force_execute_file (DEBUGGER_START_FILE, 1);
++  if (r < 0)
++    {
++      internal_warning ("cannot start debugger; debugging mode disabled");
++      debugging_mode = function_trace_mode = 0;
++    }
++  else
++    function_trace_mode = 1;
+ 
+   exit_immediately_on_error += old_errexit;
+ #endif
+diff -up bash-4.2/builtins/evalfile.c.old bash-4.2/builtins/evalfile.c
+--- bash-4.2/builtins/evalfile.c.old	2015-05-15 00:52:01.357266353 +0200
++++ bash-4.2/builtins/evalfile.c	2015-05-15 00:52:08.734263236 +0200
+@@ -125,7 +125,7 @@ file_error_and_exit:
+ 	}
+ 
+       return ((flags & FEVAL_BUILTIN) ? EXECUTION_FAILURE
+-      				      : ((errno == ENOENT) ? 0 : -1));
++      				      : ((errno == ENOENT && (flags & FEVAL_ENOENTOK) != 0) ? 0 : -1));
+     }
+ 
+   errfunc = ((flags & FEVAL_BUILTIN) ? builtin_error : internal_error);

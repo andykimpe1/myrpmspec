@@ -1,0 +1,122 @@
+diff -up bash-4.1/parse.y.old bash-4.1/parse.y
+--- bash-4.1/parse.y.old	2015-11-25 08:40:23.622581057 +0100
++++ bash-4.1/parse.y	2015-11-25 08:52:40.464096420 +0100
+@@ -3802,7 +3802,8 @@ xparse_dolparen (base, string, indp, fla
+      int flags;
+ {
+   sh_parser_state_t ps;
+-  int orig_ind, nc, sflags;
++  sh_input_line_state_t ls;
++  int orig_ind, nc, sflags, orig_eof_token;
+   char *ret, *s, *ep, *ostring;
+ 
+   /*yydebug = 1;*/
+@@ -3813,6 +3814,8 @@ xparse_dolparen (base, string, indp, fla
+   if (flags & SX_NOLONGJMP)
+     sflags |= SEVAL_NOLONGJMP;
+   save_parser_state (&ps);
++  save_input_line_state(&ls);
++  orig_eof_token = shell_eof_token;
+   /* avoid echoing every substitution again */
+   echo_input_at_read = 0;
+ 
+@@ -3821,8 +3824,10 @@ xparse_dolparen (base, string, indp, fla
+   shell_eof_token = ')';
+   parse_string (string, "command substitution", sflags, &ep);
+ 
++  shell_eof_token = orig_eof_token;
+   restore_parser_state (&ps);
+   reset_parser ();
++  restore_input_line_state(&ls);
+ 
+   token_to_read = 0;
+ 
+@@ -5845,6 +5845,12 @@ save_parser_state (ps)
+   ps->expand_aliases = expand_aliases;
+   ps->echo_input_at_read = echo_input_at_read;
+ 
++   ps->token = token;
++   ps->token_buffer_size = token_buffer_size;
++   /* Force reallocation on next call to read_token_word */
++   token = 0;
++   token_buffer_size = 0;
++
+   return (ps);
+ }
+ 
+@@ -5890,8 +5895,46 @@ restore_parser_state (ps)
+ 
+   expand_aliases = ps->expand_aliases;
+   echo_input_at_read = ps->echo_input_at_read;
++ 
++   FREE (token);
++   token = ps->token;
++   token_buffer_size = ps->token_buffer_size;
+ }
+ 
++sh_input_line_state_t *
++save_input_line_state (ls)
++     sh_input_line_state_t *ls;
++{
++  if (ls == 0)
++    ls = (sh_input_line_state_t *)xmalloc (sizeof (sh_input_line_state_t));
++  if (ls == 0)
++    return ((sh_input_line_state_t *)NULL);
++
++  ls->input_line = shell_input_line;
++  ls->input_line_size = shell_input_line_size;
++  ls->input_line_len = shell_input_line_len;
++  ls->input_line_index = shell_input_line_index;
++
++  /* force reallocation */
++  shell_input_line = 0;
++  shell_input_line_size = shell_input_line_len = shell_input_line_index = 0;
++
++  return ls;
++}
++
++void
++restore_input_line_state (ls)
++     sh_input_line_state_t *ls;
++{
++  FREE (shell_input_line);
++  shell_input_line = ls->input_line;
++  shell_input_line_size = ls->input_line_size;
++  shell_input_line_len = ls->input_line_len;
++  shell_input_line_index = ls->input_line_index;
++
++  set_line_mbstate ();
++}
++
+ /************************************************
+  *						*
+  *	MULTIBYTE CHARACTER HANDLING		*
+diff -up bash-4.1/shell.h.old bash-4.1/shell.h
+--- bash-4.1/shell.h.old	2015-11-25 08:43:42.812639057 +0100
++++ bash-4.1/shell.h	2015-11-25 08:45:20.209178453 +0100
+@@ -134,6 +134,9 @@ typedef struct _sh_parser_state_t {
+   int parser_state;
+   int *token_state;
+ 
++   char *token;
++   int token_buffer_size;
++ 
+   /* input line state -- line number saved elsewhere */
+   int input_line_terminator;
+   int eof_encountered;
+@@ -165,5 +165,15 @@ typedef struct _sh_parser_state_t {
+ /* Let's try declaring these here. */
+ extern char *parser_remaining_input __P((void));
+ 
++typedef struct _sh_input_line_state_t {
++  char *input_line;
++  size_t input_line_index;
++  size_t input_line_size;
++  size_t input_line_len;
++} sh_input_line_state_t;
++
+ extern sh_parser_state_t *save_parser_state __P((sh_parser_state_t *));
+ extern void restore_parser_state __P((sh_parser_state_t *));
++
++extern sh_input_line_state_t *save_input_line_state __P((sh_input_line_state_t *));
++extern void restore_input_line_state __P((sh_input_line_state_t *));

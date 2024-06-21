@@ -1,0 +1,240 @@
+--- a/execute_cmd.c	2014-05-27 12:35:52.590016981 +0200
++++ b/execute_cmd.c	2014-05-27 12:28:48.196310768 +0200
+@@ -4354,17 +4354,28 @@ execute_builtin_or_function (words, buil
+ {
+   int result;
+   REDIRECT *saved_undo_list;
+-  sh_builtin_func_t *saved_this_shell_builtin;
++#if defined (PROCESS_SUBSTITUTION)
++  int ofifo, nfifo, osize;
++  char *ofifo_list;
++#endif
++
++
++#if defined (PROCESS_SUBSTITUTION)  
++  ofifo = num_fifos ();
++  ofifo_list = copy_fifo_list (&osize);
++#endif
+ 
+   if (do_redirections (redirects, RX_ACTIVE|RX_UNDOABLE) != 0)
+     {
+       cleanup_redirects (redirection_undo_list);
+       redirection_undo_list = (REDIRECT *)NULL;
+       dispose_exec_redirects ();
++#if defined (PROCESS_SUBSTITUTION)
++      free (ofifo_list);
++#endif
+       return (EX_REDIRFAIL);	/* was EXECUTION_FAILURE */
+     }
+ 
+-  saved_this_shell_builtin = this_shell_builtin;
+   saved_undo_list = redirection_undo_list;
+ 
+   /* Calling the "exec" builtin changes redirections forever. */
+@@ -4423,6 +4434,14 @@ execute_builtin_or_function (words, buil
+       redirection_undo_list = (REDIRECT *)NULL;
+     }
+ 
++#if defined (PROCESS_SUBSTITUTION)
++  /* Close any FIFOs created by this builtin or function. */
++  nfifo = num_fifos ();
++  if (nfifo > ofifo)
++    close_new_fifos (ofifo_list, osize);
++  free (ofifo_list);
++#endif
++
+   return (result);
+ }
+ 
+--- a/subst.c	2009-12-30 14:24:28.000000000 +0100
++++ b/subst.c	2014-05-26 20:08:09.022559375 +0200
+@@ -4548,6 +4548,15 @@ static struct temp_fifo *fifo_list = (st
+ static int nfifo;
+ static int fifo_list_size;
+ 
++char *
++copy_fifo_list (sizep)
++     int *sizep;
++{
++  if (sizep)
++    *sizep = 0;
++  return (char *)NULL;
++}
++
+ static void
+ add_fifo_list (pathname)
+      char *pathname;
+@@ -4564,6 +4573,18 @@ add_fifo_list (pathname)
+ }
+ 
+ void
++unlink_fifo (i)
++     int i;
++{
++  if ((fifo_list[i].proc == -1) || (kill(fifo_list[i].proc, 0) == -1))
++    {
++      unlink (fifo_list[i].file);
++      free (fifo_list[i].file);
++      fifo_list[i].file = (char *)NULL;
++      fifo_list[i].proc = -1;
++    }
++}
++void
+ unlink_fifo_list ()
+ {
+   int saved, i, j;
+@@ -4600,12 +4621,44 @@ unlink_fifo_list ()
+     nfifo = 0;
+ }
+ 
++/* Take LIST, which is a bitmap denoting active FIFOs in fifo_list
++   from some point in the past, and close all open FIFOs in fifo_list
++   that are not marked as active in LIST.  If LIST is NULL, close
++   everything in fifo_list. LSIZE is the number of elements in LIST, in
++   case it's larger than fifo_list_size (size of fifo_list). */
++void
++close_new_fifos (list, lsize)
++     char *list;
++     int lsize;
++{
++  int i;
++
++  if (list == 0)
++    {
++      unlink_fifo_list ();
++      return;
++    }
++
++  for (i = 0; i < lsize; i++)
++    if (list[i] == 0 && i < fifo_list_size && fifo_list[i].proc != -1)
++      unlink_fifo (i);
++
++  for (i = lsize; i < fifo_list_size; i++)
++    unlink_fifo (i);  
++}
++
+ int
+ fifos_pending ()
+ {
+   return nfifo;
+ }
+ 
++int
++num_fifos ()
++{
++  return nfifo;
++}
++
+ static char *
+ make_named_pipe ()
+ {
+@@ -4632,6 +4685,24 @@ static char *dev_fd_list = (char *)NULL;
+ static int nfds;
+ static int totfds;	/* The highest possible number of open files. */
+ 
++char *
++copy_fifo_list (sizep)
++     int *sizep;
++{
++  char *ret;
++
++  if (nfds == 0 || totfds == 0)
++    {
++      if (sizep)
++	*sizep = 0;
++      return (char *)NULL;
++    }
++
++  if (sizep)
++    *sizep = totfds;
++  ret = (char *)xmalloc (totfds);
++  return (memcpy (ret, dev_fd_list, totfds));
++}
+ static void
+ add_fifo_list (fd)
+      int fd;
+@@ -4661,6 +4732,24 @@ fifos_pending ()
+   return 0;	/* used for cleanup; not needed with /dev/fd */
+ }
+ 
++int
++num_fifos ()
++{
++  return nfds;
++}
++
++void
++unlink_fifo (fd)
++     int fd;
++{
++  if (dev_fd_list[fd])
++    {
++      close (fd);
++      dev_fd_list[fd] = 0;
++      nfds--;
++    }
++}
++
+ void
+ unlink_fifo_list ()
+ {
+@@ -4670,16 +4759,37 @@ unlink_fifo_list ()
+     return;
+ 
+   for (i = 0; nfds && i < totfds; i++)
+-    if (dev_fd_list[i])
+-      {
+-	close (i);
+-	dev_fd_list[i] = 0;
+-	nfds--;
+-      }
++    unlink_fifo (i);
+ 
+   nfds = 0;
+ }
+ 
++/* Take LIST, which is a snapshot copy of dev_fd_list from some point in
++   the past, and close all open fds in dev_fd_list that are not marked
++   as open in LIST.  If LIST is NULL, close everything in dev_fd_list.
++   LSIZE is the number of elements in LIST, in case it's larger than
++   totfds (size of dev_fd_list). */
++void
++close_new_fifos (list, lsize)
++     char *list;
++     int lsize;
++{
++  int i;
++
++  if (list == 0)
++    {
++      unlink_fifo_list ();
++      return;
++    }
++
++  for (i = 0; i < lsize; i++)
++    if (list[i] == 0 && i < totfds && dev_fd_list[i])
++      unlink_fifo (i);
++
++  for (i = lsize; i < totfds; i++)
++    unlink_fifo (i);  
++}
++
+ #if defined (NOTDEF)
+ print_dev_fd_list ()
+ {
+--- a/subst.h	2009-12-20 01:34:12.000000000 +0100
++++ b/subst.h	2014-05-26 20:10:42.440453171 +0200
+@@ -251,7 +251,13 @@ extern WORD_DESC *command_substitute __P
+ extern char *pat_subst __P((char *, char *, char *, int));
+ 
+ extern int fifos_pending __P((void));
++extern int num_fifos __P((void));
+ extern void unlink_fifo_list __P((void));
++extern void unlink_fifo __P((int));
++
++extern char *copy_fifo_list __P((int *));
++extern void unlink_new_fifos __P((char *, int));
++extern void close_new_fifos __P((char *, int));
+ 
+ extern WORD_LIST *list_string_with_quotes __P((char *));
+ 
