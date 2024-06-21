@@ -1,0 +1,381 @@
+--- ibus-1.3.4/client/gtk2/ibusimcontext.c.orig	2014-07-22 19:43:01.219540764 +0900
++++ ibus-1.3.4/client/gtk2/ibusimcontext.c	2014-07-23 18:59:40.600161146 +0900
+@@ -78,6 +78,8 @@ static guint    _signal_retrieve_surroun
+ static const gchar * const _no_snooper_apps = NO_SNOOPER_APPS;
+ static gboolean _use_key_snooper = ENABLE_SNOOPER;
+ 
++static gboolean _use_sync_mode = FALSE;
++
+ static GtkIMContext *_focus_im_context = NULL;
+ 
+ /* functions prototype */
+@@ -192,6 +194,73 @@ ibus_im_context_new (void)
+     return obj;
+ }
+ 
++static void
++_process_key_event_done (IBusInputContext *context,
++                         IBusPendingCall  *pending,
++                         gpointer          user_data)
++{
++    GdkEventKey *event = (GdkEventKey *) user_data;
++
++    IBusError *error = NULL;
++    gboolean retval = ibus_input_context_process_key_event_async_finish (
++            context,
++            pending,
++            &error);
++
++    if (error != NULL) {
++        g_warning ("Process Key Event failed: %s %s.",
++                   error->name, error->message);
++        ibus_error_free (error);
++    }
++
++    if (retval == FALSE) {
++        event->state |= IBUS_IGNORED_MASK;
++        gdk_event_put ((GdkEvent *)event);
++    }
++    gdk_event_free ((GdkEvent *)event);
++}
++
++static gboolean
++_process_key_event (IBusInputContext *context,
++                    GdkEventKey      *event)
++{
++    guint state = event->state;
++    gboolean retval = FALSE;
++
++    if (event->type == GDK_KEY_RELEASE) {
++        state |= IBUS_RELEASE_MASK;
++    }
++
++    if (_use_sync_mode) {
++        retval = ibus_input_context_process_key_event (context,
++            event->keyval,
++            event->hardware_keycode - 8,
++            state);
++    }
++    else {
++        ibus_input_context_process_key_event_async (context,
++            event->keyval,
++            event->hardware_keycode - 8,
++            state,
++            -1,
++            NULL,
++            _process_key_event_done,
++            gdk_event_copy ((GdkEvent *) event));
++
++        retval = TRUE;
++    }
++
++    if (retval) {
++        event->state |= IBUS_HANDLED_MASK;
++    }
++    else {
++        event->state |= IBUS_IGNORED_MASK;
++    }
++
++    return retval;
++}
++
++
+ static gint
+ _key_snooper_cb (GtkWidget   *widget,
+                  GdkEventKey *event,
+@@ -218,34 +287,30 @@ _key_snooper_cb (GtkWidget   *widget,
+     if (G_UNLIKELY (event->state & IBUS_IGNORED_MASK))
+         return FALSE;
+ 
+-    switch (event->type) {
+-    case GDK_KEY_RELEASE:
+-        retval = ibus_input_context_process_key_event (ibusimcontext->ibuscontext,
+-                                                       event->keyval,
+-                                                       event->hardware_keycode - 8,
+-                                                       event->state | IBUS_RELEASE_MASK);
+-        break;
+-    case GDK_KEY_PRESS:
+-        retval = ibus_input_context_process_key_event (ibusimcontext->ibuscontext,
+-                                                       event->keyval,
+-                                                       event->hardware_keycode - 8,
+-                                                       event->state);
+-        break;
+-    default:
+-        retval = FALSE;
+-        break;
+-    }
+-
+-    if (retval) {
+-        event->state |= IBUS_HANDLED_MASK;
+-    }
+-    else {
+-        event->state |= IBUS_IGNORED_MASK;
+-    }
++    retval = _process_key_event (ibusimcontext->ibuscontext, event);
+ 
+     return retval;
+ }
+ 
++static gboolean
++_get_boolean_env(const gchar *name,
++                 gboolean     defval)
++{
++    const gchar *value = g_getenv (name);
++
++    if (value == NULL)
++      return defval;
++
++    if (g_strcmp0 (value, "") == 0 ||
++        g_strcmp0 (value, "0") == 0 ||
++        g_strcmp0 (value, "false") == 0 ||
++        g_strcmp0 (value, "False") == 0 ||
++        g_strcmp0 (value, "FALSE") == 0)
++      return FALSE;
++
++    return TRUE;
++}
++
+ static void
+ ibus_im_context_class_init     (IBusIMContextClass *klass)
+ {
+@@ -308,6 +373,8 @@ ibus_im_context_class_init     (IBusIMCo
+         }
+     }
+ 
++    _use_sync_mode = _get_boolean_env ("IBUS_ENABLE_SYNC_MODE", TRUE);
++
+     if (_use_key_snooper) {
+         gtk_key_snooper_install (_key_snooper_cb, NULL);
+     }
+@@ -427,7 +494,6 @@ ibus_im_context_filter_keypress (GtkIMCo
+         /* If context does not have focus, ibus will process key event in sync mode.
+          * It is a workaround for increase search in treeview.
+          */
+-        gboolean retval = FALSE;
+ 
+         if (event->state & IBUS_HANDLED_MASK)
+             return TRUE;
+@@ -435,29 +501,10 @@ ibus_im_context_filter_keypress (GtkIMCo
+         if (event->state & IBUS_IGNORED_MASK)
+             return gtk_im_context_filter_keypress (ibusimcontext->slave, event);
+ 
+-        switch (event->type) {
+-        case GDK_KEY_RELEASE:
+-            retval = ibus_input_context_process_key_event (ibusimcontext->ibuscontext,
+-                                                           event->keyval,
+-                                                           event->hardware_keycode - 8,
+-                                                           event->state | IBUS_RELEASE_MASK);
+-            break;
+-        case GDK_KEY_PRESS:
+-            retval = ibus_input_context_process_key_event (ibusimcontext->ibuscontext,
+-                                                           event->keyval,
+-                                                           event->hardware_keycode - 8,
+-                                                           event->state);
+-            break;
+-        default:
+-            retval = FALSE;
+-        }
+-
+-        if (retval) {
+-            event->state |= IBUS_HANDLED_MASK;
++        if (_process_key_event (ibusimcontext->ibuscontext, event)) {
+             return TRUE;
+         }
+         else {
+-            event->state |= IBUS_IGNORED_MASK;
+             return gtk_im_context_filter_keypress (ibusimcontext->slave, event);
+         }
+     }
+--- ibus-1.3.4/src/ibusinputcontext.c.orig	2014-07-23 12:33:30.308225183 +0900
++++ ibus-1.3.4/src/ibusinputcontext.c	2014-07-23 19:04:12.084481497 +0900
+@@ -792,6 +792,116 @@ ibus_input_context_process_key_event (IB
+     return retval;
+ }
+ 
++typedef struct {
++    IBusInputContext                   *context;
++    IBusInputContextNotifyFunction      callback;
++    gpointer                            user_data;
++} IBusPendingCallNotifyData;
++
++static void
++_process_key_event_notify (IBusPendingCall *pending, gpointer user_data)
++{
++    IBusPendingCallNotifyData *data = (IBusPendingCallNotifyData *) user_data;
++
++    data->callback (data->context, pending, data->user_data);
++
++    g_object_unref (data->context);
++    g_slice_free (IBusPendingCallNotifyData, data);
++}
++
++void
++ibus_input_context_process_key_event_async (IBusInputContext   *context,
++                                            guint32             keyval,
++                                            guint32             keycode,
++                                            guint32             state,
++                                            gint                timeout_msec,
++                                            GDestroyNotify      free_user_data,
++                                            IBusInputContextNotifyFunction
++                                                                callback,
++                                            gpointer            user_data)
++{
++    IBusPendingCall *pending = NULL;
++    IBusError *error = NULL;
++    gboolean retval;
++
++    g_assert (IBUS_IS_INPUT_CONTEXT (context));
++
++    if (state & IBUS_HANDLED_MASK)
++        return;
++
++    if (state & IBUS_IGNORED_MASK)
++        return;
++
++    retval = ibus_proxy_call_with_reply ((IBusProxy *) context,
++                                         "ProcessKeyEvent",
++                                         &pending,
++                                         -1,
++                                         &error,
++                                         G_TYPE_UINT, &keyval,
++                                         G_TYPE_UINT, &keycode,
++                                         G_TYPE_UINT, &state,
++                                         G_TYPE_INVALID);
++    if (!retval) {
++        g_debug ("%s: %s", error->name, error->message);
++        ibus_error_free (error);
++        return;
++    }
++
++    IBusPendingCallNotifyData *data = g_slice_new0 (IBusPendingCallNotifyData);
++    data->context = g_object_ref_sink (context);
++    data->callback= callback;
++    data->user_data = user_data;
++
++    ibus_pending_call_set_notify (pending,
++                                  _process_key_event_notify,
++                                  data,
++                                  free_user_data);
++}
++
++gboolean
++ibus_input_context_process_key_event_async_finish (IBusInputContext  *context,
++                                                   IBusPendingCall   *pending,
++                                                   IBusError        **error)
++{
++    IBusMessage *reply_message;
++    gboolean processed = TRUE;
++    IBusError *_error = NULL;
++
++    g_assert (IBUS_IS_INPUT_CONTEXT (context));
++    g_assert (pending != NULL);
++    g_assert (error == NULL || *error == NULL);
++
++    reply_message = ibus_pending_call_steal_reply (pending);
++    ibus_pending_call_unref (pending);
++
++    if (reply_message == NULL) {
++        g_debug ("%s: Do not recevie reply of ProcessKeyEvent",
++                 DBUS_ERROR_NO_REPLY);
++        processed = FALSE;
++    }
++    else if ((_error = ibus_error_new_from_message (reply_message)) != NULL) {
++        ibus_message_unref (reply_message);
++        processed = FALSE;
++    }
++    else {
++        if (!ibus_message_get_args (reply_message,
++                                    &_error,
++                                    G_TYPE_BOOLEAN, &processed,
++                                    G_TYPE_INVALID)) {
++            processed = FALSE;
++        }
++        ibus_message_unref (reply_message);
++    }
++
++    if (_error != NULL) {
++        if (error != NULL)
++            *error = ibus_error_new_from_text (_error->name, _error->message);
++        ibus_error_free (_error);
++    }
++
++    return processed;
++}
++
+ void
+ ibus_input_context_set_cursor_location (IBusInputContext *context,
+                                         gint32            x,
+--- ibus-1.3.4/src/ibusinputcontext.h.orig	2014-07-23 12:37:16.604020238 +0900
++++ ibus-1.3.4/src/ibusinputcontext.h	2014-07-23 18:54:30.474245021 +0900
+@@ -78,6 +78,18 @@ struct _IBusInputContextClass {
+     gpointer pdummy[24];
+ };
+ 
++/**
++ * IBusInputContextNotifyFunction:
++ * @context: An IBusInputContext.
++ * @pending: An IBusPendingCall.
++ * @user_data: User data for the callback function.
++ *
++ * Callback prototype of pending call notify function.
++ */
++typedef void (* IBusInputContextNotifyFunction) (IBusInputContext *context,
++                                                 IBusPendingCall  *pending,
++                                                 gpointer          user_data);
++
+ GType        ibus_input_context_get_type    (void);
+ 
+ /**
+@@ -140,6 +152,52 @@ gboolean     ibus_input_context_process_
+                                              guint32             state);
+ 
+ /**
++ * ibus_input_context_process_key_event_async:
++ * @context: An IBusInputContext.
++ * @keyval: Key symbol of a key event.
++ * @keycode: Keycode of a key event.
++ * @state: Key modifier flags.
++ * @timeout_msec: The timeout in milliseconds or -1 to use the default timeout.
++ * @free_user_data: A GDestroyNotifyor NULL.
++ * @callback: An IBusInputContextNotifyFunction to call when the request is
++ *      satisfied or NULL
++ *      if you don't care about the result of the method invocation.
++ * @user_data: The data to pass to callback.
++ *
++ * Pass the key event to input method engine with async.
++ *
++ * see_also: #IBusEngine::process-key-event
++ */
++void        ibus_input_context_process_key_event_async
++                                            (IBusInputContext   *context,
++                                             guint32             keyval,
++                                             guint32             keycode,
++                                             guint32             state,
++                                             gint                timeout_msec,
++                                             GDestroyNotify
++                                                                free_user_data,
++                                             IBusInputContextNotifyFunction
++                                                                 callback,
++                                             gpointer            user_data);
++
++/**
++ * ibus_input_context_process_key_event_async_finish:
++ * @context: An IBusInputContext.
++ * @res: A IBusPendingCall obtained from the IBusInputContextNotifyFunction
++ *      passed to ibus_input_context_process_key_event_async().
++ * @error: Return location for error or NULL.
++ * @returns: %TRUE if the key event is processed;
++ *      %FALSE otherwise or some errors happen and the @error will be set.
++ *
++ * Finishes an operation started with
++ * ibus_input_context_process_key_event_async().
++ */
++gboolean     ibus_input_context_process_key_event_async_finish
++                                            (IBusInputContext   *context,
++                                             IBusPendingCall    *pending,
++                                             IBusError        **error);
++
++/**
+  * ibus_input_context_set_cursor_location:
+  * @context: An IBusInputContext.
+  * @x: X coordinate of the cursor.
