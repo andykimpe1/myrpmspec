@@ -1,0 +1,265 @@
+# -*-Shell-script-*-
+#
+# fadump-functions	This file contains functions to be used by kdump
+#			init script in the /etc/init.d directory in
+#			fadump mode
+#
+
+FADUMP_REGISTER_SYS_NODE="/sys/kernel/fadump_registered"
+FADUMP_DEFAULT_CORE_COLLECTOR="makedumpfile -c --message-level 1 -d 31"
+FADUMP_TIMESTAMP=$(date +%Y-%m-%d-%T)
+
+is_fadump_save_path()
+{
+	[ -e /proc/device-tree/rtas/ibm,kernel-dump ] && return 0
+	return 1
+}
+
+get_fadump_target_line()
+{
+	local _target
+	_target=$(egrep "^ext[234]|^raw" /etc/kdump.conf | tail -n 1)
+
+	echo $_target
+}
+
+save_fadump_dmesg_and_vmcore()
+{
+	local _save_path=$1
+	local _core_collector=$2
+
+	mkdir -p $_save_path
+
+	/sbin/vmcore-dmesg /proc/vmcore > $_save_path/vmcore-dmesg-incomplete.txt
+	if [ $? == 0 ]; then
+		mv $_save_path/vmcore-dmesg-incomplete.txt $_save_path/vmcore-dmesg.txt
+		echo "kdump: saved vmcore-dmesg.txt"
+	else
+		echo "kdump: failed to save vmcore-dmesg.txt"
+	fi
+
+	$_core_collector /proc/vmcore $_save_path/vmcore-incomplete
+	rc=$?
+	if [ $rc != 0 ]; then
+		echo "kdump: failed to save vmcore"
+	else
+		mv $_save_path/vmcore-incomplete $_save_path/vmcore
+		echo "kdump: saved vmcore successfully"
+	fi
+
+	return $rc
+}
+
+save_fadump_core()
+{
+	local _dump_target _dump_type _path
+	local _core_collector _save_dir _save_path
+
+	if [ ! -f /proc/vmcore ]; then
+		local _commandline
+
+		echo "kdump: vmcore file not found"
+		_commandline=$(cat /proc/cmdline | grep "fadump=on")
+		if [ -z "$_commandline" ]; then
+			echo "kdump: \"fadump=on\" parameter missing in second boot"
+		fi
+		return 1
+	fi
+
+	# Consider status of all commands executed while using pipe
+	set -o pipefail
+
+	_dump_target=$(get_fadump_target_line)
+	_path=$(get_save_path)
+	_dump_type=$(echo "$_dump_target" | awk '{ print $1 }')
+	_dump_target=$(echo "$_dump_target" | awk '{ print $2 }')
+	_save_dir=127.0.0.1-$FADUMP_TIMESTAMP
+
+	_core_collector=$(egrep "^core_collector" /etc/kdump.conf|tail -n 1|awk '{ $1="" ; print $0 }')
+	if [ -z "$_core_collector" ]; then
+		# No core collector specified. Using default
+		_core_collector="$FADUMP_DEFAULT_CORE_COLLECTOR"
+	fi
+
+	case "$_dump_type" in
+	raw)
+		echo "kdump: saving to raw partition $_dump_target"
+		_core_collector=$(echo $_core_collector | sed -e's/\(^makedumpfile\)\(.*$\)/\1 -F \2/')
+		$_core_collector /proc/vmcore | dd of=$_dump_target
+		rc=$?
+		if [ $rc -ne 0 ]; then
+			echo "kdump: failed to save vmcore"
+		else
+			blockdev --flushbufs $_dump_target
+			echo "kdump: saved vmcore successfully"
+		fi
+		return $rc
+		;;
+	ext[234])
+		local _mnt_path=$(findmnt -k -f -r -n -o TARGET $_dump_target)
+		local _temp_dir=""
+
+		echo "kdump: saving to local partition $_dump_target at $_path/$_save_dir"
+		if [ -z "$_mnt_path" ]; then
+			_temp_dir=`mktemp -dq`
+			mount -t $_dump_type $_dump_target $_temp_dir
+			if [ $? -ne 0 ]; then
+				rm -rf $_temp_dir
+				echo "kdump: failed to mount $_dump_target"
+				return 1
+			fi
+
+			_save_path=$_temp_dir/$_path/$_save_dir
+		else
+			_save_path=$_mnt_path/$_path/$_save_dir
+		fi
+
+		save_fadump_dmesg_and_vmcore "$_save_path" "$_core_collector"
+		rc=$?
+		# Cleanup
+		if [ -n "$_temp_dir" ]; then
+			umount $_temp_dir
+			rm -rf $_temp_dir
+		fi
+		return $rc
+		;;
+	*)
+		echo "kdump: saving to local path $_path/$_save_dir"
+		_save_path=$_path/$_save_dir
+		save_fadump_dmesg_and_vmcore "$_save_path" "$_core_collector"
+		return $?
+		;;
+	esac
+}
+
+save_fadump_core_on_error()
+{
+	# Try one last time to save vmcore before performing default action
+	if [ -n "$(get_fadump_target_line)" ]; then
+		local _save_path="$(get_save_path)/127.0.0.1-$FADUMP_TIMESTAMP"
+		echo "kdump: trying to save vmcore to local path $_save_path"
+		echo "kdump: with \"$FADUMP_DEFAULT_CORE_COLLECTOR\" command.."
+		save_fadump_dmesg_and_vmcore "$_save_path" "$FADUMP_DEFAULT_CORE_COLLECTOR"
+	fi
+}
+
+handle_fadump_default_action()
+{
+	local _default_action=$(egrep "^default" /etc/kdump.conf | tail -n 1 | awk '{ print $2 }')
+
+	case "$_default_action" in
+	poweroff)
+		echo "kdump: shutting down the system"
+		poweroff
+		;;
+	halt)
+		echo "kdump: halting the system"
+		halt
+		;;
+	*)
+		reboot
+		;;
+	esac
+}
+
+is_fadump_target_writable()
+{
+	local _tdir=$1
+	local _path=$2
+	local _dump_target=$3
+
+	mkdir -p $_tdir/$_path && touch $_tdir/$_path/testfile-$FADUMP_TIMESTAMP
+	rc=$?
+	if [ $rc -ne 0 ]; then
+		echo "kdump: read-only dump target $_dump_target"
+	fi
+
+	rm -f $_tdir/$_path/testfile-$FADUMP_TIMESTAMP
+	return $rc
+}
+
+check_fadump_config()
+{
+	local _dump_type _dump_target
+
+	_dump_target=$(get_fadump_target_line)
+	if [ -z "$_dump_target" ]; then
+		return 0
+	fi
+
+	_dump_type=$(echo "$_dump_target" | awk '{ print $1 }')
+	_dump_target=$(echo "$_dump_target" | awk '{ print $2 }')
+
+	case "$_dump_type" in
+	raw)
+		dd if=$_dump_target count=1 of=/dev/null > /dev/null 2>&1
+		if [ $? -ne 0 ]; then
+			echo "kdump: bad raw partition $_dump_target"
+			return 1
+		fi
+		;;
+	ext[234])
+		local _path=$(get_save_path)
+		local _tdir=$(mktemp -dq)
+		mount -t $_dump_type $_dump_target $_tdir
+		if [ $? -ne 0 ]; then
+			rm -rf $_tdir
+			echo "kdump: bad mount point $_dump_target"
+			return 1
+		fi
+
+		is_fadump_target_writable "$_tdir" "$_path" "$_dump_target"
+		rc=$?
+		# Cleanup
+		umount $_tdir
+		rm -rf $_tdir
+		return $rc
+		;;
+	*)
+		;;
+	esac
+
+	return 0
+}
+
+check_current_fadump_status()
+{
+	# Check if firmware-assisted dump has been registered.
+	if [ -f $FADUMP_REGISTER_SYS_NODE ]; then
+		rc=`cat $FADUMP_REGISTER_SYS_NODE`
+		[ $rc -ne 1 ] && return 1
+	fi
+
+	return 0
+}
+
+start_fadump()
+{
+	if [ -f $FADUMP_REGISTER_SYS_NODE ]; then
+		echo 1 > $FADUMP_REGISTER_SYS_NODE
+		if check_current_fadump_status; then
+			echo "fadump: registered successfully"
+			return 0
+		fi
+	fi
+
+	echo "fadump: failed to register"
+	return 1
+}
+
+stop_fadump()
+{
+	if ! check_current_fadump_status; then
+		echo "fadump: not registered"
+		return 0
+	else
+		echo 0 > $FADUMP_REGISTER_SYS_NODE
+		if check_current_fadump_status; then
+			echo "fadump: failed to unregister"
+			return 1
+		fi
+	fi
+
+	echo "fadump: unregistered successfully"
+	return 0
+}

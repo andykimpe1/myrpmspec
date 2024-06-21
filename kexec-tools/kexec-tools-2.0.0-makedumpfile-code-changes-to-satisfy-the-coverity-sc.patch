@@ -1,0 +1,77 @@
+From b8db226455ac19b3e31514101c5993b0faedcf61 Mon Sep 17 00:00:00 2001
+From: Chao Fan <cfan@redhat.com>
+Date: Tue, 25 Aug 2015 14:50:34 +0800
+Subject: [PATCH V2] makedumpfile: code changes to satisfy the coverity scan
+
+Coverity scan found some uncheked return value when calling
+function. So the return value of the function set_page_size
+and lseek should be checked to satisfy the coverity scan.
+
+In the function read_sadump_header, block_size is defined as an
+unsigned long value, and it will never be less than zero, so this
+comparison should be removed.
+
+Signed-off-by: Chao Fan <cfan@redhat.com>
+---
+ makedumpfile.c | 3 ++-
+ makedumpfile.h | 8 +++++++-
+ sadump_info.c  | 3 ---
+ 3 files changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/makedumpfile-1.3.5/makedumpfile.c b/makedumpfile-1.3.5/makedumpfile.c
+index 32f5459..53efc04 100644
+--- a/makedumpfile-1.3.5/makedumpfile.c
++++ b/makedumpfile-1.3.5/makedumpfile.c
+@@ -3213,7 +3213,8 @@ initial(void)
+ 			MSG("because the cyclic mode doesn't support sadump format.\n");
+ 		}
+ 
+-		set_page_size(sadump_page_size());
++		if (!set_page_size(sadump_page_size()))
++			return FALSE;
+ 
+ 		if (!sadump_initialize_bitmap_memory())
+ 			return FALSE;
+diff --git a/makedumpfile.h b/makedumpfile.h
+index d2fadbd..0b54228 100644
+--- a/makedumpfile-1.3.5/makedumpfile.h
++++ b/makedumpfile-1.3.5/makedumpfile.h
+@@ -42,6 +42,7 @@
+ #include "dwarf_info.h"
+ #include "diskdump_mod.h"
+ #include "sadump_mod.h"
++#include "print_info.h"
+ 
+ /*
+  * Result of command
+@@ -1745,7 +1746,12 @@ is_dumpable(struct dump_bitmap *bitmap, mdf_pfn_t pfn)
+ 	off_t offset;
+ 	if (pfn == 0 || bitmap->no_block != pfn/PFN_BUFBITMAP) {
+ 		offset = bitmap->offset + BUFSIZE_BITMAP*(pfn/PFN_BUFBITMAP);
+-		lseek(bitmap->fd, offset, SEEK_SET);
++		if (lseek(bitmap->fd, offset, SEEK_SET) < 0 ) {
++			ERRMSG("Can't seek the bitmap(%s). %s\n",
++				bitmap->file_name, strerror(errno));
++			return FALSE;
++		}
++
+ 		read(bitmap->fd, bitmap->buf, BUFSIZE_BITMAP);
+ 		if (pfn == 0)
+ 			bitmap->no_block = 0;
+diff --git a/sadump_info.c b/sadump_info.c
+index e2c4f03..e8154f4 100644
+--- a/makedumpfile-1.3.5/sadump_info.c
++++ b/makedumpfile-1.3.5/sadump_info.c
+@@ -465,9 +465,6 @@ read_sadump_header(char *filename)
+ 	smh = si->smh_memory;
+ 
+ restart:
+-	if (block_size < 0)
+-		return FALSE;
+-
+ 	if (!read_device(sph, block_size, &offset))
+ 		return ERROR;
+ 
+-- 
+2.4.3
+

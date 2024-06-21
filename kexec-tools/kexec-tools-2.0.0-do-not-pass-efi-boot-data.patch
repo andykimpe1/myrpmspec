@@ -1,0 +1,64 @@
+
+Resolves: bz1396377
+
+When running the kernel-rt-3.10.0-xxx (provided by MRG-RT product) on
+a RHEL6 system with EFI, the kdump does not work. kdump kernel hangs early.
+
+There is a kexec-tools patch in RHEL6 kexec-tools to copy uefi boot data
+to kdump kernel, but we pass "noefi" in kdump kernel cmdline to boot in
+none-efi mode now so the old legacy patch is useless now.
+
+In RHEL6 kernel "noefi" == "completely disable efi" that means in case
+"noefi" boot kernel will bypass all the efi init steps.  But in RHEL7 and
+newer kernels "noefi" == "no efi runtime" that means early efi init code
+still runs even with "noefi". The early efi init code will dereference and
+use some efi variables like fw_vendor which is converted to virtual address
+in 1st kernel, but kdump kernel will assume it is a physical address thus
+kdump kernel hangs.
+
+Since in RHEL6 we do not support efi runtime, and we unconditionally boot
+kdump kernel with "noefi" so the patch is useless.
+
+But it can not be cleanly dropped because of later patches context changes
+thus here add aother patch to drop the code of passing efi boot data.
+
+Tested on a HP workstation.
+
+Signed-off-by: Dave Young <dyoung@redhat.com>
+---
+ kexec/arch/i386/x86-linux-setup.c |   17 -----------------
+ 1 file changed, 17 deletions(-)
+
+--- kexec-tools-2.0.0.orig/kexec/arch/i386/x86-linux-setup.c
++++ kexec-tools-2.0.0/kexec/arch/i386/x86-linux-setup.c
+@@ -403,8 +403,6 @@ void setup_linux_system_parameters(struc
+ 	/* Fill in information the BIOS would usually provide */
+ 	struct memory_range *range;
+ 	int i, ranges;
+-	int boot_param_fd;
+-	int sgi_uv_fd;
+ 
+ 	/* Default screen size */
+ 	real_mode->orig_x = 0;
+@@ -431,21 +429,6 @@ void setup_linux_system_parameters(struc
+ 	real_mode->sys_desc_table.length = 0;
+ 
+ 	memset(&real_mode->efi_info, 0, sizeof(struct efi_info));
+-	/* check to see if we're running an EFI firmware here */
+-	boot_param_fd = open("/sys/kernel/debug/boot_params/data", O_RDONLY);
+-	sgi_uv_fd = open("/proc/sgi_uv", O_RDONLY);
+-	if (boot_param_fd > 0 && sgi_uv_fd < 0) {
+-		int rc;
+-		lseek(boot_param_fd, 0x1c0, SEEK_SET);
+-		rc  = read(boot_param_fd, &real_mode->efi_info,
+-			sizeof(struct efi_info));
+-		if (rc != sizeof(struct efi_info))
+-			printf("ERROR READING EFI INFO\n");
+-		close(boot_param_fd);	
+-	} else if (sgi_uv_fd >= 0)
+-		close(sgi_uv_fd);
+-	else
+-		printf("UNABLE TO GATHER EFI DATA\n");
+ 	
+ 	/* default yes: this can be overridden on the command line */
+ 	real_mode->mount_root_rdonly = 0xFFFF;

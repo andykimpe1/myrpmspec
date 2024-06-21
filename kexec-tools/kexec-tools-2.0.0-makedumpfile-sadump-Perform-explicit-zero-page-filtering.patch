@@ -1,0 +1,72 @@
+From be3d98179f6e98938281aee7cb76123a50da66f4 Mon Sep 17 00:00:00 2001
+From: Xunlei Pang <xlpang@redhat.com>
+Date: Thu, 10 Dec 2015 20:01:15 +0800
+Subject: [PATCH 2/2] sadump: Perform explicit zero page filtering.
+
+Bugzilla:
+https://bugzilla.redhat.com/show_bug.cgi?id=1282999
+
+This a backport from upstream makedumpfile:
+
+ commit 19b3a91646958089f8ce90ca518c8262bfc8ca88
+ Author: HATAYAMA Daisuke <d.hatayama@jp.fujitsu.com>
+ Date:   Tue Oct 20 16:12:01 2015 +0900
+
+    [PATCH 2/2] sadump: Perform explicit zero page filtering.
+
+    Currently, crash utility faces different behaviors on reading zero
+    pages that are filtered out on the kdump-compressed format originating
+    from kdump ELF and from sadump formats: the former succeeds in reading
+    zero pages but the latter fails. This is a design bug. To fix this
+    issue, perform zero pages filtering explicitly if some pages are
+    filtered out.
+
+    Signed-off-by: Takao Indoh <indou.takao@jp.fujitsu.com>
+    Signed-off-by: HATAYAMA Daisuke <d.hatayama@jp.fujitsu.com>
+
+Signed-off-by: Xunlei Pang <xlpang@redhat.com>
+---
+ sadump_info.c | 20 +++++++++++++++++---
+ 1 file changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/makedumpfile-1.3.5/sadump_info.c b/makedumpfile-1.3.5/sadump_info.c
+index e30b802..63d00c6 100644
+--- a/makedumpfile-1.3.5/sadump_info.c
++++ b/makedumpfile-1.3.5/sadump_info.c
+@@ -878,6 +878,21 @@ sadump_initialize_bitmap_memory(void)
+ 	bmp->offset = si->sub_hdr_offset + sh->block_size * sh->sub_hdr_size;
+ 	si->ram_bitmap = bmp;
+ 
++	/*
++	 * Perform explicitly zero filtering. Without this processing
++	 * crash utility faces different behaviors on reading zero
++	 * pages that are filtered out on the kdump-compressed format
++	 * originating from kdump ELF and from sadump formats: the
++	 * former succeeds in reading zero pages but the latter fails.
++	 */
++	for (pfn = 0; pfn < si->max_mapnr; pfn++) {
++		if (sadump_is_ram(pfn) &&
++		    !sadump_is_dumpable(info->bitmap_memory, pfn)) {
++			info->dump_level |= DL_EXCLUDE_ZERO;
++			break;
++		}
++	}
++
+ 	return TRUE;
+ }
+ 
+@@ -1053,9 +1068,8 @@ readpage_sadump(unsigned long long paddr, void *bufptr)
+ 	}
+ 
+ 	if (!sadump_is_dumpable(info->bitmap_memory, pfn)) {
+-		ERRMSG("pfn(%llx) is excluded from %s.\n", pfn,
+-		       info->name_memory);
+-		return FALSE;
++		memset(bufptr, 0, info->page_size);
++		return TRUE;
+ 	}
+ 
+ 	block = pfn_to_block(pfn);
+-- 
+2.5.0
+
