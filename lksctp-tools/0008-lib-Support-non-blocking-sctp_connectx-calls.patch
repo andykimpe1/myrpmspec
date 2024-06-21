@@ -1,0 +1,203 @@
+From 2e0968e36e2520a0c043e53f4f9a468f4d1cd4a4 Mon Sep 17 00:00:00 2001
+From: Vlad Yasevich <vladislav.yasevich@hp.com>
+Date: Fri, 23 Oct 2009 20:43:39 -0400
+Subject: [PATCH 08/53] lib: Support non-blocking sctp_connectx() calls
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+1: I decided to keep the previous "new" sctp_connectx() implementation,
+because a: it costs nothing, and b: some very recent programs may rely
+on the broken behaviour.
+
+2: The new-new sctp_connectx() tries the new method first. If it fails
+due to ENOPROTOOPT (old kernel) then it falls back to the old method first, but
+only if it is safe to do so (blocking socket, or assoc_id not returned)
+
+3: (note of users of this feature): If a non-blocking connect fails
+quickly then a new call to sctp_connectx() may return an identical association
+id becaue the ID has been freed up already.
+
+Additional slight code clean-up.
+
+Signed-off-by: Ivan Skytte Jørgensen <isj-sctp@i1.dk>
+Signed-off-by: Vlad Yasevich <vladislav.yasevich@hp.com>
+---
+ src/include/netinet/sctp.h |   2 +
+ src/lib/Versions.map       |   4 ++
+ src/lib/connectx.c         | 113 ++++++++++++++++++++++++++++++++++++++-------
+ 3 files changed, 102 insertions(+), 17 deletions(-)
+
+diff --git a/src/include/netinet/sctp.h b/src/include/netinet/sctp.h
+index f4e6684..bb0bd0b 100644
+--- a/src/include/netinet/sctp.h
++++ b/src/include/netinet/sctp.h
+@@ -149,6 +149,8 @@ enum sctp_optname {
+ #define SCTP_GET_LOCAL_ADDRS	SCTP_GET_LOCAL_ADDRS
+ 	SCTP_SOCKOPT_CONNECTX, /* CONNECTX requests. NEW implementation */
+ #define SCTP_SOCKOPT_CONNECTX	SCTP_SOCKOPT_CONNECTX
++	SCTP_SOCKOPT_CONNECTX3, /* CONNECTX requests. NEW, NEW implementation */
++#define SCTP_SOCKOPT_CONNECTX3	SCTP_SOCKOPT_CONNECTX3
+ };
+ 
+ /*
+diff --git a/src/lib/Versions.map b/src/lib/Versions.map
+index f06c56e..a3c5561 100644
+--- a/src/lib/Versions.map
++++ b/src/lib/Versions.map
+@@ -20,3 +20,7 @@ VERS_1 {
+ VERS_2 {
+ 	global:	sctp_connectx;
+ } VERS_1;
++
++VERS_3 {
++	global:	sctp_connectx;
++} VERS_2;
+diff --git a/src/lib/connectx.c b/src/lib/connectx.c
+index 2994259..c5c18dd 100644
+--- a/src/lib/connectx.c
++++ b/src/lib/connectx.c
+@@ -23,7 +23,9 @@
+ #include <netinet/in.h>
+ #include <netinet/sctp.h> /* SCTP_SOCKOPT_CONNECTX_* */
+ #include <errno.h>
+-#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <fcntl.h>
+ 
+ /* Support the sctp_connectx() interface.
+  *
+@@ -76,36 +78,113 @@ int __sctp_connectx(int fd, struct sockaddr *addrs, int addrcnt)
+ extern int sctp_connectx_orig (int)
+ 	__attribute ((alias ("__sctp_connectx")));
+ 
+-int sctp_connectx_new(int fd, struct sockaddr *addrs, int addrcnt,
+-		      sctp_assoc_t *id)
++
++static int __connectx(int fd, struct sockaddr *addrs, socklen_t addrs_size,
++			sctp_assoc_t *id)
+ {
+-	socklen_t addrs_size = __connectx_addrsize(addrs, addrcnt);
+ 	int status;
+ 
+-	if (addrs_size < 0)
+-		return addrs_size;
+-
+ 	if (id)
+ 		*id = 0;
+ 
+-	status =  setsockopt(fd, SOL_SCTP, SCTP_SOCKOPT_CONNECTX, addrs,
+-			     addrs_size);
+-
+-	/* the kernel doesn't support the new connectx interface */
+-	if (status < 0 && errno == ENOPROTOOPT)
+-		return setsockopt(fd, SOL_SCTP, SCTP_SOCKOPT_CONNECTX_OLD,
+-				  addrs, addrs_size);
++	status = setsockopt(fd, SOL_SCTP, SCTP_SOCKOPT_CONNECTX, addrs,
++			    addrs_size);
+ 
+ 	/* Normalize status and set association id */
+ 	if (status > 0) {
+ 		if (id)
+ 			*id = status;
+-		status = 0;
++		return 0;
++	}
++
++	/* The error is something other then "Option not supported" */
++	if (status < 0 && errno != ENOPROTOOPT)
++		return status;
++
++	/* At this point, if the application wanted the id, we can't
++	 * really provide it, so we can return ENOPROTOOPT.
++	 */
++	if (id) {
++		errno = ENOPROTOOPT;
++		return -1;
++	}
++
++	/* Finally, try the old API */
++	return setsockopt(fd, SOL_SCTP, SCTP_SOCKOPT_CONNECTX_OLD,
++			  addrs, addrs_size);
++}
++
++int sctp_connectx2(int fd, struct sockaddr *addrs, int addrcnt,
++		      sctp_assoc_t *id)
++{
++	socklen_t addrs_size = __connectx_addrsize(addrs, addrcnt);
++
++	if (addrs_size < 0)
++		return addrs_size;
++
++	return __connectx(fd, addrs, addrs_size, id);
++}
++
++int sctp_connectx3(int fd, struct sockaddr *addrs, int addrcnt,
++		      sctp_assoc_t *id)
++{
++	socklen_t addrs_size = __connectx_addrsize(addrs, addrcnt);
++	int status;
++	char *new_api_buffer;
++
++	if (addrs_size < 0)
++		return addrs_size;
++
++	/* First try the new socket api
++	 * Because the id is returned in the option buffer we have prepend
++	 * 32bit to it for the returned association id
++	 */
++	new_api_buffer = (char*) malloc(sizeof(sctp_assoc_t) + addrs_size);
++	if (new_api_buffer) {
++		socklen_t option_len = addrs_size + sizeof(sctp_assoc_t);
++
++		memset(new_api_buffer, 0, sizeof(sctp_assoc_t));
++		memcpy(new_api_buffer + sizeof(sctp_assoc_t), addrs,
++			addrs_size);
++		status = getsockopt(fd, SOL_SCTP, SCTP_SOCKOPT_CONNECTX3,
++		                    new_api_buffer, &option_len);
++		if (status == 0 || errno == EINPROGRESS) {
++			/* Succeeded immediately, or initiated on non-blocking
++			 * socket.
++			 */
++			if (id)
++				*id = *(uint32_t*)new_api_buffer;
++		}
++
++		free(new_api_buffer);
++		if (errno != ENOPROTOOPT) {
++			/* No point in trying the fallbacks*/
++			return status;
++		}
++	}
++
++	/* The first incarnation of updated connectx api didn't work for
++	 * non-blocking sockets.  So if the application wants the association
++	 * id and the socket is non-blocking, we can't really do anything.
++	 */
++	if (id) {
++		/* Program wants the association-id returned. We can only do
++		 * that if the socket is blocking */
++		status = fcntl(fd, F_GETFL);
++		if (status < 0)
++			return status;
++
++		if (status & O_NONBLOCK) {
++			/* Socket is non-blocking. Fail */
++			errno = ENOPROTOOPT;
++			return -1;
++		}
+ 	}
+ 
+-	return status;
++	return __connectx(fd, addrs, addrs_size, id);
+ }
+ 
+ __asm__(".symver __sctp_connectx, sctp_connectx@");
+ __asm__(".symver sctp_connectx_orig, sctp_connectx@VERS_1");
+-__asm__(".symver sctp_connectx_new, sctp_connectx@@VERS_2");
++__asm__(".symver sctp_connectx2, sctp_connectx@VERS_2");
++__asm__(".symver sctp_connectx3, sctp_connectx@@VERS_3");
+-- 
+1.7.11.7
+

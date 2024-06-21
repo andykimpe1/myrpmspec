@@ -1,0 +1,100 @@
+From a2765e638f4f0b5c49b836927c4d670c197b58a6 Mon Sep 17 00:00:00 2001
+From: Hangbin Liu <liuhangbin@gmail.com>
+Date: Tue, 26 Feb 2013 10:03:58 +0800
+Subject: [PATCH 47/53] test_1_to_1_threads: fixup pthread hung by giving an
+ array instead of a pointer
+
+As we give a pointer arg to pthread_create, some thread's cnt will be set to 1
+when we run into next loop, which may cause all the threads blocked by t_recv.
+If we still want to use a pointer to avoid compile warning, then an array
+should be a good choice.
+
+Here I'd like to analyse the logic of function relay(). As Daniel said, this
+test's purpose is communications across different threads, which would like:
+
+  Thread 1:   send(sock_client), exit
+  Thread 2:   recv(sock_server), send(sock_client), exit
+  ...
+  Thread X-1: recv(sock_server), send(sock_client), exit
+  Thread X:   recv(sock_server), exit
+
+But this may cause test huang as we don't know the order of threads. e.g.
+
+  Thread 1:   send(sock_client), exit
+  Thread 2:   recv(sock_server), send(sock_client), exit
+  Thread X:   recv(sock_server), exit
+  Thread 3:   recv(sock_server), send(sock_client), hung
+  ...
+  Thread X-1: recv(sock_server), send(sock_client), hung
+
+If we receive first and put send at last. It may also cause hung like:
+
+  Thread X:   send(sock_client), exit
+  Thread X-1: recv(sock_server), send(sock_client), exit
+  Thread 1:   recv(sock_server), exit
+  Thread X-2: recv(sock_server), send(sock_client), hung
+  ...
+  Thread 2:   recv(sock_server), send(sock_client), hung
+
+So, keep relay()'s logic like the following should be the best choice:
+
+  Thread 1:   send(sock_client), exit
+  Thread 2:   recv(sock_server), send(sock_client), exit
+  ...
+  Thread X-1: recv(sock_server), send(sock_client), exit
+  Thread X:   recv(sock_server), send(sock_client), exit
+
+Then there will be no hung and we can keep communications across different
+threads. Thus, we also don't need if (id == THREADS -1) now.
+
+Signed-off-by: Hangbin Liu <liuhangbin@gmail.com>
+Signed-off-by: Daniel Borkmann <dborkman@redhat.com>
+---
+ src/func_tests/test_1_to_1_threads.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/src/func_tests/test_1_to_1_threads.c b/src/func_tests/test_1_to_1_threads.c
+index 80fa4c4..562b4d8 100644
+--- a/src/func_tests/test_1_to_1_threads.c
++++ b/src/func_tests/test_1_to_1_threads.c
+@@ -123,8 +123,6 @@ void *relay(void *arg)
+ 
+ 	if (id == 0) {
+ 		t_send(id);
+-	} else if (id == THREADS -1) {
+-		t_send(id);	
+ 	} else {
+ 		t_recv (id);
+ 		t_send(id);
+@@ -138,6 +136,7 @@ main(void)
+ {
+ 
+ 	int      cnt,i;
++	int      pth[THREADS];
+ 	pthread_t       thread[THREADS];
+ 	int  status;
+ 	int  exit_status;
+@@ -171,8 +170,9 @@ main(void)
+ 	acpt_sk = test_accept(server_sk, (struct sockaddr *)&svr_addr, &len);
+ 
+ 	for ( i = 0; i < THREAD_SND_RCV_LOOPS; i++ ) {
+-		for (cnt = 1; cnt < THREADS; cnt++) {
+-			status = pthread_create(&thread[cnt], &attr, relay, &cnt);
++		for (cnt = 0; cnt < THREADS; cnt++) {
++			pth[cnt] = cnt;
++			status = pthread_create(&thread[cnt], &attr, relay, &pth[cnt]);
+ 			if (status)
+ 				tst_brkm(TBROK, tst_exit, "pthread_create "
+                          		 "failed status:%d, errno:%d", status,
+@@ -180,7 +180,7 @@ main(void)
+ 		}
+ 
+ 		pthread_attr_destroy(&attr);
+-		for (cnt = 1; cnt < THREADS ; cnt++) {
++		for (cnt = 0; cnt < THREADS ; cnt++) {
+ 			exit_status = pthread_join (thread[cnt], &result);
+ 			if (exit_status == -1)
+ 				tst_brkm(TBROK, tst_exit, "pthread_join "
+-- 
+1.7.11.7
+
