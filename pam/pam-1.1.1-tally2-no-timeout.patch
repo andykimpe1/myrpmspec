@@ -1,0 +1,42 @@
+diff -up Linux-PAM-1.1.1/modules/pam_tally2/pam_tally2.c.no-timeout Linux-PAM-1.1.1/modules/pam_tally2/pam_tally2.c
+--- Linux-PAM-1.1.1/modules/pam_tally2/pam_tally2.c.no-timeout	2014-10-10 09:45:38.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_tally2/pam_tally2.c	2014-10-10 10:00:25.893165716 +0200
+@@ -124,6 +124,10 @@ struct tally_options {
+ #define OPT_AUDIT                       0100
+ #define OPT_NOLOGNOTICE                 0400
+ #define OPT_SERIALIZE                  01000
++/* This option can cause the service to be easily DoSed by having the
++   authentication stuck with lockf locked, do not use it unless you know
++   what you're doing. Use pam_faillock instead. */
++#define OPT_NO_LOCKF_TIMEOUT           02000
+ 
+ #define MAX_LOCK_WAITING_TIME 10
+ 
+@@ -230,6 +234,9 @@ tally_parse_args(pam_handle_t *pamh, str
+         }
+         opts->ctrl |= OPT_DENY_ROOT; /* even_deny_root implied */
+       }
++      else if ( ! strcmp( *argv, "no_lockf_timeout" ) ) {
++        opts->ctrl |= OPT_NO_LOCKF_TIMEOUT;
++      }
+       else if ( ! strcmp( *argv, "quiet" ) ||
+ 		! strcmp ( *argv, "silent")) {
+         opts->ctrl |= OPT_QUIET;
+@@ -425,6 +432,7 @@ skip_open:
+     }
+ 
+     if (!preopened && (ctrl & OPT_SERIALIZE)) {
++      if (!(ctrl & OPT_NO_LOCKF_TIMEOUT)) {
+ 	/* this code is not thread safe as it uses fcntl locks and alarm()
+ 	   so never use serialize with multithreaded services */
+ 	struct sigaction newsa, oldsa;
+@@ -449,6 +457,9 @@ skip_open:
+ 	}
+ 	sigaction(SIGALRM, &oldsa, NULL);
+ 	alarm(oldalarm);
++      } else {
++	while (lockf(*tfile, F_LOCK, sizeof(*tally)) == -1 && errno == EINTR);
++      }
+     }
+ 
+     if (fileinfo.st_size < (off_t)(uid+1)*(off_t)sizeof(*tally)) {

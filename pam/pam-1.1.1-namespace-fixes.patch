@@ -1,0 +1,129 @@
+diff -up Linux-PAM-1.1.1/modules/pam_namespace/namespace.conf.5.xml.nsfixes Linux-PAM-1.1.1/modules/pam_namespace/namespace.conf.5.xml
+--- Linux-PAM-1.1.1/modules/pam_namespace/namespace.conf.5.xml.nsfixes	2008-04-18 14:53:38.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_namespace/namespace.conf.5.xml	2012-10-12 09:15:58.856270924 +0200
+@@ -119,6 +119,14 @@
+       contain the user name and will be shared among all users.
+     </para>
+ 
++    <para><emphasis>mntopts</emphasis>=<replaceable>value</replaceable>
++      - value of this flag is passed to the mount call when the tmpfs mount is
++      done. It allows for example the specification of the maximum size of the
++      tmpfs instance that is created by the mount call. See <citerefentry>
++      <refentrytitle>mount</refentrytitle><manvolnum>8</manvolnum>
++      </citerefentry> for details.
++    </para>
++
+     <para>
+       The directory where polyinstantiated instances are to be
+       created, must exist and must have, by default, the mode of 0000.  The
+diff -up Linux-PAM-1.1.1/modules/pam_namespace/pam_namespace.c.nsfixes Linux-PAM-1.1.1/modules/pam_namespace/pam_namespace.c
+--- Linux-PAM-1.1.1/modules/pam_namespace/pam_namespace.c.nsfixes	2012-07-19 14:37:25.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_namespace/pam_namespace.c	2012-10-12 09:13:50.396413487 +0200
+@@ -61,9 +61,12 @@ static void add_polydir_entry(struct ins
+ 
+ static void del_polydir(struct polydir_s *poly)
+ {
+-	free(poly->uid);
+-	free(poly->init_script);
+-	free(poly);
++	if (poly) {
++		free(poly->uid);
++		free(poly->init_script);
++		free(poly->mount_opts);
++		free(poly);
++	}
+ }
+ 
+ /*
+@@ -235,9 +238,9 @@ static int parse_method(char *method, st
+     static const char *method_names[] = { "user", "context", "level", "tmpdir",
+     	"tmpfs", NULL };
+     static const char *flag_names[] = { "create", "noinit", "iscript",
+-    	"shared", NULL };
++	"shared", "mntopts", NULL };
+     static const unsigned int flag_values[] = { POLYDIR_CREATE, POLYDIR_NOINIT,
+-    	POLYDIR_ISCRIPT, POLYDIR_SHARED };
++	POLYDIR_ISCRIPT, POLYDIR_SHARED, POLYDIR_MNTOPTS };
+     int i;
+     char *flag;
+ 
+@@ -277,6 +280,20 @@ static int parse_method(char *method, st
+     			    		return -1;
+     			    	};
+     			    	break;
++
++			    case POLYDIR_MNTOPTS:
++				if (flag[namelen] != '=')
++					break;
++				if (poly->method != TMPFS) {
++					pam_syslog(idata->pamh, LOG_WARNING, "Mount options applicable only to tmpfs method");
++					break;
++				}
++				free(poly->mount_opts); /* if duplicate mntopts specified */
++				if ((poly->mount_opts = strdup(flag+namelen+1)) == NULL) {
++					pam_syslog(idata->pamh, LOG_CRIT, "Memory allocation error");
++					return -1;
++				}
++				break;
+     			}
+     		}
+     	}
+@@ -1093,7 +1110,7 @@ static int protect_dir(const char *path,
+ error:
+ 	save_errno = errno;
+ 	free(p);
+-	if (dfd != AT_FDCWD)
++	if (dfd != AT_FDCWD && dfd >= 0)
+ 		close(dfd);
+ 	errno = save_errno;
+ 
+@@ -1453,15 +1470,16 @@ static int ns_setup(struct polydir_s *po
+ 	return PAM_SESSION_ERR;    
+     }
+ 
+-    if (retval < 0 && (polyptr->flags & POLYDIR_CREATE)) {
+-	if (create_polydir(polyptr, idata) != PAM_SUCCESS)
++    if (retval < 0) {
++	if ((polyptr->flags & POLYDIR_CREATE) &&
++		create_polydir(polyptr, idata) != PAM_SUCCESS)
+ 		return PAM_SESSION_ERR;
+     } else {
+     	close(retval);
+     }
+     
+     if (polyptr->method == TMPFS) {
+-	if (mount("tmpfs", polyptr->dir, "tmpfs", 0, NULL) < 0) {
++	if (mount("tmpfs", polyptr->dir, "tmpfs", 0, polyptr->mount_opts) < 0) {
+ 	    pam_syslog(idata->pamh, LOG_ERR, "Error mounting tmpfs on %s, %m",
+         	polyptr->dir);
+             return PAM_SESSION_ERR;
+@@ -1966,8 +1984,8 @@ PAM_EXTERN int pam_sm_open_session(pam_h
+         if (strcmp(argv[i], "unmnt_only") == 0)
+             unmnt = UNMNT_ONLY;
+ 	if (strcmp(argv[i], "require_selinux") == 0) {
+-		if (~(idata.flags & PAMNS_SELINUX_ENABLED)) {
+-        		pam_syslog(idata.pamh, LOG_ERR,
++		if (!(idata.flags & PAMNS_SELINUX_ENABLED)) {
++			pam_syslog(idata.pamh, LOG_ERR,
+ 		    "selinux_required option given and selinux is disabled");
+ 			return PAM_SESSION_ERR;
+ 		}
+diff -up Linux-PAM-1.1.1/modules/pam_namespace/pam_namespace.h.nsfixes Linux-PAM-1.1.1/modules/pam_namespace/pam_namespace.h
+--- Linux-PAM-1.1.1/modules/pam_namespace/pam_namespace.h.nsfixes	2008-04-18 14:53:38.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_namespace/pam_namespace.h	2012-10-12 09:17:22.833138891 +0200
+@@ -103,6 +103,7 @@
+ #define POLYDIR_NOINIT        0x00000004 /* no init script */
+ #define POLYDIR_SHARED        0x00000008 /* share context/level instances among users */
+ #define POLYDIR_ISCRIPT       0x00000010 /* non default init script */
++#define POLYDIR_MNTOPTS       0x00000020 /* mount options for tmpfs mount */
+ 
+ 
+ #define NAMESPACE_MAX_DIR_LEN 80
+@@ -151,6 +152,7 @@ struct polydir_s {
+     uid_t *uid;				/* list of override uids */
+     unsigned int flags;			/* polydir flags */
+     char *init_script;			/* path to init script */
++    char *mount_opts;			/* mount options for tmpfs mount */
+     uid_t owner;			/* user which should own the polydir */
+     gid_t group;			/* group which should own the polydir */
+     mode_t mode;			/* mode of the polydir */

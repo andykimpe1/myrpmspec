@@ -1,0 +1,170 @@
+diff -up Linux-PAM-1.1.1/modules/pam_mkhomedir/pam_mkhomedir.c.std-noclose Linux-PAM-1.1.1/modules/pam_mkhomedir/pam_mkhomedir.c
+--- Linux-PAM-1.1.1/modules/pam_mkhomedir/pam_mkhomedir.c.std-noclose	2009-04-09 10:07:18.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_mkhomedir/pam_mkhomedir.c	2014-06-20 15:47:50.447291666 +0200
+@@ -35,6 +35,7 @@
+ #include <sys/time.h>
+ #include <sys/resource.h>
+ #include <sys/wait.h>
++#include <fcntl.h>
+ #include <unistd.h>
+ #include <pwd.h>
+ #include <errno.h>
+@@ -133,14 +134,22 @@ create_homedir (pam_handle_t *pamh, opti
+    if (child == 0) {
+         int i;
+         struct rlimit rlim;
++	int dummyfds[2];
+ 	static char *envp[] = { NULL };
+ 	char *args[] = { NULL, NULL, NULL, NULL, NULL };
+ 
++	/* replace std file descriptors with a dummy pipe */
++	if (pipe2(dummyfds, O_NONBLOCK) == 0) {
++		dup2(dummyfds[0], STDIN_FILENO);
++		dup2(dummyfds[1], STDOUT_FILENO);
++		dup2(dummyfds[1], STDERR_FILENO);
++	}
++
+ 	if (getrlimit(RLIMIT_NOFILE, &rlim)==0) {
+           if (rlim.rlim_max >= MAX_FD_NO)
+                 rlim.rlim_max = MAX_FD_NO;
+-	  for (i=0; i < (int)rlim.rlim_max; i++) {
+-	  	close(i);
++	  for (i = STDERR_FILENO + 1; i < (int)rlim.rlim_max; i++) {
++		close(i);
+ 	  }
+ 	}
+ 
+diff -up Linux-PAM-1.1.1/modules/pam_unix/pam_unix_acct.c.std-noclose Linux-PAM-1.1.1/modules/pam_unix/pam_unix_acct.c
+--- Linux-PAM-1.1.1/modules/pam_unix/pam_unix_acct.c.std-noclose	2009-04-09 10:07:28.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_unix/pam_unix_acct.c	2014-06-20 15:50:32.688100916 +0200
+@@ -41,6 +41,8 @@
+ #include <string.h>
+ #include <unistd.h>
+ #include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
+ #include <syslog.h>
+ #include <pwd.h>
+ #include <shadow.h>
+@@ -95,21 +97,26 @@ int _unix_run_verify_binary(pam_handle_t
+   if (child == 0) {
+     int i=0;
+     struct rlimit rlim;
++    int dummyfds[2];
+     static char *envp[] = { NULL };
+     char *args[] = { NULL, NULL, NULL, NULL };
+ 
+     /* reopen stdout as pipe */
+     dup2(fds[1], STDOUT_FILENO);
+ 
++    /* replace std file descriptors with a dummy pipe */
++    if (pipe2(dummyfds, O_NONBLOCK) == 0) {
++      dup2(dummyfds[0], STDIN_FILENO);
++      dup2(dummyfds[1], STDERR_FILENO);
++    }
++
+     /* XXX - should really tidy up PAM here too */
+ 
+     if (getrlimit(RLIMIT_NOFILE,&rlim)==0) {
+       if (rlim.rlim_max >= MAX_FD_NO)
+         rlim.rlim_max = MAX_FD_NO;
+-      for (i=0; i < (int)rlim.rlim_max; i++) {
+-	if (i != STDOUT_FILENO) {
+-	  close(i);
+-	}
++      for (i = STDERR_FILENO + 1; i < (int)rlim.rlim_max; i++) {
++	close(i);
+       }
+     }
+ 
+diff -up Linux-PAM-1.1.1/modules/pam_unix/pam_unix_passwd.c.std-noclose Linux-PAM-1.1.1/modules/pam_unix/pam_unix_passwd.c
+--- Linux-PAM-1.1.1/modules/pam_unix/pam_unix_passwd.c.std-noclose	2014-06-20 15:47:50.439291479 +0200
++++ Linux-PAM-1.1.1/modules/pam_unix/pam_unix_passwd.c	2014-06-20 15:47:50.448291690 +0200
+@@ -194,6 +194,7 @@ static int _unix_run_update_binary(pam_h
+     if (child == 0) {
+         int i=0;
+         struct rlimit rlim;
++	int dummyfds[2];
+ 	static char *envp[] = { NULL };
+ 	char *args[] = { NULL, NULL, NULL, NULL, NULL, NULL };
+         char buffer[16];
+@@ -203,12 +204,18 @@ static int _unix_run_update_binary(pam_h
+ 	/* reopen stdin as pipe */
+ 	dup2(fds[0], STDIN_FILENO);
+ 
++	/* replace std file descriptors with a dummy pipe */
++	if (pipe2(dummyfds, O_NONBLOCK) == 0) {
++          dup2(dummyfds[1], STDOUT_FILENO);
++          dup2(dummyfds[1], STDERR_FILENO);
++	}
++
+ 	if (getrlimit(RLIMIT_NOFILE,&rlim)==0) {
+ 	  if (rlim.rlim_max >= MAX_FD_NO)
+ 	    rlim.rlim_max = MAX_FD_NO;
+-	  for (i=0; i < (int)rlim.rlim_max; i++) {
+-	    if (i != STDIN_FILENO)
+-	  	   close(i);
++	  for (i = STDERR_FILENO + 1; i < (int)rlim.rlim_max; i++) {
++	    if (i != dummyfds[0])
++		close(i);
+ 	  }
+ 	}
+ 
+diff -up Linux-PAM-1.1.1/modules/pam_unix/support.c.std-noclose Linux-PAM-1.1.1/modules/pam_unix/support.c
+--- Linux-PAM-1.1.1/modules/pam_unix/support.c.std-noclose	2009-06-29 16:21:58.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_unix/support.c	2014-06-20 15:52:00.895171929 +0200
+@@ -18,6 +18,9 @@
+ #include <signal.h>
+ #include <ctype.h>
+ #include <syslog.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
+ #include <sys/resource.h>
+ #ifdef HAVE_RPCSVC_YPCLNT_H
+ #include <rpcsvc/ypclnt.h>
+@@ -443,6 +446,7 @@ static int _unix_run_helper_binary(pam_h
+     if (child == 0) {
+         int i=0;
+         struct rlimit rlim;
++	int dummyfds[2];
+ 	static char *envp[] = { NULL };
+ 	char *args[] = { NULL, NULL, NULL, NULL };
+ 
+@@ -451,12 +455,18 @@ static int _unix_run_helper_binary(pam_h
+ 	/* reopen stdin as pipe */
+ 	dup2(fds[0], STDIN_FILENO);
+ 
++        /* replace std file descriptors with a dummy pipe */
++        if (pipe2(dummyfds, O_NONBLOCK) == 0) {
++          dup2(dummyfds[1], STDOUT_FILENO);
++          dup2(dummyfds[1], STDERR_FILENO);
++        }
++
+ 	if (getrlimit(RLIMIT_NOFILE,&rlim)==0) {
+           if (rlim.rlim_max >= MAX_FD_NO)
+                 rlim.rlim_max = MAX_FD_NO;
+-	  for (i=0; i < (int)rlim.rlim_max; i++) {
+-		if (i != STDIN_FILENO)
+-	  	   close(i);
++	  for (i = STDERR_FILENO + 1; i < (int)rlim.rlim_max; i++) {
++		if (i != dummyfds[0])
++		  close(i);
+ 	  }
+ 	}
+ 
+@@ -487,14 +497,12 @@ static int _unix_run_helper_binary(pam_h
+ 	if (passwd != NULL) {            /* send the password to the child */
+ 	    if (write(fds[1], passwd, strlen(passwd)+1) == -1) {
+ 	      pam_syslog (pamh, LOG_ERR, "Cannot send password to helper: %m");
+-	      close(fds[1]);
+ 	      retval = PAM_AUTH_ERR;
+ 	    }
+ 	    passwd = NULL;
+ 	} else {                         /* blank password */
+ 	    if (write(fds[1], "", 1) == -1) {
+ 	      pam_syslog (pamh, LOG_ERR, "Cannot send password to helper: %m");
+-	      close(fds[1]);
+ 	      retval = PAM_AUTH_ERR;
+ 	    }
+ 	}

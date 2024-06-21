@@ -1,0 +1,134 @@
+diff -up Linux-PAM-1.1.1/modules/pam_unix/pam_unix_acct.c.expiry Linux-PAM-1.1.1/modules/pam_unix/pam_unix_acct.c
+--- Linux-PAM-1.1.1/modules/pam_unix/pam_unix_acct.c.expiry	2016-01-07 17:31:33.319923785 +0100
++++ Linux-PAM-1.1.1/modules/pam_unix/pam_unix_acct.c	2016-11-01 15:42:57.536079778 +0100
+@@ -234,6 +234,19 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_hand
+ 	} else
+ 		retval = check_shadow_expiry(pamh, spent, &daysleft);
+ 
++	if (on(UNIX_NO_PASS_EXPIRY, ctrl)) {
++		const void *pretval = NULL;
++		int authrv = PAM_AUTHINFO_UNAVAIL; /* authentication not called */
++
++		if (pam_get_data(pamh, "unix_setcred_return", &pretval) == PAM_SUCCESS
++			&& pretval)
++			authrv = *(const int *)pretval;
++
++		if (authrv != PAM_SUCCESS
++			&& (retval == PAM_NEW_AUTHTOK_REQD || retval == PAM_AUTHTOK_EXPIRED))
++			retval = PAM_SUCCESS;
++	}
++
+ 	switch (retval) {
+ 	case PAM_ACCT_EXPIRED:
+ 		pam_syslog(pamh, LOG_NOTICE,
+diff -up Linux-PAM-1.1.1/modules/pam_unix/pam_unix_auth.c.expiry Linux-PAM-1.1.1/modules/pam_unix/pam_unix_auth.c
+--- Linux-PAM-1.1.1/modules/pam_unix/pam_unix_auth.c.expiry	2009-11-12 14:24:12.000000000 +0100
++++ Linux-PAM-1.1.1/modules/pam_unix/pam_unix_auth.c	2016-11-01 15:45:40.452825517 +0100
+@@ -78,14 +78,13 @@
+ 
+ #define AUTH_RETURN						\
+ do {								\
+-	if (on(UNIX_LIKE_AUTH, ctrl) && ret_data) {		\
++	if (ret_data) {						\
+ 		D(("recording return code for next time [%d]",	\
+ 					retval));		\
+ 		*ret_data = retval;				\
+ 		pam_set_data(pamh, "unix_setcred_return",	\
+ 		             (void *) ret_data, setcred_free);	\
+-	} else if (ret_data)					\
+-	  free (ret_data);                                      \
++	}							\
+ 	D(("done. [%s]", pam_strerror(pamh, retval)));		\
+ 	return retval;						\
+ } while (0)
+@@ -112,9 +111,8 @@ PAM_EXTERN int pam_sm_authenticate(pam_h
+ 	ctrl = _set_ctrl(pamh, flags, NULL, NULL, argc, argv);
+ 
+ 	/* Get a few bytes so we can pass our return value to
+-	   pam_sm_setcred(). */
+-	if (on(UNIX_LIKE_AUTH, ctrl))
+-		ret_data = malloc(sizeof(int));
++	   pam_sm_setcred() and pam_sm_acct_mgmt(). */
++	ret_data = malloc(sizeof(int));
+ 
+ 	/* get the user'name' */
+ 
+@@ -191,20 +189,22 @@ PAM_EXTERN int pam_sm_authenticate(pam_h
+  */
+ 
+ PAM_EXTERN int
+-pam_sm_setcred (pam_handle_t *pamh, int flags UNUSED,
+-		int argc UNUSED, const char **argv UNUSED)
++pam_sm_setcred (pam_handle_t *pamh, int flags,
++		int argc, const char **argv)
+ {
+ 	int retval;
+ 	const void *pretval = NULL;
++	unsigned int ctrl;
+ 
+ 	D(("called."));
+ 
++	ctrl = _set_ctrl(pamh, flags, NULL, NULL, argc, argv);
++
+ 	retval = PAM_SUCCESS;
+ 
+ 	D(("recovering return code from auth call"));
+-	/* We will only find something here if UNIX_LIKE_AUTH is set --
+-	   don't worry about an explicit check of argv. */
+-	if (pam_get_data(pamh, "unix_setcred_return", &pretval) == PAM_SUCCESS
++	if (on(UNIX_LIKE_AUTH, ctrl)
++	    && pam_get_data(pamh, "unix_setcred_return", &pretval) == PAM_SUCCESS
+ 	    && pretval) {
+  	        retval = *(const int *)pretval;
+ 		pam_set_data(pamh, "unix_setcred_return", NULL, NULL);
+diff -up Linux-PAM-1.1.1/modules/pam_unix/pam_unix.8.xml.expiry Linux-PAM-1.1.1/modules/pam_unix/pam_unix.8.xml
+--- Linux-PAM-1.1.1/modules/pam_unix/pam_unix.8.xml.expiry	2016-01-07 17:31:33.334924123 +0100
++++ Linux-PAM-1.1.1/modules/pam_unix/pam_unix.8.xml	2016-11-01 15:42:57.539079847 +0100
+@@ -333,6 +333,25 @@
+           </para>
+         </listitem>
+       </varlistentry>
++      <varlistentry>
++        <term>
++          <option>no_pass_expiry</option>
++        </term>
++        <listitem>
++          <para>
++            When set ignore password expiration as defined by the
++            <emphasis>shadow</emphasis> entry of the user. The option has an
++            effect only in case <emphasis>pam_unix</emphasis> was not used
++            for the authentication or it returned authentication failure
++            meaning that other authentication source or method succeeded.
++            The example can be public key authentication in
++            <emphasis>sshd</emphasis>. The module will return
++            <emphasis remap='B'>PAM_SUCCESS</emphasis> instead of eventual
++            <emphasis remap='B'>PAM_NEW_AUTHTOK_REQD</emphasis> or
++            <emphasis remap='B'>PAM_AUTHTOK_EXPIRED</emphasis>.
++          </para>
++        </listitem>
++      </varlistentry>
+     </variablelist>
+     <para>
+       Invalid arguments are logged with  <citerefentry>
+diff -up Linux-PAM-1.1.1/modules/pam_unix/support.h.expiry Linux-PAM-1.1.1/modules/pam_unix/support.h
+--- Linux-PAM-1.1.1/modules/pam_unix/support.h.expiry	2016-11-01 15:42:57.539079847 +0100
++++ Linux-PAM-1.1.1/modules/pam_unix/support.h	2016-11-01 15:47:11.766924987 +0100
+@@ -89,8 +89,9 @@ typedef struct {
+ #define UNIX_ALGO_ROUNDS         25	/* optional number of rounds for new 
+ 					   password hash algorithms */
+ #define UNIX_BLOWFISH_PASS       26	/* new password hashes will use blowfish */
++#define UNIX_NO_PASS_EXPIRY      27     /* Don't check for password expiration if not used for authentication */
+ /* -------------- */
+-#define UNIX_CTRLS_              27	/* number of ctrl arguments defined */
++#define UNIX_CTRLS_              28	/* number of ctrl arguments defined */
+ 
+ static const UNIX_Ctrls unix_args[UNIX_CTRLS_] =
+ {
+@@ -124,6 +125,7 @@ static const UNIX_Ctrls unix_args[UNIX_C
+ /* UNIX_SHA512_PASS */     {"sha512",       _ALL_ON_^(0260420000), 040000000},
+ /* UNIX_ALGO_ROUNDS */     {"rounds=",         _ALL_ON_,          0100000000},
+ /* UNIX_BLOWFISH_PASS */   {"blowfish",    _ALL_ON_^(0260420000), 0200000000},
++/* UNIX_NO_PASS_EXPIRY */  {"no_pass_expiry",  _ALL_ON_,          0400000000},
+ };
+ 
+ #define UNIX_DEFAULTS  (unix_args[UNIX__NONULL].flag)

@@ -1,0 +1,304 @@
+diff -up Linux-PAM-1.1.1/modules/pam_group/pam_group.c.review Linux-PAM-1.1.1/modules/pam_group/pam_group.c
+--- Linux-PAM-1.1.1/modules/pam_group/pam_group.c.review	2009-11-12 14:12:07.000000000 +0100
++++ Linux-PAM-1.1.1/modules/pam_group/pam_group.c	2011-02-24 21:38:54.000000000 +0100
+@@ -113,6 +113,7 @@ read_field (const pam_handle_t *pamh, in
+ 	if (i < 0) {
+ 	    pam_syslog(pamh, LOG_ERR, "error reading %s: %m", PAM_GROUP_CONF);
+ 	    close(fd);
++	    _pam_drop(*buf);
+ 	    return -1;
+ 	} else if (!i) {
+ 	    close(fd);
+@@ -146,16 +147,10 @@ read_field (const pam_handle_t *pamh, in
+ 		for (j=i; j < *to && (c = (*buf)[j]) != '\n'; ++j);
+ 		if (j >= *to) {
+ 		    (*buf)[*to = ++i] = '\0';
+-		} else if (c == '\n') {
++		} else {
+ 		    shift_bytes(i + (*buf), j-i, (*to) - j);
+ 		    *to -= j-i;
+ 		    ++i;
+-		} else {
+-		    pam_syslog(pamh, LOG_CRIT,
+-			       "internal error in file %s at line %d",
+-			       __FILE__, __LINE__);
+-	            close(fd);
+-		    return -1;
+ 		}
+ 		break;
+ 	    case '\\':
+@@ -208,7 +203,7 @@ read_field (const pam_handle_t *pamh, in
+ 
+     if (*to <= 0) {
+ 	D(("[end of text]"));
+-	*buf = NULL;
++	_pam_drop(*buf);
+     }
+     return fd;
+ }
+diff -up Linux-PAM-1.1.1/modules/pam_limits/pam_limits.c.review Linux-PAM-1.1.1/modules/pam_limits/pam_limits.c
+--- Linux-PAM-1.1.1/modules/pam_limits/pam_limits.c.review	2011-02-24 21:38:54.000000000 +0100
++++ Linux-PAM-1.1.1/modules/pam_limits/pam_limits.c	2011-02-24 21:38:54.000000000 +0100
+@@ -926,7 +926,10 @@ out:
+     }
+ 
+     if (ctrl & PAM_DO_SETREUID) {
+-	setreuid(pwd->pw_uid, -1);
++	if (setreuid(pwd->pw_uid, -1) != 0) {
++	    pam_syslog(pamh, LOG_ERR, "setreuid(%lu, -1) failed: %m", (unsigned long)pwd->pw_uid);
++	    return PAM_SESSION_ERR;
++	}
+     }
+ 
+     retval = setup_limits(pamh, pwd->pw_name, pwd->pw_uid, ctrl, pl);
+diff -up Linux-PAM-1.1.1/modules/pam_namespace/argv_parse.c.review Linux-PAM-1.1.1/modules/pam_namespace/argv_parse.c
+--- Linux-PAM-1.1.1/modules/pam_namespace/argv_parse.c.review	2008-02-13 13:49:44.000000000 +0100
++++ Linux-PAM-1.1.1/modules/pam_namespace/argv_parse.c	2011-02-24 21:38:54.000000000 +0100
+@@ -44,15 +44,15 @@ int argv_parse(const char *in_buf, int *
+ {
+ 	int	argc = 0, max_argc = 0;
+ 	char 	**argv, **new_argv, *buf, ch;
+-	const char *cp = 0;
+-	char    *outcp = 0;
++	const char *cp = NULL;
++	char    *outcp = NULL;
+ 	int	state = STATE_WHITESPACE;
+ 
+ 	buf = malloc(strlen(in_buf)+1);
+ 	if (!buf)
+ 		return -1;
+ 
+-	max_argc = 0; argc = 0; argv = 0;
++	argv = NULL;
+ 	outcp = buf;
+ 	for (cp = in_buf; (ch = *cp); cp++) {
+ 		if (state == STATE_WHITESPACE) {
+@@ -111,15 +111,19 @@ int argv_parse(const char *in_buf, int *
+ 	}
+ 	if (state != STATE_WHITESPACE)
+ 		*outcp++ = '\0';
+-	if (argv == 0) {
+-		argv = malloc(sizeof(char *));
++	if (ret_argv) {
++		if (argv == NULL) {
++			argv = malloc(sizeof(char *));
++			free(buf);
++		}
++		argv[argc] = NULL;
++		*ret_argv = argv;
++	} else {
+ 		free(buf);
++		free(argv);
+ 	}
+-	argv[argc] = 0;
+ 	if (ret_argc)
+ 		*ret_argc = argc;
+-	if (ret_argv)
+-		*ret_argv = argv;
+ 	return 0;
+ }
+ 
+diff -up Linux-PAM-1.1.1/modules/pam_namespace/pam_namespace.c.review Linux-PAM-1.1.1/modules/pam_namespace/pam_namespace.c
+--- Linux-PAM-1.1.1/modules/pam_namespace/pam_namespace.c.review	2011-02-24 21:38:54.000000000 +0100
++++ Linux-PAM-1.1.1/modules/pam_namespace/pam_namespace.c	2011-02-24 21:38:54.000000000 +0100
+@@ -307,10 +307,6 @@ static int process_line(char *line, cons
+     const char *rvar_values[] = {rhome, idata->ruser};
+     int len;
+ 
+-    poly = calloc(1, sizeof(*poly));
+-    if (poly == NULL)
+-    	goto erralloc;
+-
+     /*
+      * skip the leading white space
+      */
+@@ -337,6 +333,10 @@ static int process_line(char *line, cons
+     if (line[0] == 0)
+         return 0;
+ 
++    poly = calloc(1, sizeof(*poly));
++    if (poly == NULL)
++    	goto erralloc;
++
+     /*
+      * Initialize and scan the five strings from the line from the
+      * namespace configuration file.
+diff -up Linux-PAM-1.1.1/modules/pam_pwhistory/pam_pwhistory.c.review Linux-PAM-1.1.1/modules/pam_pwhistory/pam_pwhistory.c
+--- Linux-PAM-1.1.1/modules/pam_pwhistory/pam_pwhistory.c.review	2008-12-18 14:09:36.000000000 +0100
++++ Linux-PAM-1.1.1/modules/pam_pwhistory/pam_pwhistory.c	2011-02-24 21:38:54.000000000 +0100
+@@ -187,12 +187,13 @@ pam_sm_chauthtok (pam_handle_t *pamh, in
+     {
+       retval = pam_get_authtok (pamh, PAM_AUTHTOK, &newpass, NULL);
+       if (retval != PAM_SUCCESS && retval != PAM_TRY_AGAIN)
+-	return retval;
++	{
++	  if (retval == PAM_CONV_AGAIN)
++	    retval = PAM_INCOMPLETE;
++	  return retval;
++	}
+       tries++;
+ 
+-      if (newpass == NULL || retval == PAM_TRY_AGAIN)
+-	continue;
+-
+       if (options.debug)
+ 	{
+ 	  if (newpass)
+@@ -201,12 +202,8 @@ pam_sm_chauthtok (pam_handle_t *pamh, in
+ 	    pam_syslog (pamh, LOG_DEBUG, "got no auth token");
+ 	}
+ 
+-      if (retval != PAM_SUCCESS || newpass == NULL)
+-	{
+-	  if (retval == PAM_CONV_AGAIN)
+-	    retval = PAM_INCOMPLETE;
+-	  return retval;
+-	}
++      if (newpass == NULL || retval == PAM_TRY_AGAIN)
++	continue;
+ 
+       if (options.debug)
+ 	pam_syslog (pamh, LOG_DEBUG, "check against old password file");
+@@ -219,7 +216,6 @@ pam_sm_chauthtok (pam_handle_t *pamh, in
+ 	  newpass = NULL;
+ 	  /* Remove password item, else following module will use it */
+           pam_set_item (pamh, PAM_AUTHTOK, (void *) NULL);
+-	  continue;
+ 	}
+     }
+ 
+@@ -230,8 +226,7 @@ pam_sm_chauthtok (pam_handle_t *pamh, in
+       return PAM_MAXTRIES;
+     }
+ 
+-  /* Remember new password */
+-  return pam_set_item (pamh, PAM_AUTHTOK, newpass);
++  return PAM_SUCCESS;
+ }
+ 
+ 
+diff -up Linux-PAM-1.1.1/modules/pam_selinux/pam_selinux.c.review Linux-PAM-1.1.1/modules/pam_selinux/pam_selinux.c
+--- Linux-PAM-1.1.1/modules/pam_selinux/pam_selinux.c.review	2008-12-17 15:27:24.000000000 +0100
++++ Linux-PAM-1.1.1/modules/pam_selinux/pam_selinux.c	2011-02-24 21:39:42.000000000 +0100
+@@ -196,6 +196,7 @@ manual_context (pam_handle_t *pamh, cons
+               goto fail_set;
+ 	   if (context_type_set (new_context, type)) 
+               goto fail_set;
++	   _pam_drop(type);
+ 	}
+ 	_pam_drop(response);
+ 
+@@ -290,6 +291,7 @@ config_context (pam_handle_t *pamh, secu
+ 	      goto fail_set;
+ 	    if (context_type_set (new_context, type))
+ 	      goto fail_set;
++	    _pam_drop(type);
+ 	  } 
+ 	}
+ 	_pam_drop(response);
+@@ -374,6 +376,7 @@ context_from_env (pam_handle_t *pamh, se
+   int mls_enabled = is_selinux_mls_enabled();
+   const char *env = NULL;
+   char *type = NULL;
++  int fail = 1;
+ 
+   if ((new_context = context_new(defaultcon)) == NULL)
+     goto fail_set;
+@@ -434,9 +437,6 @@ context_from_env (pam_handle_t *pamh, se
+   /* Get the string value of the context and see if it is valid. */
+   if (security_check_context(newcon)) {
+     pam_syslog(pamh, LOG_NOTICE, "Not a valid security context %s", newcon);
+-    send_audit_message(pamh, 0, defaultcon, newcon);
+-    freecon(newcon);
+-    newcon = NULL;
+ 
+     goto fail_set;
+   }
+@@ -446,16 +446,21 @@ context_from_env (pam_handle_t *pamh, se
+      be checked at setexeccon time */
+   if (mls_enabled && !mls_range_allowed(pamh, defaultcon, newcon, debug)) {
+     pam_syslog(pamh, LOG_NOTICE, "Security context %s is not allowed for %s", defaultcon, newcon);
+-    send_audit_message(pamh, 0, defaultcon, newcon);
+-    freecon(newcon);
+-    newcon = NULL;
++
++    goto fail_set;
+   }
+ 
++  fail = 0;
++
+  fail_set:
+   free(type);
+   context_free(my_context);
+   context_free(new_context);
+-  send_audit_message(pamh, 0, defaultcon, NULL);
++  if (fail) {
++    send_audit_message(pamh, 0, defaultcon, newcon);
++    freecon(newcon);
++    newcon = NULL;
++  }
+   return newcon;
+ }
+ 
+@@ -652,10 +657,10 @@ pam_sm_open_session(pam_handle_t *pamh, 
+ 	  if (debug)
+ 		  pam_syslog(pamh, LOG_DEBUG, "Username= %s SELinux User = %s Level= %s",
+                              username, seuser, level);
+-	  free(seuser);
+ 	  free(level);
+   }
+   if (num_contexts > 0) {
++    free(seuser);
+     default_user_context=strdup(contextlist[0]);
+     freeconary(contextlist);
+     if (default_user_context == NULL) {
+@@ -682,7 +687,10 @@ pam_sm_open_session(pam_handle_t *pamh, 
+     }
+   }
+   else { 
+-      user_context = manual_context(pamh,seuser,debug);
++      if (seuser != NULL) {
++	user_context = manual_context(pamh,seuser,debug);
++	free(seuser);
++      }
+       if (user_context == NULL) {
+ 	pam_syslog (pamh, LOG_ERR, "Unable to get valid context for %s",
+ 		    username);
+diff -up Linux-PAM-1.1.1/modules/pam_time/pam_time.c.review Linux-PAM-1.1.1/modules/pam_time/pam_time.c
+--- Linux-PAM-1.1.1/modules/pam_time/pam_time.c.review	2008-11-25 15:04:55.000000000 +0100
++++ Linux-PAM-1.1.1/modules/pam_time/pam_time.c	2011-02-24 21:38:54.000000000 +0100
+@@ -138,6 +138,7 @@ read_field(const pam_handle_t *pamh, int
+ 	if (i < 0) {
+ 	    pam_syslog(pamh, LOG_ERR, "error reading %s: %m", PAM_TIME_CONF);
+ 	    close(fd);
++	    _pam_drop(*buf);
+ 	    return -1;
+ 	} else if (!i) {
+ 	    close(fd);
+@@ -171,16 +172,10 @@ read_field(const pam_handle_t *pamh, int
+ 		for (j=i; j < *to && (c = (*buf)[j]) != '\n'; ++j);
+ 		if (j >= *to) {
+ 		    (*buf)[*to = ++i] = '\0';
+-		} else if (c == '\n') {
++		} else {
+ 		    shift_bytes(i + (*buf), j-i, (*to) - j);
+ 		    *to -= j-i;
+ 		    ++i;
+-		} else {
+-		    pam_syslog(pamh, LOG_CRIT,
+-			       "internal error in file %s at line %d",
+-			       __FILE__, __LINE__);
+-		    close(fd);
+-		    return -1;
+ 		}
+ 		break;
+ 	    case '\\':
+@@ -233,7 +228,7 @@ read_field(const pam_handle_t *pamh, int
+ 
+     if (*to <= 0) {
+ 	D(("[end of text]"));
+-	*buf = NULL;
++	_pam_drop(*buf);
+     }
+ 
+     return fd;

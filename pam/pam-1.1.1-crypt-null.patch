@@ -1,0 +1,85 @@
+diff -up Linux-PAM-1.1.1/modules/pam_pwhistory/opasswd.c.crypt-null Linux-PAM-1.1.1/modules/pam_pwhistory/opasswd.c
+--- Linux-PAM-1.1.1/modules/pam_pwhistory/opasswd.c.crypt-null	2014-06-19 13:01:55.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_pwhistory/opasswd.c	2014-06-19 13:37:16.583775781 +0200
+@@ -108,7 +108,7 @@ compare_password(const char *newpass, co
+   outval = crypt (newpass, oldpass);
+ #endif
+ 
+-  return strcmp(outval, oldpass) == 0;
++  return outval != NULL && strcmp(outval, oldpass) == 0;
+ }
+ 
+ /* Check, if the new password is already in the opasswd file.  */
+diff -up Linux-PAM-1.1.1/modules/pam_unix/bigcrypt.c.crypt-null Linux-PAM-1.1.1/modules/pam_unix/bigcrypt.c
+--- Linux-PAM-1.1.1/modules/pam_unix/bigcrypt.c.crypt-null	2008-11-30 18:13:58.000000000 +0100
++++ Linux-PAM-1.1.1/modules/pam_unix/bigcrypt.c	2014-06-19 13:38:51.187996992 +0200
+@@ -109,6 +109,10 @@ char *bigcrypt(const char *key, const ch
+ #else
+ 	tmp_ptr = crypt(plaintext_ptr, salt);	/* libc crypt() */
+ #endif
++	if (tmp_ptr == NULL) {
++		free(dec_c2_cryptbuf);
++		return NULL;
++	}
+ 	/* and place in the static area */
+ 	strncpy(cipher_ptr, tmp_ptr, 13);
+ 	cipher_ptr += ESEGMENT_SIZE + SALT_SIZE;
+@@ -130,6 +134,11 @@ char *bigcrypt(const char *key, const ch
+ #else
+ 			tmp_ptr = crypt(plaintext_ptr, salt_ptr);
+ #endif
++			if (tmp_ptr == NULL) {
++				_pam_overwrite(dec_c2_cryptbuf);
++				free(dec_c2_cryptbuf);
++				return NULL;
++			}
+ 
+ 			/* skip the salt for seg!=0 */
+ 			strncpy(cipher_ptr, (tmp_ptr + SALT_SIZE), ESEGMENT_SIZE);
+diff -up Linux-PAM-1.1.1/modules/pam_unix/md5_crypt.c.crypt-null Linux-PAM-1.1.1/modules/pam_unix/md5_crypt.c
+--- Linux-PAM-1.1.1/modules/pam_unix/md5_crypt.c.crypt-null	2001-07-10 22:24:16.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_unix/md5_crypt.c	2014-06-19 13:46:49.931237400 +0200
+@@ -51,6 +51,8 @@ char *MD5Name(crypt_md5)(const char *pw,
+ 	/* TODO: now that we're using malloc'ed memory, get rid of the
+ 	   strange constant buffer size. */
+ 	passwd = malloc(120);
++	if (passwd == NULL)
++		return NULL;
+ 
+ 	/* If it starts with the magic string, then skip that */
+ 	if (!strncmp(sp, magic, strlen(magic)))
+diff -up Linux-PAM-1.1.1/modules/pam_unix/pam_unix_passwd.c.crypt-null Linux-PAM-1.1.1/modules/pam_unix/pam_unix_passwd.c
+--- Linux-PAM-1.1.1/modules/pam_unix/pam_unix_passwd.c.crypt-null	2014-06-19 13:04:37.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_unix/pam_unix_passwd.c	2014-06-19 13:50:02.286753713 +0200
+@@ -300,7 +300,7 @@ static int check_old_password(const char
+ 			s_pas = strtok_r(NULL, ":,", &sptr);
+ 			while (s_pas != NULL) {
+ 				char *md5pass = Goodcrypt_md5(newpass, s_pas);
+-				if (!strcmp(md5pass, s_pas)) {
++				if (md5pass == NULL || !strcmp(md5pass, s_pas)) {
+ 					_pam_delete(md5pass);
+ 					retval = PAM_AUTHTOK_ERR;
+ 					break;
+diff -up Linux-PAM-1.1.1/modules/pam_unix/passverify.c.crypt-null Linux-PAM-1.1.1/modules/pam_unix/passverify.c
+--- Linux-PAM-1.1.1/modules/pam_unix/passverify.c.crypt-null	2014-06-19 13:14:57.000000000 +0200
++++ Linux-PAM-1.1.1/modules/pam_unix/passverify.c	2014-06-19 13:53:34.170728535 +0200
+@@ -424,7 +424,7 @@ PAMH_ARG_DECL(char * create_password_has
+ 	}
+ #endif
+ 	sp = crypt(password, salt);
+-	if (strncmp(algoid, sp, strlen(algoid)) != 0) {
++	if (!sp || strncmp(algoid, sp, strlen(algoid)) != 0) {
+ 		/* libxcrypt/libc doesn't know the algorithm, use MD5 */
+ 		pam_syslog(pamh, LOG_ERR,
+ 			   "Algo %s not supported by the crypto backend, "
+@@ -432,7 +432,9 @@ PAMH_ARG_DECL(char * create_password_has
+ 			   on(UNIX_BLOWFISH_PASS, ctrl) ? "blowfish" :
+ 			   on(UNIX_SHA256_PASS, ctrl) ? "sha256" :
+ 			   on(UNIX_SHA512_PASS, ctrl) ? "sha512" : algoid);
+-		memset(sp, '\0', strlen(sp));
++		if(sp) {
++		   memset(sp, '\0', strlen(sp));
++		}
+ 		return crypt_md5_wrapper(password);
+ 	}
+ 
