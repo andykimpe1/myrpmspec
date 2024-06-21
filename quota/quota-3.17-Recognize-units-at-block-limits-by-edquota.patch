@@ -1,0 +1,93 @@
+From dae7690c9425aff1985784c77ff7e47a28eb73d5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Wed, 9 Jan 2013 18:16:14 +0100
+Subject: [PATCH] Recognize units at block limits by edquota
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+With this patch, it's possible to specify block values including
+binary units in the editor run by edquota.
+
+Signed-off-by: Petr Písař <ppisar@redhat.com>
+Signed-off-by: Jan Kara <jack@suse.cz>
+
+Petr Pisar: This port to 3.17 supports ALT_FORMAT only.
+---
+ edquota.8  |  4 ++++
+ quotaops.c | 28 +++++++++++++++++++++++++---
+ 2 files changed, 29 insertions(+), 3 deletions(-)
+
+diff --git a/edquota.8 b/edquota.8
+index 9b61c93..f26bfbd 100644
+--- a/edquota.8
++++ b/edquota.8
+@@ -64,6 +64,10 @@ is then invoked on the file.  The quotas may then be modified, new
+ quotas added, etc.
+ Setting a quota to zero indicates that no quota should be imposed.
+ .PP
++Block usage and limits are reported and interpereted as multiples of kibibyte
++(1024 bytes) blocks by default. Symbols K, M, G, and T can be appended to
++numeric value to express kibibytes, mebibytes, gibibytes, and tebibytes.
++.PP
+ Users are permitted to exceed their soft limits for a grace period that
+ may be specified per filesystem.  Once the grace period has expired, the
+ soft limit is enforced as a hard limit.
+diff --git a/quotaops.c b/quotaops.c
+index c44feb4..beda65e 100644
+--- a/quotaops.c
++++ b/quotaops.c
+@@ -321,11 +321,14 @@ int readprivs(struct dquot *qlist, int infd)
+ {
+ 	FILE *fd;
+ 	int cnt;
+-	long long blocks, bsoft, bhard, inodes, isoft, ihard;
++	qsize_t blocks, bsoft, bhard;
++	long long inodes, isoft, ihard;
+ 	struct dquot *q;
+ 
+ #if defined(ALT_FORMAT)
+ 	char fsp[BUFSIZ], line[BUFSIZ];
++	char blocksstring[BUFSIZ], bsoftstring[BUFSIZ], bhardstring[BUFSIZ];
++	const char *error;
+ #else
+ 	char *fsp, line1[BUFSIZ], line2[BUFSIZ];
+ #endif
+@@ -342,13 +345,32 @@ int readprivs(struct dquot *qlist, int infd)
+ 	fgets(line, sizeof(line), fd);
+ 
+ 	while (fgets(line, sizeof(line), fd)) {
+-		cnt = sscanf(line, "%s %llu %llu %llu %llu %llu %llu",
+-			     fsp, &blocks, &bsoft, &bhard, &inodes, &isoft, &ihard);
++		cnt = sscanf(line, "%s %s %s %s %llu %llu %llu",
++			     fsp, blocksstring, bsoftstring, bhardstring,
++			     &inodes, &isoft, &ihard);
+ 
+ 		if (cnt != 7) {
+ 			errstr(_("Bad format:\n%s\n"), line);
+ 			return -1;
+ 		}
++		error = str2space(blocksstring, &blocks);
++		if (error) {
++			errstr(_("Bad block usage: %s: %s\n"),
++				blocksstring, error);
++			return -1;
++		}
++		error = str2space(bsoftstring, &bsoft);
++		if (error) {
++			errstr(_("Bad block soft limit: %s: %s\n"),
++				bsoftstring, error);
++			return -1;
++		}
++		error = str2space(bhardstring, &bhard);
++		if (error) {
++			errstr(_("Bad block hard limit: %s: %s\n"),
++				bhardstring, error);
++			return -1;
++		}
+ 
+ 		merge_limits_to_list(qlist, fsp, blocks, bsoft, bhard, inodes, isoft, ihard);
+ 	}
+-- 
+1.8.1.4
+

@@ -1,0 +1,3426 @@
+From f42791b5a1a5df2f8fe915af318784801a92560a Mon Sep 17 00:00:00 2001
+From: jkar8572 <jkar8572>
+Date: Thu, 2 Dec 2010 11:28:53 +0100
+Subject: [PATCH] 64-bit quota support.
+
+This is back-port of dece383b7ad548c1c62a757936ecdd7a7e40ab41 commit adding
+support for vfsv1 quota file format and full 64-bit support.
+
+This adds files `quota_tree.h' and `quotaio_tree.c' introduced by commit
+3786e49ea95fd4091d2a96b2db6104b225e44f2f that developers forgot to add in
+original commit.
+
+Both upstream commits are part of upstream 4.00_pre1 version.
+---
+ Makefile.in     |    4 +-
+ convertquota.8  |   21 ++-
+ convertquota.c  |   98 +++++---
+ dqblk_v2.h      |    5 +-
+ edquota.8       |    6 +-
+ edquota.c       |    4 -
+ quot.c          |    4 -
+ quota.1         |    6 +-
+ quota.c         |    4 -
+ quota.h         |    1 +
+ quota_tree.h    |   51 ++++
+ quotacheck.8    |    6 +-
+ quotacheck.c    |   60 +++---
+ quotacheck.h    |    3 +-
+ quotacheck_v2.c |  136 ++++++++---
+ quotaio.c       |   56 +++--
+ quotaio.h       |   37 ++--
+ quotaio_tree.c  |  519 ++++++++++++++++++++++++++++++++++++++++++
+ quotaio_v1.c    |    8 +-
+ quotaio_v2.c    |  683 ++++++++++++++-----------------------------------------
+ quotaio_v2.h    |   38 ++--
+ quotaio_xfs.c   |    2 +-
+ quotaon.8       |    6 +-
+ quotaon.c       |  220 ++++++++++---------
+ quotaon.h       |    2 -
+ quotaon_xfs.c   |    3 +-
+ quotaops.c      |    4 -
+ quotasys.c      |  143 +++++++-----
+ quotasys.h      |   10 +-
+ repquota.8      |    6 +-
+ setquota.8      |    6 +-
+ warnquota.8     |    6 +-
+ xqmstats.c      |    2 +-
+ 33 files changed, 1271 insertions(+), 889 deletions(-)
+ create mode 100644 quota_tree.h
+ create mode 100644 quotaio_tree.c
+
+diff --git a/Makefile.in b/Makefile.in
+index a3ef3d5..31eb67a 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -1,5 +1,5 @@
+ PROGS         = quotacheck quotaon quota quot repquota warnquota quotastats xqmstats edquota setquota convertquota rpc.rquotad @QUOTA_NETLINK_PROG@
+-SOURCES       = bylabel.c common.c convertquota.c edquota.c pot.c quot.c quota.c quotacheck.c quotacheck_v1.c quotacheck_v2.c quotaio.c quotaio_rpc.c quotaio_v1.c quotaio_v2.c quotaio_xfs.c quotaio_meta.c quotaio_generic.c quotaon.c quotaon_xfs.c quotaops.c quotastats.c quotasys.c repquota.c rquota_client.c rquota_server.c rquota_svc.c setquota.c warnquota.c xqmstats.c svc_socket.c
++SOURCES       = bylabel.c common.c convertquota.c edquota.c pot.c quot.c quota.c quotacheck.c quotacheck_v1.c quotacheck_v2.c quotaio.c quotaio_rpc.c quotaio_v1.c quotaio_v2.c quotaio_tree.c quotaio_xfs.c quotaio_meta.c quotaio_generic.c quotaon.c quotaon_xfs.c quotaops.c quotastats.c quotasys.c repquota.c rquota_client.c rquota_server.c rquota_svc.c setquota.c warnquota.c xqmstats.c svc_socket.c
+ VERSIONDEF    = -DQUOTA_VERSION=\"3.17\"
+ CFLAGS        = @CFLAGS@ @EXT2_DIRECT@ -D_GNU_SOURCE -Wall -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 $(VERSIONDEF) -DCOMPILE_OPTS="\"@COMPILE_OPTS@\""
+ CPPFLAGS      = @CPPFLAGS@
+@@ -39,7 +39,7 @@ locale_dir    = $(prefix)/share/locale
+ sysconfdir    = @sysconfdir@
+ 
+ RPCCLNTOBJS = rquota_xdr.o rquota_client.o rquota_clnt.o
+-IOOBJS = quotaio.o quotaio_v1.o quotaio_v2.o quotaio_rpc.o quotaio_xfs.o quotaio_meta.o quotaio_generic.o
++IOOBJS = quotaio.o quotaio_v1.o quotaio_v2.o quotaio_tree.o quotaio_rpc.o quotaio_xfs.o quotaio_meta.o quotaio_generic.o
+ IOOBJS += $(RPCCLNTOBJS)
+ LIBOBJS = bylabel.o common.o quotasys.o pot.o $(IOOBJS)
+ LIBOBJS += @LIBMALLOC@
+diff --git a/convertquota.8 b/convertquota.8
+index 5ce5b31..5313c7e 100644
+--- a/convertquota.8
++++ b/convertquota.8
+@@ -6,11 +6,16 @@ convertquota \- convert quota from old file format to new one
+ .B convertquota
+ [
+ .B -ug
+-] [
++] 
+ .B -e
+-|
++.I filesystem
++.LP
++.B convertquota
++[
++.B -ug
++] 
+ .B -f
+-]
++.IR oldformat , newformat
+ .I filesystem
+ .SH DESCRIPTION
+ .B convertquota
+@@ -37,11 +42,15 @@ convert user quota file. This is the default.
+ .B -g, --group
+ convert group quota file.
+ .TP
+-.B -f, --convert-format
+-convert from old file format to new one. This is the default.
++.B -f, --convert-format \f2oldformat,newformat\f1
++convert quota file from
++.I oldformat
++to
++.IR newformat .
+ .TP
+ .B -e, --convert-endian
+-convert new file format from big endian to little endian.
++convert vfsv0 file format from big endian to little endian (old kernels had
++a bug and did not store quota files in little endian format).
+ .TP
+ .B -V, --version
+ print version information.
+diff --git a/convertquota.c b/convertquota.c
+index 1572cb9..6cfd430 100644
+--- a/convertquota.c
++++ b/convertquota.c
+@@ -32,20 +32,30 @@ char *progname;
+ int ucv, gcv;
+ struct quota_handle *qn;	/* Handle of new file */
+ int action;			/* Action to be performed */
++int infmt, outfmt;
+ 
+ static void usage(void)
+ {
+ 	errstr(_("Utility for converting quota files.\nUsage:\n\t%s [options] mountpoint\n\n\
+--u, --user            convert user quota file\n\
+--g, --group           convert group quota file\n\
+--e, --convert-endian  convert quota file to correct endianity\n\
+--f, --convert-format  convert from old to VFSv0 quota format\n\
+--h, --help            show this help text and exit\n\
+--V, --version         output version information and exit\n\n"), progname);
++-u, --user                          convert user quota file\n\
++-g, --group                         convert group quota file\n\
++-e, --convert-endian                convert quota file to correct endianity\n\
++-f, --convert-format oldfmt,newfmt  convert from old to VFSv0 quota format\n\
++-h, --help                          show this help text and exit\n\
++-V, --version                       output version information and exit\n\n"), progname);
+ 	errstr(_("Bugs to %s\n"), MY_EMAIL);
+ 	exit(1);
+ }
+ 
++static inline unsigned int min(unsigned a, unsigned b)
++{
++	if (a < b)
++		return a;
++	return b;
++}
++
++#define MAX_FMTNAME_LEN 32
++
+ static void parse_options(int argcnt, char **argstr)
+ {
+ 	int ret;
+@@ -55,12 +65,13 @@ static void parse_options(int argcnt, char **argstr)
+ 		{ "user", 0, NULL, 'u'},
+ 		{ "group", 0, NULL, 'g'},
+ 		{ "convert-endian", 0, NULL, 'e'},
+-		{ "convert-format", 0, NULL, 'f'},
++		{ "convert-format", 1, NULL, 'f'},
+ 		{ NULL, 0, NULL, 0}
+ 	};
++	char *comma;
++	char fmtbuf[MAX_FMTNAME_LEN];
+ 
+-	action = ACT_FORMAT;
+-	while ((ret = getopt_long(argcnt, argstr, "Vugefh:", long_opts, NULL)) != -1) {
++	while ((ret = getopt_long(argcnt, argstr, "Vugef:h", long_opts, NULL)) != -1) {
+ 		switch (ret) {
+ 			case '?':
+ 			case 'h':
+@@ -79,17 +90,33 @@ static void parse_options(int argcnt, char **argstr)
+ 				break;
+ 			case 'f':
+ 				action = ACT_FORMAT;
++				comma = strchr(optarg, ',');
++				if (!comma) {
++					errstr(_("You have to specify source and target format of conversion.\n"));
++					usage();
++				}
++				sstrncpy(fmtbuf, optarg, min(comma - optarg + 1, MAX_FMTNAME_LEN));
++				infmt = name2fmt(fmtbuf);
++				if (infmt == QF_ERROR)
++					usage();
++				outfmt = name2fmt(comma + 1);
++				if (outfmt == QF_ERROR)
++					usage();
+ 				break;
+ 		}
+ 	}
+ 
+ 	if (optind + 1 != argcnt) {
+-		puts(_("Bad number of arguments."));
++		errstr(_("Bad number of arguments.\n"));
+ 		usage();
+ 	}
+ 
+ 	if (!(ucv | gcv))
+ 		ucv = 1;
++	if (!action) {
++		errstr(_("You have to specify action to perform.\n"));
++		usage();
++	}
+ 
+ 	mntpoint = argstr[optind];
+ }
+@@ -103,10 +130,10 @@ typedef char *dqbuf_t;
+ #define set_bit(bmp, ind) ((bmp)[(ind) >> 3] |= (1 << ((ind) & 7)))
+ #define get_bit(bmp, ind) ((bmp)[(ind) >> 3] & (1 << ((ind) & 7)))
+ 
+-#define getdqbuf() smalloc(V2_DQBLKSIZE)
++#define getdqbuf() smalloc(QT_BLKSIZE)
+ #define freedqbuf(buf) free(buf)
+ 
+-static inline void endian_disk2memdqblk(struct util_dqblk *m, struct v2_disk_dqblk *d)
++static inline void endian_disk2memdqblk(struct util_dqblk *m, struct v2r0_disk_dqblk *d)
+ {
+ 	m->dqb_ihardlimit = __be32_to_cpu(d->dqb_ihardlimit);
+ 	m->dqb_isoftlimit = __be32_to_cpu(d->dqb_isoftlimit);
+@@ -119,9 +146,9 @@ static inline void endian_disk2memdqblk(struct util_dqblk *m, struct v2_disk_dqb
+ }
+ 
+ /* Is given dquot empty? */
+-static int endian_empty_dquot(struct v2_disk_dqblk *d)
++static int endian_empty_dquot(struct v2r0_disk_dqblk *d)
+ {
+-	static struct v2_disk_dqblk fakedquot;
++	static struct v2r0_disk_dqblk fakedquot;
+ 
+ 	return !memcmp(d, &fakedquot, sizeof(fakedquot));
+ }
+@@ -131,27 +158,28 @@ static void read_blk(int fd, uint blk, dqbuf_t buf)
+ {
+ 	int err;
+ 
+-	lseek(fd, blk << V2_DQBLKSIZE_BITS, SEEK_SET);
+-	err = read(fd, buf, V2_DQBLKSIZE);
++	lseek(fd, blk << QT_BLKSIZE_BITS, SEEK_SET);
++	err = read(fd, buf, QT_BLKSIZE);
+ 	if (err < 0)
+ 		die(2, _("Cannot read block %u: %s\n"), blk, strerror(errno));
+-	else if (err != V2_DQBLKSIZE)
+-		memset(buf + err, 0, V2_DQBLKSIZE - err);
++	else if (err != QT_BLKSIZE)
++		memset(buf + err, 0, QT_BLKSIZE - err);
+ }
+ 
+ static void endian_report_block(int fd, uint blk, char *bitmap)
+ {
+ 	dqbuf_t buf = getdqbuf();
+-	struct v2_disk_dqdbheader *dh;
+-	struct v2_disk_dqblk *ddata;
++	struct qt_disk_dqdbheader *dh;
++	struct v2r0_disk_dqblk *ddata;
+ 	struct dquot dquot;
++	struct qtree_mem_dqinfo *info = &qn->qh_info.u.v2_mdqi.dqi_qtree;
+ 	int i;
+ 
+ 	set_bit(bitmap, blk);
+ 	read_blk(fd, blk, buf);
+-	dh = (struct v2_disk_dqdbheader *)buf;
+-	ddata = V2_GETENTRIES(buf);
+-	for (i = 0; i < V2_DQSTRINBLK; i++)
++	dh = (struct qt_disk_dqdbheader *)buf;
++	ddata = (struct v2r0_disk_dqblk *)(dh + 1);
++	for (i = 0; i < qtree_dqstr_in_blk(info); i++)
+ 		if (!endian_empty_dquot(ddata + i)) {
+ 			memset(&dquot, 0, sizeof(dquot));
+ 			dquot.dq_h = qn;
+@@ -171,15 +199,15 @@ static void endian_report_tree(int fd, uint blk, int depth, char *bitmap)
+ 	u_int32_t *ref = (u_int32_t *) buf;
+ 
+ 	read_blk(fd, blk, buf);
+-	if (depth == V2_DQTREEDEPTH - 1) {
+-		for (i = 0; i < V2_DQBLKSIZE >> 2; i++) {
++	if (depth == QT_TREEDEPTH - 1) {
++		for (i = 0; i < QT_BLKSIZE >> 2; i++) {
+ 			blk = __be32_to_cpu(ref[i]);
+ 			if (blk && !get_bit(bitmap, blk))
+ 				endian_report_block(fd, blk, bitmap);
+ 		}
+ 	}
+ 	else {
+-		for (i = 0; i < V2_DQBLKSIZE >> 2; i++)
++		for (i = 0; i < QT_BLKSIZE >> 2; i++)
+ 			if ((blk = __be32_to_cpu(ref[i])))
+ 				endian_report_tree(fd, blk, depth + 1, bitmap);
+ 	}
+@@ -189,11 +217,11 @@ static void endian_report_tree(int fd, uint blk, int depth, char *bitmap)
+ static int endian_scan_structures(int fd, int type)
+ {
+ 	char *bitmap;
+-	loff_t blocks = (lseek(fd, 0, SEEK_END) + V2_DQBLKSIZE - 1) >> V2_DQBLKSIZE_BITS;
++	loff_t blocks = (lseek(fd, 0, SEEK_END) + QT_BLKSIZE - 1) >> QT_BLKSIZE_BITS;
+ 
+ 	bitmap = smalloc((blocks + 7) >> 3);
+ 	memset(bitmap, 0, (blocks + 7) >> 3);
+-	endian_report_tree(fd, V2_DQTREEOFF, 0, bitmap);
++	endian_report_tree(fd, QT_TREEOFF, 0, bitmap);
+ 	free(bitmap);
+ 	return 0;
+ }
+@@ -257,12 +285,12 @@ static int convert_dquot(struct dquot *dquot, char *name)
+ 	return 0;
+ }
+ 
+-static int rename_file(int type, struct mntent *mnt)
++static int rename_file(int type, int fmt, struct mntent *mnt)
+ {
+ 	char *qfname, namebuf[PATH_MAX];
+ 	int ret = 0;
+ 
+-	if (get_qf_name(mnt, type, (1 << QF_VFSV0), 0, &qfname) < 0) {
++	if (get_qf_name(mnt, type, fmt, 0, &qfname) < 0) {
+ 		errstr(_("Cannot get name of new quotafile.\n"));
+ 		return -1;
+ 	}
+@@ -282,19 +310,19 @@ static int convert_format(int type, struct mntent *mnt)
+ 	struct quota_handle *qo;
+ 	int ret = 0;
+ 	
+-	if (!(qo = init_io(mnt, type, QF_VFSOLD, IOI_OPENFILE))) {
++	if (!(qo = init_io(mnt, type, infmt, IOI_OPENFILE))) {
+ 		errstr(_("Cannot open old format file for %ss on %s\n"),
+ 			type2name(type), mnt->mnt_dir);
+ 		return -1;
+ 	}
+-	if (!(qn = new_io(mnt, type, QF_VFSV0))) {
++	if (!(qn = new_io(mnt, type, outfmt))) {
+ 		errstr(_("Cannot create file for %ss for new format on %s: %s\n"),
+ 			type2name(type), mnt->mnt_dir, strerror(errno));
+ 		end_io(qo);
+ 		return -1;
+ 	}
+ 	if (qo->qh_ops->scan_dquots(qo, convert_dquot) >= 0)	/* Conversion succeeded? */
+-		ret = rename_file(type, mnt);
++		ret = rename_file(type, outfmt, mnt);
+ 	else
+ 		ret = -1;
+ 	end_io(qo);
+@@ -308,7 +336,7 @@ static int convert_endian(int type, struct mntent *mnt)
+ 	int ofd;
+ 	char *qfname;
+ 
+-	if (get_qf_name(mnt, type, (1 << QF_VFSV0), NF_EXIST, &qfname) < 0)
++	if (get_qf_name(mnt, type, QF_VFSV0, NF_EXIST, &qfname) < 0)
+ 		return -1;
+ 	if ((ofd = open(qfname, O_RDONLY)) < 0) {
+ 		errstr(_("Cannot open old quota file on %s: %s\n"), mnt->mnt_dir, strerror(errno));
+@@ -336,7 +364,7 @@ static int convert_endian(int type, struct mntent *mnt)
+ 	if (ret < 0)
+ 		return ret;
+ 	
+-	return rename_file(type, mnt);
++	return rename_file(type, QF_VFSV0, mnt);
+ }
+ 
+ static int convert_file(int type, struct mntent *mnt)
+diff --git a/dqblk_v2.h b/dqblk_v2.h
+index c5932b3..d71baf0 100644
+--- a/dqblk_v2.h
++++ b/dqblk_v2.h
+@@ -8,6 +8,7 @@
+ #define _DQBLK_V2_H
+ 
+ #include <sys/types.h>
++#include "quota_tree.h"
+ 
+ #define Q_V2_GETQUOTA	0x0D00	/* Get limits and usage */
+ #define Q_V2_SETQUOTA	0x0E00	/* Set limits and usage */
+@@ -21,10 +22,8 @@
+ 
+ /* Structure for format specific information */
+ struct v2_mem_dqinfo {
++	struct qtree_mem_dqinfo dqi_qtree;
+ 	uint dqi_flags;		/* Flags set in quotafile */
+-	uint dqi_blocks;	/* Number of blocks in file */
+-	uint dqi_free_blk;	/* Number of first free block in the list */
+-	uint dqi_free_entry;	/* Number of first block with free entry in the list */
+ 	uint dqi_used_entries;	/* Number of entries in file - updated by scan_dquots */
+ 	uint dqi_data_blocks;	/* Number of data blocks in file - updated by scan_dquots */
+ };
+diff --git a/edquota.8 b/edquota.8
+index 061bb32..7ade64a 100644
+--- a/edquota.8
++++ b/edquota.8
+@@ -120,9 +120,11 @@ mechanism used to initialize quotas for groups of users.
+ Edit quota for specified format (ie. don't perform format autodetection).
+ Possible format names are:
+ .B vfsold
+-(version 1 quota),
++Original quota format with 16-bit UIDs / GIDs,
+ .B vfsv0
+-(version 2 quota),
++Quota format with 32-bit UIDs / GIDs, 64-bit space usage, 32-bit inode usage and limits,
++.B vfsv1
++Quota format with 64-bit quota limits and usage,
+ .B rpc
+ (quota over NFS),
+ .B xfs
+diff --git a/edquota.c b/edquota.c
+index 746a848..bfb026f 100644
+--- a/edquota.c
++++ b/edquota.c
+@@ -32,10 +32,6 @@
+  * SUCH DAMAGE.
+  */
+ 
+-#ident "$Copyright: (c) 1980, 1990 Regents of the University of California. $"
+-#ident "$Copyright: All rights reserved. $"
+-#ident "$Id: edquota.c,v 1.23 2008/04/28 10:25:37 jkar8572 Exp $"
+-
+ /*
+  * Disk quota editor.
+  */
+diff --git a/quot.c b/quot.c
+index 77701b5..9276c65 100644
+--- a/quot.c
++++ b/quot.c
+@@ -32,10 +32,6 @@
+  * SUCH DAMAGE.
+  */
+ 
+-#ident "$Copyright: (c) 1980, 1990 Regents of the University of California. $"
+-#ident "$Copyright: (c) 2000, 2001 Silicon Graphics, Inc. $"
+-#ident "$Copyright: All rights reserved. $"
+-
+ #include <sys/stat.h>
+ #include <sys/param.h>
+ #include <sys/ioctl.h>
+diff --git a/quota.1 b/quota.1
+index 6579063..705629c 100644
+--- a/quota.1
++++ b/quota.1
+@@ -67,9 +67,11 @@ the server machine is performed to get the information.
+ Show quota for specified format (ie. don't perform format autodetection).
+ Possible format names are:
+ .B vfsold
+-(version 1 quota),
++Original quota format with 16-bit UIDs / GIDs,
+ .B vfsv0
+-(version 2 quota),
++Quota format with 32-bit UIDs / GIDs, 64-bit space usage, 32-bit inode usage and limits,
++.B vfsv1
++Quota format with 64-bit quota limits and usage,
+ .B rpc
+ (quota over NFS),
+ .B xfs
+diff --git a/quota.c b/quota.c
+index 02631a0..91f63d2 100644
+--- a/quota.c
++++ b/quota.c
+@@ -32,10 +32,6 @@
+  * SUCH DAMAGE.
+  */
+ 
+-#ident "$Copyright: (c) 1980, 1990 Regents of the University of California. $"
+-#ident "$Copyright: All rights reserved. $"
+-#ident "$Id: quota.c,v 1.27 2008/04/21 15:37:42 jkar8572 Exp $"
+-
+ /*
+  * Disk quota reporting program.
+  */
+diff --git a/quota.h b/quota.h
+index 76b12b2..b2bab6b 100644
+--- a/quota.h
++++ b/quota.h
+@@ -140,6 +140,7 @@ enum {
+ #define QFMT_VFS_OLD 1
+ #define QFMT_VFS_V0  2
+ #define QFMT_OCFS2   3
++#define QFMT_VFS_V1  4
+ 
+ /* Flags supported by kernel */
+ #define V1_DQF_RSQUASH 1
+diff --git a/quota_tree.h b/quota_tree.h
+new file mode 100644
+index 0000000..9dd1b8b
+--- /dev/null
++++ b/quota_tree.h
+@@ -0,0 +1,51 @@
++#ifndef _QUOTA_TREE_H
++#define _QUOTA_TREE_H
++
++#include <sys/types.h>
++#include "quota.h"
++
++#define QT_TREEOFF	1	/* Offset of tree in file in blocks */
++#define QT_TREEDEPTH	4	/* Depth of quota tree */
++#define QT_BLKSIZE_BITS	10
++#define QT_BLKSIZE (1 << QT_BLKSIZE_BITS)	/* Size of block with quota structures */
++
++/*
++ *  Structure of header of block with quota structures. It is padded to 16 bytes so
++ *  there will be space for exactly 18 quota-entries in a block
++ */
++struct qt_disk_dqdbheader {
++	u_int32_t dqdh_next_free;	/* Number of next block with free entry */
++	u_int32_t dqdh_prev_free;	/* Number of previous block with free entry */
++	u_int16_t dqdh_entries;	/* Number of valid entries in block */
++	u_int16_t dqdh_pad1;
++	u_int32_t dqdh_pad2;
++} __attribute__ ((packed));
++
++struct dquot;
++struct quota_handle;
++
++/* Operations */
++struct qtree_fmt_operations {
++	void (*mem2disk_dqblk)(void *disk, struct dquot *dquot);	/* Convert given entry from in memory format to disk one */
++	void (*disk2mem_dqblk)(struct dquot *dquot, void *disk);	/* Convert given entry from disk format to in memory one */
++	int (*is_id)(void *disk, struct dquot *dquot);	/* Is this structure for given id? */
++};
++
++/* Inmemory copy of version specific information */
++struct qtree_mem_dqinfo {
++	unsigned int dqi_blocks;	/* # of blocks in quota file */
++	unsigned int dqi_free_blk;	/* First block in list of free blocks */
++	unsigned int dqi_free_entry;	/* First block with free entry */
++	unsigned int dqi_entry_size;	/* Size of quota entry in quota file */
++	struct qtree_fmt_operations *dqi_ops;	/* Operations for entry manipulation */
++};
++
++void qtree_write_dquot(struct dquot *dquot);
++struct dquot *qtree_read_dquot(struct quota_handle *h, qid_t id);
++void qtree_delete_dquot(struct dquot *dquot);
++int qtree_entry_unused(struct qtree_mem_dqinfo *info, char *disk);
++int qtree_scan_dquots(struct quota_handle *h, int (*process_dquot) (struct dquot *, char *));
++
++int qtree_dqstr_in_blk(struct qtree_mem_dqinfo *info);
++
++#endif
+diff --git a/quotacheck.8 b/quotacheck.8
+index 1b5a01f..ed23e73 100644
+--- a/quotacheck.8
++++ b/quotacheck.8
+@@ -133,9 +133,11 @@ Check and fix quota files of specified format (ie. don't perform format
+ auto-detection). This is recommended as detection might not work well on
+ corrupted quota files.  Possible format names are:
+ .B vfsold
+-(version 1 quota),
++Original quota format with 16-bit UIDs / GIDs,
+ .B vfsv0
+-(version 2 quota),
++Quota format with 32-bit UIDs / GIDs, 64-bit space usage, 32-bit inode usage and limits,
++.B vfsv1
++Quota format with 64-bit quota limits and usage,
+ .B rpc
+ (quota over NFS),
+ .B xfs
+diff --git a/quotacheck.c b/quotacheck.c
+index b5f7e2e..0a43188 100644
+--- a/quotacheck.c
++++ b/quotacheck.c
+@@ -8,8 +8,6 @@
+  *	New quota format implementation - Jan Kara <jack@suse.cz> - Sponsored by SuSE CR
+  */
+ 
+-#ident "$Id: quotacheck.c,v 1.57 2008/12/17 12:40:07 jkar8572 Exp $"
+-
+ #include <dirent.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -623,7 +621,7 @@ static int process_file(struct mntent *mnt, int type)
+ 	debug(FL_DEBUG, _("Going to check %s quota file of %s\n"), type2name(type),
+ 	      mnt->mnt_dir);
+ 
+-	if (kern_quota_on(mnt->mnt_fsname, type, (1 << cfmt)) > 0) {	/* Is quota enabled? */
++	if (kern_quota_on(mnt->mnt_fsname, type, cfmt) >= 0) {	/* Is quota enabled? */
+ 		if (!(flags & FL_FORCE)) {
+ 			if (flags & FL_INTERACTIVE) {
+ 				printf(_("Quota for %ss is enabled on mountpoint %s so quotacheck might damage the file.\n"), type2name(type), mnt->mnt_dir);
+@@ -644,7 +642,7 @@ Please turn quotas off or use -f to force checking.\n"),
+ 	}
+ 
+ 	if (!(flags & FL_NEWFILE)) {	/* Need to buffer file? */
+-		if (get_qf_name(mnt, type, (1 << cfmt), 0, &qfname) < 0) {
++		if (get_qf_name(mnt, type, cfmt, 0, &qfname) < 0) {
+ 			errstr(_("Cannot get quotafile name for %s\n"), mnt->mnt_fsname);
+ 			return -1;
+ 		}
+@@ -664,18 +662,11 @@ Please turn quotas off or use -f to force checking.\n"),
+ 
+ 	ret = 0;
+ 	memset(old_info + type, 0, sizeof(old_info[type]));
+-	switch (cfmt) {
+-		case QF_TOONEW:
+-			errstr(_("Too new quotafile format on %s\n"), mnt->mnt_fsname);
+-			ret = -1;
+-			break;
+-		case QF_VFSOLD:
+-			ret = v1_buffer_file(qfname, fd, type);
+-			break;
+-		case QF_VFSV0:
+-			ret = v2_buffer_file(qfname, fd, type);
+-			break;
+-	}
++	if (is_tree_qfmt(cfmt))
++		ret = v2_buffer_file(qfname, fd, type, cfmt);
++	else
++		ret = v1_buffer_file(qfname, fd, type);
++
+ 	if (!(flags & FL_NEWFILE)) {
+ 		free(qfname);
+ 		close(fd);
+@@ -695,7 +686,7 @@ static int rename_files(struct mntent *mnt, int type)
+ #endif
+ 
+ 	debug(FL_DEBUG, _("Renaming new files to proper names.\n"));
+-	if (get_qf_name(mnt, type, (1 << cfmt), 0, &filename) < 0)
++	if (get_qf_name(mnt, type, cfmt, 0, &filename) < 0)
+ 		die(2, _("Cannot get name of old quotafile on %s.\n"), mnt->mnt_dir);
+ 	if (stat(filename, &st) < 0) {	/* File doesn't exist? */
+ 		if (errno == ENOENT) {
+@@ -802,7 +793,7 @@ static int dump_to_file(struct mntent *mnt, int type)
+ 	if (!(flags & FL_NEWFILE)) {
+ 		h->qh_info.dqi_bgrace = old_info[type].dqi_bgrace;
+ 		h->qh_info.dqi_igrace = old_info[type].dqi_igrace;
+-		if (cfmt == QF_VFSV0)
++		if (is_tree_qfmt(cfmt))
+ 			v2_merge_info(&h->qh_info, old_info + type);
+ 		mark_quotafile_info_dirty(h);
+ 	}
+@@ -817,10 +808,10 @@ static int dump_to_file(struct mntent *mnt, int type)
+ 		return -1;
+ 	}
+ 	debug(FL_DEBUG, _("Data dumped.\n"));
+-	if (cfmt == kern_quota_on(mnt->mnt_fsname, type, 1 << cfmt)) {	/* Quota turned on? */
++	if (kern_quota_on(mnt->mnt_fsname, type, cfmt) >= 0) {	/* Quota turned on? */
+ 		char *filename;
+ 
+-		if (get_qf_name(mnt, type, 1 << cfmt, NF_FORMAT, &filename) < 0)
++		if (get_qf_name(mnt, type, cfmt, NF_FORMAT, &filename) < 0)
+ 			errstr(_("Cannot find checked quota file for %ss on %s!\n"), type2name(type), mnt->mnt_fsname);
+ 		else {
+ 			if (quotactl(QCMD((kernel_iface == IFACE_GENERIC) ? Q_QUOTAOFF : Q_6_5_QUOTAOFF, type),
+@@ -830,7 +821,7 @@ static int dump_to_file(struct mntent *mnt, int type)
+ 			else {
+ 				int ret;
+ 
+-				/* Rename files - if it fails we cannot do anything better then just turn on quotas again */
++				/* Rename files - if it fails we cannot do anything better than just turn on quotas again */
+ 				rename_files(mnt, type);
+ 
+ 				if (kernel_iface == IFACE_GENERIC)
+@@ -860,7 +851,7 @@ static void sub_quota_file(struct mntent *mnt, int qtype, int ftype)
+ 	qid_t id;
+ 
+ 	debug(FL_DEBUG, _("Substracting space used by old %s quota file.\n"), type2name(ftype));
+-	if (get_qf_name(mnt, ftype, 1 << cfmt, 0, &filename) < 0) {
++	if (get_qf_name(mnt, ftype, cfmt, 0, &filename) < 0) {
+ 		debug(FL_VERBOSE, _("Old %s file not found. Usage will not be substracted.\n"), type2name(ftype));
+ 		return;
+ 	}
+@@ -976,6 +967,7 @@ static int detect_filename_format(struct mntent *mnt, int type)
+ 	struct stat statbuf;
+ 	char namebuf[PATH_MAX];
+ 	int journal = 0;
++	int fmt;
+ 
+ 	if (type == USRQUOTA) {
+ 		if ((option = hasmntopt(mnt, MNTOPT_USRQUOTA)))
+@@ -998,7 +990,6 @@ static int detect_filename_format(struct mntent *mnt, int type)
+ 	if (!option)
+ 		die(2, _("Cannot find quota option on filesystem %s with quotas!\n"), mnt->mnt_dir);
+ 	if (journal) {
+-		int fmt;
+ 		char fmtbuf[64], *space;
+ 		
+ 		if (!(option = hasmntopt(mnt, MNTOPT_JQFMT))) {
+@@ -1015,24 +1006,32 @@ jquota_err:
+ 		if (space-option > sizeof(fmtbuf))
+ 			goto jquota_err;
+ 		sstrncpy(fmtbuf, option+1, space-option);
+-		if ((fmt = name2fmt(fmtbuf)) == QF_ERROR)
++		fmt = name2fmt(fmtbuf);
++		if (fmt == QF_ERROR)
+ 			goto jquota_err;
+ 		return fmt;
+ 	}
+ 	else if (*option == '=')	/* If the file name is specified we can't detect quota format from it... */
+ 		return -1;
+ 	snprintf(namebuf, PATH_MAX, "%s/%s.%s", mnt->mnt_dir, basenames[QF_VFSV0], extensions[type]);
+-	if (!stat(namebuf, &statbuf))
+-		return QF_VFSV0;
++	if (!stat(namebuf, &statbuf)) {
++		int fd = open(namebuf, O_RDONLY);
++		if (fd < 0)
++			return -1;
++		fmt = v2_detect_version(namebuf, fd, type);
++		close(fd);
++		return fmt;
++		
++	}
+ 	if (errno != ENOENT)
+ 		return -1;
+ 	snprintf(namebuf, PATH_MAX, "%s/%s.%s", mnt->mnt_dir, basenames[QF_VFSOLD], extensions[type]);
+ 	if (!stat(namebuf, &statbuf))
+ 		return QF_VFSOLD;
+-	/* Old quota files don't exist, just create newest quotafile available */
+-	if (kernel_formats & (1 << QF_VFSV0))
++	/* Old quota files don't exist, just create VFSv0 format if available */
++	if (kern_qfmt_supp(QF_VFSV0))
+ 		return QF_VFSV0;
+-	if (kernel_formats & (1 << QF_VFSOLD))
++	if (kern_qfmt_supp(QF_VFSOLD))
+ 		return QF_VFSOLD;
+ 	return -1;
+ }
+@@ -1065,7 +1064,8 @@ static void check_all(void)
+ 		if (!ucheck && !gcheck)
+ 			continue;
+ 		if (cfmt == -1) {
+-			if ((cfmt = detect_filename_format(mnt, ucheck ? USRQUOTA : GRPQUOTA)) == -1) {
++			cfmt = detect_filename_format(mnt, ucheck ? USRQUOTA : GRPQUOTA);
++			if (cfmt == -1) {
+ 				errstr(_("Cannot guess format from filename on %s. Please specify format on commandline.\n"),
+ 					mnt->mnt_fsname);
+ 				continue;
+diff --git a/quotacheck.h b/quotacheck.h
+index a4f8955..e7faad1 100644
+--- a/quotacheck.h
++++ b/quotacheck.h
+@@ -40,7 +40,8 @@ void debug(int df, char *fmtstr, ...) __attribute__ ((__format__ (__printf__, 2,
+ int ask_yn(char *q, int def);
+ struct dquot *lookup_dquot(qid_t id, int type);
+ struct dquot *add_dquot(qid_t id, int type);
+-int v2_buffer_file(char *filename, int fd, int type);
++int v2_detect_version(char *filename, int fd, int type);
++int v2_buffer_file(char *filename, int fd, int type, int version);
+ int v1_buffer_file(char *filename, int fd, int type);
+ void v2_merge_info(struct util_dqinfo *new, struct util_dqinfo *old);
+ #endif
+diff --git a/quotacheck_v2.c b/quotacheck_v2.c
+index 7788237..b6a2d7f 100644
+--- a/quotacheck_v2.c
++++ b/quotacheck_v2.c
+@@ -18,8 +18,9 @@
+ #include "quotaio.h"
+ #include "quotaio_v2.h"
+ #include "quotacheck.h"
++#include "quota_tree.h"
+ 
+-#define getdqbuf() smalloc(V2_DQBLKSIZE)
++#define getdqbuf() smalloc(QT_BLKSIZE)
+ #define freedqbuf(buf) free(buf)
+ 
+ #define SET_BLK(blk) (blkbmp[(blk) >> 3] |= 1 << ((blk) & 7))
+@@ -28,14 +29,15 @@
+ typedef char *dqbuf_t;
+ 
+ static const int magics[MAXQUOTAS] = INITQMAGICS;	/* Magics we should look for */
+-static const int known_versions[MAXQUOTAS] = INITKNOWNVERSIONS;	/* Versions we accept */
++static const int known_versions[MAXQUOTAS] = INIT_V2_VERSIONS;	/* Versions we accept */
+ static char *blkbmp;		/* Bitmap of checked blocks */
++static int detected_versions[MAXQUOTAS];
+ 
+ static int check_blkref(uint blk, uint blocks)
+ {
+ 	if (blk >= blocks)
+ 		return -1;
+-	if (blk && blk < V2_DQTREEOFF)
++	if (blk && blk < QT_TREEOFF)
+ 		return -1;
+ 	return 0;
+ }
+@@ -69,25 +71,32 @@ static int check_info(char *filename, int fd, int type)
+ 	dflags = __le32_to_cpu(dinfo.dqi_flags);
+ 	filesize = lseek(fd, 0, SEEK_END);
+ 	if (check_blkref(freeblk, blocks) < 0 || dflags & ~V2_DQF_MASK ||
+-	    check_blkref(freeent, blocks) < 0 || (filesize + V2_DQBLKSIZE - 1) >> V2_DQBLKSIZE_BITS != blocks) {
++	    check_blkref(freeent, blocks) < 0 || (filesize + QT_BLKSIZE - 1) >> QT_BLKSIZE_BITS != blocks) {
+ 		errstr(_("WARNING - Quota file info was corrupted.\n"));
+ 		debug(FL_DEBUG, _("Size of file: %lu\nBlocks: %u Free block: %u Block with free entry: %u Flags: %x\n"),
+ 		      (unsigned long)filesize, blocks, freeblk, freeent, dflags);
+ 		old_info[type].dqi_bgrace = MAX_DQ_TIME;
+ 		old_info[type].dqi_igrace = MAX_IQ_TIME;
+-		old_info[type].u.v2_mdqi.dqi_blocks =
+-			(filesize + V2_DQBLKSIZE - 1) >> V2_DQBLKSIZE_BITS;
++		old_info[type].u.v2_mdqi.dqi_qtree.dqi_blocks =
++			(filesize + QT_BLKSIZE - 1) >> QT_BLKSIZE_BITS;
+ 		old_info[type].u.v2_mdqi.dqi_flags = 0;
+ 		printf(_("Setting grace times and other flags to default values.\nAssuming number of blocks is %u.\n"),
+-		       old_info[type].u.v2_mdqi.dqi_blocks);
++		       old_info[type].u.v2_mdqi.dqi_qtree.dqi_blocks);
+ 	}
+ 	else {
+ 		old_info[type].dqi_bgrace = __le32_to_cpu(dinfo.dqi_bgrace);
+ 		old_info[type].dqi_igrace = __le32_to_cpu(dinfo.dqi_igrace);
+-		old_info[type].u.v2_mdqi.dqi_blocks = blocks;
++		old_info[type].u.v2_mdqi.dqi_qtree.dqi_blocks = blocks;
+ 		old_info[type].u.v2_mdqi.dqi_flags = dflags;
+ 	}
+-	old_info[type].u.v2_mdqi.dqi_free_blk = old_info[type].u.v2_mdqi.dqi_free_entry = 0;	/* This won't be needed */
++	if (detected_versions[type] == 0)
++		old_info[type].u.v2_mdqi.dqi_qtree.dqi_entry_size = sizeof(struct v2r0_disk_dqblk);
++	else if (detected_versions[type] == 1)
++		old_info[type].u.v2_mdqi.dqi_qtree.dqi_entry_size = sizeof(struct v2r1_disk_dqblk);
++	/* Won't be needed */
++	old_info[type].u.v2_mdqi.dqi_qtree.dqi_free_blk = 0;
++	old_info[type].u.v2_mdqi.dqi_qtree.dqi_free_entry = 0;
++
+ 	debug(FL_DEBUG, _("File info done.\n"));
+ 	return 0;
+ }
+@@ -120,7 +129,7 @@ static void blk_corrupted(int *corrupted, uint * lblk, uint blk, char *fmtstr, .
+ }
+ 
+ /* Convert dist quota format to utility one - copy just needed fields */
+-static inline void disk2utildqblk(struct util_dqblk *u, struct v2_disk_dqblk *d)
++static void v2r0_disk2utildqblk(struct util_dqblk *u, struct v2r0_disk_dqblk *d)
+ {
+ 	u->dqb_ihardlimit = __le32_to_cpu(d->dqb_ihardlimit);
+ 	u->dqb_isoftlimit = __le32_to_cpu(d->dqb_isoftlimit);
+@@ -130,23 +139,34 @@ static inline void disk2utildqblk(struct util_dqblk *u, struct v2_disk_dqblk *d)
+ 	u->dqb_btime = __le64_to_cpu(d->dqb_btime);
+ }
+ 
+-/* Check whether given dquot is empty */
+-static int empty_dquot(struct v2_disk_dqblk *d)
++/* Convert dist quota format to utility one - copy just needed fields */
++static void v2r1_disk2utildqblk(struct util_dqblk *u, struct v2r1_disk_dqblk *d)
+ {
+-	static struct v2_disk_dqblk fakedq;
+-
+-	return !memcmp(&fakedq, d, sizeof(fakedq));
++	u->dqb_ihardlimit = __le64_to_cpu(d->dqb_ihardlimit);
++	u->dqb_isoftlimit = __le64_to_cpu(d->dqb_isoftlimit);
++	u->dqb_bhardlimit = __le64_to_cpu(d->dqb_bhardlimit);
++	u->dqb_bsoftlimit = __le64_to_cpu(d->dqb_bsoftlimit);
++	u->dqb_itime = __le64_to_cpu(d->dqb_itime);
++	u->dqb_btime = __le64_to_cpu(d->dqb_btime);
+ }
+ 
+ /* Put one entry info memory */
+ static int buffer_entry(dqbuf_t buf, uint blk, int *corrupted, uint * lblk, int cnt, int type)
+ {
+-	struct util_dqblk mdq, *fdq;
++	struct util_dqblk *fdq, mdq;
+ 	qid_t id;
+ 	struct dquot *cd;
++	struct qtree_mem_dqinfo *info = &old_info[type].u.v2_mdqi.dqi_qtree;
++	char *ddq = (char *)buf + sizeof(struct qt_disk_dqdbheader) + cnt * info->dqi_entry_size;
++
++	if (detected_versions[type] == 0) {
++		v2r0_disk2utildqblk(&mdq, (struct v2r0_disk_dqblk *)ddq);
++		id = __le32_to_cpu(((struct v2r0_disk_dqblk *)ddq)->dqb_id);
++	} else {
++		v2r1_disk2utildqblk(&mdq, (struct v2r1_disk_dqblk *)ddq);
++		id = __le32_to_cpu(((struct v2r1_disk_dqblk *)ddq)->dqb_id);
++	}
+ 
+-	disk2utildqblk(&mdq, ((struct v2_disk_dqblk *)(((char *)buf) + sizeof(struct v2_disk_dqdbheader))) + cnt);
+-	id = __le32_to_cpu(((struct v2_disk_dqblk *)(((char *)buf) + sizeof(struct v2_disk_dqdbheader)))[cnt].dqb_id);
+ 	cd = lookup_dquot(id, type);
+ 	if (cd != NODQUOT) {
+ 		fdq = &cd->dq_dqb;
+@@ -213,13 +233,13 @@ static void check_read_blk(int fd, uint blk, dqbuf_t buf)
+ {
+ 	size_t rd;
+ 
+-	lseek(fd, blk << V2_DQBLKSIZE_BITS, SEEK_SET);
+-	rd = read(fd, buf, V2_DQBLKSIZE);
++	lseek(fd, blk << QT_BLKSIZE_BITS, SEEK_SET);
++	rd = read(fd, buf, QT_BLKSIZE);
+ 	if (rd < 0)
+ 		die(2, _("Cannot read block %u: %s\n"), blk, strerror(errno));
+-	if (rd != V2_DQBLKSIZE) {
++	if (rd != QT_BLKSIZE) {
+ 		debug(FL_VERBOSE | FL_DEBUG, _("Block %u is truncated.\n"), blk);
+-		memset(buf + rd, 0, V2_DQBLKSIZE - rd);
++		memset(buf + rd, 0, QT_BLKSIZE - rd);
+ 	}
+ }
+ 
+@@ -242,20 +262,21 @@ static int check_tree_ref(uint blk, uint ref, uint blocks, int check_use, int *
+ static int check_data_blk(int fd, uint blk, int type, uint blocks, int * corrupted, uint * lblk)
+ {
+ 	dqbuf_t buf = getdqbuf();
+-	struct v2_disk_dqdbheader *head = (struct v2_disk_dqdbheader *)buf;
++	struct qt_disk_dqdbheader *head = (struct qt_disk_dqdbheader *)buf;
+ 	int i;
+-	struct v2_disk_dqblk *dd = (struct v2_disk_dqblk *)(head + 1);
++	char *dd = (char *)(head + 1);
++	struct qtree_mem_dqinfo *info = &old_info[type].u.v2_mdqi.dqi_qtree;
+ 
+ 	SET_BLK(blk);
+ 	check_read_blk(fd, blk, buf);
+ 	if (check_blkref(__le32_to_cpu(head->dqdh_next_free), blocks) < 0)
+ 		blk_corrupted(corrupted, lblk, blk, _("Illegal free block reference to block %u"),
+ 			      __le32_to_cpu(head->dqdh_next_free));
+-	if (__le16_to_cpu(head->dqdh_entries) > V2_DQSTRINBLK)
++	if (__le16_to_cpu(head->dqdh_entries) > qtree_dqstr_in_blk(info))
+ 		blk_corrupted(corrupted, lblk, blk, _("Corrupted number of used entries (%u)"),
+ 			      (uint) __le16_to_cpu(head->dqdh_entries));
+-	for (i = 0; i < V2_DQSTRINBLK; i++)
+-		if (!empty_dquot(dd + i))
++	for (i = 0; i < qtree_dqstr_in_blk(info); i++)
++		if (!qtree_entry_unused(info, dd + i * info->dqi_entry_size))
+ 			if (buffer_entry(buf, blk, corrupted, lblk, i, type) < 0) {
+ 				freedqbuf(buf);
+ 				return -1;
+@@ -274,8 +295,8 @@ static int check_tree_blk(int fd, uint blk, int depth, int type, uint blocks, in
+ 
+ 	SET_BLK(blk);
+ 	check_read_blk(fd, blk, buf);
+-	for (i = 0; i < V2_DQBLKSIZE >> 2; i++)
+-		if (depth < V2_DQTREEDEPTH - 1) {
++	for (i = 0; i < QT_BLKSIZE >> 2; i++)
++		if (depth < QT_TREEDEPTH - 1) {
+ 			if (check_tree_ref(blk, __le32_to_cpu(r[i]), blocks, 1, corrupted, lblk) >= 0 &&
+ 			    __le32_to_cpu(r[i]))	/* Isn't block OK? */
+ 				if (check_tree_blk(fd, __le32_to_cpu(r[i]), depth + 1, type, blocks, corrupted, lblk) < 0) {
+@@ -292,8 +313,26 @@ static int check_tree_blk(int fd, uint blk, int depth, int type, uint blocks, in
+ 	return 0;
+ }
+ 
++int v2_detect_version(char *filename, int fd, int type)
++{
++	struct v2_disk_dqheader head;
++	int err;
++
++	lseek(fd, 0, SEEK_SET);
++	err = read(fd, &head, sizeof(head));
++	if (err < 0 || err != sizeof(head))
++		return -1;
++	if (__le32_to_cpu(head.dqh_magic) != magics[type] ||
++	    __le32_to_cpu(head.dqh_version) > known_versions[type]) {
++		errstr(_("Quota file %s has corrupted headers. You have to specify quota format on command line.\n"),
++			filename);
++		return -1;
++	}
++	return __le32_to_cpu(head.dqh_version);
++}
++
+ /* Check basic header */
+-static int check_header(char *filename, int fd, int type)
++static int check_header(char *filename, int fd, int type, int version)
+ {
+ 	int err;
+ 	struct v2_disk_dqheader head;
+@@ -308,34 +347,55 @@ static int check_header(char *filename, int fd, int type)
+ 			filename);
+ 		return -1;
+ 	}
+-	if (__le32_to_cpu(head.dqh_magic) != magics[type] || __le32_to_cpu(head.dqh_version) > known_versions[type])
++	if (__le32_to_cpu(head.dqh_magic) != magics[type] ||
++	    __le32_to_cpu(head.dqh_version) > known_versions[type]) {
+ 		errstr(_("WARNING - Quota file %s has corrupted headers\n"),
+ 			filename);
++	}
++	if (__le32_to_cpu(head.dqh_version) != version) {
++		errstr(_("Quota file format version %d does not match the one "
++			 "specified on command line (%d). Quota file header "
++			 "may be corrupted.\n"),
++		       __le32_to_cpu(head.dqh_version), version);
++		if (!ask_yn(_("Continue checking assuming version from command line?"), 1))
++			return -1;
++		detected_versions[type] = version;
++	} else
++		detected_versions[type] = __le32_to_cpu(head.dqh_version);
++
+ 	debug(FL_DEBUG, _("Headers checked.\n"));
+ 	return 0;
+ }
+ 
+ /* Load data from file to memory */
+-int v2_buffer_file(char *filename, int fd, int type)
++int v2_buffer_file(char *filename, int fd, int type, int fmt)
+ {
+ 	uint blocks, lastblk = 0;
+ 	int corrupted = 0, ret = 0;
++	int version;
++
++	if (fmt == QF_VFSV0)
++		version = 0;
++	else if (fmt == QF_VFSV1)
++		version = 1;
++	else
++		die(3, _("Do not know how to buffer format %d\n"), fmt);
+ 
+ 	old_info[type].dqi_bgrace = MAX_DQ_TIME;
+ 	old_info[type].dqi_igrace = MAX_IQ_TIME;
+ 	if (flags & FL_NEWFILE)
+ 		return 0;
+-	if (check_header(filename, fd, type) < 0)
+-		return 0;
++	if (check_header(filename, fd, type, version) < 0)
++		return -1;
+ 	if (check_info(filename, fd, type) < 0)
+-		return 0;
++		return -1;
+ 	debug(FL_DEBUG, _("Headers of file %s checked. Going to load data...\n"),
+ 	      filename);
+-	blocks = old_info[type].u.v2_mdqi.dqi_blocks;
++	blocks = old_info[type].u.v2_mdqi.dqi_qtree.dqi_blocks;
+ 	blkbmp = xmalloc((blocks + 7) >> 3);
+ 	memset(blkbmp, 0, (blocks + 7) >> 3);
+-	if (check_tree_ref(0, V2_DQTREEOFF, blocks, 1, &corrupted, &lastblk) >= 0)
+-		ret = check_tree_blk(fd, V2_DQTREEOFF, 0, type, blocks, &corrupted, &lastblk);
++	if (check_tree_ref(0, QT_TREEOFF, blocks, 1, &corrupted, &lastblk) >= 0)
++		ret = check_tree_blk(fd, QT_TREEOFF, 0, type, blocks, &corrupted, &lastblk);
+ 	else
+ 		errstr(_("Cannot gather quota data. Tree root node corrupted.\n"));
+ #ifdef DEBUG_MALLOC
+diff --git a/quotaio.c b/quotaio.c
+index d74a37d..26a0a26 100644
+--- a/quotaio.c
++++ b/quotaio.c
+@@ -89,9 +89,9 @@ struct quota_handle *init_io(struct mntent *mnt, int type, int fmt, int flags)
+ 		errstr(_("XFS quota allowed only on XFS filesystem.\n"));
+ 		goto out_handle;
+ 	}
+-	if (kernel_formats > 0 && (fmt == -1 || (1 << fmt) & kernel_formats)) {	/* Quota compiled and desired format available? */
++	if (kern_qfmt_supp(fmt)) {	/* Quota compiled and desired format available? */
+ 		/* Quota turned on? */
+-		kernfmt = kern_quota_on(h->qh_quotadev, type, fmt == -1 ? kernel_formats : (1 << fmt));
++		kernfmt = kern_quota_on(h->qh_quotadev, type, fmt);
+ 		if (kernfmt >= 0) {
+ 			h->qh_io_flags |= IOFL_QUOTAON;
+ 			fmt = kernfmt;	/* Default is kernel used format */
+@@ -112,13 +112,33 @@ struct quota_handle *init_io(struct mntent *mnt, int type, int fmt, int flags)
+ 		goto set_ops;
+ 	}
+ 
+-	fmt = get_qf_name(mnt, type,
+-			  (fmt == -1) ? ((1 << QF_VFSOLD) | (1 << QF_VFSV0)) : (1 << fmt),
+-			  (!QIO_ENABLED(h) || flags & IOI_OPENFILE) ? NF_FORMAT : 0,
+-			  &qfname);
+-	if (fmt < 0) {
+-		errstr(_("Quota file not found or has wrong format.\n"));
+-		goto out_handle;
++	if (fmt == -1) {
++		/* Let's try any VFSv0 quota format... */
++		if (get_qf_name(mnt, type, QF_VFSV0,
++				(!QIO_ENABLED(h) || flags & IOI_OPENFILE) ? NF_FORMAT : 0,
++			  	&qfname) >= 0)
++			fmt = QF_VFSV0;
++		/* And then VFSv1 quota format... */
++		else if (get_qf_name(mnt, type, QF_VFSV1,
++				(!QIO_ENABLED(h) || flags & IOI_OPENFILE) ? NF_FORMAT : 0,
++			  	&qfname) >= 0)
++			fmt = QF_VFSV1;
++		/* And then old quota format... */
++		else if (get_qf_name(mnt, type, QF_VFSOLD,
++                                (!QIO_ENABLED(h) || flags & IOI_OPENFILE) ? NF_FORMAT : 0,
++                                &qfname) >= 0)
++			fmt = QF_VFSOLD;
++		else {	/* Don't know... */
++			errstr(_("Cannot find any quota file to work on.\n"));
++			goto out_handle;
++		}
++	} else {
++		if (get_qf_name(mnt, type, fmt,
++				(!QIO_ENABLED(h) || flags & IOI_OPENFILE) ? NF_FORMAT : 0,
++			  	&qfname) < 0) {
++			errstr(_("Quota file not found or has wrong format.\n"));
++			goto out_handle;
++		}
+ 	}
+ 	if (!QIO_ENABLED(h) || flags & IOI_OPENFILE) {	/* Need to open file? */
+ 		/* We still need to open file for operations like 'repquota' */
+@@ -131,8 +151,7 @@ struct quota_handle *init_io(struct mntent *mnt, int type, int fmt, int flags)
+ 		/* Init handle */
+ 		h->qh_fd = fd;
+ 		h->qh_fmt = fmt;
+-	}
+-	else {
++	} else {
+ 		h->qh_fd = -1;
+ 		h->qh_fmt = fmt;
+ 	}
+@@ -140,11 +159,11 @@ struct quota_handle *init_io(struct mntent *mnt, int type, int fmt, int flags)
+ 	qfname = NULL;
+ 
+ set_ops:
+-	if (h->qh_fmt == QF_VFSOLD)
++	if (fmt == QF_VFSOLD)
+ 		h->qh_ops = &quotafile_ops_1;
+-	else if (h->qh_fmt == QF_VFSV0)
++	else if (is_tree_qfmt(fmt))
+ 		h->qh_ops = &quotafile_ops_2;
+-	else if (h->qh_fmt == QF_META)
++	else if (fmt == QF_META)
+ 		h->qh_ops = &quotafile_ops_meta;
+ 	memset(&h->qh_info, 0, sizeof(h->qh_info));
+ 
+@@ -175,13 +194,13 @@ struct quota_handle *new_io(struct mntent *mnt, int type, int fmt)
+ 	char namebuf[PATH_MAX];
+ 
+ 	if (fmt == -1)
+-		fmt = QF_VFSV0;	/* Use the newest format */
++		fmt = QF_VFSV0;
+ 	else if (fmt == QF_RPC || fmt == QF_XFS || meta_qf_fstype(mnt->mnt_type)) {
+ 		errstr(_("Creation of %s quota format is not supported.\n"),
+-			fmt == QF_RPC ? "RPC" : "XFS");
++			fmt2name(fmt));
+ 		return NULL;
+ 	}
+-	if (get_qf_name(mnt, type, (1 << fmt), 0, &qfname) < 0)
++	if (get_qf_name(mnt, type, fmt, 0, &qfname) < 0)
+ 		return NULL;
+ 	sstrncpy(namebuf, qfname, PATH_MAX);
+ 	sstrncat(namebuf, ".new", PATH_MAX);
+@@ -200,6 +219,7 @@ struct quota_handle *new_io(struct mntent *mnt, int type, int fmt)
+ 	sstrncpy(h->qh_quotadev, mnt_fsname, sizeof(h->qh_quotadev));
+ 	free((char *)mnt_fsname);
+ 	h->qh_type = type;
++	h->qh_fmt = fmt;
+ 	memset(&h->qh_info, 0, sizeof(h->qh_info));
+ 	if (fmt == QF_VFSOLD)
+ 		h->qh_ops = &quotafile_ops_1;
+@@ -213,7 +233,7 @@ struct quota_handle *new_io(struct mntent *mnt, int type, int fmt)
+ 		goto out_fd;
+ 	}
+ 	return h;
+-      out_fd:
++out_fd:
+ 	close(fd);
+ 	return NULL;
+ }
+diff --git a/quotaio.h b/quotaio.h
+index f6eef50..052ec3b 100644
+--- a/quotaio.h
++++ b/quotaio.h
+@@ -18,39 +18,32 @@
+ #include "dqblk_rpc.h"
+ #include "dqblk_xfs.h"
+ 
+-/* Latest known versions */
+-#define INITKNOWNVERSIONS {\
+-	0,\
+-	0\
+-}
+-
+-#define QUOTAFORMATS 4
++#define QUOTAFORMATS 6
+ 
+ #define INITQFBASENAMES {\
+ 	"quota",\
+ 	"aquota",\
++	"aquota",\
++	"",\
++	"",\
+ 	"",\
+-	""\
+-}
+-
+-#define INITQFMTNAMES {\
+-	"vfsold",\
+-	"vfsv0",\
+-	"rpc",\
+-	"xfs"\
+ }
+ 
+ #define MAX_FSTYPE_LEN 16		/* Maximum length of filesystem type name */
+ 
+ /* Values for format handling */
+-#define QF_UNKNOWN -3		/* Format cannot be detected from filename */
+-#define QF_TOONEW -2		/* Quota format is too new to handle */
+ #define QF_ERROR -1		/* There was error while detecting format (maybe unknown format...) */
+ #define QF_VFSOLD 0		/* Old quota format */
+-#define QF_VFSV0 1		/* New quota format - version 0 */
+-#define QF_RPC 2		/* RPC should be used on given filesystem */
+-#define QF_XFS 3		/* XFS quota format */
+-#define QF_META 4		/* Quota files are hidden, we don't care about the format */
++#define QF_VFSV0 1		/* Quota files with tree quota format */
++#define QF_VFSV1 2		/* Quota files with 64-bit tree quota format */
++#define QF_RPC 3		/* RPC should be used on given filesystem */
++#define QF_XFS 4		/* XFS quota format */
++#define QF_META 5		/* Quota files are hidden, we don't care about the format */
++
++static inline int is_tree_qfmt(int fmt)
++{
++	return fmt == QF_VFSV0 || fmt == QF_VFSV1;
++}
+ 
+ /*
+  * Definitions for disk quotas imposed on the average user
+@@ -143,7 +136,7 @@ struct dquot {
+ 
+ /* Structure of quotafile operations */
+ struct quotafile_ops {
+-	int (*check_file) (int fd, int type);		/* Check whether quotafile is in our format */
++	int (*check_file) (int fd, int type, int fmt);	/* Check whether quotafile is in our format */
+ 	int (*init_io) (struct quota_handle * h);	/* Open quotafile */
+ 	int (*new_io) (struct quota_handle * h);	/* Create new quotafile */
+ 	int (*end_io) (struct quota_handle * h);	/* Write all changes and close quotafile */
+diff --git a/quotaio_tree.c b/quotaio_tree.c
+new file mode 100644
+index 0000000..deef04e
+--- /dev/null
++++ b/quotaio_tree.c
+@@ -0,0 +1,519 @@
++/*
++ *	Implementation of new quotafile format
++ *
++ *	Jan Kara <jack@suse.cz> - sponsored by SuSE CR
++ */
++
++#include <sys/types.h>
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <asm/byteorder.h>
++
++#include "pot.h"
++#include "common.h"
++#include "quota_tree.h"
++#include "quotaio.h"
++#include "quotasys.h"
++#include "quotaio_generic.h"
++
++typedef char *dqbuf_t;
++
++#define getdqbuf() smalloc(QT_BLKSIZE)
++#define freedqbuf(buf) free(buf)
++
++/* Is given dquot empty? */
++int qtree_entry_unused(struct qtree_mem_dqinfo *info, char *disk)
++{
++	int i;
++
++	for (i = 0; i < info->dqi_entry_size; i++)
++		if (disk[i])
++			return 0;
++	return 1;
++}
++
++int qtree_dqstr_in_blk(struct qtree_mem_dqinfo *info)
++{
++	return (QT_BLKSIZE - sizeof(struct qt_disk_dqdbheader)) / info->dqi_entry_size;
++}
++
++static int get_index(qid_t id, int depth)
++{
++	return (id >> ((QT_TREEDEPTH - depth - 1) * 8)) & 0xff;
++}
++
++/* Read given block */
++static void read_blk(struct quota_handle *h, uint blk, dqbuf_t buf)
++{
++	int err;
++
++	lseek(h->qh_fd, blk << QT_BLKSIZE_BITS, SEEK_SET);
++	err = read(h->qh_fd, buf, QT_BLKSIZE);
++	if (err < 0)
++		die(2, _("Cannot read block %u: %s\n"), blk, strerror(errno));
++	else if (err != QT_BLKSIZE)
++		memset(buf + err, 0, QT_BLKSIZE - err);
++}
++
++/* Write block */
++static int write_blk(struct quota_handle *h, uint blk, dqbuf_t buf)
++{
++	int err;
++
++	lseek(h->qh_fd, blk << QT_BLKSIZE_BITS, SEEK_SET);
++	err = write(h->qh_fd, buf, QT_BLKSIZE);
++	if (err < 0 && errno != ENOSPC)
++		die(2, _("Cannot write block (%u): %s\n"), blk, strerror(errno));
++	if (err != QT_BLKSIZE)
++		return -ENOSPC;
++	return 0;
++}
++
++/* Get free block in file (either from free list or create new one) */
++static int get_free_dqblk(struct quota_handle *h)
++{
++	dqbuf_t buf = getdqbuf();
++	struct qt_disk_dqdbheader *dh = (struct qt_disk_dqdbheader *)buf;
++	struct qtree_mem_dqinfo *info = &h->qh_info.u.v2_mdqi.dqi_qtree;
++	int blk;
++
++	if (info->dqi_free_blk) {
++		blk = info->dqi_free_blk;
++		read_blk(h, blk, buf);
++		info->dqi_free_blk = __le32_to_cpu(dh->dqdh_next_free);
++	}
++	else {
++		memset(buf, 0, QT_BLKSIZE);
++		if (write_blk(h, info->dqi_blocks, buf) < 0) {	/* Assure block allocation... */
++			freedqbuf(buf);
++			errstr(_("Cannot allocate new quota block (out of disk space).\n"));
++			return -ENOSPC;
++		}
++		blk = info->dqi_blocks++;
++	}
++	mark_quotafile_info_dirty(h);
++	freedqbuf(buf);
++	return blk;
++}
++
++/* Put given block to free list */
++static void put_free_dqblk(struct quota_handle *h, dqbuf_t buf, uint blk)
++{
++	struct qt_disk_dqdbheader *dh = (struct qt_disk_dqdbheader *)buf;
++	struct qtree_mem_dqinfo *info = &h->qh_info.u.v2_mdqi.dqi_qtree;
++
++	dh->dqdh_next_free = __cpu_to_le32(info->dqi_free_blk);
++	dh->dqdh_prev_free = __cpu_to_le32(0);
++	dh->dqdh_entries = __cpu_to_le16(0);
++	info->dqi_free_blk = blk;
++	mark_quotafile_info_dirty(h);
++	write_blk(h, blk, buf);
++}
++
++/* Remove given block from the list of blocks with free entries */
++static void remove_free_dqentry(struct quota_handle *h, dqbuf_t buf, uint blk)
++{
++	dqbuf_t tmpbuf = getdqbuf();
++	struct qt_disk_dqdbheader *dh = (struct qt_disk_dqdbheader *)buf;
++	uint nextblk = __le32_to_cpu(dh->dqdh_next_free), prevblk =
++
++		__le32_to_cpu(dh->dqdh_prev_free);
++
++	if (nextblk) {
++		read_blk(h, nextblk, tmpbuf);
++		((struct qt_disk_dqdbheader *)tmpbuf)->dqdh_prev_free = dh->dqdh_prev_free;
++		write_blk(h, nextblk, tmpbuf);
++	}
++	if (prevblk) {
++		read_blk(h, prevblk, tmpbuf);
++		((struct qt_disk_dqdbheader *)tmpbuf)->dqdh_next_free = dh->dqdh_next_free;
++		write_blk(h, prevblk, tmpbuf);
++	}
++	else {
++		h->qh_info.u.v2_mdqi.dqi_qtree.dqi_free_entry = nextblk;
++		mark_quotafile_info_dirty(h);
++	}
++	freedqbuf(tmpbuf);
++	dh->dqdh_next_free = dh->dqdh_prev_free = __cpu_to_le32(0);
++	write_blk(h, blk, buf);	/* No matter whether write succeeds block is out of list */
++}
++
++/* Insert given block to the beginning of list with free entries */
++static void insert_free_dqentry(struct quota_handle *h, dqbuf_t buf, uint blk)
++{
++	dqbuf_t tmpbuf = getdqbuf();
++	struct qt_disk_dqdbheader *dh = (struct qt_disk_dqdbheader *)buf;
++	struct qtree_mem_dqinfo *info = &h->qh_info.u.v2_mdqi.dqi_qtree;
++
++	dh->dqdh_next_free = __cpu_to_le32(info->dqi_free_entry);
++	dh->dqdh_prev_free = __cpu_to_le32(0);
++	write_blk(h, blk, buf);
++	if (info->dqi_free_entry) {
++		read_blk(h, info->dqi_free_entry, tmpbuf);
++		((struct qt_disk_dqdbheader *)tmpbuf)->dqdh_prev_free = __cpu_to_le32(blk);
++		write_blk(h, info->dqi_free_entry, tmpbuf);
++	}
++	freedqbuf(tmpbuf);
++	info->dqi_free_entry = blk;
++	mark_quotafile_info_dirty(h);
++}
++
++/* Find space for dquot */
++static uint find_free_dqentry(struct quota_handle *h, struct dquot *dquot, int *err)
++{
++	int blk, i;
++	struct qt_disk_dqdbheader *dh;
++	struct qtree_mem_dqinfo *info = &h->qh_info.u.v2_mdqi.dqi_qtree;
++	char *ddquot;
++	dqbuf_t buf;
++
++	*err = 0;
++	buf = getdqbuf();
++	dh = (struct qt_disk_dqdbheader *)buf;
++	if (info->dqi_free_entry) {
++		blk = info->dqi_free_entry;
++		read_blk(h, blk, buf);
++	}
++	else {
++		blk = get_free_dqblk(h);
++		if (blk < 0) {
++			freedqbuf(buf);
++			*err = blk;
++			return 0;
++		}
++		memset(buf, 0, QT_BLKSIZE);
++		info->dqi_free_entry = blk;
++		mark_quotafile_info_dirty(h);
++	}
++	if (__le16_to_cpu(dh->dqdh_entries) + 1 >= qtree_dqstr_in_blk(info))	/* Block will be full? */
++		remove_free_dqentry(h, buf, blk);
++	dh->dqdh_entries = __cpu_to_le16(__le16_to_cpu(dh->dqdh_entries) + 1);
++	/* Find free structure in block */
++	ddquot = buf + sizeof(struct qt_disk_dqdbheader);
++	for (i = 0;
++	     i < qtree_dqstr_in_blk(info) && !qtree_entry_unused(info, ddquot);
++	     i++, ddquot += info->dqi_entry_size);
++	if (i == qtree_dqstr_in_blk(info))
++		die(2, _("find_free_dqentry(): Data block full but it shouldn't.\n"));
++	write_blk(h, blk, buf);
++	dquot->dq_dqb.u.v2_mdqb.dqb_off =
++		(blk << QT_BLKSIZE_BITS) + sizeof(struct qt_disk_dqdbheader) +
++		i * info->dqi_entry_size;
++	freedqbuf(buf);
++	return blk;
++}
++
++/* Insert reference to structure into the trie */
++static int do_insert_tree(struct quota_handle *h, struct dquot *dquot, uint * treeblk, int depth)
++{
++	dqbuf_t buf;
++	int newson = 0, newact = 0;
++	u_int32_t *ref;
++	uint newblk;
++	int ret = 0;
++
++	buf = getdqbuf();
++	if (!*treeblk) {
++		ret = get_free_dqblk(h);
++		if (ret < 0)
++			goto out_buf;
++		*treeblk = ret;
++		memset(buf, 0, QT_BLKSIZE);
++		newact = 1;
++	}
++	else
++		read_blk(h, *treeblk, buf);
++	ref = (u_int32_t *) buf;
++	newblk = __le32_to_cpu(ref[get_index(dquot->dq_id, depth)]);
++	if (!newblk)
++		newson = 1;
++	if (depth == QT_TREEDEPTH - 1) {
++		if (newblk)
++			die(2, _("Inserting already present quota entry (block %u).\n"),
++			    ref[get_index(dquot->dq_id, depth)]);
++		newblk = find_free_dqentry(h, dquot, &ret);
++	}
++	else
++		ret = do_insert_tree(h, dquot, &newblk, depth + 1);
++	if (newson && ret >= 0) {
++		ref[get_index(dquot->dq_id, depth)] = __cpu_to_le32(newblk);
++		write_blk(h, *treeblk, buf);
++	}
++	else if (newact && ret < 0)
++		put_free_dqblk(h, buf, *treeblk);
++out_buf:
++	freedqbuf(buf);
++	return ret;
++}
++
++/* Wrapper for inserting quota structure into tree */
++static void dq_insert_tree(struct quota_handle *h, struct dquot *dquot)
++{
++	uint tmp = QT_TREEOFF;
++
++	if (do_insert_tree(h, dquot, &tmp, 0) < 0)
++		die(2, _("Cannot write quota (id %u): %s\n"), (uint) dquot->dq_id, strerror(errno));
++}
++
++/* Write dquot to file */
++void qtree_write_dquot(struct dquot *dquot)
++{
++	ssize_t ret;
++	struct qtree_mem_dqinfo *info = &dquot->dq_h->qh_info.u.v2_mdqi.dqi_qtree;
++	char *ddquot = smalloc(info->dqi_entry_size);
++
++	if (!dquot->dq_dqb.u.v2_mdqb.dqb_off)
++		dq_insert_tree(dquot->dq_h, dquot);
++	lseek(dquot->dq_h->qh_fd, dquot->dq_dqb.u.v2_mdqb.dqb_off, SEEK_SET);
++	info->dqi_ops->mem2disk_dqblk(ddquot, dquot);
++	ret = write(dquot->dq_h->qh_fd, ddquot, info->dqi_entry_size);
++	if (ret != info->dqi_entry_size) {
++		if (ret > 0)
++			errno = ENOSPC;
++		die(2, _("Quota write failed (id %u): %s\n"), (uint)dquot->dq_id, strerror(errno));
++	}
++}
++
++/* Free dquot entry in data block */
++static void free_dqentry(struct quota_handle *h, struct dquot *dquot, uint blk)
++{
++	struct qt_disk_dqdbheader *dh;
++	struct qtree_mem_dqinfo *info = &h->qh_info.u.v2_mdqi.dqi_qtree;
++	dqbuf_t buf = getdqbuf();
++
++	if (dquot->dq_dqb.u.v2_mdqb.dqb_off >> QT_BLKSIZE_BITS != blk)
++		die(2, _("Quota structure has offset to other block (%u) than it should (%u).\n"), blk,
++		    (uint) (dquot->dq_dqb.u.v2_mdqb.dqb_off >> QT_BLKSIZE_BITS));
++	read_blk(h, blk, buf);
++	dh = (struct qt_disk_dqdbheader *)buf;
++	dh->dqdh_entries = __cpu_to_le16(__le16_to_cpu(dh->dqdh_entries) - 1);
++	if (!__le16_to_cpu(dh->dqdh_entries)) {	/* Block got free? */
++		remove_free_dqentry(h, buf, blk);
++		put_free_dqblk(h, buf, blk);
++	}
++	else {
++		memset(buf + (dquot->dq_dqb.u.v2_mdqb.dqb_off & ((1 << QT_BLKSIZE_BITS) - 1)), 0,
++		       info->dqi_entry_size);
++
++		if (__le16_to_cpu(dh->dqdh_entries) == qtree_dqstr_in_blk(info) - 1)	/* First free entry? */
++			insert_free_dqentry(h, buf, blk);	/* This will also write data block */
++		else
++			write_blk(h, blk, buf);
++	}
++	dquot->dq_dqb.u.v2_mdqb.dqb_off = 0;
++	freedqbuf(buf);
++}
++
++/* Remove reference to dquot from tree */
++static void remove_tree(struct quota_handle *h, struct dquot *dquot, uint * blk, int depth)
++{
++	dqbuf_t buf = getdqbuf();
++	uint newblk;
++	u_int32_t *ref = (u_int32_t *) buf;
++
++	read_blk(h, *blk, buf);
++	newblk = __le32_to_cpu(ref[get_index(dquot->dq_id, depth)]);
++	if (depth == QT_TREEDEPTH - 1) {
++		free_dqentry(h, dquot, newblk);
++		newblk = 0;
++	}
++	else
++		remove_tree(h, dquot, &newblk, depth + 1);
++	if (!newblk) {
++		int i;
++
++		ref[get_index(dquot->dq_id, depth)] = __cpu_to_le32(0);
++		for (i = 0; i < QT_BLKSIZE && !buf[i]; i++);	/* Block got empty? */
++		/* Don't put the root block into the free block list */
++		if (i == QT_BLKSIZE && *blk != QT_TREEOFF) {
++			put_free_dqblk(h, buf, *blk);
++			*blk = 0;
++		}
++		else
++			write_blk(h, *blk, buf);
++	}
++	freedqbuf(buf);
++}
++
++/* Delete dquot from tree */
++void qtree_delete_dquot(struct dquot *dquot)
++{
++	uint tmp = QT_TREEOFF;
++
++	if (!dquot->dq_dqb.u.v2_mdqb.dqb_off)	/* Even not allocated? */
++		return;
++	remove_tree(dquot->dq_h, dquot, &tmp, 0);
++}
++
++/* Find entry in block */
++static loff_t find_block_dqentry(struct quota_handle *h, struct dquot *dquot, uint blk)
++{
++	struct qtree_mem_dqinfo *info = &h->qh_info.u.v2_mdqi.dqi_qtree;
++	dqbuf_t buf = getdqbuf();
++	int i;
++	char *ddquot = buf + sizeof(struct qt_disk_dqdbheader);
++
++	read_blk(h, blk, buf);
++	for (i = 0;
++	     i < qtree_dqstr_in_blk(info) && !info->dqi_ops->is_id(ddquot, dquot);
++	     i++, ddquot += info->dqi_entry_size);
++	if (i == qtree_dqstr_in_blk(info))
++		die(2, _("Quota for id %u referenced but not present.\n"), dquot->dq_id);
++	freedqbuf(buf);
++	return (blk << QT_BLKSIZE_BITS) + sizeof(struct qt_disk_dqdbheader) +
++		i * info->dqi_entry_size;
++}
++
++/* Find entry for given id in the tree */
++static loff_t find_tree_dqentry(struct quota_handle *h, struct dquot *dquot, uint blk, int depth)
++{
++	dqbuf_t buf = getdqbuf();
++	loff_t ret = 0;
++	u_int32_t *ref = (u_int32_t *) buf;
++
++	read_blk(h, blk, buf);
++	ret = 0;
++	blk = __le32_to_cpu(ref[get_index(dquot->dq_id, depth)]);
++	if (!blk)		/* No reference? */
++		goto out_buf;
++	if (depth < QT_TREEDEPTH - 1)
++		ret = find_tree_dqentry(h, dquot, blk, depth + 1);
++	else
++		ret = find_block_dqentry(h, dquot, blk);
++      out_buf:
++	freedqbuf(buf);
++	return ret;
++}
++
++/* Find entry for given id in the tree - wrapper function */
++static inline loff_t find_dqentry(struct quota_handle *h, struct dquot *dquot)
++{
++	return find_tree_dqentry(h, dquot, QT_TREEOFF, 0);
++}
++
++/*
++ *  Read dquot (either from disk or from kernel)
++ *  User can use errno to detect errstr when NULL is returned
++ */
++struct dquot *qtree_read_dquot(struct quota_handle *h, qid_t id)
++{
++	struct qtree_mem_dqinfo *info = &h->qh_info.u.v2_mdqi.dqi_qtree;
++	loff_t offset;
++	ssize_t ret;
++	char *ddquot = smalloc(info->dqi_entry_size);
++	struct dquot *dquot = get_empty_dquot();
++
++	dquot->dq_id = id;
++	dquot->dq_h = h;
++	dquot->dq_dqb.u.v2_mdqb.dqb_off = 0;
++	memset(&dquot->dq_dqb, 0, sizeof(struct util_dqblk));
++
++	offset = find_dqentry(h, dquot);
++	if (offset > 0) {
++		dquot->dq_dqb.u.v2_mdqb.dqb_off = offset;
++		lseek(h->qh_fd, offset, SEEK_SET);
++		ret = read(h->qh_fd, ddquot, info->dqi_entry_size);
++		if (ret != info->dqi_entry_size) {
++			if (ret > 0)
++				errno = EIO;
++			die(2, _("Cannot read quota structure for id %u: %s\n"), dquot->dq_id,
++			    strerror(errno));
++		}
++		info->dqi_ops->disk2mem_dqblk(dquot, ddquot);
++	}
++	return dquot;
++}
++
++/*
++ *	Scan all dquots in file and call callback on each
++ */
++#define set_bit(bmp, ind) ((bmp)[(ind) >> 3] |= (1 << ((ind) & 7)))
++#define get_bit(bmp, ind) ((bmp)[(ind) >> 3] & (1 << ((ind) & 7)))
++
++static int report_block(struct dquot *dquot, uint blk, char *bitmap,
++			int (*process_dquot) (struct dquot *, char *))
++{
++	struct qtree_mem_dqinfo *info = &dquot->dq_h->qh_info.u.v2_mdqi.dqi_qtree;
++	dqbuf_t buf = getdqbuf();
++	struct qt_disk_dqdbheader *dh;
++	char *ddata;
++	int entries, i;
++
++	set_bit(bitmap, blk);
++	read_blk(dquot->dq_h, blk, buf);
++	dh = (struct qt_disk_dqdbheader *)buf;
++	ddata = buf + sizeof(struct qt_disk_dqdbheader);
++	entries = __le16_to_cpu(dh->dqdh_entries);
++	for (i = 0; i < qtree_dqstr_in_blk(info); i++, ddata += info->dqi_entry_size)
++		if (!qtree_entry_unused(info, ddata)) {
++			info->dqi_ops->disk2mem_dqblk(dquot, ddata);
++			if (process_dquot(dquot, NULL) < 0)
++				break;
++		}
++	freedqbuf(buf);
++	return entries;
++}
++
++static void check_reference(struct quota_handle *h, uint blk)
++{
++	if (blk >= h->qh_info.u.v2_mdqi.dqi_qtree.dqi_blocks)
++		die(2, _("Illegal reference (%u >= %u) in %s quota file on %s. Quota file is probably corrupted.\nPlease run quotacheck(8) and try again.\n"), blk, h->qh_info.u.v2_mdqi.dqi_qtree.dqi_blocks, type2name(h->qh_type), h->qh_quotadev);
++}
++
++static int report_tree(struct dquot *dquot, uint blk, int depth, char *bitmap,
++		       int (*process_dquot) (struct dquot *, char *))
++{
++	int entries = 0, i;
++	dqbuf_t buf = getdqbuf();
++	u_int32_t *ref = (u_int32_t *) buf;
++
++	read_blk(dquot->dq_h, blk, buf);
++	if (depth == QT_TREEDEPTH - 1) {
++		for (i = 0; i < QT_BLKSIZE >> 2; i++) {
++			blk = __le32_to_cpu(ref[i]);
++			check_reference(dquot->dq_h, blk);
++			if (blk && !get_bit(bitmap, blk))
++				entries += report_block(dquot, blk, bitmap, process_dquot);
++		}
++	}
++	else {
++		for (i = 0; i < QT_BLKSIZE >> 2; i++)
++			if ((blk = __le32_to_cpu(ref[i]))) {
++				check_reference(dquot->dq_h, blk);
++				entries +=
++					report_tree(dquot, blk, depth + 1, bitmap, process_dquot);
++			}
++	}
++	freedqbuf(buf);
++	return entries;
++}
++
++static uint find_set_bits(char *bmp, int blocks)
++{
++	uint i, used = 0;
++
++	for (i = 0; i < blocks; i++)
++		if (get_bit(bmp, i))
++			used++;
++	return used;
++}
++
++int qtree_scan_dquots(struct quota_handle *h, int (*process_dquot) (struct dquot *, char *))
++{
++	char *bitmap;
++	struct v2_mem_dqinfo *v2info = &h->qh_info.u.v2_mdqi;
++	struct qtree_mem_dqinfo *info = &v2info->dqi_qtree;
++	struct dquot *dquot = get_empty_dquot();
++
++	dquot->dq_h = h;
++	bitmap = smalloc((info->dqi_blocks + 7) >> 3);
++	memset(bitmap, 0, (info->dqi_blocks + 7) >> 3);
++	v2info->dqi_used_entries = report_tree(dquot, QT_TREEOFF, 0, bitmap, process_dquot);
++	v2info->dqi_data_blocks = find_set_bits(bitmap, info->dqi_blocks);
++	free(bitmap);
++	free(dquot);
++	return 0;
++}
+diff --git a/quotaio_v1.c b/quotaio_v1.c
+index 9ee0efc..2cd70b2 100644
+--- a/quotaio_v1.c
++++ b/quotaio_v1.c
+@@ -32,10 +32,6 @@
+  * SUCH DAMAGE.
+  */
+ 
+-#ident "$Copyright: (c) 1980, 1990 Regents of the University of California. $"
+-#ident "$Copyright: All rights reserved. $"
+-#ident "$Id: quotaio_v1.c,v 1.15 2005/11/21 22:30:23 jkar8572 Exp $"
+-
+ #include <unistd.h>
+ #include <errno.h>
+ #include <string.h>
+@@ -49,7 +45,7 @@
+ #include "quotasys.h"
+ #include "quotaio_generic.h"
+ 
+-static int v1_check_file(int fd, int type);
++static int v1_check_file(int fd, int type, int fmt);
+ static int v1_init_io(struct quota_handle *h);
+ static int v1_new_io(struct quota_handle *h);
+ static int v1_write_info(struct quota_handle *h);
+@@ -126,7 +122,7 @@ static inline void v1_util2kerndqblk(struct v1_kern_dqblk *k, struct util_dqblk
+ /*
+  *	Check whether quotafile is in our format
+  */
+-static int v1_check_file(int fd, int type)
++static int v1_check_file(int fd, int type, int fmt)
+ {
+ 	struct stat st;
+ 
+diff --git a/quotaio_v2.c b/quotaio_v2.c
+index 39d0517..669fda3 100644
+--- a/quotaio_v2.c
++++ b/quotaio_v2.c
+@@ -22,7 +22,7 @@
+ 
+ typedef char *dqbuf_t;
+ 
+-static int v2_check_file(int fd, int type);
++static int v2_check_file(int fd, int type, int fmt);
+ static int v2_init_io(struct quota_handle *h);
+ static int v2_new_io(struct quota_handle *h);
+ static int v2_write_info(struct quota_handle *h);
+@@ -48,8 +48,12 @@ report:	v2_report
+ /*
+  *	Copy dquot from disk to memory
+  */
+-static inline void v2_disk2memdqblk(struct util_dqblk *m, struct v2_disk_dqblk *d)
++static void v2r0_disk2memdqblk(struct dquot *dquot, void *dp)
+ {
++	struct util_dqblk *m = &dquot->dq_dqb;
++	struct v2r0_disk_dqblk *d = dp, empty;
++
++	dquot->dq_id = __le32_to_cpu(d->dqb_id);
+ 	m->dqb_ihardlimit = __le32_to_cpu(d->dqb_ihardlimit);
+ 	m->dqb_isoftlimit = __le32_to_cpu(d->dqb_isoftlimit);
+ 	m->dqb_bhardlimit = __le32_to_cpu(d->dqb_bhardlimit);
+@@ -58,13 +62,22 @@ static inline void v2_disk2memdqblk(struct util_dqblk *m, struct v2_disk_dqblk *
+ 	m->dqb_curspace = __le64_to_cpu(d->dqb_curspace);
+ 	m->dqb_itime = __le64_to_cpu(d->dqb_itime);
+ 	m->dqb_btime = __le64_to_cpu(d->dqb_btime);
++
++	memset(&empty, 0, sizeof(struct v2r0_disk_dqblk));
++	empty.dqb_itime = __cpu_to_le64(1);
++	if (!memcmp(&empty, dp, sizeof(struct v2r0_disk_dqblk)))
++		m->dqb_itime = 0;
+ }
+ 
+ /*
+  *	Copy dquot from memory to disk
+  */
+-static inline void v2_mem2diskdqblk(struct v2_disk_dqblk *d, struct util_dqblk *m)
++static void v2r0_mem2diskdqblk(void *dp, struct dquot *dquot)
+ {
++	struct util_dqblk *m = &dquot->dq_dqb;
++	struct v2r0_disk_dqblk *d = dp;
++	struct qtree_mem_dqinfo *info = &dquot->dq_h->qh_info.u.v2_mdqi.dqi_qtree;
++
+ 	d->dqb_ihardlimit = __cpu_to_le32(m->dqb_ihardlimit);
+ 	d->dqb_isoftlimit = __cpu_to_le32(m->dqb_isoftlimit);
+ 	d->dqb_bhardlimit = __cpu_to_le32(m->dqb_bhardlimit);
+@@ -73,8 +86,88 @@ static inline void v2_mem2diskdqblk(struct v2_disk_dqblk *d, struct util_dqblk *
+ 	d->dqb_curspace = __cpu_to_le64(m->dqb_curspace);
+ 	d->dqb_itime = __cpu_to_le64(m->dqb_itime);
+ 	d->dqb_btime = __cpu_to_le64(m->dqb_btime);
++	d->dqb_id = __cpu_to_le32(dquot->dq_id);
++	if (qtree_entry_unused(info, dp))
++		d->dqb_itime = __cpu_to_le64(1);
++}
++
++static int v2r0_is_id(void *dp, struct dquot *dquot)
++{
++	struct v2r0_disk_dqblk *d = dp;
++	struct qtree_mem_dqinfo *info = &dquot->dq_h->qh_info.u.v2_mdqi.dqi_qtree;
++
++	if (qtree_entry_unused(info, dp))
++		return 0;
++	return __le32_to_cpu(d->dqb_id) == dquot->dq_id;
++}
++
++/*
++ *	Copy dquot from disk to memory
++ */
++static void v2r1_disk2memdqblk(struct dquot *dquot, void *dp)
++{
++	struct util_dqblk *m = &dquot->dq_dqb;
++	struct v2r1_disk_dqblk *d = dp, empty;
++
++	dquot->dq_id = __le32_to_cpu(d->dqb_id);
++	m->dqb_ihardlimit = __le64_to_cpu(d->dqb_ihardlimit);
++	m->dqb_isoftlimit = __le64_to_cpu(d->dqb_isoftlimit);
++	m->dqb_bhardlimit = __le64_to_cpu(d->dqb_bhardlimit);
++	m->dqb_bsoftlimit = __le64_to_cpu(d->dqb_bsoftlimit);
++	m->dqb_curinodes = __le64_to_cpu(d->dqb_curinodes);
++	m->dqb_curspace = __le64_to_cpu(d->dqb_curspace);
++	m->dqb_itime = __le64_to_cpu(d->dqb_itime);
++	m->dqb_btime = __le64_to_cpu(d->dqb_btime);
++
++	memset(&empty, 0, sizeof(struct v2r1_disk_dqblk));
++	empty.dqb_itime = __cpu_to_le64(1);
++	if (!memcmp(&empty, dp, sizeof(struct v2r1_disk_dqblk)))
++		m->dqb_itime = 0;
++}
++
++/*
++ *	Copy dquot from memory to disk
++ */
++static void v2r1_mem2diskdqblk(void *dp, struct dquot *dquot)
++{
++	struct util_dqblk *m = &dquot->dq_dqb;
++	struct v2r1_disk_dqblk *d = dp;
++
++	d->dqb_ihardlimit = __cpu_to_le64(m->dqb_ihardlimit);
++	d->dqb_isoftlimit = __cpu_to_le64(m->dqb_isoftlimit);
++	d->dqb_bhardlimit = __cpu_to_le64(m->dqb_bhardlimit);
++	d->dqb_bsoftlimit = __cpu_to_le64(m->dqb_bsoftlimit);
++	d->dqb_curinodes = __cpu_to_le64(m->dqb_curinodes);
++	d->dqb_curspace = __cpu_to_le64(m->dqb_curspace);
++	d->dqb_itime = __cpu_to_le64(m->dqb_itime);
++	d->dqb_btime = __cpu_to_le64(m->dqb_btime);
++	d->dqb_id = __cpu_to_le32(dquot->dq_id);
++	if (qtree_entry_unused(&dquot->dq_h->qh_info.u.v2_mdqi.dqi_qtree, dp))
++		d->dqb_itime = __cpu_to_le64(1);
++}
++
++static int v2r1_is_id(void *dp, struct dquot *dquot)
++{
++	struct v2r1_disk_dqblk *d = dp;
++	struct qtree_mem_dqinfo *info = &dquot->dq_h->qh_info.u.v2_mdqi.dqi_qtree;
++
++	if (qtree_entry_unused(info, dp))
++		return 0;
++	return __le32_to_cpu(d->dqb_id) == dquot->dq_id;
+ }
+ 
++static struct qtree_fmt_operations v2r0_fmt_ops = {
++	.mem2disk_dqblk = v2r0_mem2diskdqblk,
++	.disk2mem_dqblk = v2r0_disk2memdqblk,
++	.is_id = v2r0_is_id,
++};
++
++static struct qtree_fmt_operations v2r1_fmt_ops = {
++	.mem2disk_dqblk = v2r1_mem2diskdqblk,
++	.disk2mem_dqblk = v2r1_disk2memdqblk,
++	.is_id = v2r1_is_id,
++};
++
+ /*
+  *	Copy dqinfo from disk to memory
+  */
+@@ -83,9 +176,9 @@ static inline void v2_disk2memdqinfo(struct util_dqinfo *m, struct v2_disk_dqinf
+ 	m->dqi_bgrace = __le32_to_cpu(d->dqi_bgrace);
+ 	m->dqi_igrace = __le32_to_cpu(d->dqi_igrace);
+ 	m->u.v2_mdqi.dqi_flags = __le32_to_cpu(d->dqi_flags) & V2_DQF_MASK;
+-	m->u.v2_mdqi.dqi_blocks = __le32_to_cpu(d->dqi_blocks);
+-	m->u.v2_mdqi.dqi_free_blk = __le32_to_cpu(d->dqi_free_blk);
+-	m->u.v2_mdqi.dqi_free_entry = __le32_to_cpu(d->dqi_free_entry);
++	m->u.v2_mdqi.dqi_qtree.dqi_blocks = __le32_to_cpu(d->dqi_blocks);
++	m->u.v2_mdqi.dqi_qtree.dqi_free_blk = __le32_to_cpu(d->dqi_free_blk);
++	m->u.v2_mdqi.dqi_qtree.dqi_free_entry = __le32_to_cpu(d->dqi_free_entry);
+ }
+ 
+ /*
+@@ -96,9 +189,9 @@ static inline void v2_mem2diskdqinfo(struct v2_disk_dqinfo *d, struct util_dqinf
+ 	d->dqi_bgrace = __cpu_to_le32(m->dqi_bgrace);
+ 	d->dqi_igrace = __cpu_to_le32(m->dqi_igrace);
+ 	d->dqi_flags = __cpu_to_le32(m->u.v2_mdqi.dqi_flags & V2_DQF_MASK);
+-	d->dqi_blocks = __cpu_to_le32(m->u.v2_mdqi.dqi_blocks);
+-	d->dqi_free_blk = __cpu_to_le32(m->u.v2_mdqi.dqi_free_blk);
+-	d->dqi_free_entry = __cpu_to_le32(m->u.v2_mdqi.dqi_free_entry);
++	d->dqi_blocks = __cpu_to_le32(m->u.v2_mdqi.dqi_qtree.dqi_blocks);
++	d->dqi_free_blk = __cpu_to_le32(m->u.v2_mdqi.dqi_qtree.dqi_free_blk);
++	d->dqi_free_entry = __cpu_to_le32(m->u.v2_mdqi.dqi_qtree.dqi_free_entry);
+ }
+ 
+ /* Convert kernel quotablock format to utility one */
+@@ -127,26 +220,33 @@ static inline void v2_util2kerndqblk(struct v2_kern_dqblk *k, struct util_dqblk
+ 	k->dqb_btime = u->dqb_btime;
+ }
+ 
+-/* Is given dquot empty? */
+-static int empty_dquot(struct v2_disk_dqblk *d)
++static int v2_read_header(int fd, struct v2_disk_dqheader *h)
+ {
+-	static struct v2_disk_dqblk fakedquot;
+-
+-	return !memcmp(d, &fakedquot, sizeof(fakedquot));
++	lseek(fd, 0, SEEK_SET);
++	if (read(fd, h, sizeof(struct v2_disk_dqheader)) != sizeof(struct v2_disk_dqheader))
++		return 0;
++	return 1;
+ }
+ 
+ /*
+  *	Check whether given quota file is in our format
+  */
+-static int v2_check_file(int fd, int type)
++static int v2_check_file(int fd, int type, int fmt)
+ {
+ 	struct v2_disk_dqheader h;
+ 	int file_magics[] = INITQMAGICS;
+ 	int known_versions[] = INIT_V2_VERSIONS;
++	int version;
+ 
+-	lseek(fd, 0, SEEK_SET);
+-	if (read(fd, &h, sizeof(h)) != sizeof(h))
++	if (!v2_read_header(fd, &h))
+ 		return 0;
++	if (fmt == QF_VFSV0)
++		version = 0;
++	else if (fmt == QF_VFSV1)
++		version = 1;
++	else
++		return 0;
++
+ 	if (__le32_to_cpu(h.dqh_magic) != file_magics[type]) {
+ 		if (__be32_to_cpu(h.dqh_magic) == file_magics[type])
+ 			die(3, _("Your quota file is stored in wrong endianity. Please use convertquota(8) to convert it.\n"));
+@@ -154,6 +254,8 @@ static int v2_check_file(int fd, int type)
+ 	}
+ 	if (__le32_to_cpu(h.dqh_version) > known_versions[type])
+ 		return 0;
++	if (version != __le32_to_cpu(h.dqh_version))
++		return 0;
+ 	return 1;
+ }
+ 
+@@ -179,18 +281,37 @@ static int v2_init_io(struct quota_handle *h)
+ 			h->qh_info.dqi_bgrace = kdqinfo.dqi_bgrace;
+ 			h->qh_info.dqi_igrace = kdqinfo.dqi_igrace;
+ 			h->qh_info.u.v2_mdqi.dqi_flags = kdqinfo.dqi_flags;
+-			h->qh_info.u.v2_mdqi.dqi_blocks = kdqinfo.dqi_blocks;
+-			h->qh_info.u.v2_mdqi.dqi_free_blk = kdqinfo.dqi_free_blk;
+-			h->qh_info.u.v2_mdqi.dqi_free_entry = kdqinfo.dqi_free_entry;
++			h->qh_info.u.v2_mdqi.dqi_qtree.dqi_blocks = kdqinfo.dqi_blocks;
++			h->qh_info.u.v2_mdqi.dqi_qtree.dqi_free_blk = kdqinfo.dqi_free_blk;
++			h->qh_info.u.v2_mdqi.dqi_qtree.dqi_free_entry = kdqinfo.dqi_free_entry;
+ 		}
+ 	}
+-	else {
++	if (h->qh_fd != -1) {
+ 		struct v2_disk_dqinfo ddqinfo;
++		struct v2_disk_dqheader header;
++
++		if (!v2_read_header(h->qh_fd, &header))
++			return -1;
+ 
+ 		lseek(h->qh_fd, V2_DQINFOOFF, SEEK_SET);
+ 		if (read(h->qh_fd, &ddqinfo, sizeof(ddqinfo)) != sizeof(ddqinfo))
+ 			return -1;
+-		v2_disk2memdqinfo(&h->qh_info, &ddqinfo);
++		/* Convert everything */
++		if (!QIO_ENABLED(h))
++			v2_disk2memdqinfo(&h->qh_info, &ddqinfo);
++		else	/* We need just the number of blocks */
++			h->qh_info.u.v2_mdqi.dqi_qtree.dqi_blocks = __le32_to_cpu(ddqinfo.dqi_blocks);
++
++		if (__le32_to_cpu(header.dqh_version) == 0) {
++			h->qh_info.u.v2_mdqi.dqi_qtree.dqi_entry_size = sizeof(struct v2r0_disk_dqblk);
++			h->qh_info.u.v2_mdqi.dqi_qtree.dqi_ops = &v2r0_fmt_ops;
++		} else {
++			h->qh_info.u.v2_mdqi.dqi_qtree.dqi_entry_size = sizeof(struct v2r1_disk_dqblk);
++			h->qh_info.u.v2_mdqi.dqi_qtree.dqi_ops = &v2r1_fmt_ops;
++		}
++	} else {
++		/* We don't have the file open -> we don't need quota tree operations */
++		h->qh_info.u.v2_mdqi.dqi_qtree.dqi_ops = NULL;
+ 	}
+ 	return 0;
+ }
+@@ -201,13 +322,20 @@ static int v2_init_io(struct quota_handle *h)
+ static int v2_new_io(struct quota_handle *h)
+ {
+ 	int file_magics[] = INITQMAGICS;
+-	int known_versions[] = INIT_V2_VERSIONS;
+ 	struct v2_disk_dqheader ddqheader;
+ 	struct v2_disk_dqinfo ddqinfo;
++	int version;
++
++	if (h->qh_fmt == QF_VFSV0)
++		version = 0;
++	else if (h->qh_fmt == QF_VFSV1)
++		version = 1;
++	else
++		return -1;
+ 
+ 	/* Write basic quota header */
+ 	ddqheader.dqh_magic = __cpu_to_le32(file_magics[h->qh_type]);
+-	ddqheader.dqh_version = __cpu_to_le32(known_versions[h->qh_type]);
++	ddqheader.dqh_version = __cpu_to_le32(version);
+ 	lseek(h->qh_fd, 0, SEEK_SET);
+ 	if (write(h->qh_fd, &ddqheader, sizeof(ddqheader)) != sizeof(ddqheader))
+ 		return -1;
+@@ -215,9 +343,16 @@ static int v2_new_io(struct quota_handle *h)
+ 	h->qh_info.dqi_bgrace = MAX_DQ_TIME;
+ 	h->qh_info.dqi_igrace = MAX_IQ_TIME;
+ 	h->qh_info.u.v2_mdqi.dqi_flags = 0;
+-	h->qh_info.u.v2_mdqi.dqi_blocks = V2_DQTREEOFF + 1;
+-	h->qh_info.u.v2_mdqi.dqi_free_blk = 0;
+-	h->qh_info.u.v2_mdqi.dqi_free_entry = 0;
++	h->qh_info.u.v2_mdqi.dqi_qtree.dqi_blocks = QT_TREEOFF + 1;
++	h->qh_info.u.v2_mdqi.dqi_qtree.dqi_free_blk = 0;
++	h->qh_info.u.v2_mdqi.dqi_qtree.dqi_free_entry = 0;
++	if (version == 0) {
++		h->qh_info.u.v2_mdqi.dqi_qtree.dqi_entry_size = sizeof(struct v2r0_disk_dqblk);
++		h->qh_info.u.v2_mdqi.dqi_qtree.dqi_ops = &v2r0_fmt_ops;
++	} else if (version == 1) {
++		h->qh_info.u.v2_mdqi.dqi_qtree.dqi_entry_size = sizeof(struct v2r1_disk_dqblk);
++		h->qh_info.u.v2_mdqi.dqi_qtree.dqi_ops = &v2r1_fmt_ops;
++	}
+ 	v2_mem2diskdqinfo(&ddqinfo, &h->qh_info);
+ 	lseek(h->qh_fd, V2_DQINFOOFF, SEEK_SET);
+ 	if (write(h->qh_fd, &ddqinfo, sizeof(ddqinfo)) != sizeof(ddqinfo))
+@@ -246,9 +381,9 @@ static int v2_write_info(struct quota_handle *h)
+ 			kdqinfo.dqi_bgrace = h->qh_info.dqi_bgrace;
+ 			kdqinfo.dqi_igrace = h->qh_info.dqi_igrace;
+ 			kdqinfo.dqi_flags = h->qh_info.u.v2_mdqi.dqi_flags;
+-			kdqinfo.dqi_blocks = h->qh_info.u.v2_mdqi.dqi_blocks;
+-			kdqinfo.dqi_free_blk = h->qh_info.u.v2_mdqi.dqi_free_blk;
+-			kdqinfo.dqi_free_entry = h->qh_info.u.v2_mdqi.dqi_free_entry;
++			kdqinfo.dqi_blocks = h->qh_info.u.v2_mdqi.dqi_qtree.dqi_blocks;
++			kdqinfo.dqi_free_blk = h->qh_info.u.v2_mdqi.dqi_qtree.dqi_free_blk;
++			kdqinfo.dqi_free_entry = h->qh_info.u.v2_mdqi.dqi_qtree.dqi_free_entry;
+ 			if (quotactl(QCMD(Q_V2_SETGRACE, h->qh_type), h->qh_quotadev, 0, (void *)&kdqinfo) < 0 ||
+ 			    quotactl(QCMD(Q_V2_SETFLAGS, h->qh_type), h->qh_quotadev, 0, (void *)&kdqinfo) < 0)
+ 					return -1;
+@@ -265,375 +400,19 @@ static int v2_write_info(struct quota_handle *h)
+ 	return 0;
+ }
+ 
+-/* Read given block */
+-static void read_blk(struct quota_handle *h, uint blk, dqbuf_t buf)
+-{
+-	int err;
+-
+-	lseek(h->qh_fd, blk << V2_DQBLKSIZE_BITS, SEEK_SET);
+-	err = read(h->qh_fd, buf, V2_DQBLKSIZE);
+-	if (err < 0)
+-		die(2, _("Cannot read block %u: %s\n"), blk, strerror(errno));
+-	else if (err != V2_DQBLKSIZE)
+-		memset(buf + err, 0, V2_DQBLKSIZE - err);
+-}
+-
+-/* Write block */
+-static int write_blk(struct quota_handle *h, uint blk, dqbuf_t buf)
+-{
+-	int err;
+-
+-	lseek(h->qh_fd, blk << V2_DQBLKSIZE_BITS, SEEK_SET);
+-	err = write(h->qh_fd, buf, V2_DQBLKSIZE);
+-	if (err < 0 && errno != ENOSPC)
+-		die(2, _("Cannot write block (%u): %s\n"), blk, strerror(errno));
+-	if (err != V2_DQBLKSIZE)
+-		return -ENOSPC;
+-	return 0;
+-}
+-
+-/* Get free block in file (either from free list or create new one) */
+-static int get_free_dqblk(struct quota_handle *h)
+-{
+-	dqbuf_t buf = getdqbuf();
+-	struct v2_disk_dqdbheader *dh = (struct v2_disk_dqdbheader *)buf;
+-	struct v2_mem_dqinfo *info = &h->qh_info.u.v2_mdqi;
+-	int blk;
+-
+-	if (info->dqi_free_blk) {
+-		blk = info->dqi_free_blk;
+-		read_blk(h, blk, buf);
+-		info->dqi_free_blk = __le32_to_cpu(dh->dqdh_next_free);
+-	}
+-	else {
+-		memset(buf, 0, V2_DQBLKSIZE);
+-		if (write_blk(h, info->dqi_blocks, buf) < 0) {	/* Assure block allocation... */
+-			freedqbuf(buf);
+-			errstr(_("Cannot allocate new quota block (out of disk space).\n"));
+-			return -ENOSPC;
+-		}
+-		blk = info->dqi_blocks++;
+-	}
+-	mark_quotafile_info_dirty(h);
+-	freedqbuf(buf);
+-	return blk;
+-}
+-
+-/* Put given block to free list */
+-static void put_free_dqblk(struct quota_handle *h, dqbuf_t buf, uint blk)
+-{
+-	struct v2_disk_dqdbheader *dh = (struct v2_disk_dqdbheader *)buf;
+-	struct v2_mem_dqinfo *info = &h->qh_info.u.v2_mdqi;
+-
+-	dh->dqdh_next_free = __cpu_to_le32(info->dqi_free_blk);
+-	dh->dqdh_prev_free = __cpu_to_le32(0);
+-	dh->dqdh_entries = __cpu_to_le16(0);
+-	info->dqi_free_blk = blk;
+-	mark_quotafile_info_dirty(h);
+-	write_blk(h, blk, buf);
+-}
+-
+-/* Remove given block from the list of blocks with free entries */
+-static void remove_free_dqentry(struct quota_handle *h, dqbuf_t buf, uint blk)
+-{
+-	dqbuf_t tmpbuf = getdqbuf();
+-	struct v2_disk_dqdbheader *dh = (struct v2_disk_dqdbheader *)buf;
+-	uint nextblk = __le32_to_cpu(dh->dqdh_next_free), prevblk =
+-
+-		__le32_to_cpu(dh->dqdh_prev_free);
+-
+-	if (nextblk) {
+-		read_blk(h, nextblk, tmpbuf);
+-		((struct v2_disk_dqdbheader *)tmpbuf)->dqdh_prev_free = dh->dqdh_prev_free;
+-		write_blk(h, nextblk, tmpbuf);
+-	}
+-	if (prevblk) {
+-		read_blk(h, prevblk, tmpbuf);
+-		((struct v2_disk_dqdbheader *)tmpbuf)->dqdh_next_free = dh->dqdh_next_free;
+-		write_blk(h, prevblk, tmpbuf);
+-	}
+-	else {
+-		h->qh_info.u.v2_mdqi.dqi_free_entry = nextblk;
+-		mark_quotafile_info_dirty(h);
+-	}
+-	freedqbuf(tmpbuf);
+-	dh->dqdh_next_free = dh->dqdh_prev_free = __cpu_to_le32(0);
+-	write_blk(h, blk, buf);	/* No matter whether write succeeds block is out of list */
+-}
+-
+-/* Insert given block to the beginning of list with free entries */
+-static void insert_free_dqentry(struct quota_handle *h, dqbuf_t buf, uint blk)
+-{
+-	dqbuf_t tmpbuf = getdqbuf();
+-	struct v2_disk_dqdbheader *dh = (struct v2_disk_dqdbheader *)buf;
+-	struct v2_mem_dqinfo *info = &h->qh_info.u.v2_mdqi;
+-
+-	dh->dqdh_next_free = __cpu_to_le32(info->dqi_free_entry);
+-	dh->dqdh_prev_free = __cpu_to_le32(0);
+-	write_blk(h, blk, buf);
+-	if (info->dqi_free_entry) {
+-		read_blk(h, info->dqi_free_entry, tmpbuf);
+-		((struct v2_disk_dqdbheader *)tmpbuf)->dqdh_prev_free = __cpu_to_le32(blk);
+-		write_blk(h, info->dqi_free_entry, tmpbuf);
+-	}
+-	freedqbuf(tmpbuf);
+-	info->dqi_free_entry = blk;
+-	mark_quotafile_info_dirty(h);
+-}
+-
+-/* Find space for dquot */
+-static uint find_free_dqentry(struct quota_handle *h, struct dquot *dquot, int *err)
+-{
+-	int blk, i;
+-	struct v2_disk_dqdbheader *dh;
+-	struct v2_disk_dqblk *ddquot;
+-	struct v2_mem_dqinfo *info = &h->qh_info.u.v2_mdqi;
+-	dqbuf_t buf;
+-
+-	*err = 0;
+-	buf = getdqbuf();
+-	dh = (struct v2_disk_dqdbheader *)buf;
+-	ddquot = V2_GETENTRIES(buf);
+-	if (info->dqi_free_entry) {
+-		blk = info->dqi_free_entry;
+-		read_blk(h, blk, buf);
+-	}
+-	else {
+-		blk = get_free_dqblk(h);
+-		if (blk < 0) {
+-			freedqbuf(buf);
+-			*err = blk;
+-			return 0;
+-		}
+-		memset(buf, 0, V2_DQBLKSIZE);
+-		info->dqi_free_entry = blk;
+-		mark_quotafile_info_dirty(h);
+-	}
+-	if (__le16_to_cpu(dh->dqdh_entries) + 1 >= V2_DQSTRINBLK)	/* Block will be full? */
+-		remove_free_dqentry(h, buf, blk);
+-	dh->dqdh_entries = __cpu_to_le16(__le16_to_cpu(dh->dqdh_entries) + 1);
+-	/* Find free structure in block */
+-	for (i = 0; i < V2_DQSTRINBLK && !empty_dquot(ddquot + i); i++);
+-	if (i == V2_DQSTRINBLK)
+-		die(2, _("find_free_dqentry(): Data block full but it shouldn't.\n"));
+-	write_blk(h, blk, buf);
+-	dquot->dq_dqb.u.v2_mdqb.dqb_off =
+-		(blk << V2_DQBLKSIZE_BITS) + sizeof(struct v2_disk_dqdbheader) +
+-
+-		i * sizeof(struct v2_disk_dqblk);
+-	freedqbuf(buf);
+-	return blk;
+-}
+-
+-/* Insert reference to structure into the trie */
+-static int do_insert_tree(struct quota_handle *h, struct dquot *dquot, uint * treeblk, int depth)
+-{
+-	dqbuf_t buf;
+-	int newson = 0, newact = 0;
+-	u_int32_t *ref;
+-	uint newblk;
+-	int ret = 0;
+-
+-	buf = getdqbuf();
+-	if (!*treeblk) {
+-		ret = get_free_dqblk(h);
+-		if (ret < 0)
+-			goto out_buf;
+-		*treeblk = ret;
+-		memset(buf, 0, V2_DQBLKSIZE);
+-		newact = 1;
+-	}
+-	else
+-		read_blk(h, *treeblk, buf);
+-	ref = (u_int32_t *) buf;
+-	newblk = __le32_to_cpu(ref[V2_GETIDINDEX(dquot->dq_id, depth)]);
+-	if (!newblk)
+-		newson = 1;
+-	if (depth == V2_DQTREEDEPTH - 1) {
+-		if (newblk)
+-			die(2, _("Inserting already present quota entry (block %u).\n"),
+-			    ref[V2_GETIDINDEX(dquot->dq_id, depth)]);
+-		newblk = find_free_dqentry(h, dquot, &ret);
+-	}
+-	else
+-		ret = do_insert_tree(h, dquot, &newblk, depth + 1);
+-	if (newson && ret >= 0) {
+-		ref[V2_GETIDINDEX(dquot->dq_id, depth)] = __cpu_to_le32(newblk);
+-		write_blk(h, *treeblk, buf);
+-	}
+-	else if (newact && ret < 0)
+-		put_free_dqblk(h, buf, *treeblk);
+-      out_buf:
+-	freedqbuf(buf);
+-	return ret;
+-}
+-
+-/* Wrapper for inserting quota structure into tree */
+-static inline void dq_insert_tree(struct quota_handle *h, struct dquot *dquot)
+-{
+-	uint tmp = V2_DQTREEOFF;
+-
+-	if (do_insert_tree(h, dquot, &tmp, 0) < 0)
+-		die(2, _("Cannot write quota (id %u): %s\n"), (uint) dquot->dq_id, strerror(errno));
+-}
+-
+-/* Write dquot to file */
+-static void v2_write_dquot(struct dquot *dquot)
+-{
+-	ssize_t ret;
+-	struct v2_disk_dqblk ddquot;
+-
+-	if (!dquot->dq_dqb.u.v2_mdqb.dqb_off)
+-		dq_insert_tree(dquot->dq_h, dquot);
+-	lseek(dquot->dq_h->qh_fd, dquot->dq_dqb.u.v2_mdqb.dqb_off, SEEK_SET);
+-	v2_mem2diskdqblk(&ddquot, &dquot->dq_dqb);
+-	ddquot.dqb_id = __cpu_to_le32(dquot->dq_id);
+-	ret = write(dquot->dq_h->qh_fd, (char *)&ddquot, sizeof(struct v2_disk_dqblk));
+-	if (ret != sizeof(struct v2_disk_dqblk)) {
+-		if (ret > 0)
+-			errno = ENOSPC;
+-		die(2, _("Quota write failed (id %u): %s\n"), (uint) dquot->dq_id, strerror(errno));
+-	}
+-}
+-
+-/* Free dquot entry in data block */
+-static void free_dqentry(struct quota_handle *h, struct dquot *dquot, uint blk)
+-{
+-	struct v2_disk_dqdbheader *dh;
+-	dqbuf_t buf = getdqbuf();
+-
+-	if (dquot->dq_dqb.u.v2_mdqb.dqb_off >> V2_DQBLKSIZE_BITS != blk)
+-		die(2, _("Quota structure has offset to other block (%u) than it should (%u).\n"), blk,
+-		    (uint) (dquot->dq_dqb.u.v2_mdqb.dqb_off >> V2_DQBLKSIZE_BITS));
+-	read_blk(h, blk, buf);
+-	dh = (struct v2_disk_dqdbheader *)buf;
+-	dh->dqdh_entries = __cpu_to_le16(__le16_to_cpu(dh->dqdh_entries) - 1);
+-	if (!__le16_to_cpu(dh->dqdh_entries)) {	/* Block got free? */
+-		remove_free_dqentry(h, buf, blk);
+-		put_free_dqblk(h, buf, blk);
+-	}
+-	else {
+-		memset(buf + (dquot->dq_dqb.u.v2_mdqb.dqb_off & ((1 << V2_DQBLKSIZE_BITS) - 1)), 0,
+-		       sizeof(struct v2_disk_dqblk));
+-
+-		if (__le16_to_cpu(dh->dqdh_entries) == V2_DQSTRINBLK - 1)	/* First free entry? */
+-			insert_free_dqentry(h, buf, blk);	/* This will also write data block */
+-		else
+-			write_blk(h, blk, buf);
+-	}
+-	dquot->dq_dqb.u.v2_mdqb.dqb_off = 0;
+-	freedqbuf(buf);
+-}
+-
+-/* Remove reference to dquot from tree */
+-static void remove_tree(struct quota_handle *h, struct dquot *dquot, uint * blk, int depth)
+-{
+-	dqbuf_t buf = getdqbuf();
+-	uint newblk;
+-	u_int32_t *ref = (u_int32_t *) buf;
+-
+-	read_blk(h, *blk, buf);
+-	newblk = __le32_to_cpu(ref[V2_GETIDINDEX(dquot->dq_id, depth)]);
+-	if (depth == V2_DQTREEDEPTH - 1) {
+-		free_dqentry(h, dquot, newblk);
+-		newblk = 0;
+-	}
+-	else
+-		remove_tree(h, dquot, &newblk, depth + 1);
+-	if (!newblk) {
+-		int i;
+-
+-		ref[V2_GETIDINDEX(dquot->dq_id, depth)] = __cpu_to_le32(0);
+-		for (i = 0; i < V2_DQBLKSIZE && !buf[i]; i++);	/* Block got empty? */
+-		/* Don't put the root block into the free block list */
+-		if (i == V2_DQBLKSIZE && *blk != V2_DQTREEOFF) {
+-			put_free_dqblk(h, buf, *blk);
+-			*blk = 0;
+-		}
+-		else
+-			write_blk(h, *blk, buf);
+-	}
+-	freedqbuf(buf);
+-}
+-
+-/* Delete dquot from tree */
+-static void v2_delete_dquot(struct dquot *dquot)
+-{
+-	uint tmp = V2_DQTREEOFF;
+-
+-	if (!dquot->dq_dqb.u.v2_mdqb.dqb_off)	/* Even not allocated? */
+-		return;
+-	remove_tree(dquot->dq_h, dquot, &tmp, 0);
+-}
+-
+-/* Find entry in block */
+-static loff_t find_block_dqentry(struct quota_handle *h, struct dquot *dquot, uint blk)
+-{
+-	dqbuf_t buf = getdqbuf();
+-	int i;
+-	struct v2_disk_dqblk *ddquot = V2_GETENTRIES(buf);
+-
+-	read_blk(h, blk, buf);
+-	if (dquot->dq_id)
+-		for (i = 0; i < V2_DQSTRINBLK && __le32_to_cpu(ddquot[i].dqb_id) != dquot->dq_id;
+-		     i++);
+-	else {			/* ID 0 as a bit more complicated searching... */
+-		for (i = 0; i < V2_DQSTRINBLK; i++)
+-			if (!__le32_to_cpu(ddquot[i].dqb_id) && !empty_dquot(ddquot + i))
+-				break;
+-	}
+-	if (i == V2_DQSTRINBLK)
+-		die(2, _("Quota for id %u referenced but not present.\n"), dquot->dq_id);
+-	freedqbuf(buf);
+-	return (blk << V2_DQBLKSIZE_BITS) + sizeof(struct v2_disk_dqdbheader) +
+-
+-		i * sizeof(struct v2_disk_dqblk);
+-}
+-
+-/* Find entry for given id in the tree */
+-static loff_t find_tree_dqentry(struct quota_handle *h, struct dquot *dquot, uint blk, int depth)
+-{
+-	dqbuf_t buf = getdqbuf();
+-	loff_t ret = 0;
+-	u_int32_t *ref = (u_int32_t *) buf;
+-
+-	read_blk(h, blk, buf);
+-	ret = 0;
+-	blk = __le32_to_cpu(ref[V2_GETIDINDEX(dquot->dq_id, depth)]);
+-	if (!blk)		/* No reference? */
+-		goto out_buf;
+-	if (depth < V2_DQTREEDEPTH - 1)
+-		ret = find_tree_dqentry(h, dquot, blk, depth + 1);
+-	else
+-		ret = find_block_dqentry(h, dquot, blk);
+-      out_buf:
+-	freedqbuf(buf);
+-	return ret;
+-}
+-
+-/* Find entry for given id in the tree - wrapper function */
+-static inline loff_t find_dqentry(struct quota_handle *h, struct dquot *dquot)
+-{
+-	return find_tree_dqentry(h, dquot, V2_DQTREEOFF, 0);
+-}
+-
+ /*
+  *  Read dquot (either from disk or from kernel)
+  *  User can use errno to detect errstr when NULL is returned
+  */
+ static struct dquot *v2_read_dquot(struct quota_handle *h, qid_t id)
+ {
+-	loff_t offset;
+-	ssize_t ret;
+-	struct v2_disk_dqblk ddquot;
+-	struct dquot *dquot = get_empty_dquot();
+-
+-	dquot->dq_id = id;
+-	dquot->dq_h = h;
+-	dquot->dq_dqb.u.v2_mdqb.dqb_off = 0;
+-	memset(&dquot->dq_dqb, 0, sizeof(struct util_dqblk));
+-
+ 	if (QIO_ENABLED(h)) {
++		struct dquot *dquot = get_empty_dquot();
++
++		dquot->dq_id = id;
++		dquot->dq_h = h;
++		dquot->dq_dqb.u.v2_mdqb.dqb_off = 0;
++		memset(&dquot->dq_dqb, 0, sizeof(struct util_dqblk));
+ 		if (kernel_iface == IFACE_GENERIC) {
+ 			if (vfs_get_dquot(dquot) < 0) {
+ 				free(dquot);
+@@ -651,25 +430,7 @@ static struct dquot *v2_read_dquot(struct quota_handle *h, qid_t id)
+ 		}
+ 		return dquot;
+ 	}
+-	offset = find_dqentry(h, dquot);
+-	if (offset > 0) {
+-		dquot->dq_dqb.u.v2_mdqb.dqb_off = offset;
+-		lseek(h->qh_fd, offset, SEEK_SET);
+-		ret = read(h->qh_fd, (char *)&ddquot, sizeof(struct v2_disk_dqblk));
+-		if (ret != sizeof(struct v2_disk_dqblk)) {
+-			if (ret > 0)
+-				errno = EIO;
+-			die(2, _("Cannot read quota structure for id %u: %s\n"), dquot->dq_id,
+-			    strerror(errno));
+-		}
+-		v2_disk2memdqblk(&dquot->dq_dqb, &ddquot);
+-		/* Unescape all-zero structure (it can be on disk after a crash) */
+-		if (!dquot->dq_id && !dquot->dq_dqb.dqb_bhardlimit && !dquot->dq_dqb.dqb_bsoftlimit &&
+-		    !dquot->dq_dqb.dqb_curspace && !dquot->dq_dqb.dqb_ihardlimit && !dquot->dq_dqb.dqb_isoftlimit &&
+-		    !dquot->dq_dqb.dqb_curinodes && !dquot->dq_dqb.dqb_btime && dquot->dq_dqb.dqb_itime == 1)
+-			dquot->dq_dqb.dqb_itime = 0;
+-	}
+-	return dquot;
++	return qtree_read_dquot(h, id);
+ }
+ 
+ /* 
+@@ -713,112 +474,20 @@ static int v2_commit_dquot(struct dquot *dquot, int flags)
+ 	}
+ 	if (!b->dqb_curspace && !b->dqb_curinodes && !b->dqb_bsoftlimit && !b->dqb_isoftlimit
+ 	    && !b->dqb_bhardlimit && !b->dqb_ihardlimit)
+-		v2_delete_dquot(dquot);
++		qtree_delete_dquot(dquot);
+ 	else
+-		v2_write_dquot(dquot);
++		qtree_write_dquot(dquot);
+ 	return 0;
+ }
+ 
+-/*
+- *	Scan all dquots in file and call callback on each
+- */
+-#define set_bit(bmp, ind) ((bmp)[(ind) >> 3] |= (1 << ((ind) & 7)))
+-#define get_bit(bmp, ind) ((bmp)[(ind) >> 3] & (1 << ((ind) & 7)))
+-
+-static int report_block(struct dquot *dquot, uint blk, char *bitmap,
+-			int (*process_dquot) (struct dquot *, char *))
+-{
+-	dqbuf_t buf = getdqbuf();
+-	struct v2_disk_dqdbheader *dh;
+-	struct v2_disk_dqblk *ddata;
+-	int entries, i;
+-
+-	set_bit(bitmap, blk);
+-	read_blk(dquot->dq_h, blk, buf);
+-	dh = (struct v2_disk_dqdbheader *)buf;
+-	ddata = V2_GETENTRIES(buf);
+-	entries = __le16_to_cpu(dh->dqdh_entries);
+-	for (i = 0; i < V2_DQSTRINBLK; i++)
+-		if (!empty_dquot(ddata + i)) {
+-			v2_disk2memdqblk(&dquot->dq_dqb, ddata + i);
+-			dquot->dq_id = __le32_to_cpu(ddata[i].dqb_id);
+-			if (process_dquot(dquot, NULL) < 0)
+-				break;
+-		}
+-	freedqbuf(buf);
+-	return entries;
+-}
+-
+-static void check_reference(struct quota_handle *h, uint blk)
+-{
+-	if (blk >= h->qh_info.u.v2_mdqi.dqi_blocks)
+-		die(2, _("Illegal reference in %s quota file on %s. Quota file is probably corrupted.\nPlease run quotacheck(8) and try again.\n"), type2name(h->qh_type), h->qh_quotadev);
+-}
+-
+-static int report_tree(struct dquot *dquot, uint blk, int depth, char *bitmap,
+-		       int (*process_dquot) (struct dquot *, char *))
+-{
+-	int entries = 0, i;
+-	dqbuf_t buf = getdqbuf();
+-	u_int32_t *ref = (u_int32_t *) buf;
+-
+-	read_blk(dquot->dq_h, blk, buf);
+-	if (depth == V2_DQTREEDEPTH - 1) {
+-		for (i = 0; i < V2_DQBLKSIZE >> 2; i++) {
+-			blk = __le32_to_cpu(ref[i]);
+-			check_reference(dquot->dq_h, blk);
+-			if (blk && !get_bit(bitmap, blk))
+-				entries += report_block(dquot, blk, bitmap, process_dquot);
+-		}
+-	}
+-	else {
+-		for (i = 0; i < V2_DQBLKSIZE >> 2; i++)
+-			if ((blk = __le32_to_cpu(ref[i]))) {
+-				check_reference(dquot->dq_h, blk);
+-				entries +=
+-					report_tree(dquot, blk, depth + 1, bitmap, process_dquot);
+-			}
+-	}
+-	freedqbuf(buf);
+-	return entries;
+-}
+-
+-static uint find_set_bits(char *bmp, int blocks)
+-{
+-	uint i, used = 0;
+-
+-	for (i = 0; i < blocks; i++)
+-		if (get_bit(bmp, i))
+-			used++;
+-	return used;
+-}
+-
+ static int v2_scan_dquots(struct quota_handle *h, int (*process_dquot) (struct dquot *, char *))
+ {
+-	char *bitmap;
+-	struct v2_mem_dqinfo *info = &h->qh_info.u.v2_mdqi;
+-	struct v2_disk_dqinfo ddqinfo;
+-	struct dquot *dquot = get_empty_dquot();
+-
+ 	if (QIO_ENABLED(h))	/* Kernel uses same file? */
+ 		if (quotactl(QCMD((kernel_iface == IFACE_GENERIC) ? Q_SYNC : Q_6_5_SYNC, h->qh_type),
+ 			     h->qh_quotadev, 0, NULL) < 0)
+ 			die(4, _("Cannot sync quotas on device %s: %s\n"), h->qh_quotadev,
+ 			    strerror(errno));
+-	lseek(h->qh_fd, V2_DQINFOOFF, SEEK_SET);
+-	if (read(h->qh_fd, &ddqinfo, sizeof(ddqinfo)) != sizeof(ddqinfo)) {
+-		free(dquot);
+-		return -1;
+-	}
+-	info->dqi_blocks = __le32_to_cpu(ddqinfo.dqi_blocks);
+-	dquot->dq_h = h;
+-	bitmap = smalloc((info->dqi_blocks + 7) >> 3);
+-	memset(bitmap, 0, (info->dqi_blocks + 7) >> 3);
+-	info->dqi_used_entries = report_tree(dquot, V2_DQTREEOFF, 0, bitmap, process_dquot);
+-	info->dqi_data_blocks = find_set_bits(bitmap, info->dqi_blocks);
+-	free(bitmap);
+-	free(dquot);
+-	return 0;
++	return qtree_scan_dquots(h, process_dquot);
+ }
+ 
+ /* Report information about quotafile */
+@@ -828,7 +497,7 @@ static int v2_report(struct quota_handle *h, int verbose)
+ 		struct v2_mem_dqinfo *info = &h->qh_info.u.v2_mdqi;
+ 
+ 		printf(_("Statistics:\nTotal blocks: %u\nData blocks: %u\nEntries: %u\nUsed average: %f\n"),
+-			 info->dqi_blocks, info->dqi_data_blocks, info->dqi_used_entries,
++			 info->dqi_qtree.dqi_blocks, info->dqi_data_blocks, info->dqi_used_entries,
+ 			 ((float)info->dqi_used_entries) / info->dqi_data_blocks);
+ 	}
+ 	return 0;
+diff --git a/quotaio_v2.h b/quotaio_v2.h
+index 2482156..092f22f 100644
+--- a/quotaio_v2.h
++++ b/quotaio_v2.h
+@@ -11,14 +11,7 @@
+ #include "quota.h"
+ 
+ #define V2_DQINFOOFF	sizeof(struct v2_disk_dqheader)	/* Offset of info header in file */
+-#define V2_DQBLKSIZE_BITS	10
+-#define V2_DQBLKSIZE	(1 << V2_DQBLKSIZE_BITS)	/* Size of block with quota structures */
+-#define V2_DQTREEOFF	1	/* Offset of tree in file in blocks */
+-#define V2_DQTREEDEPTH	4	/* Depth of quota tree */
+-#define V2_DQSTRINBLK	((V2_DQBLKSIZE - sizeof(struct v2_disk_dqdbheader)) / sizeof(struct v2_disk_dqblk))	/* Number of entries in one blocks */
+-#define V2_GETIDINDEX(id, depth) (((id) >> ((V2_DQTREEDEPTH-(depth)-1)*8)) & 0xff)
+-#define V2_GETENTRIES(buf) ((struct v2_disk_dqblk *)(((char *)(buf)) + sizeof(struct v2_disk_dqdbheader)))
+-#define INIT_V2_VERSIONS { 0, 0}
++#define INIT_V2_VERSIONS { 1, 1}
+ 
+ struct v2_disk_dqheader {
+ 	u_int32_t dqh_magic;	/* Magic number identifying file */
+@@ -38,20 +31,8 @@ struct v2_disk_dqinfo {
+ 	u_int32_t dqi_free_entry;	/* Number of block with at least one free entry */
+ } __attribute__ ((packed));
+ 
+-/*
+- *  Structure of header of block with quota structures. It is padded to 16 bytes so
+- *  there will be space for exactly 18 quota-entries in a block
+- */
+-struct v2_disk_dqdbheader {
+-	u_int32_t dqdh_next_free;	/* Number of next block with free entry */
+-	u_int32_t dqdh_prev_free;	/* Number of previous block with free entry */
+-	u_int16_t dqdh_entries;	/* Number of valid entries in block */
+-	u_int16_t dqdh_pad1;
+-	u_int32_t dqdh_pad2;
+-} __attribute__ ((packed));
+-
+ /* Structure of quota for one user on disk */
+-struct v2_disk_dqblk {
++struct v2r0_disk_dqblk {
+ 	u_int32_t dqb_id;	/* id this quota applies to */
+ 	u_int32_t dqb_ihardlimit;	/* absolute limit on allocated inodes */
+ 	u_int32_t dqb_isoftlimit;	/* preferred inode limit */
+@@ -63,6 +44,19 @@ struct v2_disk_dqblk {
+ 	u_int64_t dqb_itime;	/* time limit for excessive inode use */
+ } __attribute__ ((packed));
+ 
++struct v2r1_disk_dqblk {
++	u_int32_t dqb_id;	/* id this quota applies to */
++	u_int32_t dqb_pad;
++	u_int64_t dqb_ihardlimit;	/* absolute limit on allocated inodes */
++	u_int64_t dqb_isoftlimit;	/* preferred inode limit */
++	u_int64_t dqb_curinodes;	/* current # allocated inodes */
++	u_int64_t dqb_bhardlimit;	/* absolute limit on disk space (in QUOTABLOCK_SIZE) */
++	u_int64_t dqb_bsoftlimit;	/* preferred limit on disk space (in QUOTABLOCK_SIZE) */
++	u_int64_t dqb_curspace;	/* current space occupied (in bytes) */
++	u_int64_t dqb_btime;	/* time limit for excessive disk use */
++	u_int64_t dqb_itime;	/* time limit for excessive inode use */
++} __attribute__ ((packed));
++
+ /* Structure of quota for communication with kernel */
+ struct v2_kern_dqblk {
+ 	unsigned int dqb_ihardlimit;
+@@ -75,7 +69,7 @@ struct v2_kern_dqblk {
+ 	time_t dqb_itime;
+ };
+ 
+-/* Structure of quotafile info for communication with kernel */
++/* Structure of quotafile info for communication with kernel (obsolete) */
+ struct v2_kern_dqinfo {
+ 	unsigned int dqi_bgrace;
+ 	unsigned int dqi_igrace;
+diff --git a/quotaio_xfs.c b/quotaio_xfs.c
+index e983cb9..02f49f0 100644
+--- a/quotaio_xfs.c
++++ b/quotaio_xfs.c
+@@ -1,8 +1,8 @@
+ /*
+  *	Implementation of XFS quota manager.
++ *      Copyright (c) 2001 Silicon Graphics, Inc.
+  */
+ 
+-#ident "Copyright (c) 2001 Silicon Graphics, Inc."
+ 
+ #include <stdio.h>
+ #include <unistd.h>
+diff --git a/quotaon.8 b/quotaon.8
+index 4a0e122..178fdaa 100644
+--- a/quotaon.8
++++ b/quotaon.8
+@@ -84,9 +84,11 @@ have any disk quotas turned off.
+ Report quota for specified format (ie. don't perform format autodetection).
+ Possible format names are:
+ .B vfsold
+-(version 1 quota),
++Original quota format with 16-bit UIDs / GIDs,
+ .B vfsv0
+-(version 2 quota),
++Quota format with 32-bit UIDs / GIDs, 64-bit space usage, 32-bit inode usage and limits,
++.B vfsv1
++Quota format with 64-bit quota limits and usage,
+ .B xfs
+ (quota on XFS filesystem)
+ .TP
+diff --git a/quotaon.c b/quotaon.c
+index eafadef..869293f 100644
+--- a/quotaon.c
++++ b/quotaon.c
+@@ -32,10 +32,6 @@
+  * SUCH DAMAGE.
+  */
+ 
+-#ident "$Copyright: (c) 1980, 1990 Regents of the University of California $"
+-#ident "$Copyright: All rights reserved. $"
+-#ident "$Id: quotaon.c,v 1.26 2008/12/17 12:40:07 jkar8572 Exp $"
+-
+ /*
+  * Turn quota on/off for a filesystem.
+  */
+@@ -149,73 +145,37 @@ static void parse_options(int argcnt, char **argstr)
+ }
+ 
+ /*
+- *	For both VFS quota formats, need to pass in the quota file;
+- *	for XFS quota manager, pass on the -x command line option.
++ *	Enable/disable rsquash on given filesystem
+  */
+-static int newstate(struct mntent *mnt, int type, char *extra)
++static int quotarsquashonoff(const char *quotadev, int type, int flags)
+ {
+-	int sflags, ret = 0, usefmt;
+-	newstate_t *statefunc;
++#if defined(MNTOPT_RSQUASH)
++	int ret;
+ 
+-	sflags = flags & FL_OFF ? STATEFLAG_OFF : STATEFLAG_ON;
+-	if (flags & FL_VERBOSE)
+-		sflags |= STATEFLAG_VERBOSE;
+-	if (flags & FL_ALL)
+-		sflags |= STATEFLAG_ALL;
++	if (kernel_iface == IFACE_GENERIC) {
++		int qcmd = QCMD(Q_SETINFO, type);
++		struct if_dqinfo info;
+ 
+-	if (!strcmp(mnt->mnt_type, MNTTYPE_XFS)) {	/* XFS filesystem has special handling... */
+-		if (!(kernel_formats & (1 << QF_XFS))) {
+-			errstr(_("Cannot change state of XFS quota. It's not compiled in kernel.\n"));
+-			return 1;
+-		}
+-		if (kernel_formats & (1 << QF_XFS) &&
+-		    ((flags & FL_OFF && (kern_quota_on(mnt->mnt_fsname, USRQUOTA, 1 << QF_XFS)
+-		    || kern_quota_on(mnt->mnt_fsname, GRPQUOTA, 1 << QF_XFS)))
+-		    || (!(flags & FL_OFF) && kern_quota_on(mnt->mnt_fsname, type, 1 << QF_XFS))))
+-			ret = xfs_newstate(mnt, type, extra, sflags);
+-	}
+-	else if (meta_qf_fstype(mnt->mnt_type)) {
+-		if (!hasquota(mnt, type, 0))
+-			return 0;
+-		/* Must be non-empty because empty path is always invalid. */
+-		ret = v2_newstate(mnt, type, ".", sflags);
++		info.dqi_flags = V1_DQF_RSQUASH;
++		info.dqi_valid = IIF_FLAGS;
++		ret = quotactl(qcmd, quotadev, 0, (void *)&info);
+ 	}
+ 	else {
+-		if (!hasquota(mnt, type, 0))
+-			return 0;
+-		usefmt = get_qf_name(mnt, type, fmt == -1 ? kernel_formats : (1 << fmt), NF_FORMAT, &extra);
+-		if (usefmt < 0) {
+-			errstr(_("Cannot find quota file on %s [%s] to turn quotas on/off.\n"), mnt->mnt_dir, mnt->mnt_fsname);
+-			return 1;
+-		}
+-		statefunc = (usefmt == QF_VFSV0) ? v2_newstate : v1_newstate;
+-		ret = statefunc(mnt, type, extra, sflags);
+-		free(extra);
+-	}
+-	return ret;
+-}
+-
+-/* Print state of quota (on/off) */
+-static int print_state(struct mntent *mnt, int type)
+-{
+-	int on = 0;
++		int mode = (flags & STATEFLAG_OFF) ? 0 : 1;
++		int qcmd = QCMD(Q_V1_RSQUASH, type);
+ 
+-	if (!strcmp(mnt->mnt_type, MNTTYPE_XFS)) {
+-		if (kernel_formats & (1 << QF_XFS))
+-			on = kern_quota_on(mnt->mnt_fsname, type, 1 << QF_XFS) != -1;
++		ret = quotactl(qcmd, quotadev, 0, (void *)&mode);
+ 	}
+-	else if (kernel_iface == IFACE_GENERIC)
+-		/* PSz 28 Apr 04  Have V0 and OLD set, try both */
+-		on = kern_quota_on(mnt->mnt_fsname, type, kernel_formats) != -1;
+-	else if (kernel_formats & (1 << QF_VFSV0))
+-		on = kern_quota_on(mnt->mnt_fsname, type, 1 << QF_VFSV0) != -1;
+-	else if (kernel_formats & (1 << QF_VFSOLD))
+-		on = kern_quota_on(mnt->mnt_fsname, type, 1 << QF_VFSOLD) != -1;
+-
+-	printf(_("%s quota on %s (%s) is %s\n"), type2name(type), mnt->mnt_dir, mnt->mnt_fsname,
+-	  on ? _("on") : _("off"));
+-	
+-	return on;
++	if (ret < 0) {
++		errstr(_("set root_squash on %s: %s\n"), quotadev, strerror(errno));
++		return 1;
++	}
++	if ((flags & STATEFLAG_VERBOSE) && (flags & STATEFLAG_OFF))
++		printf(_("%s: %s root_squash turned off\n"), quotadev, type2name(type));
++	else if ((flags & STATEFLAG_VERBOSE) && (flags & STATEFLAG_ON))
++		printf(_("%s: %s root_squash turned on\n"), quotadev, type2name(type));
++#endif
++	return 0;
+ }
+ 
+ /*
+@@ -263,43 +223,9 @@ static int quotaonoff(char *quotadev, char *quotadir, char *quotafile, int type,
+ }
+ 
+ /*
+- *	Enable/disable rsquash on given filesystem
+- */
+-static int quotarsquashonoff(const char *quotadev, int type, int flags)
+-{
+-#if defined(MNTOPT_RSQUASH)
+-	int ret;
+-
+-	if (kernel_iface == IFACE_GENERIC) {
+-		int qcmd = QCMD(Q_SETINFO, type);
+-		struct if_dqinfo info;
+-
+-		info.dqi_flags = V1_DQF_RSQUASH;
+-		info.dqi_valid = IIF_FLAGS;
+-		ret = quotactl(qcmd, quotadev, 0, (void *)&info);
+-	}
+-	else {
+-		int mode = (flags & STATEFLAG_OFF) ? 0 : 1;
+-		int qcmd = QCMD(Q_V1_RSQUASH, type);
+-
+-		ret = quotactl(qcmd, quotadev, 0, (void *)&mode);
+-	}
+-	if (ret < 0) {
+-		errstr(_("set root_squash on %s: %s\n"), quotadev, strerror(errno));
+-		return 1;
+-	}
+-	if ((flags & STATEFLAG_VERBOSE) && (flags & STATEFLAG_OFF))
+-		printf(_("%s: %s root_squash turned off\n"), quotadev, type2name(type));
+-	else if ((flags & STATEFLAG_VERBOSE) && (flags & STATEFLAG_ON))
+-		printf(_("%s: %s root_squash turned on\n"), quotadev, type2name(type));
+-#endif
+-	return 0;
+-}
+-
+-/*
+  *	Enable/disable quota/rootsquash on given filesystem (version 1)
+  */
+-int v1_newstate(struct mntent *mnt, int type, char *file, int flags)
++static int v1_newstate(struct mntent *mnt, int type, char *file, int flags, int fmt)
+ {
+ 	int errs = 0;
+ 	const char *dev = get_device_name(mnt->mnt_fsname);
+@@ -317,22 +243,108 @@ int v1_newstate(struct mntent *mnt, int type, char *file, int flags)
+ }
+ 
+ /*
+- *	Enable/disable quota on given filesystem (version 2 quota)
++ *	Enable/disable quota on given filesystem (generic VFS quota)
+  */
+-int v2_newstate(struct mntent *mnt, int type, char *file, int flags)
++static int v2_newstate(struct mntent *mnt, int type, char *file, int flags, int fmt)
+ {
+ 	const char *dev = get_device_name(mnt->mnt_fsname);
+ 	int errs = 0;
+ 
+ 	if (!dev)
+ 		return 1;
+-
+ 	if (hasquota(mnt, type, 0))
+-		errs = quotaonoff((char *)dev, mnt->mnt_dir, file, type, QF_VFSV0, flags);
++		errs = quotaonoff((char *)dev, mnt->mnt_dir, file, type, fmt, flags);
+ 	free((char *)dev);
+ 	return errs;
+ }
+ 
++/*
++ *	For both VFS quota formats, need to pass in the quota file;
++ *	for XFS quota manager, pass on the -x command line option.
++ */
++static int newstate(struct mntent *mnt, int type, char *extra)
++{
++	int sflags, ret = 0;
++
++	sflags = flags & FL_OFF ? STATEFLAG_OFF : STATEFLAG_ON;
++	if (flags & FL_VERBOSE)
++		sflags |= STATEFLAG_VERBOSE;
++	if (flags & FL_ALL)
++		sflags |= STATEFLAG_ALL;
++
++	if (!strcmp(mnt->mnt_type, MNTTYPE_XFS)) {	/* XFS filesystem has special handling... */
++		if (!kern_qfmt_supp(QF_XFS)) {
++			errstr(_("Cannot change state of XFS quota. It's not compiled in kernel.\n"));
++			return 1;
++		}
++		if ((flags & FL_OFF && (kern_quota_on(mnt->mnt_fsname, USRQUOTA, QF_XFS) != -1
++		    || kern_quota_on(mnt->mnt_fsname, GRPQUOTA, QF_XFS) != -1))
++		    || (!(flags & FL_OFF) && kern_quota_on(mnt->mnt_fsname, type, QF_XFS) == -1))
++			ret = xfs_newstate(mnt, type, extra, sflags);
++	}
++	else if (meta_qf_fstype(mnt->mnt_type)) {
++		if (!hasquota(mnt, type, 0))
++			return 0;
++		/* Must be non-empty because empty path is always invalid. */
++		ret = v2_newstate(mnt, type, ".", sflags, QF_VFSV0);
++	}
++	else {
++		int usefmt;
++
++		if (!hasquota(mnt, type, 0))
++			return 0;
++		if (fmt == -1) {
++			if (get_qf_name(mnt, type, QF_VFSV0,
++					NF_FORMAT, &extra) >= 0)
++				usefmt = QF_VFSV0;
++			else if (get_qf_name(mnt, type, QF_VFSV1,
++					NF_FORMAT, &extra) >= 0)
++				usefmt = QF_VFSV1;
++			else if (get_qf_name(mnt, type, QF_VFSOLD,
++					NF_FORMAT, &extra) >= 0)
++				usefmt = QF_VFSOLD;
++			else {
++				errstr(_("Cannot find quota file on %s [%s] to turn quotas on/off.\n"), mnt->mnt_dir, mnt->mnt_fsname);
++				return 1;
++			}
++		} else {
++			if (get_qf_name(mnt, type, fmt, NF_FORMAT, &extra) < 0) {
++				errstr(_("Quota file on %s [%s] does not exist or has wrong format.\n"), mnt->mnt_dir, mnt->mnt_fsname);
++				return 1;
++			}
++			usefmt = fmt;
++		}
++		if (is_tree_qfmt(usefmt))
++			ret = v2_newstate(mnt, type, extra, sflags, usefmt);
++		else
++			ret = v1_newstate(mnt, type, extra, sflags, QF_VFSOLD);
++		free(extra);
++	}
++	return ret;
++}
++
++/* Print state of quota (on/off) */
++static int print_state(struct mntent *mnt, int type)
++{
++	int on = 0;
++
++	if (!strcmp(mnt->mnt_type, MNTTYPE_XFS)) {
++		if (kern_qfmt_supp(QF_XFS))
++			on = kern_quota_on(mnt->mnt_fsname, type, QF_XFS) != -1;
++	}
++	else if (kernel_iface == IFACE_GENERIC)
++		on = kern_quota_on(mnt->mnt_fsname, type, -1) != -1;
++	else if (kern_qfmt_supp(QF_VFSV0))
++		on = kern_quota_on(mnt->mnt_fsname, type, QF_VFSV0) != -1;
++	else if (kern_qfmt_supp(QF_VFSOLD))
++		on = kern_quota_on(mnt->mnt_fsname, type, QF_VFSOLD) != -1;
++
++	printf(_("%s quota on %s (%s) is %s\n"), type2name(type), mnt->mnt_dir, mnt->mnt_fsname,
++	  on ? _("on") : _("off"));
++	
++	return on;
++}
++
+ int main(int argc, char **argv)
+ {
+ 	struct mntent *mnt;
+@@ -349,9 +361,9 @@ int main(int argc, char **argv)
+ 	parse_options(argc, argv);
+ 
+ 	init_kernel_interface();
+-	if (fmt != -1 && !(kernel_formats & (1 << fmt)))
++	if (fmt != -1 && !kern_qfmt_supp(fmt))
+ 		die(1, _("Required format %s not supported by kernel.\n"), fmt2name(fmt));
+-	else if (!kernel_formats)
++	else if (!kern_qfmt_supp(-1))
+ 		errstr(_("Warning: No quota format detected in the kernel.\n"));
+ 
+ 	if (init_mounts_scan(mntcnt, mntpoints, MS_XFS_DISABLED | MS_LOCALONLY) < 0)
+diff --git a/quotaon.h b/quotaon.h
+index b4be0de..4e92f09 100644
+--- a/quotaon.h
++++ b/quotaon.h
+@@ -16,6 +16,4 @@
+ #define STATEFLAG_VERBOSE	0x08
+ 
+ typedef int (newstate_t) (struct mntent * mnt, int type, char *file, int flags);
+-extern int v1_newstate(struct mntent *mnt, int type, char *file, int flags);
+-extern int v2_newstate(struct mntent *mnt, int type, char *file, int flags);
+ extern int xfs_newstate(struct mntent *mnt, int type, char *file, int flags);
+diff --git a/quotaon_xfs.c b/quotaon_xfs.c
+index 657edfb..0820c8a 100644
+--- a/quotaon_xfs.c
++++ b/quotaon_xfs.c
+@@ -1,9 +1,8 @@
+ /*
+  *	State changes for the XFS Quota Manager.
++ *	Copyright (c) 2001 Silicon Graphics, Inc.
+  */
+ 
+-#ident "Copyright (c) 2001 Silicon Graphics, Inc."
+-
+ #include <stdio.h>
+ #include <unistd.h>
+ #include <stdlib.h>
+diff --git a/quotaops.c b/quotaops.c
+index f63b043..c44feb4 100644
+--- a/quotaops.c
++++ b/quotaops.c
+@@ -32,10 +32,6 @@
+  * SUCH DAMAGE.
+  */
+ 
+-#ident "$Copyright: (c) 1980, 1990 Regents of the University of California. $"
+-#ident "$Copyright: All rights reserved. $"
+-#ident "$Id: quotaops.c,v 1.22 2008/12/17 12:40:07 jkar8572 Exp $"
+-
+ #include <rpc/rpc.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+diff --git a/quotasys.c b/quotasys.c
+index d65b376..947f486 100644
+--- a/quotasys.c
++++ b/quotasys.c
+@@ -34,9 +34,16 @@
+ 
+ #define min(x,y) (((x) < (y)) ? (x) : (y))
+ 
++#define QFMT_NAMES 5
++
+ static char extensions[MAXQUOTAS + 2][20] = INITQFNAMES;
+ static char *basenames[] = INITQFBASENAMES;
+-static char *fmtnames[] = INITQFMTNAMES;
++static char *fmtnames[] = { "vfsold",
++			    "vfsv0",
++			    "vfsv1",
++			    "rpc",
++			    "xfs",
++};
+ 
+ /*
+  *	Check for various kinds of NFS filesystem
+@@ -246,12 +253,13 @@ int name2fmt(char *str)
+ {
+ 	int fmt;
+ 
+-	for (fmt = 0; fmt < QUOTAFORMATS; fmt++)
++	for (fmt = 0; fmt < QFMT_NAMES; fmt++)
+ 		if (!strcmp(str, fmtnames[fmt]))
+ 			return fmt;
+ 	errstr(_("Unknown quota format: %s\nSupported formats are:\n\
+   vfsold - original quota format\n\
+-  vfsv0 - new quota format\n\
++  vfsv0 - standard quota format\n\
++  vfsv1 - quota format with 64-bit limits\n\
+   rpc - use RPC calls\n\
+   xfs - XFS quota format\n"), str);
+ 	return QF_ERROR;
+@@ -262,22 +270,21 @@ int name2fmt(char *str)
+  */
+ char *fmt2name(int fmt)
+ {
+-
+-	if (fmt < 0)
+-		return _("Unknown format");
+ 	return fmtnames[fmt];
+ }
+ 
+ /*
+  *	Convert kernel to utility quota format number
+  */
+-int kern2utilfmt(int fmt)
++int kern2utilfmt(int kernfmt)
+ {
+-	switch (fmt) {
++	switch (kernfmt) {
+ 		case QFMT_VFS_OLD:
+ 			return QF_VFSOLD;
+ 		case QFMT_VFS_V0:
+ 			return QF_VFSV0;
++		case QFMT_VFS_V1:
++			return QF_VFSV1;
+ 		case QFMT_OCFS2:
+ 			return QF_META;
+ 	}
+@@ -294,6 +301,8 @@ int util2kernfmt(int fmt)
+ 			return QFMT_VFS_OLD;
+ 		case QF_VFSV0:
+ 			return QFMT_VFS_V0;
++		case QF_VFSV1:
++			return QFMT_VFS_V1;
+ 	}
+ 	return -1;
+ }
+@@ -508,81 +517,85 @@ static int check_fmtfile_ok(char *name, int type, int fmt, int flags)
+ 				errstr(_("Cannot stat quota file %s: %s\n"), name, strerror(errno));
+ 			return 0;
+ 		}
+-		return 1;
+-	}
+-	else {
++	} 
++	if (flags & NF_FORMAT) {
+ 		int fd, ret = 0;
+ 
+ 		if ((fd = open(name, O_RDONLY)) >= 0) {
+-			if (fmt == QF_VFSV0)
+-				ret = quotafile_ops_2.check_file(fd, type);
++			if (is_tree_qfmt(fmt))
++				ret = quotafile_ops_2.check_file(fd, type, fmt);
+ 			else
+-				ret = quotafile_ops_1.check_file(fd, type);
++				ret = quotafile_ops_1.check_file(fd, type, fmt);
+ 			close(fd);
++			if (ret <= 0)
++				return 0;
+ 		}
+-		else if (errno != ENOENT && errno != EPERM)
++		else if (errno != ENOENT && errno != EPERM) {
+ 			errstr(_("Cannot open quotafile %s: %s\n"), name, strerror(errno));
+-		return ret;
++			return 0;
++		}
+ 	}
++	return 1;
+ }
+ 
+ /*
+- *	Get quotafile name for given entry. Return format and quota file name.
++ *	Get quotafile name for given entry. Return 0 in case format check succeeded,
++ * 	otherwise return -1.
+  *	Note that formats without quotafile *must* be detected prior to calling this function
+  */
+ int get_qf_name(struct mntent *mnt, int type, int fmt, int flags, char **filename)
+ {
+ 	char *option, *pathname, has_quota_file_definition = 0;
+-	char qfullname[PATH_MAX] = "";
++	char qfullname[PATH_MAX];
+ 
++	qfullname[0] = 0;
+ 	if (type == USRQUOTA && (option = hasmntopt(mnt, MNTOPT_USRQUOTA))) {
+ 		if (*(pathname = option + strlen(MNTOPT_USRQUOTA)) == '=')
+ 			has_quota_file_definition = 1;
+ 	}
+ 	else if (type == USRQUOTA && (option = hasmntoptarg(mnt, MNTOPT_USRJQUOTA))) {
+-		pathname = option-1;
++		pathname = option;
+ 		has_quota_file_definition = 1;
+ 		sstrncpy(qfullname, mnt->mnt_dir, sizeof(qfullname));
+ 		sstrncat(qfullname, "/", sizeof(qfullname));
+ 	}
+ 	else if (type == GRPQUOTA && (option = hasmntopt(mnt, MNTOPT_GRPQUOTA))) {
+-		if (*(pathname = option + strlen(MNTOPT_GRPQUOTA)) == '=')
++		pathname = option + strlen(MNTOPT_GRPQUOTA);
++		if (*pathname == '=') {
+ 			has_quota_file_definition = 1;
++			pathname++;
++		}
+ 	}
+ 	else if (type == GRPQUOTA && (option = hasmntoptarg(mnt, MNTOPT_GRPJQUOTA))) {
+-		pathname = option-1;
++		pathname = option;
+ 		has_quota_file_definition = 1;
+ 		sstrncpy(qfullname, mnt->mnt_dir, sizeof(qfullname));
+ 		sstrncat(qfullname, "/", sizeof(qfullname));
+ 	}
+ 	else if (type == USRQUOTA && (option = hasmntopt(mnt, MNTOPT_QUOTA))) {
+-		if (*(pathname = option + strlen(MNTOPT_QUOTA)) == '=')
++		pathname = option + strlen(MNTOPT_QUOTA);
++		if (*pathname == '=') {
+ 			has_quota_file_definition = 1;
++			pathname++;
++		}
+ 	}
+ 	else
+ 		return -1;
+ 
+ 	if (has_quota_file_definition) {
+-		if ((option = strchr(++pathname, ',')))
+-			sstrncpy(qfullname+strlen(qfullname), pathname, min((option - pathname + 1), sizeof(qfullname)-strlen(qfullname)));
+-		else
++		if ((option = strchr(pathname, ','))) {
++			int tocopy = min(option - pathname + 1,
++					 sizeof(qfullname) - strlen(qfullname));
++			sstrncpy(qfullname + strlen(qfullname), pathname, tocopy);
++		} else
+ 			sstrncat(qfullname, pathname, sizeof(qfullname));
++	} else {
++		snprintf(qfullname, PATH_MAX, "%s/%s.%s", mnt->mnt_dir,
++			 basenames[fmt], extensions[type]);
+ 	}
+-	if (fmt & (1 << QF_VFSV0)) {
+-		if (!has_quota_file_definition)
+-			snprintf(qfullname, PATH_MAX, "%s/%s.%s", mnt->mnt_dir, basenames[QF_VFSV0], extensions[type]);
+-		if (check_fmtfile_ok(qfullname, type, QF_VFSV0, flags)) {
+-			*filename = sstrdup(qfullname);
+-			return QF_VFSV0;
+-		}
+-	}
+-	if (fmt & (1 << QF_VFSOLD)) {
+-		if (!has_quota_file_definition)
+-			snprintf(qfullname, PATH_MAX, "%s/%s.%s", mnt->mnt_dir, basenames[QF_VFSOLD], extensions[type]);
+-		if (check_fmtfile_ok(qfullname, type, QF_VFSOLD, flags)) {
+-			*filename = sstrdup(qfullname);
+-			return QF_VFSOLD;
+-		}
++	if (check_fmtfile_ok(qfullname, type, fmt, flags)) {
++		*filename = sstrdup(qfullname);
++		return 0;
+ 	}
+ 	return -1;
+ }
+@@ -681,7 +694,9 @@ int devcmp_handles(struct quota_handle *a, struct quota_handle *b)
+  *	Check kernel quota version
+  */
+ 
+-int kernel_iface, kernel_formats;	/* Formats supported by kernel */
++int kernel_iface;	/* Kernel interface type */
++static int kernel_qfmt_num;	/* Number of different supported formats */
++static int kernel_qfmt[QUOTAFORMATS]; /* Formats supported by kernel */
+ 
+ #ifndef FS_DQSTATS
+ #define FS_DQSTATS 16
+@@ -704,25 +719,28 @@ void init_kernel_interface(void)
+ 	if (sigaction(SIGSEGV, &sig, &oldsig) < 0)
+ 		die(2, _("Cannot set signal handler: %s\n"), strerror(errno));
+ 
+-	kernel_formats = 0;
++	kernel_qfmt_num = 0;
+ 	if (!stat("/proc/fs/xfs/stat", &st))
+-		kernel_formats |= (1 << QF_XFS);
++		kernel_qfmt[kernel_qfmt_num++] = QF_XFS;
+ 	else {
+ 		fs_quota_stat_t dummy;
+ 
+ 		if (!quotactl(QCMD(Q_XGETQSTAT, 0), "/dev/root", 0, (void *)&dummy) || (errno != EINVAL && errno != ENOSYS))
+-			kernel_formats |= (1 << QF_XFS);
++			kernel_qfmt[kernel_qfmt_num++] = QF_XFS;
+ 	}
+ 	/* Detect new kernel interface; Assume generic interface unless we can prove there is not one... */
+ 	if (!stat("/proc/sys/fs/quota", &st) || errno != ENOENT) {
+ 		kernel_iface = IFACE_GENERIC;
+-		kernel_formats |= (1 << QF_VFSOLD) | (1 << QF_VFSV0) | (1 << QF_META);
++		kernel_qfmt[kernel_qfmt_num++] = QF_META;
++		kernel_qfmt[kernel_qfmt_num++] = QF_VFSOLD;
++		kernel_qfmt[kernel_qfmt_num++] = QF_VFSV0;
++		kernel_qfmt[kernel_qfmt_num++] = QF_VFSV1;
+ 	}
+ 	else {
+ 		struct v2_dqstats v2_stats;
+ 
+ 		if (quotactl(QCMD(Q_V2_GETSTATS, 0), NULL, 0, (void *)&v2_stats) >= 0) {
+-			kernel_formats |= (1 << QF_VFSV0);
++			kernel_qfmt[kernel_qfmt_num++] = QF_VFSV0;
+ 			kernel_iface = IFACE_VFSV0;
+ 		}
+ 		else if (errno != ENOSYS && errno != ENOTSUP) {
+@@ -742,11 +760,11 @@ void init_kernel_interface(void)
+ 			 * On a 2.4.x 		we expect 0, ENOENT
+ 			 * On a 2.4.x-ac	we wont get here */
+ 			if (err_stat == 0 && err_quota == EINVAL) {
+-				kernel_formats |= (1 << QF_VFSV0);
++				kernel_qfmt[kernel_qfmt_num++] = QF_VFSV0;
+ 				kernel_iface = IFACE_VFSV0;
+ 			}
+ 			else {
+-				kernel_formats |= (1 << QF_VFSOLD);
++				kernel_qfmt[kernel_qfmt_num++] = QF_VFSOLD;
+ 				kernel_iface = IFACE_VFSOLD;
+ 			}
+ 		}
+@@ -755,6 +773,20 @@ void init_kernel_interface(void)
+ 		die(2, _("Cannot reset signal handler: %s\n"), strerror(errno));
+ }
+ 
++/* Return whether kernel is able to handle given format */
++int kern_qfmt_supp(int fmt)
++{
++	int i;
++
++	if (fmt == -1)
++		return kernel_qfmt_num > 0;
++
++	for (i = 0; i < kernel_qfmt_num; i++)
++		if (fmt == kernel_qfmt[i])
++			return 1;
++	return 0;
++}
++
+ /* Check whether old quota is turned on on given device */
+ static int v1_kern_quota_on(const char *dev, int type)
+ {
+@@ -803,15 +835,18 @@ int kern_quota_on(const char *dev, int type, int fmt)
+ 		if (quotactl(QCMD(Q_GETFMT, type), dev, 0, (void *)&actfmt) < 0)
+ 			return -1;
+ 		actfmt = kern2utilfmt(actfmt);
+-		if (actfmt >= 0 && (fmt == -1 || (1 << actfmt) & fmt))
+-			return actfmt;
+-		return -1;
++		if (actfmt < 0)
++			return -1;
++		return actfmt;
+ 	}
+-	if ((fmt & (1 << QF_VFSV0)) && v2_kern_quota_on(dev, type))	/* New quota format */
++	if ((fmt == -1 || fmt == QF_VFSV0) &&
++	    v2_kern_quota_on(dev, type))	/* VFSv0 quota format */
+ 		return QF_VFSV0;
+-	if ((fmt & (1 << QF_XFS)) && xfs_kern_quota_on(dev, type))	/* XFS quota format */
++	if ((fmt == -1 || fmt == QF_XFS) &&
++	    xfs_kern_quota_on(dev, type))	/* XFS quota format */
+ 		return QF_XFS;
+-	if ((fmt & (1 << QF_VFSOLD)) && v1_kern_quota_on(dev, type))	/* Old quota format */
++	if ((fmt == -1 || fmt == QF_VFSOLD) &&
++	    v1_kern_quota_on(dev, type))	/* Old quota format */
+ 		return QF_VFSOLD;
+ 	return -1;
+ }
+diff --git a/quotasys.h b/quotasys.h
+index 17b0a05..b504468 100644
+--- a/quotasys.h
++++ b/quotasys.h
+@@ -33,8 +33,8 @@
+ /* Path to export table of NFS daemon */
+ #define NFSD_XTAB_PATH "/var/lib/nfs/etab"
+ 
+-/* Kernel quota format and supported interface */
+-extern int kernel_formats, kernel_iface;
++/* Supported kernel interface */
++extern int kernel_iface;
+ 
+ /*
+  *	Exported functions
+@@ -77,9 +77,6 @@ int name2fmt(char *str);
+ /* Convert quota format number to name */
+ char *fmt2name(int fmt);
+ 
+-/* Convert kernel to utility format numbers */
+-int kern2utilfmt(int fmt);
+-
+ /* Convert utility to kernel format numbers */
+ int util2kernfmt(int fmt);
+ 
+@@ -129,6 +126,9 @@ void init_kernel_interface(void);
+ /* Check whether is quota turned on on given device for given type */
+ int kern_quota_on(const char *dev, int type, int fmt);
+ 
++/* Return whether kernel is able to handle given format */
++int kern_qfmt_supp(int fmt);
++
+ /* Flags for init_mounts_scan() */
+ #define MS_NO_MNTPOINT 0x01	/* Specified directory needn't be mountpoint */
+ #define MS_NO_AUTOFS 0x02	/* Ignore autofs mountpoints */
+diff --git a/repquota.8 b/repquota.8
+index 6753efa..7580f64 100644
+--- a/repquota.8
++++ b/repquota.8
+@@ -107,9 +107,11 @@ Ignore mountpoints mounted by automounter.
+ Report quota for specified format (ie. don't perform format autodetection).
+ Possible format names are:
+ .B vfsold
+-(version 1 quota),
++Original quota format with 16-bit UIDs / GIDs,
+ .B vfsv0
+-(version 2 quota),
++Quota format with 32-bit UIDs / GIDs, 64-bit space usage, 32-bit inode usage and limits,
++.B vfsv1
++Quota format with 64-bit quota limits and usage,
+ .B xfs
+ (quota on XFS filesystem)
+ .TP
+diff --git a/setquota.8 b/setquota.8
+index c8b6614..624deec 100644
+--- a/setquota.8
++++ b/setquota.8
+@@ -134,9 +134,11 @@ be aware that quota over RPC will stop working if you are using new
+ Perform setting for specified format (ie. don't perform format autodetection).
+ Possible format names are:
+ .B vfsold
+-(version 1 quota),
++Original quota format with 16-bit UIDs / GIDs,
+ .B vfsv0
+-(version 2 quota),
++Quota format with 32-bit UIDs / GIDs, 64-bit space usage, 32-bit inode usage and limits,
++.B vfsv1
++Quota format with 64-bit quota limits and usage,
+ .B rpc
+ (quota over NFS),
+ .B xfs
+diff --git a/warnquota.8 b/warnquota.8
+index 62aefdf..89844ec 100644
+--- a/warnquota.8
++++ b/warnquota.8
+@@ -29,9 +29,11 @@ It is typically run via
+ Perform setting for specified format (ie. don't perform format autodetection).
+ Possible format names are:
+ .B vfsold
+-(version 1 quota),
++Original quota format with 16-bit UIDs / GIDs,
+ .B vfsv0
+-(version 2 quota),
++Quota format with 32-bit UIDs / GIDs, 64-bit space usage, 32-bit inode usage and limits,
++.B vfsv1
++Quota format with 64-bit quota limits and usage,
+ .B rpc
+ (quota over NFS),
+ .B xfs
+diff --git a/xqmstats.c b/xqmstats.c
+index 84e8edf..762b548 100644
+--- a/xqmstats.c
++++ b/xqmstats.c
+@@ -1,8 +1,8 @@
+ /*
+  *	Display XFS quota manager statistics from /proc.
++ *      Copyright (c) 2001-2003 Silicon Graphics, Inc.
+  */
+ 
+-#ident "Copyright (c) 2001-2003 Silicon Graphics, Inc."
+ 
+ #include <stdio.h>
+ #include <unistd.h>
+-- 
+1.7.3.2
+

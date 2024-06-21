@@ -1,0 +1,183 @@
+From 728b623cb72dffd21d1ef8e77a45eb72a09e1d5c Mon Sep 17 00:00:00 2001
+From: Abhijith Das <adas@redhat.com>
+Date: Tue, 1 Feb 2011 17:16:12 +0100
+Subject: [PATCH] Add quotasync tool
+
+Add tool allowing to sync quotas for some / all filesystems.
+
+Signed-off-by: Jan Kara <jack@suse.cz>
+
+Petr Pisar: Remove STRIP from Makefile.in
+Petr Pisar: Adjust Makefile.in to context
+---
+ Makefile.in |    8 ++-
+ quotasync.c |  127 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 132 insertions(+), 3 deletions(-)
+ create mode 100644 quotasync.c
+
+diff --git a/Makefile.in b/Makefile.in
+index 31eb67a..a6ee54a 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -1,5 +1,5 @@
+-PROGS         = quotacheck quotaon quota quot repquota warnquota quotastats xqmstats edquota setquota convertquota rpc.rquotad @QUOTA_NETLINK_PROG@
+-SOURCES       = bylabel.c common.c convertquota.c edquota.c pot.c quot.c quota.c quotacheck.c quotacheck_v1.c quotacheck_v2.c quotaio.c quotaio_rpc.c quotaio_v1.c quotaio_v2.c quotaio_tree.c quotaio_xfs.c quotaio_meta.c quotaio_generic.c quotaon.c quotaon_xfs.c quotaops.c quotastats.c quotasys.c repquota.c rquota_client.c rquota_server.c rquota_svc.c setquota.c warnquota.c xqmstats.c svc_socket.c
++PROGS         = quotacheck quotaon quota quot repquota warnquota quotastats xqmstats edquota setquota convertquota rpc.rquotad quotasync @QUOTA_NETLINK_PROG@
++SOURCES       = bylabel.c common.c convertquota.c edquota.c pot.c quot.c quota.c quotacheck.c quotacheck_v1.c quotacheck_v2.c quotaio.c quotaio_rpc.c quotaio_v1.c quotaio_v2.c quotaio_tree.c quotaio_xfs.c quotaio_meta.c quotaio_generic.c quotaon.c quotaon_xfs.c quotaops.c quotastats.c quotasys.c repquota.c rquota_client.c rquota_server.c rquota_svc.c setquota.c warnquota.c xqmstats.c svc_socket.c quotasync.c
+ VERSIONDEF    = -DQUOTA_VERSION=\"3.17\"
+ CFLAGS        = @CFLAGS@ @EXT2_DIRECT@ -D_GNU_SOURCE -Wall -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 $(VERSIONDEF) -DCOMPILE_OPTS="\"@COMPILE_OPTS@\""
+ CPPFLAGS      = @CPPFLAGS@
+@@ -103,7 +103,7 @@ install: all @INSTMO@
+ 	-mkdir -p $(ROOTDIR)$(mandir)/man8
+ 	-$(INSTALL) -m 755 -d $(ROOTDIR)$(includedir)/rpcsvc
+ 	-$(INSTALL) -m 644 rquota.h rquota.x $(ROOTDIR)$(includedir)/rpcsvc
+-	-$(INSTALL) -m $(DEF_SBIN_MODE) quota $(ROOTDIR)$(bindir)
++	-$(INSTALL) -m $(DEF_SBIN_MODE) quota quotasync $(ROOTDIR)$(bindir)
+ 	-$(INSTALL) -m $(DEF_SBIN_MODE) rpc.rquotad $(ROOTDIR)$(sbindir)
+ ifneq ($(NETLINKLIBS),)
+ 	-$(INSTALL) -m $(DEF_SBIN_MODE) quota_nld $(ROOTDIR)$(sbindir)
+@@ -120,6 +120,8 @@ quotacheck: quotacheck.o quotacheck_v1.o quotacheck_v2.o quotaops.o $(LIBOBJS)
+ 
+ quota: quota.o quotaops.o $(LIBOBJS)
+ 
++quotasync: quotasync.o $(LIBOBJS)
++
+ quot: quot.o $(LIBOBJS)
+ 
+ repquota: repquota.o $(LIBOBJS)
+diff --git a/quotasync.c b/quotasync.c
+new file mode 100644
+index 0000000..0ce44c9
+--- /dev/null
++++ b/quotasync.c
+@@ -0,0 +1,127 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <string.h>
++#include <errno.h>
++#include <getopt.h>
++
++#include "pot.h"
++#include "common.h"
++#include "quotasys.h"
++#include "quotaio.h"
++
++#define FL_USER 1		/* sync user quotas */
++#define FL_GROUP 2		/* sync group quotas */
++#define FL_ALL 4		/* sync quotas on all filesystems */
++
++int flags, fmt = -1;
++char **mnt;
++int mntcnt;
++char *progname;
++
++static void usage(void)
++{
++	errstr(_("Utility for syncing quotas.\nUsage:\n%s [-ug] -a | mntpoint...\n\n"), progname);
++	fprintf(stderr, _("Bugs to %s\n"), MY_EMAIL);
++	exit(1);
++}
++
++static void parse_options(int argcnt, char **argstr)
++{
++	int ret;
++	struct option long_opts[] = {
++		{ "user", 0, NULL, 'u' },
++		{ "group", 0, NULL, 'g' },
++		{ "all", 0, NULL, 'a' },
++		{ "version", 0, NULL, 'V' },
++		{ "help", 0, NULL, 'h' },
++		{ NULL, 0, NULL, 0 }
++	};
++
++	while ((ret = getopt_long(argcnt, argstr, "ahugV", long_opts, NULL)) != -1) {
++		switch (ret) {
++			case '?':
++			case 'h':
++				usage();
++			case 'V':
++				version();
++				exit(0);
++			case 'u':
++				flags |= FL_USER;
++				break;
++			case 'g':
++				flags |= FL_GROUP;
++				break;
++			case 'a':
++				flags |= FL_ALL;
++				break;
++		}
++	}
++
++	if ((flags & FL_ALL && optind != argcnt) ||
++	    (!(flags & FL_ALL) && optind == argcnt)) {
++		fputs(_("Bad number of arguments.\n"), stderr);
++		usage();
++	}
++	if (!(flags & FL_ALL)) {
++		mnt = argstr + optind;
++		mntcnt = argcnt - optind;
++	}
++	if (!(flags & (FL_USER | FL_GROUP)))
++		flags |= FL_USER;
++}
++
++static int sync_one(int type, char *dev)
++{
++	int qcmd = QCMD(Q_SYNC, type);
++
++	return quotactl(qcmd, dev, 0, NULL);
++}
++
++int syncquotas(int type)
++{
++	struct quota_handle **handles, *h;
++	int i, ret = 0;
++
++	if (flags & FL_ALL) {
++		if (sync_one(type, NULL) < 0)
++			errstr(_("%s quota sync failed: %s\n"), type2name(type),
++					strerror(errno));
++		return -1;
++	}
++
++	handles = create_handle_list(mntcnt, mnt, type, fmt,
++				     IOI_READONLY, MS_LOCALONLY | MS_NO_AUTOFS);
++
++	for (i = 0; handles[i]; i++) {
++		h = handles[i];
++		if (sync_one(type, h->qh_quotadev)) {
++			errstr(_("%s quota sync failed for %s: %s\n"),
++				type2name(type), h->qh_quotadev, strerror(errno));
++			ret = -1;
++		}
++	}
++	dispose_handle_list(handles);
++
++	return ret;
++}
++
++int main(int argc, char **argv)
++{
++	int ret = 0;
++
++	gettexton();
++	progname = basename(argv[0]);
++
++	parse_options(argc, argv);
++	init_kernel_interface();
++
++	if (flags & FL_USER)
++		if (syncquotas(USRQUOTA))
++			ret = 1;
++	if (flags & FL_GROUP)
++		if (syncquotas(GRPQUOTA))
++			ret = 1;
++	return ret;
++}
+-- 
+1.7.4
+

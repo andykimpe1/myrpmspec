@@ -1,0 +1,177 @@
+From 4b58af1bb8db7c33d90ce4928866eb35ac62b334 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Wed, 9 Jan 2013 17:00:44 +0100
+Subject: [PATCH] Recognize units at inode limits by setquota
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This patch allows to specify suffixes at inode limits on setquota
+command line and standard input. Decimal Units k, m, g, t are
+implemented.  Numeric value without suffix is equivatent to single
+inodes as before.  This is complementary functionality to `quota -s'.
+
+Signed-off-by: Petr Písař <ppisar@redhat.com>
+Signed-off-by: Jan Kara <jack@suse.cz>
+---
+ quotasys.c | 32 ++++++++++++++++++++++++++++++++
+ quotasys.h |  3 +++
+ setquota.8 |  6 ++++++
+ setquota.c | 39 +++++++++++++++++++++++++++++++++++----
+ 4 files changed, 76 insertions(+), 4 deletions(-)
+
+diff --git a/quotasys.c b/quotasys.c
+index 5b1cfa8..72b072a 100644
+--- a/quotasys.c
++++ b/quotasys.c
+@@ -448,6 +448,38 @@ void number2str(unsigned long long num, char *buf, int format)
+ }
+ 
+ /*
++ * Convert inode number with unit from string to quota inodes.
++ * Return NULL on success, static error message otherwise.
++ */
++const char *str2number(const char *string, qsize_t *inodes)
++{
++	char *unit;
++	unsigned long long int number, multiple;
++       
++	number = strtoull(string, &unit, 0);
++	if (ULLONG_MAX == number)
++		return _("Integer overflow while parsing number.");
++
++	if (!unit || unit[0] == '\0')
++		multiple = 1;
++	else if (!strcmp(unit, _("k")))
++		multiple = 1000;
++	else if (!strcmp(unit, _("m")))
++		multiple = 1000000;
++	else if (!strcmp(unit, _("g")))
++		multiple = 1000000000;
++	else if (!strcmp(unit, _("t")))
++		multiple = 1000000000000ULL;
++	else
++		return _("Unknown decimal unit. "
++			"Valid units are k, m, g, t.");
++	if (number > QSIZE_MAX / multiple)
++		return _("Integer overflow while interpreting decimal unit.");
++	*inodes = number * multiple;
++	return NULL;
++}
++
++/*
+  *	Check for XFS filesystem with quota accounting enabled
+  */
+ static int hasxfsquota(struct mntent *mnt, int type, int flags)
+diff --git a/quotasys.h b/quotasys.h
+index 2403ab2..a9e1d26 100644
+--- a/quotasys.h
++++ b/quotasys.h
+@@ -98,6 +98,9 @@ const char *str2space(const char *string, qsize_t *space);
+ /* Convert number to short printable form */
+ void number2str(unsigned long long, char *, int);
+ 
++/* Convert inode number with unit from string to quota inodes. */
++const char *str2number(const char *string, qsize_t *inodes);
++
+ /* Check to see if particular quota is to be enabled */
+ /* Recognizes MS_XFS_DISABLED flag */
+ int hasquota(struct mntent *mnt, int type, int flags);
+diff --git a/setquota.8 b/setquota.8
+index 208f78d..1b97080 100644
+--- a/setquota.8
++++ b/setquota.8
+@@ -189,6 +189,12 @@ are interpreted as multiples of kibibyte (1024 bytes) blocks by default.
+ Symbols K, M, G, and T can be appended to numeric value to express kibibytes,
+ mebibytes, gibibytes, and tebibytes.
+ .PP
++.I inode-softlimit
++and
++.I inode-hardlimit
++are interpreted literally. Symbols k, m, g, and t can be appended to numeric
++value to express multiples of 10^3, 10^6, 10^9, and 10^12 inodes.
++.PP
+ To disable a quota, set the coresponding parameter to 0. To change quotas
+ for several filesystems, invoke once for each filesystem.
+ .PP
+diff --git a/setquota.c b/setquota.c
+index d03a7fb..c5d594f 100644
+--- a/setquota.c
++++ b/setquota.c
+@@ -103,6 +103,19 @@ static qsize_t parse_blocksize(const char *str, const char *msg)
+ 	return ret;
+ }
+ 
++/* Convert inode count to number - print errstr message in case of failure */
++static qsize_t parse_inodecount(const char *str, const char *msg)
++{
++	qsize_t ret;
++	const char *error = str2number(str, &ret);
++
++	if (error) {
++		errstr(_("%s: %s: %s\n"), msg, str, error);
++		usage();
++	}
++	return ret;
++}
++
+ /* Convert our flags to quota type */
+ static inline int flag2type(int flags)
+ {
+@@ -238,8 +251,8 @@ static void parse_options(int argcnt, char **argstr)
+ 		if (!(flags & (FL_GRACE | FL_INDIVIDUAL_GRACE | FL_PROTO))) {
+ 			toset.dqb_bsoftlimit = parse_blocksize(argstr[optind++], _("block softlimit"));
+ 			toset.dqb_bhardlimit = parse_blocksize(argstr[optind++], _("block hardlimit"));
+-			toset.dqb_isoftlimit = parse_unum(argstr[optind++], _("inode softlimit"));
+-			toset.dqb_ihardlimit = parse_unum(argstr[optind++], _("inode hardlimit"));
++			toset.dqb_isoftlimit = parse_inodecount(argstr[optind++], _("inode softlimit"));
++			toset.dqb_ihardlimit = parse_inodecount(argstr[optind++], _("inode hardlimit"));
+ 		}
+ 		else if (flags & FL_PROTO)
+ 			protoid = name2id(protoname, flag2type(flags), !!(flags & FL_NUMNAMES), NULL);
+@@ -316,7 +329,7 @@ static int read_entry(qid_t *id, qsize_t *isoftlimit, qsize_t *ihardlimit, qsize
+ 	static int line = 0;
+ 	char name[MAXNAMELEN+1];
+ 	char linebuf[MAXLINELEN], *chptr;
+-	unsigned long is, ih;
++	char is[MAXNAMELEN+1], ih[MAXNAMELEN+1];
+ 	char bs[MAXNAMELEN+1], bh[MAXNAMELEN+1];
+ 	const char *error;
+ 	int ret;
+@@ -336,7 +349,7 @@ static int read_entry(qid_t *id, qsize_t *isoftlimit, qsize_t *ihardlimit, qsize
+ 			chptr++;
+ 		if (*chptr == '\n')
+ 			continue;
+-		ret = sscanf(chptr, "%s %s %s %lu %lu", name, bs, bh, &is, &ih);
++		ret = sscanf(chptr, "%s %s %s %s %s", name, bs, bh, is, ih);
+ 		if (ret != 5) {
+ 			errstr(_("Cannot parse input line %d.\n"), line);
+ 			if (!(flags & FL_CONTINUE_BATCH))
+@@ -370,6 +383,24 @@ static int read_entry(qid_t *id, qsize_t *isoftlimit, qsize_t *ihardlimit, qsize
+ 			errstr(_("Skipping line.\n"));
+ 			continue;
+ 		}
++		error = str2number(is, isoftlimit);
++		if (error) {
++			errstr(_("Unable to parse inode soft limit '%s' "
++				    "on line %d: %s\n"), is, line, error);
++			if (!(flags & FL_CONTINUE_BATCH))
++				die(1, _("Exitting.\n"));
++			errstr(_("Skipping line.\n"));
++			continue;
++		}
++		error = str2number(ih, ihardlimit);
++		if (error) {
++			errstr(_("Unable to parse inode hard limit '%s' "
++				    "on line %d: %s\n"), ih, line, error);
++			if (!(flags & FL_CONTINUE_BATCH))
++				die(1, _("Exitting.\n"));
++			errstr(_("Skipping line.\n"));
++			continue;
++		}
+ 		break;
+ 	}
+ 	*isoftlimit = is;
+-- 
+1.8.1.4
+

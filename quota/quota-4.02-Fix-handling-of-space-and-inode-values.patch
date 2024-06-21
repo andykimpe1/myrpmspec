@@ -1,0 +1,64 @@
+From 663ac451b045b4823d6d633893a5d748c09f42f2 Mon Sep 17 00:00:00 2001
+From: Jan Kara <jack@suse.cz>
+Date: Wed, 1 Oct 2014 18:10:40 +0200
+Subject: [PATCH] Fix handling of space and inode values
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Commit 0214512479e0 (Properly handle signed space and inode values)
+broke parsing of pure numbers in str2number() so that it would always
+complain about "Integer overflow while interpreting decimal unit". Fix
+condition checking for overflow.
+
+Also number2str() was buggy and wouldn't guess proper units for negative
+numbers.
+
+Signed-off-by: Jan Kara <jack@suse.cz>
+Signed-off-by: Petr Písař <ppisar@redhat.com>
+---
+ quotasys.c | 16 +++++++++-------
+ 1 file changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/quotasys.c b/quotasys.c
+index a5737a8..4b49e0e 100644
+--- a/quotasys.c
++++ b/quotasys.c
+@@ -459,17 +459,19 @@ void number2str(long long num, char *buf, int format)
+ 	int i;
+ 	unsigned long long div;
+ 	char suffix[8] = " kmgt";
+-	long long anum = num >= 0 ? num : -num;
+ 
+-	if (format)
+-		for (i = 4, div = 1000000000000LL; i > 0; i--, div /= 1000)
+-			if (num >= 100*div) {
+-				int sign = num != anum ? -1 : 1;
++	if (format) {
++		long long anum = num >= 0 ? num : -num;
++		int sign = num != anum ? -1 : 1;
+ 
+-				sprintf(buf, "%lld%c", (num+div-1) / div * sign,
++		for (i = 4, div = 1000000000000LL; i > 0; i--, div /= 1000)
++			if (anum >= 100*div) {
++				sprintf(buf, "%lld%c",
++					DIV_ROUND_UP(anum, div) * sign,
+ 					suffix[i]);
+ 				return;
+ 			}
++	}
+ 	sprintf(buf, "%lld", num);
+ }
+ 
+@@ -500,7 +502,7 @@ const char *str2number(const char *string, qsize_t *inodes)
+ 		return _("Unknown decimal unit. "
+ 			"Valid units are k, m, g, t.");
+ 	if (number > QSIZE_MAX / multiple ||
+-	    -number < QSIZE_MAX / multiple)
++	    number < -(QSIZE_MAX / multiple))
+ 		return _("Integer overflow while interpreting decimal unit.");
+ 	*inodes = number * multiple;
+ 	return NULL;
+-- 
+1.9.3
+

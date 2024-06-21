@@ -1,0 +1,67 @@
+From b58944b582722dd3c56893eb4b6c8b8a0291201d Mon Sep 17 00:00:00 2001
+From: jkar8572 <jkar8572>
+Date: Thu, 27 May 2010 13:12:57 +0000
+Subject: [PATCH] * fix repquota to get latest quota info header (Jan Kara)
+
+Petr Pisar: Changelog entry removed.
+
+---
+ quotaio.c    |    9 +++++++++
+ quotaio_v1.c |    5 -----
+ quotaio_v2.c |    5 -----
+
+diff --git a/quotaio.c b/quotaio.c
+index 533b631..ee8c48a 100644
+--- a/quotaio.c
++++ b/quotaio.c
+@@ -147,6 +147,15 @@ struct quota_handle *init_io(struct mntent *mnt, int type, int fmt, int flags)
+ 		}
+ 	}
+ 	if (!QIO_ENABLED(h) || flags & IOI_OPENFILE) {	/* Need to open file? */
++		if (QIO_ENABLED(h)) {	/* Kernel uses same file? */
++			unsigned int cmd =
++				(kernel_iface == IFACE_GENERIC) ? Q_SYNC : Q_6_5_SYNC;
++			if (quotactl(QCMD(cmd, h->qh_type), h->qh_quotadev,
++				     0, NULL) < 0) {
++				die(4, _("Cannot sync quotas on device %s: %s\n"),
++				    h->qh_quotadev, strerror(errno));
++			}
++		}
+ 		/* We still need to open file for operations like 'repquota' */
+ 		if ((fd = open(qfname, QIO_RO(h) ? O_RDONLY : O_RDWR)) < 0) {
+ 			errstr(_("Cannot open quotafile %s: %s\n"),
+diff --git a/quotaio_v1.c b/quotaio_v1.c
+index 0edbc16..1533ffc 100644
+--- a/quotaio_v1.c
++++ b/quotaio_v1.c
+@@ -348,11 +348,6 @@ static int v1_scan_dquots(struct quota_handle *h, int (*process_dquot) (struct d
+ 	struct dquot *dquot = get_empty_dquot();
+ 	qid_t id = 0;
+ 
+-	if (QIO_ENABLED(h))	/* Kernel uses same file? */
+-		if (quotactl(QCMD((kernel_iface == IFACE_GENERIC) ? Q_SYNC : Q_6_5_SYNC, h->qh_type),
+-			     h->qh_quotadev, 0, NULL) < 0)
+-			die(4, _("Cannot sync quotas on device %s: %s\n"), h->qh_quotadev,
+-			    strerror(errno));
+ 	memset(dquot, 0, sizeof(*dquot));
+ 	dquot->dq_h = h;
+ 	lseek(h->qh_fd, 0, SEEK_SET);
+diff --git a/quotaio_v2.c b/quotaio_v2.c
+index 2e3c725..38440e7 100644
+--- a/quotaio_v2.c
++++ b/quotaio_v2.c
+@@ -484,11 +484,6 @@ static int v2_commit_dquot(struct dquot *dquot, int flags)
+ 
+ static int v2_scan_dquots(struct quota_handle *h, int (*process_dquot) (struct dquot *, char *))
+ {
+-	if (QIO_ENABLED(h))	/* Kernel uses same file? */
+-		if (quotactl(QCMD((kernel_iface == IFACE_GENERIC) ? Q_SYNC : Q_6_5_SYNC, h->qh_type),
+-			     h->qh_quotadev, 0, NULL) < 0)
+-			die(4, _("Cannot sync quotas on device %s: %s\n"), h->qh_quotadev,
+-			    strerror(errno));
+ 	return qtree_scan_dquots(h, process_dquot);
+ }
+ 
+-- 
+1.7.4
+

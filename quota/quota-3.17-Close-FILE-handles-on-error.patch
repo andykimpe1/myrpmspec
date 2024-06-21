@@ -1,0 +1,131 @@
+From aaf3bdca0c9dbfaf2e979bd2862df41efdbd633b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Thu, 13 Jun 2013 16:11:30 +0200
+Subject: [PATCH] Close FILE handles on error
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Functions for reading quota specification in quotaops.c create new
+temporary FILE stream handle, they close it on successful return,
+but they forget to close it on unsuccessful return. That leads to
+memory leaks. This patch ensures that the handle gets closed in all
+cases.
+
+Petr Pisar: Ported to 3.17.
+
+Signed-off-by: Petr Písař <ppisar@redhat.com>
+---
+ quotaops.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/quotaops.c b/quotaops.c
+index 82ccc88..a96567b 100644
+--- a/quotaops.c
++++ b/quotaops.c
+@@ -351,42 +351,49 @@ int readprivs(struct dquot *qlist, int infd)
+ 
+ 		if (cnt != 7) {
+ 			errstr(_("Bad format:\n%s\n"), line);
++			fclose(fd);
+ 			return -1;
+ 		}
+ 		error = str2space(blocksstring, &blocks);
+ 		if (error) {
+ 			errstr(_("Bad block usage: %s: %s\n"),
+ 				blocksstring, error);
++			fclose(fd);
+ 			return -1;
+ 		}
+ 		error = str2space(bsoftstring, &bsoft);
+ 		if (error) {
+ 			errstr(_("Bad block soft limit: %s: %s\n"),
+ 				bsoftstring, error);
++			fclose(fd);
+ 			return -1;
+ 		}
+ 		error = str2space(bhardstring, &bhard);
+ 		if (error) {
+ 			errstr(_("Bad block hard limit: %s: %s\n"),
+ 				bhardstring, error);
++			fclose(fd);
+ 			return -1;
+ 		}
+ 		error = str2number(inodesstring, &inodes);
+ 		if (error) {
+ 			errstr(_("Bad inode usage: %s: %s\n"),
+ 				inodesstring, error);
++			fclose(fd);
+ 			return -1;
+ 		}
+ 		error = str2number(isoftstring, &isoft);
+ 		if (error) {
+ 			errstr(_("Bad inode soft limit: %s: %s\n"),
+ 				isoftstring, error);
++			fclose(fd);
+ 			return -1;
+ 		}
+ 		error = str2number(ihardstring, &ihard);
+ 		if (error) {
+ 			errstr(_("Bad inode hard limit: %s: %s\n"),
+ 				ihardstring, error);
++			fclose(fd);
+ 			return -1;
+ 		}
+ 
+@@ -536,6 +543,7 @@ int readindividualtimes(struct dquot *qlist, int infd)
+ 		if (cnt != 3) {
+ format_err:
+ 			errstr(_("bad format:\n%s\n"), line);
++			fclose(fd);
+ 			return -1;
+ 		}
+ 		if (!strcmp(btimestr, _("unset")))
+@@ -546,6 +554,7 @@ format_err:
+ 			if (str2timeunits(btime, bunits, &bseconds) < 0) {
+ units_err:
+ 				errstr(_("Bad time units. Units are 'second', 'minute', 'hour', and 'day'.\n"));
++				fclose(fd);
+ 				return -1;
+ 			}
+ 			bseconds += now;
+@@ -652,6 +661,7 @@ int readtimes(struct quota_handle **handles, int infd)
+ 		cnt = sscanf(line, "%s %d %s %d %s", fsp, &btime, bunits, &itime, iunits);
+ 		if (cnt != 5) {
+ 			errstr(_("bad format:\n%s\n"), line);
++			fclose(fd);
+ 			return -1;
+ 		}
+ #else
+@@ -664,11 +674,13 @@ int readtimes(struct quota_handle **handles, int infd)
+ 	while (fgets(line1, sizeof(line1), fd)) {
+ 		if (!(fsp = strtok(line1, " \t:"))) {
+ 			errstr(_("%s - bad format\n"), line1);
++			fclose(fd);
+ 			return -1;
+ 		}
+ 		if (!(cp = strtok(NULL, "\n"))) {
+ 			errstr(_("%s - %s -- bad format\n"),
+ 				fsp, &fsp[strlen(fsp) + 1]);
++			fclose(fd);
+ 			return -1;
+ 		}
+ 		cnt = sscanf(cp, _(" block grace period: %d %s file grace period: %d %s"),
+@@ -676,12 +688,14 @@ int readtimes(struct quota_handle **handles, int infd)
+ 		if (cnt != 4) {
+ 			errstr(_("%s - %s -- bad format\n"),
+ 				fsp, cp);
++			fclose(fd);
+ 			return -1;
+ 		}
+ #endif
+ 		if (str2timeunits(btime, bunits, &bseconds) < 0 ||
+ 		    str2timeunits(itime, iunits, &iseconds) < 0) {
+ 			errstr(_("Bad time units. Units are 'second', 'minute', 'hour', and 'day'.\n"));
++			fclose(fd);
+ 			return -1;
+ 		}
+ 		for (i = 0; handles[i]; i++) {
+-- 
+1.8.1.4
+

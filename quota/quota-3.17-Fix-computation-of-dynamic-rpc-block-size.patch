@@ -1,0 +1,79 @@
+From 7420e6b3a5495f705a3214de062fbf9f0c3eceb3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Wed, 18 Sep 2013 10:19:50 +0200
+Subject: [PATCH] Fix computation of dynamic rpc block size
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The computation counted with block limits as being in bytes. But they are
+in quota blocks. Fix the math.
+
+In additon, change the computaion logic to prevent from infinite loop
+if current block space is a negative value.
+
+This is based on upstream commits:
+
+commit 2ef32f7d7edf4cd3295a8a7828229487e37ea0f3
+Author: Jan Kara <jack@suse.cz>
+Date:   Tue Jun 12 16:03:35 2012 +0200
+
+commit fef44fb2d924c6249a8aadfe7cf5e1093ebd2e43
+Author: Petr Písař <ppisar@redhat.com>
+Date:   Thu Jan 6 17:59:27 2011 +0100
+
+Signed-off-by: Petr Písař <ppisar@redhat.com>
+---
+ rquota_server.c | 25 ++++++++++++-------------
+ 1 file changed, 12 insertions(+), 13 deletions(-)
+
+diff --git a/rquota_server.c b/rquota_server.c
+index d5d9fe8..568b0b2 100644
+--- a/rquota_server.c
++++ b/rquota_server.c
+@@ -96,16 +96,15 @@ static inline void servnet2utildqblk(struct util_dqblk *u, sq_dqblk * n)
+ static int find_block_shift(qsize_t hard, qsize_t soft, qsize_t cur)
+ {
+ 	int shift;
+-	qsize_t value;
+-    
+-	value = (hard > soft) ? hard : soft;
+-	for (shift = QUOTABLOCK_BITS; value; shift++) value >>= 1;
++	qsize_t value = hard;
+ 
+-	cur >>= shift;
+-	for (; cur; shift++) cur >>= 1;
+-
+-	shift -= 32;
+-	if (shift < 0) shift = 0;
++	if (value < soft)
++		value = soft;
++	if (value < cur)
++		value = cur;
++	value >>= 32;
++	for (shift = QUOTABLOCK_BITS; value; shift++)
++		value >>= 1;
+ 
+ 	return shift;
+ }
+@@ -116,13 +115,13 @@ static inline void servutil2netdqblk(struct rquota *n, struct util_dqblk *u)
+ 	int shift;
+ 
+ 	shift = find_block_shift(u->dqb_bhardlimit, u->dqb_bsoftlimit,
+-		u->dqb_curspace);
++		toqb(u->dqb_curspace));
+ 	n->rq_bsize = 1 << shift;
+-	n->rq_bhardlimit = (u->dqb_bhardlimit << QUOTABLOCK_BITS) >> shift;
+-	n->rq_bsoftlimit = (u->dqb_bsoftlimit << QUOTABLOCK_BITS) >> shift;
++	n->rq_bhardlimit = u->dqb_bhardlimit >> (shift - QUOTABLOCK_BITS);
++	n->rq_bsoftlimit = u->dqb_bsoftlimit >> (shift - QUOTABLOCK_BITS);
+ 	n->rq_fhardlimit = u->dqb_ihardlimit;
+ 	n->rq_fsoftlimit = u->dqb_isoftlimit;
+-	n->rq_curblocks = (u->dqb_curspace + n->rq_bsize - 1) >> shift;
++	n->rq_curblocks = toqb(u->dqb_curspace) >> (shift - QUOTABLOCK_BITS);
+ 	n->rq_curfiles = u->dqb_curinodes;
+ 
+ 	time(&now);
+-- 
+1.8.3.1
+

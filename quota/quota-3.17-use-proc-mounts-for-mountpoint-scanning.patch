@@ -1,0 +1,82 @@
+From 6a3bbccab6f8262912bdc2cf5bff77553c547e30 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Thu, 25 Nov 2010 15:48:27 +0100
+Subject: [PATCH] Use /proc/mounts for mountpoint scanning
+
+This is back-port of relevant part of upstream commit
+d271d0a329a5b3e99f4ad209b5270a8648739ff0.
+
+Series of switching quota on/off by mount(8) command (-o remount,noquota
+-o remount,usrquota,grpquota) damages /etc/mtab content
+(usrquota,grpquota,noquota,usrquota,grpquota) and that makes quota to
+believe the mount point has quota off.
+
+See <https://bugzilla.redhat.com/show_bug.cgi?id=623656> for more details.
+---
+ configure.in |    7 +++++++
+ quotasys.c   |   23 +++++++++++++----------
+ 2 files changed, 20 insertions(+), 10 deletions(-)
+
+diff --git a/configure.in b/configure.in
+index c119c6c..58c1c62 100644
+--- a/configure.in
++++ b/configure.in
+@@ -205,6 +205,10 @@ AC_ARG_ENABLE(rootsbin,
+ 	[  --enable-rootsbin=[yes/no]      Use /sbin for some important binaries regardless $prefix [default=no].],
+ 	,
+ 	enable_rootsbin="no")
++AC_ARG_ENABLE(proc-mounts,
++	[  --enable-proc-mounts=[path]   Use alternate file instead of /etc/mtab [default=/proc/mounts].],
++	,
++	enable_proc_mounts="/proc/mounts")
+ 
+ if test "$enable_altformat" = "yes" ; then
+ 	CFLAGS="-DALT_FORMAT $CFLAGS"
+@@ -233,6 +237,9 @@ if test "$enable_nls" = "yes" ; then
+ 	CFLAGS="-D__GETTEXT__ $CFLAGS"
+ 	INSTMO="inst_mo"
+ fi
++if test -n "$enable_proc_mounts" ; then
++	CFLAGS="-DALT_MTAB=\\\"$enable_proc_mounts\\\" $CFLAGS"
++fi
+ if test "$enable_rootsbin" = "yes" ; then
+ 	ROOTSBIN="/sbin"
+ else
+diff --git a/quotasys.c b/quotasys.c
+index 86802c3..dbe9d1c 100644
+--- a/quotasys.c
++++ b/quotasys.c
+@@ -913,17 +913,20 @@ static int cache_mnt_table(int flags)
+ 	int autofsdircnt = 0;
+ 	char autofsdir[AUTOFS_DIR_MAX][PATH_MAX];
+ 
+-	if (!(mntf = setmntent(_PATH_MOUNTED, "r"))) {
+-		if (errno != ENOENT) {
+-			errstr(_("Cannot open %s: %s\n"), _PATH_MOUNTED, strerror(errno));
+-			return -1;
+-		}
+-		else	/* Fallback on fstab when mtab not available */
+-			if (!(mntf = setmntent(_PATH_MNTTAB, "r"))) {
+-				errstr(_("Cannot open %s: %s\n"), _PATH_MNTTAB, strerror(errno));
+-				return -1;
+-			}
++#ifdef ALT_MTAB
++	mntf = setmntent(ALT_MTAB, "r");
++	if (mntf)
++		goto alloc;
++#endif
++	mntf = setmntent(_PATH_MOUNTED, "r");
++	if (mntf)
++		goto alloc;
++	/* Fallback to fstab when mtab not available */
++	if (!(mntf = setmntent(_PATH_MNTTAB, "r"))) {
++		errstr(_("Cannot open any file with mount points.\n"));
++		return -1;
+ 	}
++alloc:
+ 	mnt_entries = smalloc(sizeof(struct mount_entry) * ALLOC_ENTRIES_NUM);
+ 	mnt_entries_cnt = 0;
+ 	allocated += ALLOC_ENTRIES_NUM;
+-- 
+1.7.3.2
+
