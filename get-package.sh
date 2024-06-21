@@ -1,25 +1,6 @@
 #!/bin/bash
 baseos=http://archive.kernel.org/centos-vault/centos/6/os/Source/SPackages
 updates=http://archive.kernel.org/centos-vault/centos/6/updates/Source/SPackages
-
-curl -L \
-  -X PATCH \
-  -H "Accept: application/vnd.github+json" \
-  -H "Authorization: Bearer $githuapikey" \
-  -H "X-GitHub-Api-Version: 2022-11-28" \
-  https://api.github.com/repos/andykimpe/myrpmspec/releases/assets/40450 \
-  -d '{"name":"get-package.sh","label":"binary"}'
-
-
-curl -L \
-  -H "Accept: application/vnd.github+json" \
-  -H "Authorization: Bearer $githuapikey" \
-  -H "X-GitHub-Api-Version: 2022-11-28" \
-  https://api.github.com/repos/andykimpe/myrpmspec/releases
-
-
-
-
 decompte() {
     i=$1
     echo "please wait or press key for continue"
