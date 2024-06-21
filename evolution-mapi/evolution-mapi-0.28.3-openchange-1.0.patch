@@ -1,0 +1,422 @@
+diff -up evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-cal-utils.c.openchange-1.0 evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-cal-utils.c
+--- evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-cal-utils.c.openchange-1.0	2013-05-29 19:01:17.571637788 +0200
++++ evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-cal-utils.c	2013-05-29 19:01:17.575613803 +0200
+@@ -34,6 +34,11 @@
+ #define O_BINARY 0
+ #endif
+ 
++/* This property changed names in openchange, try to support both */
++#ifndef PidLidTaskAcceptanceState
++	#define PidLidTaskAcceptanceState PidLidAcceptanceState
++#endif
++
+ #define d(x) 
+ 
+ static gboolean appt_build_name_id (ExchangeMapiConnection *conn, mapi_id_t fid, TALLOC_CTX *mem_ctx, struct SPropTagArray *props);
+@@ -1173,7 +1178,7 @@ task_build_name_id (ExchangeMapiConnecti
+ 		{ PidLidTaskFRecurring, 0 },
+ 		{ PidLidTaskRole, 0 },
+ 		{ PidLidTaskOwnership, 0 },
+-		{ PidLidAcceptanceState, 0 }
++		{ PidLidTaskAcceptanceState, 0 }
+ 	};
+ 
+ 	if (!props)
+diff -up evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-connection.c.openchange-1.0 evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-connection.c
+--- evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-connection.c.openchange-1.0	2013-05-29 19:01:17.557013825 +0200
++++ evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-connection.c	2013-05-29 19:01:17.578614427 +0200
+@@ -48,6 +48,8 @@ static struct mapi_session *mapi_profile
+ static void ema_global_lock (void);
+ static void ema_global_unlock (void);
+ 
++static struct mapi_context *global_mapi_context = NULL;
++
+ /* GObject foo - begin */
+ 
+ G_DEFINE_TYPE (ExchangeMapiConnection, exchange_mapi_connection, G_TYPE_OBJECT)
+@@ -857,7 +859,7 @@ exchange_mapi_util_set_attachments (mapi
+ 		}
+ 
+ 		/* SetProps */
+-		ms = SetProps (&obj_attach, attachment->lpProps, attachment->cValues);
++		ms = SetProps (&obj_attach, MAPI_PROPS_SKIP_NAMEDID_CHECK, attachment->lpProps, attachment->cValues);
+ 		if (ms != MAPI_E_SUCCESS) {
+ 			make_mapi_error (perror, "SetProps", ms);
+ 			goto cleanup;
+@@ -1027,7 +1029,7 @@ exchange_mapi_util_get_attachments (Exch
+ 			goto loop_cleanup;
+ 		}
+ 
+-		ms = GetPropsAll (&obj_attach, &properties);
++		ms = GetPropsAll (&obj_attach, MAPI_UNICODE, &properties);
+ 		if (ms != MAPI_E_SUCCESS) {
+ 			make_mapi_error (perror, "GetPropsAll", ms);
+ 			goto loop_cleanup;
+@@ -1058,7 +1060,7 @@ exchange_mapi_util_get_attachments (Exch
+ 
+ 				/* prefer unicode strings, if available */
+ 				tags = set_SPropTagArray (mem_ctx, 0x1, (attachment->lpProps[az].ulPropTag & 0xFFFF0000) | PT_UNICODE);
+-				if (MAPI_E_SUCCESS == GetProps (&obj_attach, tags, &lpProps, &prop_count) && prop_count == 1 && lpProps) {
++				if (MAPI_E_SUCCESS == GetProps (&obj_attach, MAPI_PROPS_SKIP_NAMEDID_CHECK | MAPI_UNICODE, tags, &lpProps, &prop_count) && prop_count == 1 && lpProps) {
+ 					if ((lpProps->ulPropTag & 0xFFFF) == PT_UNICODE)
+ 						attachment->lpProps[az] = *lpProps;
+ 				}
+@@ -1303,7 +1305,7 @@ exchange_mapi_util_modify_recipients (Ex
+ 	enum MAPISTATUS	ms;
+ 	struct SPropTagArray	*SPropTagArray = NULL;
+ 	struct SRowSet		*SRowSet = NULL;
+-	struct SPropTagArray	*FlagList = NULL;
++	struct PropertyTagArray_r *FlagList = NULL;
+ 	GSList			*l;
+ 	const gchar		**users = NULL;
+ 	uint32_t		i, j, count = 0;
+@@ -1659,7 +1661,7 @@ exchange_mapi_connection_fetch_items   (
+ 				for (k = 0; k < propsTagArray->cValues; k++)
+ 					SPropTagArray_add (mem_ctx, tags, propsTagArray->aulPropTag[k]);
+ 
+-				ms = GetProps (&obj_message, tags, &lpProps, &prop_count);
++				ms = GetProps (&obj_message, MAPI_PROPS_SKIP_NAMEDID_CHECK | MAPI_UNICODE, tags, &lpProps, &prop_count);
+ 				if (ms != MAPI_E_SUCCESS)
+ 					make_mapi_error (perror, "GetProps", ms);
+ 
+@@ -1690,7 +1692,7 @@ exchange_mapi_connection_fetch_items   (
+ 					}
+ 				}
+ 			} else {
+-				ms = GetPropsAll (&obj_message, &properties_array);
++				ms = GetPropsAll (&obj_message, MAPI_UNICODE, &properties_array);
+ 				if (ms != MAPI_E_SUCCESS)
+ 					make_mapi_error (perror, "GetPropsAll", ms);
+ 			}
+@@ -1821,7 +1823,7 @@ exchange_mapi_connection_fetch_object_pr
+ 
+ 		lpProps = talloc_zero(mem_ctx, struct SPropValue);
+ 
+-		ms = GetProps (obj_message, propsTagArray, &lpProps, &prop_count);
++		ms = GetProps (obj_message, MAPI_PROPS_SKIP_NAMEDID_CHECK | MAPI_UNICODE, propsTagArray, &lpProps, &prop_count);
+ 		if (ms != MAPI_E_SUCCESS)
+ 			make_mapi_error (perror, "GetProps", ms);
+ 
+@@ -1841,7 +1843,7 @@ exchange_mapi_connection_fetch_object_pr
+ 			}
+ 		}
+ 	} else {
+-		ms = GetPropsAll (obj_message, &properties_array);
++		ms = GetPropsAll (obj_message, MAPI_UNICODE, &properties_array);
+ 		if (ms != MAPI_E_SUCCESS)
+ 			make_mapi_error (perror, "GetPropsAll", ms);
+ 	}
+@@ -2024,7 +2026,7 @@ exchange_mapi_connection_create_folder (
+ 	vals[0].value.lpszA = type;
+ 	vals[0].ulPropTag = PR_CONTAINER_CLASS;
+ 
+-	ms = SetProps (&obj_folder, vals, 1);
++	ms = SetProps (&obj_folder, MAPI_PROPS_SKIP_NAMEDID_CHECK, vals, 1);
+ 	if (ms != MAPI_E_SUCCESS) {
+ 		make_mapi_error (perror, "SetProps", ms);
+ 		goto cleanup;
+@@ -2203,7 +2205,7 @@ exchange_mapi_connection_rename_folder (
+ 	props = talloc_zero(mem_ctx, struct SPropValue);
+ 	set_SPropValue_proptag (props, PR_DISPLAY_NAME_UNICODE, new_name);
+ 
+-	ms = SetProps (&obj_folder, props, 1);
++	ms = SetProps (&obj_folder, MAPI_PROPS_SKIP_NAMEDID_CHECK, props, 1);
+ 	if (ms != MAPI_E_SUCCESS) {
+ 		make_mapi_error (perror, "SetProps", ms);
+ 		goto cleanup;
+@@ -2571,7 +2573,7 @@ exchange_mapi_connection_create_item (Ex
+ 	}
+ 
+ 	/* set properties for the item */
+-	ms = SetProps (&obj_message, props, propslen);
++	ms = SetProps (&obj_message, MAPI_PROPS_SKIP_NAMEDID_CHECK, props, propslen);
+ 	if (ms != MAPI_E_SUCCESS) {
+ 		make_mapi_error (perror, "SetProps", ms);
+ 		goto cleanup;
+@@ -2696,7 +2698,7 @@ exchange_mapi_connection_modify_item (Ex
+ 	}
+ 
+ 	/* set properties for the item */
+-	ms = SetProps (&obj_message, props, propslen);
++	ms = SetProps (&obj_message, MAPI_PROPS_SKIP_NAMEDID_CHECK, props, propslen);
+ 	if (ms != MAPI_E_SUCCESS) {
+ 		make_mapi_error (perror, "SetProps", ms);
+ 		goto cleanup;
+@@ -2804,16 +2806,20 @@ static gboolean
+ mapi_move_items (ExchangeMapiConnection *conn, mapi_id_t src_fid, guint32 src_fid_options, mapi_id_t dest_fid, guint32 dest_fid_options, GSList *mid_list, gboolean do_copy, GError **perror)
+ {
+ 	enum MAPISTATUS	ms;
++	TALLOC_CTX *mem_ctx;
+ 	mapi_object_t obj_folder_src;
+ 	mapi_object_t obj_folder_dst;
+ 	mapi_id_array_t msg_id_array;
+ 	GSList *l;
+ 
++	CHECK_CORRECT_CONN_AND_GET_PRIV (conn, FALSE);
+ 	e_return_val_mapi_error_if_fail (conn != NULL, MAPI_E_INVALID_PARAMETER, FALSE);
+ 
++	mem_ctx = talloc_new (priv->session);
++
+ 	mapi_object_init(&obj_folder_src);
+ 	mapi_object_init(&obj_folder_dst);
+-	mapi_id_array_init(&msg_id_array);
++	mapi_id_array_init(mem_ctx, &msg_id_array);
+ 
+ 	for (l = mid_list; l != NULL; l = g_slist_next (l))
+ 		mapi_id_array_add_id (&msg_id_array, *((mapi_id_t *)l->data));
+@@ -2838,6 +2844,7 @@ cleanup:
+ 	mapi_id_array_release(&msg_id_array);
+ 	mapi_object_release(&obj_folder_dst);
+ 	mapi_object_release(&obj_folder_src);
++	talloc_free (mem_ctx);
+ 
+ 	return ms;
+ }
+@@ -3044,9 +3051,6 @@ cleanup:
+ 	return result;
+ }
+ 
+-/* TODO : Find a right place for this. */
+-#define PR_ADDITIONAL_REN_ENTRYIDS    PROP_TAG(PT_MV_BINARY, 0x36D8)
+-
+ /*NOTE : This should be called when you hold the connection lock*/
+ /*NOTE : IsMailboxFolder doesn't support this yet. */
+ /* Ticket : http://trac.openchange.org/ticket/134  */
+@@ -3097,7 +3101,7 @@ mapi_get_ren_additional_fids (mapi_objec
+ 	SPropTagArray = set_SPropTagArray(mem_ctx, 0x1, PR_ADDITIONAL_REN_ENTRYIDS);
+ 
+ 	lpProps = talloc_zero(mem_ctx, struct SPropValue);
+-	ms = GetProps (&obj_folder_inbox, SPropTagArray, &lpProps, &count);
++	ms = GetProps (&obj_folder_inbox, MAPI_PROPS_SKIP_NAMEDID_CHECK | MAPI_UNICODE, SPropTagArray, &lpProps, &count);
+ 	if (ms != MAPI_E_SUCCESS) {
+ 		make_mapi_error (perror, "GetProps", ms);
+ 		goto cleanup;
+@@ -3220,10 +3224,10 @@ exchange_mapi_connection_get_folders_lis
+ 					  PR_DISPLAY_NAME_UNICODE,
+ 					  PR_MAILBOX_OWNER_NAME_UNICODE,
+ 					  PR_MESSAGE_SIZE,
+-					  PR_USER_NAME_UNICODE);
++					  PidTagMailboxOwnerName);
+ 
+ 	lpProps = talloc_zero(mem_ctx, struct SPropValue);
+-	ms = GetProps (&priv->msg_store, SPropTagArray, &lpProps, &count);
++	ms = GetProps (&priv->msg_store, MAPI_PROPS_SKIP_NAMEDID_CHECK | MAPI_UNICODE, SPropTagArray, &lpProps, &count);
+ 	MAPIFreeBuffer(SPropTagArray);
+ 
+ 	if (ms != MAPI_E_SUCCESS) {
+@@ -3239,7 +3243,7 @@ exchange_mapi_connection_get_folders_lis
+ 	/* betting that these will never fail */
+ 	mailbox_name = (const gchar *) exchange_mapi_util_find_row_propval (&aRow, PR_DISPLAY_NAME_UNICODE);
+ 	mailbox_owner_name = (const gchar *) exchange_mapi_util_find_row_propval (&aRow, PR_MAILBOX_OWNER_NAME_UNICODE);
+-	mailbox_user_name = (const gchar *) exchange_mapi_util_find_row_propval (&aRow, PR_USER_NAME_UNICODE);
++	mailbox_user_name = (const gchar *) exchange_mapi_util_find_row_propval (&aRow, PidTagMailboxOwnerName);
+ 	mailbox_size = (const uint32_t *)exchange_mapi_util_find_row_propval  (&aRow, PR_MESSAGE_SIZE);
+ 
+ 	/* Prepare the directory listing */
+@@ -3352,7 +3356,7 @@ exchange_mapi_connection_ex_to_smtp (Exc
+ 	TALLOC_CTX		*mem_ctx;
+ 	struct SPropTagArray	*SPropTagArray;
+ 	struct SRowSet		*SRowSet = NULL;
+-	struct SPropTagArray	*flaglist = NULL;
++	struct PropertyTagArray_r *flaglist = NULL;
+ 	const gchar		*str_array[2];
+ 	gchar			*smtp_addr = NULL;
+ 
+@@ -3607,7 +3611,7 @@ ensure_mapi_init_called (GError **perror
+ 		}
+ 	}
+ 
+-	ms = MAPIInitialize (profpath);
++	ms = MAPIInitialize (&global_mapi_context, profpath);
+ 	if (ms == MAPI_E_SESSION_LIMIT) {
+ 		/* do nothing, the profile store is already initialized */
+ 		/* but this shouldn't happen */
+@@ -3669,15 +3673,15 @@ mapi_profile_load (const gchar *profname
+ 	/* Initialize libmapi logger*/
+ 	if (g_getenv ("MAPI_DEBUG")) {
+ 		debug_log_level = atoi (g_getenv ("MAPI_DEBUG"));
+-		SetMAPIDumpData(TRUE);
+-		SetMAPIDebugLevel(debug_log_level);
++		SetMAPIDumpData(global_mapi_context, TRUE);
++		SetMAPIDebugLevel(global_mapi_context, debug_log_level);
+ 	}
+ 
+ 	g_debug("Loading profile %s ", profname);
+ 
+-	ms = MapiLogonEx (&session, profname, password);
++	ms = MapiLogonEx (global_mapi_context, &session, profname, password);
+ 	if (ms == MAPI_E_NOT_FOUND && try_create_profile (profname, password))
+-		ms = MapiLogonEx (&session, profname, password);
++		ms = MapiLogonEx (global_mapi_context, &session, profname, password);
+ 
+ 	if (ms != MAPI_E_SUCCESS) {
+ 		make_mapi_error (perror, "MapiLogonEx", ms);
+@@ -3691,6 +3695,26 @@ mapi_profile_load (const gchar *profname
+ 	return session;
+ }
+ 
++static int
++create_profile_fallback_callback (struct SRowSet *rowset, gconstpointer data)
++{
++	guint32	ii;
++	const gchar *username = (const gchar *) data;
++
++	/* If we can find the exact username, then find & return its index. */
++	for (ii = 0; ii < rowset->cRows; ii++) {
++		const gchar *account_name;
++
++		account_name = exchange_mapi_util_find_row_propval (&(rowset->aRow[ii]), PR_ACCOUNT_UNICODE);
++
++		if (account_name && g_strcmp0 (username, account_name) == 0)
++			return ii;
++	}
++
++	/* cancel it, do authenticate again */
++	return rowset->cRows + 1;
++}
++
+ static gboolean
+ mapi_profile_create (const gchar *username, const gchar *password, const gchar *domain,
+ 		     const gchar *server, guint32 flags,
+@@ -3704,6 +3728,11 @@ mapi_profile_create (const gchar *userna
+ 	gchar *profname = NULL;
+ 	struct mapi_session *session = NULL;
+ 
++	if (!callback) {
++		callback = create_profile_fallback_callback;
++		data = (gpointer) username;
++	}
++
+ 	/*We need all the params before proceeding.*/
+ 	e_return_val_mapi_error_if_fail (username && *username && password && *password &&
+ 			      domain && *domain && server && *server, MAPI_E_INVALID_PARAMETER, FALSE);
+@@ -3722,34 +3751,34 @@ mapi_profile_create (const gchar *userna
+ 	profname = exchange_mapi_util_profile_name (username, domain, server, TRUE);
+ 
+ 	/* Delete any existing profiles with the same profilename */
+-	ms = DeleteProfile (profname);
++	ms = DeleteProfile (global_mapi_context, profname);
+ 	/* don't bother to check error - it would be valid if we got an error */
+ 
+-	ms = CreateProfile (profname, username, password, OC_PROFILE_NOPASSWORD);
++	ms = CreateProfile (global_mapi_context, profname, username, password, OC_PROFILE_NOPASSWORD);
+ 	if (ms != MAPI_E_SUCCESS) {
+ 		make_mapi_error (perror, "CreateProfile", ms);
+ 		goto cleanup;
+ 	}
+ 
+-	mapi_profile_add_string_attr(profname, "binding", server);
+-	mapi_profile_add_string_attr(profname, "workstation", workstation);
+-	mapi_profile_add_string_attr(profname, "domain", domain);
++	mapi_profile_add_string_attr (global_mapi_context, profname, "binding", server);
++	mapi_profile_add_string_attr (global_mapi_context, profname, "workstation", workstation);
++	mapi_profile_add_string_attr (global_mapi_context, profname, "domain", domain);
+ 
+ 	if ((flags & CREATE_PROFILE_FLAG_USE_SSL) != 0)
+-		mapi_profile_add_string_attr (profname, "seal", "true");
++		mapi_profile_add_string_attr (global_mapi_context, profname, "seal", "true");
+ 
+ 	/* This is only convenient here and should be replaced at some point */
+-	mapi_profile_add_string_attr(profname, "codepage", "0x4e4");
+-	mapi_profile_add_string_attr(profname, "language", "0x409");
+-	mapi_profile_add_string_attr(profname, "method", "0x409");
++	mapi_profile_add_string_attr (global_mapi_context, profname, "codepage", "1252");
++	mapi_profile_add_string_attr (global_mapi_context, profname, "language", "1033");
++	mapi_profile_add_string_attr (global_mapi_context, profname, "method", "1033");
+ 
+ 	/* Login now */
+ 	g_debug("Logging into the server... ");
+-	ms = MapiLogonProvider (&session, profname, password, PROVIDER_ID_NSPI);
++	ms = MapiLogonProvider (global_mapi_context, &session, profname, password, PROVIDER_ID_NSPI);
+ 	if (ms != MAPI_E_SUCCESS) {
+ 		make_mapi_error (perror, "MapiLogonProvider", ms);
+ 		g_debug ("Deleting profile %s ", profname);
+-		DeleteProfile (profname);
++		DeleteProfile (global_mapi_context, profname);
+ 		goto cleanup;
+ 	}
+ 	g_debug("MapiLogonProvider : succeeded \n");
+@@ -3758,7 +3787,7 @@ mapi_profile_create (const gchar *userna
+ 	if (ms != MAPI_E_SUCCESS) {
+ 		make_mapi_error (perror, "ProcessNetworkProfile", ms);
+ 		g_debug ("Deleting profile %s ", profname);
+-		DeleteProfile (profname);
++		DeleteProfile (global_mapi_context, profname);
+ 		goto cleanup;
+ 	}
+ 	g_debug("ProcessNetworkProfile : succeeded \n");
+@@ -3812,7 +3841,7 @@ exchange_mapi_delete_profile (const gcha
+ 
+ 		g_debug ("Deleting profile %s ", profile);
+ 
+-		ms = DeleteProfile (profile);
++		ms = DeleteProfile (global_mapi_context, profile);
+ 		if (ms == MAPI_E_SUCCESS) {
+ 			result = TRUE;
+ 		} else {
+@@ -3826,3 +3855,9 @@ exchange_mapi_delete_profile (const gcha
+ }
+ 
+ /* profile related functions - end */
++
++struct mapi_context *
++e_mapi_connection_get_global_mapi_context (void)
++{
++	return global_mapi_context;
++}
+\ No newline at end of file
+diff -up evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-connection.h.openchange-1.0 evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-connection.h
+--- evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-connection.h.openchange-1.0	2011-02-07 04:45:47.000000000 +0100
++++ evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-connection.h	2013-05-29 19:01:17.578614427 +0200
+@@ -29,6 +29,7 @@
+ #include <glib-object.h>
+ 
+ #include <libmapi/libmapi.h>
++#include <libmapi/mapi_nameid.h>
+ 
+ /* Standard GObject macros */
+ #define EXCHANGE_TYPE_MAPI_CONNECTION (exchange_mapi_connection_get_type ())
+@@ -245,6 +246,8 @@ gboolean		exchange_mapi_delete_profile (
+ 
+ void make_mapi_error (GError **perror, const gchar *context, enum MAPISTATUS mapi_status);
+ 
++struct mapi_context *e_mapi_connection_get_global_mapi_context (void);
++
+ G_END_DECLS
+ 
+ #endif
+diff -up evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-defs.h.openchange-1.0 evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-defs.h
+--- evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-defs.h.openchange-1.0	2011-02-07 04:45:47.000000000 +0100
++++ evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-defs.h	2013-05-29 19:01:17.579614317 +0200
+@@ -113,13 +113,6 @@ typedef enum {
+ 
+ /* APPOINTMENTS */
+ typedef enum {
+-    olFree = 0,
+-    olTentative = 1,
+-    olBusy = 2,
+-    olOutOfOffice = 3
+-} OlBusyStatus; /* Appointment flags with PR_APPOINTMENT_BUSY_STATUS */
+-
+-typedef enum {
+     olOrganizer = 0,
+     olRequired = 1,
+     olOptional = 2,
+diff -up evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-utils.c.openchange-1.0 evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-utils.c
+--- evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-utils.c.openchange-1.0	2011-02-07 04:45:47.000000000 +0100
++++ evolution-mapi-0.32.2/src/libexchangemapi/exchange-mapi-utils.c	2013-05-29 19:01:17.580614580 +0200
+@@ -943,11 +943,13 @@ exchange_mapi_util_profile_name (const g
+ 	if (migrate) {
+ 		/* expects MAPIInitialize already called! */
+ 		gchar *old_name;
++		struct mapi_context *global_mapi_context;
+ 
+ 		old_name = g_strdup_printf ("%s@%s", username, domain);
+ 		old_name = g_strcanon (old_name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@", '_');
+ 
+-		RenameProfile (old_name, res);
++		global_mapi_context = e_mapi_connection_get_global_mapi_context ();
++		RenameProfile (global_mapi_context, old_name, res);
+ 
+ 		g_free (old_name);
+ 	}
