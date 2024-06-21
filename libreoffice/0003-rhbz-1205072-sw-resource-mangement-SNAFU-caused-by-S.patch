@@ -1,0 +1,133 @@
+From 6c096a5966abb942a6c8f8c9b665c211efa48853 Mon Sep 17 00:00:00 2001
+From: Michael Stahl <mstahl@redhat.com>
+Date: Sat, 25 Apr 2015 21:25:00 +0200
+Subject: [PATCH] rhbz#1205072: sw: resource mangement SNAFU caused by SwPaM
+ copy ctor
+
+SwPaM copy ctor has the surprising habit of linking the new one into the
+old one's Ring.  If you copy a shell cursor, *this* epic fail happens:
+
+==948== Thread 6 SelectionManager:
+==948== Invalid free() / delete / delete[] / realloc()
+==948==    at 0x4A07CE9: free (in /usr/lib64/valgrind/vgpreload_memcheck-amd64-linux.so)
+==948==    by 0x222F542B: SwPaM::operator delete(void*, unsigned long) (in /libreoffice-4-3/instdir/program/libswlo.so)
+==948==    by 0x2239E20E: SwPaM::~SwPaM() (pam.cxx:422)
+==948==    by 0x22368630: CheckRange(SwCursor*) (crsrsh.cxx:111)
+==948==    by 0x2236DECC: SwCrsrShell::UpdateCrsr(unsigned short, bool) (crsrsh.cxx:1397)
+==948==    by 0x22369113: SwCrsrShell::EndAction(bool) (crsrsh.cxx:290)
+==948==    by 0x2268971F: SwEditShell::EndAllAction() (edws.cxx:87)
+==948==    by 0x2262BEF3: SwBaseLink::DataChanged(rtl::OUString const&, com::sun::star::uno::Any const&) (swbaslnk.cxx:274)
+==948==    by 0x2262C78E: SwBaseLink::SwapIn(bool, bool) (swbaslnk.cxx:411)
+==948==    by 0x227102EC: SwGrfNode::SwapIn(bool) (ndgrf.cxx:539)
+==948==    by 0x227121BC: SwGrfNode::MakeCopy(SwDoc*, SwNodeIndex const&) const (ndgrf.cxx:999)
+==948==    by 0x22610E4D: SwNodes::_CopyNodes(SwNodeRange const&, SwNodeIndex const&, bool, bool) const (nodes.cxx:1862)
+==948==    by 0x225B98E0: SwDoc::CopyWithFlyInFly(SwNodeRange const&, int, SwNodeIndex const&, SwPaM const*, bool, bool, bool) const (ndcopy.cxx:1336)
+==948==    by 0x224AC1FF: SwDoc::CopyLayoutFmt(SwFrmFmt const&, SwFmtAnchor const&, bool, bool) (doclay.cxx:446)
+==948==    by 0x2294D2D4: SwTxtFlyCnt::CopyFlyFmt(SwDoc*) (atrflyin.cxx:130)
+==948==    by 0x229A5B96: MakeTxtAttr(SwDoc&, SfxPoolItem&, int, int, CopyOrNew_t, SwTxtNode*) (thints.cxx:1060)
+==948==    by 0x229A64E6: SwTxtNode::InsertItem(SfxPoolItem&, int, int, unsigned short) (thints.cxx:1224)
+==948==    by 0x2298E536: SwTxtNode::CopyText(SwTxtNode*, SwIndex const&, SwIndex const&, int, bool) (ndtxt.cxx:1773)
+==948==    by 0x2298DC08: SwTxtNode::CopyText(SwTxtNode*, SwIndex const&, int, bool) (ndtxt.cxx:1555)
+==948==    by 0x225B4C9D: SwTxtNode::MakeCopy(SwDoc*, SwNodeIndex const&) const (ndcopy.cxx:286)
+==948==    by 0x22610E4D: SwNodes::_CopyNodes(SwNodeRange const&, SwNodeIndex const&, bool, bool) const (nodes.cxx:1862)
+==948==    by 0x223EF3C2: SwNodes::_Copy(SwNodeRange const&, SwNodeIndex const&, bool) const (ndarr.hxx:182)
+==948==    by 0x225B5D8D: SwTableNode::MakeCopy(SwDoc*, SwNodeIndex const&) const (ndcopy.cxx:475)
+==948==    by 0x22610ACA: SwNodes::_CopyNodes(SwNodeRange const&, SwNodeIndex const&, bool, bool) const (nodes.cxx:1790)
+==948==    by 0x223EF3C2: SwNodes::_Copy(SwNodeRange const&, SwNodeIndex const&, bool) const (ndarr.hxx:182)
+==948==    by 0x225CA663: SwSectionNode::MakeCopy(SwDoc*, SwNodeIndex const&) const (ndsect.cxx:1270)
+==948==    by 0x22610BFC: SwNodes::_CopyNodes(SwNodeRange const&, SwNodeIndex const&, bool, bool) const (nodes.cxx:1817)
+==948==    by 0x223EF3C2: SwNodes::_Copy(SwNodeRange const&, SwNodeIndex const&, bool) const (ndarr.hxx:182)
+==948==    by 0x225CA663: SwSectionNode::MakeCopy(SwDoc*, SwNodeIndex const&) const (ndsect.cxx:1270)
+==948==    by 0x22610BFC: SwNodes::_CopyNodes(SwNodeRange const&, SwNodeIndex const&, bool, bool) const (nodes.cxx:1817)
+==948==    by 0x223EF3C2: SwNodes::_Copy(SwNodeRange const&, SwNodeIndex const&, bool) const (ndarr.hxx:182)
+==948==    by 0x225CA663: SwSectionNode::MakeCopy(SwDoc*, SwNodeIndex const&) const (ndsect.cxx:1270)
+==948==    by 0x22610BFC: SwNodes::_CopyNodes(SwNodeRange const&, SwNodeIndex const&, bool, bool) const (nodes.cxx:1817)
+==948==    by 0x225B98E0: SwDoc::CopyWithFlyInFly(SwNodeRange const&, int, SwNodeIndex const&, SwPaM const*, bool, bool, bool) const (ndcopy.cxx:1336)
+==948==    by 0x225B8F15: SwDoc::CopyImpl(SwPaM&, SwPosition&, bool, bool, SwPaM*) const (ndcopy.cxx:1239)
+==948==    by 0x225B6EE0: SwDoc::CopyRange(SwPaM&, SwPosition&, bool) const (ndcopy.cxx:707)
+==948==    by 0x22667E69: SwEditShell::_CopySelToDoc(SwDoc*, SwNodeIndex*) (edglss.cxx:244)
+==948==    by 0x226C8400: SwFEShell::Copy(SwDoc*, rtl::OUString const*) (fecopy.cxx:214)
+==948==    by 0x22DBF72B: (anonymous namespace)::lclOverWriteDoc(SwWrtShell&, SwDoc&) (swdtflvr.cxx:373)
+==948==    by 0x22DBFBC6: SwTransferable::GetData(com::sun::star::datatransfer::DataFlavor const&, rtl::OUString const&) (swdtflvr.cxx:439)
+==948==    by 0x7CB36C7: TransferableHelper::getTransferData2(com::sun::star::datatransfer::DataFlavor const&, rtl::OUString const&) (transfer.cxx:332)
+==948==    by 0x7CB34B5: TransferableHelper::getTransferData(com::sun::star::datatransfer::DataFlavor const&) (transfer.cxx:306)
+==948==    by 0x17A7E949: x11::SelectionManager::convertData(com::sun::star::uno::Reference<com::sun::star::datatransfer::XTransferable> const&, unsigned long, unsigned long, int&, com::sun::star::uno::Sequence<signed char>&) (X11_selection.cxx:655)
+==948==    by 0x17A823CA: x11::SelectionManager::sendData(x11::SelectionAdaptor*, unsigned long, unsigned long, unsigned long, unsigned long) (X11_selection.cxx:1503)
+==948==    by 0x17A82E03: x11::SelectionManager::handleSelectionRequest(XSelectionRequestEvent&) (X11_selection.cxx:1729)
+==948==    by 0x17A8A08A: x11::SelectionManager::handleXEvent(_XEvent&) (X11_selection.cxx:3574)
+==948==  Address 0x21e31a60 is on thread 6's stack
+==948==  in frame #40, created by SwEditShell::_CopySelToDoc(SwDoc*, SwNodeIndex*) (edglss.cxx:158)
+
+(regression from 49505336a629a75f4fb48bbe0c532b402e857ed4)
+
+(cherry picked from commit c55599fd0e7198773087c6433031f7119aaaca36)
+
+Conflicts:
+	sw/source/core/edit/edglss.cxx
+
+Reviewed-on: https://gerrit.libreoffice.org/15533
+Reviewed-by: Miklos Vajna <vmiklos@collabora.co.uk>
+Tested-by: Miklos Vajna <vmiklos@collabora.co.uk>
+(cherry picked from commit 8f570028b0871dbaaaa99722cca76c0d1179e06c)
+
+Conflicts:
+	sw/source/core/edit/edglss.cxx
+
+Change-Id: I3d0a288a83b4719dda7977b4898dea656ea67388
+---
+ sw/source/core/edit/eddel.cxx  | 6 ++++--
+ sw/source/core/edit/edglss.cxx | 5 ++++-
+ 2 files changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/sw/source/core/edit/eddel.cxx b/sw/source/core/edit/eddel.cxx
+index 7802643..88eca5f 100644
+--- a/sw/source/core/edit/eddel.cxx
++++ b/sw/source/core/edit/eddel.cxx
+@@ -33,6 +33,8 @@
+ #include <comcore.hrc>
+ #include <list>
+ 
++#include <boost/scoped_ptr.hpp>
++
+ void SwEditShell::DeleteSel( SwPaM& rPam, bool* pUndo )
+ {
+     bool bSelectAll = StartsWithTable() && ExtendedSelectedAll(/*bFootnotes =*/ false);
+@@ -89,12 +91,12 @@ void SwEditShell::DeleteSel( SwPaM& rPam, bool* pUndo )
+     }
+     else
+     {
+-        std::unique_ptr<SwPaM> pNewPam;
++        boost::scoped_ptr<SwPaM> pNewPam;
+         SwPaM * pPam = &rPam;
+         if (bSelectAll)
+         {
+             assert(dynamic_cast<SwShellCrsr*>(&rPam)); // must be corrected pam
+-            pNewPam.reset(new SwPaM(rPam));
++            pNewPam.reset(new SwPaM(*rPam.GetMark(), *rPam.GetPoint()));
+             // Selection starts at the first para of the first cell, but we
+             // want to delete the table node before the first cell as well.
+             pNewPam->Start()->nNode = pNewPam->Start()->nNode.GetNode().FindTableNode()->GetIndex();
+diff --git a/sw/source/core/edit/edglss.cxx b/sw/source/core/edit/edglss.cxx
+index 7a17737..230fc83 100644
+--- a/sw/source/core/edit/edglss.cxx
++++ b/sw/source/core/edit/edglss.cxx
+@@ -235,12 +235,15 @@ bool SwEditShell::_CopySelToDoc( SwDoc* pInsDoc, SwNodeIndex* pSttNd )
+                 // Make a copy, so that in case we need to adjust the selection
+                 // for the purpose of copying, our shell cursor is not touched.
+                 // (Otherwise we would have to restore it.)
+-                SwPaM aPaM(*PCURCRSR);
++                SwPaM aPaM(*PCURCRSR->GetMark(), *PCURCRSR->GetPoint());
+                 if (bSelectAll)
++                {
+                     // Selection starts at the first para of the first cell,
+                     // but we want to copy the table and the start node before
+                     // the first cell as well.
+                     aPaM.Start()->nNode = aPaM.Start()->nNode.GetNode().FindTableNode()->GetIndex();
++                    aPaM.Start()->nContent.Assign(0, 0);
++                }
+                 bRet = GetDoc()->CopyRange( aPaM, aPos, false ) || bRet;
+             }
+ 
+-- 
+2.5.0
+

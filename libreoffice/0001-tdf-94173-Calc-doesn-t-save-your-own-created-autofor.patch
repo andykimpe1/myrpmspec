@@ -1,0 +1,104 @@
+From 0931316cf88c19aa03ca2c13acd560837b8fb97e Mon Sep 17 00:00:00 2001
+Message-Id: <0931316cf88c19aa03ca2c13acd560837b8fb97e.1444044110.git.erack@redhat.com>
+From: Julien Nabet <serval2412@yahoo.fr>
+Date: Tue, 15 Sep 2015 21:41:48 +0200
+Subject: [PATCH] tdf#94173: Calc doesn't save your own created autoformat
+ presets
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="------------erAck-patch-parts"
+
+This is a multi-part message in MIME format.
+--------------erAck-patch-parts
+Content-Type: text/plain; charset=UTF-8; format=fixed
+Content-Transfer-Encoding: 8bit
+
+
+Auformat list (maData) is defined as "MapType" which itself is defined like this:
+boost::ptr_map<OUString, ScAutoFormatData>
+so default sorting is ascii
+
+2 consequences:
+1) Default didn't appear first
+2) When adding a new autoformat entry when it was new first one of the list
+wasn't saved because of iterator was incremented first before looping
+See https://bugs.documentfoundation.org/show_bug.cgi?id=94173#c5
+There were some other weird behaviors too according to comments of the bugtracker
+
+Regression from http://cgit.freedesktop.org/libreoffice/core/commit/?id=72c1b6141d590fb4479925ed8bc88b79357c2bfc
+
+Solution:
+Add a Compare so Default entry is always first one so the first time incremented iterator is ok and
+new entry (even if new first one in list) is saved
+
+Thank you Markus for the idea! (I was lost in Compare syntax)
+
+Reviewed-on: https://gerrit.libreoffice.org/18598
+Tested-by: Jenkins <ci@libreoffice.org>
+Reviewed-by: Julien Nabet <serval2412@yahoo.fr>
+(cherry picked from commit 652158c3f2c9cd0d6f71ecd14bf5d5cc02a71b50)
+
+use collator for UI visible sorting, tdf#94173 follow-up
+
+(cherry picked from commit a71febc99d2cfc2fe51dec8c0bca5d84d8577168)
+
+b9f7ebb087c1ce5008f43b2df3f1fadc41066ed1
+
+Change-Id: I9ba0cdc63c66b747db102bb661cd09fbfe5996ae
+Reviewed-on: https://gerrit.libreoffice.org/19029
+Reviewed-by: Eike Rathke <erack@redhat.com>
+Tested-by: Eike Rathke <erack@redhat.com>
+---
+ sc/inc/autoform.hxx              |  6 +++++-
+ sc/source/core/tool/autoform.cxx | 10 ++++++++++
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+
+--------------erAck-patch-parts
+Content-Type: text/x-patch; name="0001-tdf-94173-Calc-doesn-t-save-your-own-created-autofor.patch"
+Content-Transfer-Encoding: 8bit
+Content-Disposition: attachment; filename="0001-tdf-94173-Calc-doesn-t-save-your-own-created-autofor.patch"
+
+diff --git a/sc/inc/autoform.hxx b/sc/inc/autoform.hxx
+index aad0604..22a1e6d 100644
+--- a/sc/inc/autoform.hxx
++++ b/sc/inc/autoform.hxx
+@@ -309,9 +309,13 @@ public:
+     bool                        Save( SvStream& rStream, sal_uInt16 fileVersion );
+ };
+ 
++struct DefaultFirstEntry {
++    bool operator() (const OUString& left, const OUString& right) const;
++};
++
+ class SC_DLLPUBLIC ScAutoFormat
+ {
+-    typedef boost::ptr_map<OUString, ScAutoFormatData> MapType;
++    typedef boost::ptr_map<OUString, ScAutoFormatData, DefaultFirstEntry> MapType;
+     MapType maData;
+     bool mbSaveLater;
+     ScAfVersions m_aVersions;
+diff --git a/sc/source/core/tool/autoform.cxx b/sc/source/core/tool/autoform.cxx
+index b8ddd9c..3b0f88b 100644
+--- a/sc/source/core/tool/autoform.cxx
++++ b/sc/source/core/tool/autoform.cxx
+@@ -898,6 +898,16 @@ ScAutoFormat::ScAutoFormat() :
+     insert(pData);
+ }
+ 
++bool DefaultFirstEntry::operator() (const OUString& left, const OUString& right) const
++{
++    OUString aStrStandard(ScGlobal::GetRscString(STR_STYLENAME_STANDARD));
++    if ( ScGlobal::GetpTransliteration()->isEqual( left, aStrStandard ) )
++        return true;
++    if ( ScGlobal::GetpTransliteration()->isEqual( right, aStrStandard ) )
++        return false;
++    return ScGlobal::GetCollator()->compareString( left, right) < 0;
++}
++
+ ScAutoFormat::ScAutoFormat(const ScAutoFormat& r) :
+     maData(r.maData),
+     mbSaveLater(false) {}
+
+--------------erAck-patch-parts--
+
+

@@ -1,0 +1,132 @@
+From dffb7a52ddba02b725d0f1d2438931e20655475f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Caol=C3=A1n=20McNamara?= <caolanm@redhat.com>
+Date: Wed, 18 Feb 2015 15:04:45 +0000
+Subject: [PATCH] Resolves: rhbz#1193971 clear hard-coded char props in table
+ cells...
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+like we do already for shapes. So now when attempting to set replacement char
+properties on the entire cell, clear any hard-coded sub ranges within the
+existing paragraphs.
+
+This extends the effort of
+commit a217f3cb2dce71a4322f78ceb45edb6f171b2b65
+Author: Matúš Kukan <matus.kukan@collabora.com>
+Date:   Tue Aug 26 10:16:34 2014 +0200
+
+    bnc#770711: Make changing table text color in impress always work
+
+to encompass all character properties, not just color
+
+(cherry picked from commit b14259b946686c753c0df42c519fc2537e871601)
+
+Conflicts:
+	svx/source/table/cell.cxx
+
+Change-Id: If8b426c3531b4678868d8351426db32c3c558650
+---
+ svx/source/svdraw/svdedtv1.cxx | 38 ++++++++++++++++++++++----------------
+ svx/source/table/cell.cxx      | 15 +++++++++++++--
+ 2 files changed, 35 insertions(+), 18 deletions(-)
+
+diff --git a/svx/source/svdraw/svdedtv1.cxx b/svx/source/svdraw/svdedtv1.cxx
+index 7945d2c..928f9e2 100644
+--- a/svx/source/svdraw/svdedtv1.cxx
++++ b/svx/source/svdraw/svdedtv1.cxx
+@@ -953,6 +953,26 @@ void SdrEditView::MergeAttrFromMarked(SfxItemSet& rAttr, bool bOnlyHardAttr) con
+     }
+ }
+ 
++std::vector<sal_uInt16> GetAllCharPropIds(const SfxItemSet& rSet)
++{
++    std::vector<sal_uInt16> aCharWhichIds;
++    {
++        SfxItemIter aIter(rSet);
++        const SfxPoolItem* pItem=aIter.FirstItem();
++        while (pItem!=NULL)
++        {
++            if (!IsInvalidItem(pItem))
++            {
++                sal_uInt16 nWhich = pItem->Which();
++                if (nWhich>=EE_CHAR_START && nWhich<=EE_CHAR_END)
++                    aCharWhichIds.push_back( nWhich );
++            }
++            pItem=aIter.NextItem();
++        }
++    }
++    return aCharWhichIds;
++}
++
+ void SdrEditView::SetAttrToMarked(const SfxItemSet& rAttr, bool bReplaceAll)
+ {
+     if (AreObjectsMarked())
+@@ -977,25 +997,11 @@ void SdrEditView::SetAttrToMarked(const SfxItemSet& rAttr, bool bReplaceAll)
+         }
+ #endif
+ 
+-        // #103836# if the user thets character attributes to the complete shape,
++        // #103836# if the user sets character attributes to the complete shape,
+         //          we want to remove all hard set character attributes with same
+         //          which ids from the text. We do that later but here we remember
+         //          all character attribute which id's that are set.
+-        std::vector<sal_uInt16> aCharWhichIds;
+-        {
+-            SfxItemIter aIter(rAttr);
+-            const SfxPoolItem* pItem=aIter.FirstItem();
+-            while( pItem!=NULL )
+-            {
+-                if (!IsInvalidItem(pItem))
+-                {
+-                    sal_uInt16 nWhich = pItem->Which();
+-                    if (nWhich>=EE_CHAR_START && nWhich<=EE_CHAR_END)
+-                        aCharWhichIds.push_back( nWhich );
+-                }
+-                pItem=aIter.NextItem();
+-            }
+-        }
++        std::vector<sal_uInt16> aCharWhichIds(GetAllCharPropIds(rAttr));
+ 
+         // To make Undo reconstruct text attributes correctly after Format.Standard
+         bool bHasEEItems=SearchOutlinerItems(rAttr,bReplaceAll);
+diff --git a/svx/source/table/cell.cxx b/svx/source/table/cell.cxx
+index 8d64dbc..7c2e5eb 100644
+--- a/svx/source/table/cell.cxx
++++ b/svx/source/table/cell.cxx
+@@ -139,6 +139,8 @@ SdrText* CellTextProvider::getText(sal_Int32 nIndex) const
+ 
+ }
+ 
++extern std::vector<sal_uInt16> GetAllCharPropIds(const SfxItemSet& rSet);
++
+ namespace sdr
+ {
+     namespace properties
+@@ -261,12 +263,21 @@ namespace sdr
+ 
+                     sal_Int32 nParaCount(pOutliner->GetParagraphCount());
+ 
++                    // if the user sets character attributes to the complete
++                    // cell we want to remove all hard set character attributes
++                    // with same which ids from the text
++                    std::vector<sal_uInt16> aCharWhichIds(GetAllCharPropIds(rSet));
++
+                     for(sal_Int32 nPara = 0; nPara < nParaCount; nPara++)
+                     {
+                         SfxItemSet aSet(pOutliner->GetParaAttribs(nPara));
+                         aSet.Put(rSet);
+-                        if (aSet.GetItemState(EE_CHAR_COLOR, false) == SFX_ITEM_ON)
+-                            pOutliner->QuickRemoveCharAttribs( nPara, EE_CHAR_COLOR );
++
++                        for (std::vector<sal_uInt16>::const_iterator aI = aCharWhichIds.begin(); aI != aCharWhichIds.end(); ++aI)
++                        {
++                            pOutliner->QuickRemoveCharAttribs(nPara, *aI);
++                        }
++
+                         pOutliner->SetParaAttribs(nPara, aSet);
+                     }
+ 
+-- 
+1.9.3
+

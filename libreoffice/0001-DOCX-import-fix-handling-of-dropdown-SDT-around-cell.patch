@@ -1,0 +1,103 @@
+From bb21f53e6c9b6b3f4a2d8c5e55ebc3a08caa69ba Mon Sep 17 00:00:00 2001
+From: Miklos Vajna <vmiklos@collabora.co.uk>
+Date: Thu, 18 Sep 2014 15:47:59 +0200
+Subject: [PATCH] DOCX import: fix handling of dropdown SDT around cell
+
+There were two problems here:
+
+1) The CT_SdtContentCell handlers didn't emit the usual
+NS_ooxml::LN_CT_SdtBlock_sdtContent /
+NS_ooxml::LN_CT_SdtBlock_sdtEndContent tokens, so the dropdown control
+was not created (and then was created with the wrong anchor).
+
+2) In case the SDT was around the cell, the newline character was also
+added to the text of the currently selected entry, resulting in an
+invalid argument of SwXText::convertToTable(), so no table was created.
+
+(cherry picked from commit 419054c0f19acb323a0e51c7ef49a1a2d9f42ac8)
+
+Conflicts:
+	sw/qa/extras/ooxmlexport/ooxmlexport.cxx
+	writerfilter/source/dmapper/DomainMapper.cxx
+	writerfilter/source/ooxml/model.xml
+
+Change-Id: I4806626181f40c6d26ff7b25f5dbb863967d8077
+---
+ sw/qa/extras/ooxmlexport/ooxmlexport.cxx     |  9 ---------
+ writerfilter/source/dmapper/DomainMapper.cxx | 14 +++++++++++---
+ writerfilter/source/ooxml/model.xml          |  5 ++++-
+ 3 files changed, 15 insertions(+), 13 deletions(-)
+
+diff --git a/sw/qa/extras/ooxmlexport/ooxmlexport.cxx b/sw/qa/extras/ooxmlexport/ooxmlexport.cxx
+index a443d58..24459d1 100644
+--- a/sw/qa/extras/ooxmlexport/ooxmlexport.cxx
++++ b/sw/qa/extras/ooxmlexport/ooxmlexport.cxx
+@@ -3566,15 +3566,6 @@ DECLARE_OOXMLEXPORT_TEST(testfdo79822, "fdo79822.docx")
+         return;
+ }
+ 
+-DECLARE_OOXMLEXPORT_TEST(testfdo79817,"fdo79817.docx")
+-{
+-    xmlDocPtr pXmlDoc = parseExport("word/document.xml");
+-    if (!pXmlDoc)
+-        return;
+-    assertXPath ( pXmlDoc, "/w:document/w:body/w:p[3]/w:sdt/w:sdtPr/w:dataBinding", "storeItemID","{9222E47B-A68B-4AEB-9855-21C912B9D3D2}");
+-    assertXPath ( pXmlDoc, "/w:document/w:body/w:p[3]/w:sdt/w:sdtPr/w:dataBinding", "xpath","/ns0:properties[1]/documentManagement[1]/ns2:Responsible_x0020_Officer_x0020_Title[1]");
+-}
+-
+ DECLARE_OOXMLEXPORT_TEST(testfdo80522,"fdo80522.docx")
+ {
+    xmlDocPtr pXmlDoc = parseExport("[Content_Types].xml");
+diff --git a/writerfilter/source/dmapper/DomainMapper.cxx b/writerfilter/source/dmapper/DomainMapper.cxx
+index 44efb59..baf91d9 100644
+--- a/writerfilter/source/dmapper/DomainMapper.cxx
++++ b/writerfilter/source/dmapper/DomainMapper.cxx
+@@ -2768,10 +2768,18 @@ void DomainMapper::lcl_utext(const sal_uInt8 * data_, size_t len)
+     aBuffer.append( (const sal_Unicode *) data_, len);
+     sText = aBuffer.makeStringAndClear();
+ 
++
++    bool bNewLine = len == 1 && (sText[0] == 0x0d || sText[0] == 0x07);
+     if (!m_pImpl->m_pSdtHelper->getDropDownItems().empty())
+     {
+-        m_pImpl->m_pSdtHelper->getSdtTexts().append(sText);
+-        return;
++        if (bNewLine)
++            // Dropdown control has single-line texts, so in case of newline, create the control.
++            m_pImpl->m_pSdtHelper->createDropDownControl();
++        else
++        {
++            m_pImpl->m_pSdtHelper->getSdtTexts().append(sText);
++            return;
++        }
+     }
+     else if (!m_pImpl->m_pSdtHelper->getDateFormat().isEmpty())
+     {
+@@ -2814,7 +2822,7 @@ void DomainMapper::lcl_utext(const sal_uInt8 * data_, size_t len)
+     {
+         m_pImpl->getTableManager().utext(data_, len);
+ 
+-        if(len == 1 && (sText[0] == 0x0d || sText[0] == 0x07))
++        if (bNewLine)
+         {
+             if (m_pImpl->m_bIgnoreNextPara)
+             {
+diff --git a/writerfilter/source/ooxml/model.xml b/writerfilter/source/ooxml/model.xml
+index 69ac296..3f4e71c 100644
+--- a/writerfilter/source/ooxml/model.xml
++++ b/writerfilter/source/ooxml/model.xml
+@@ -25033,7 +25033,10 @@
+     <resource name="CT_SdtContentRun" resource="Stream" tag="field"/>
+     <resource name="CT_SdtContentBlock" resource="Stream" tag="field"/>
+     <resource name="CT_SdtContentRow" resource="Stream" tag="field"/>
+-    <resource name="CT_SdtContentCell" resource="Stream" tag="field"/>
++    <resource name="CT_SdtContentCell" resource="Stream" tag="field">
++      <action name="start" action="startSdt"/>
++      <action name="end" action="endSdt"/>
++    </resource>
+     <resource name="CT_SdtBlock" resource="Stream" tag="field">
+       <element name="sdtPr" tokenid="ooxml:CT_SdtBlock_sdtPr"/>
+       <element name="sdtEndPr" tokenid="ooxml:CT_SdtBlock_sdtEndPr"/>
+-- 
+2.1.0
+

@@ -1,0 +1,114 @@
+From ef854520bd7f2e496294ed1a8421d2bcf84f4ee3 Mon Sep 17 00:00:00 2001
+Message-Id: <ef854520bd7f2e496294ed1a8421d2bcf84f4ee3.1433421604.git.erack@redhat.com>
+From: Takeshi Abe <tabe@fixedpoint.jp>
+Date: Thu, 4 Jun 2015 02:19:09 +0900
+Subject: [PATCH] tdf#91425 CRASH - Calc Insert Columns Left
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="------------erAck-patch-parts"
+
+This is a multi-part message in MIME format.
+--------------erAck-patch-parts
+Content-Type: text/plain; charset=UTF-8; format=fixed
+Content-Transfer-Encoding: 8bit
+
+
+This fix is a SCCOL variant of:
+
+commit c66d1b9fcc2244b4fd8940f17ebf4e772f09c84e
+Author: Kohei Yoshida <kyoshida@novell.com>
+Date:   Thu May 5 00:23:25 2011 -0400
+
+    fdo#36406: Let's not use invalidated iterators.
+
+    std::set::erase(iterator) call invalidates the iterator of the erased
+    element.  We better not use it after the erase() call.  Since the number
+    of manual breaks should not be high enough to cause a performance
+    bottleneck under normal usage, a safer linear copy should just be fine.
+
+    Now, I'm not sure if this indeed is the cause of the erroneous amount
+    of manual breaks in the test document, but I didn't see any other likely
+    spot.
+
+Change-Id: I0c2e8f738949776aa7f8ea5528e2c0eeb9351c16
+Reviewed-on: https://gerrit.libreoffice.org/16063
+Reviewed-by: Eike Rathke <erack@redhat.com>
+Tested-by: Eike Rathke <erack@redhat.com>
+(cherry picked from commit 1ba1cbe48c40d649c33661abb32369c39a23fff4)
+---
+ sc/source/core/data/table2.cxx | 46 ++++++++++++++++++++++++------------------
+ 1 file changed, 26 insertions(+), 20 deletions(-)
+
+
+--------------erAck-patch-parts
+Content-Type: text/x-patch; name="0001-tdf-91425-CRASH-Calc-Insert-Columns-Left.patch"
+Content-Transfer-Encoding: 8bit
+Content-Disposition: attachment; filename="0001-tdf-91425-CRASH-Calc-Insert-Columns-Left.patch"
+
+diff --git a/sc/source/core/data/table2.cxx b/sc/source/core/data/table2.cxx
+index 555272f..0306244 100644
+--- a/sc/source/core/data/table2.cxx
++++ b/sc/source/core/data/table2.cxx
+@@ -299,18 +299,17 @@ void ScTable::InsertCol(
+ 
+         if (!maColManualBreaks.empty())
+         {
+-            std::set<SCCOL>::reverse_iterator rit = maColManualBreaks.rbegin();
+-            while (rit != maColManualBreaks.rend())
+-            {
+-                SCCOL nCol = *rit;
+-                if (nCol < nStartCol)
+-                    break;  // while
+-                else
+-                {
+-                    maColManualBreaks.erase( (++rit).base());
+-                    maColManualBreaks.insert( static_cast<SCCOL>( nCol + nSize));
+-                }
+-            }
++            // Copy all breaks up to nStartCol (non-inclusive).
++            ::std::set<SCCOL>::iterator itr1 = maColManualBreaks.lower_bound(nStartCol);
++            ::std::set<SCCOL> aNewBreaks(maColManualBreaks.begin(), itr1);
++
++            // Copy all breaks from nStartCol (inclusive) to the last element,
++            // but add nSize to each value.
++            ::std::set<SCCOL>::iterator itr2 = maColManualBreaks.end();
++            for (; itr1 != itr2; ++itr1)
++                aNewBreaks.insert(static_cast<SCCOL>(*itr1 + nSize));
++
++            maColManualBreaks.swap(aNewBreaks);
+         }
+     }
+ 
+@@ -381,14 +380,21 @@ void ScTable::DeleteCol(
+ 
+         if (!maColManualBreaks.empty())
+         {
+-            std::set<SCCOL>::iterator it = maColManualBreaks.upper_bound( static_cast<SCCOL>( nStartCol + nSize - 1));
+-            maColManualBreaks.erase( maColManualBreaks.lower_bound( nStartCol), it);
+-            while (it != maColManualBreaks.end())
+-            {
+-                SCCOL nCol = *it;
+-                maColManualBreaks.erase( it++);
+-                maColManualBreaks.insert( static_cast<SCCOL>( nCol - nSize));
+-            }
++            // Erase all manual breaks between nStartCol and nStartCol + nSize - 1 (inclusive).
++            std::set<SCCOL>::iterator itr1 = maColManualBreaks.lower_bound(nStartCol);
++            std::set<SCCOL>::iterator itr2 = maColManualBreaks.upper_bound(static_cast<SCCOL>(nStartCol + nSize - 1));
++            maColManualBreaks.erase(itr1, itr2);
++
++            // Copy all breaks from the 1st element up to nStartCol to the new container.
++            itr1 = maColManualBreaks.lower_bound(nStartCol);
++            ::std::set<SCCOL> aNewBreaks(maColManualBreaks.begin(), itr1);
++
++            // Copy all breaks from nStartCol to the last element, but subtract each value by nSize.
++            itr2 = maColManualBreaks.end();
++            for (; itr1 != itr2; ++itr1)
++                aNewBreaks.insert(static_cast<SCCOL>(*itr1 - nSize));
++
++            maColManualBreaks.swap(aNewBreaks);
+         }
+     }
+ 
+
+--------------erAck-patch-parts--
+
+

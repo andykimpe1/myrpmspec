@@ -1,0 +1,396 @@
+From 21c291f571daf25a7ed15f7baf551a6aac08f35f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Toma=C5=BE=20Vajngerl?= <tomaz.vajngerl@collabora.com>
+Date: Mon, 25 Aug 2014 18:20:58 +0200
+Subject: [PATCH] fdo#36772 Move the scrollbar and sheet tabs in a separate
+ row.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Change-Id: I57d891d9f6e89dafb4840a577ba55baa734fdcc2
+(cherry picked from commit 1d1d1c62caf2ee6a96946e96d782e03f3ef80439)
+
+Move the scrollbar and layer tabs in a separate row in Draw
+
+The reason for this is that the height of the scrollbar is theme-dependent
+and makes the tabs unreadable if it's too small.
+
+The same has already been done for Calc (fdo#36772).
+
+Reviewed-on: https://gerrit.libreoffice.org/11480
+Reviewed-by: Tomaž Vajngerl <quikee@gmail.com>
+Tested-by: Tomaž Vajngerl <quikee@gmail.com>
+(cherry picked from commit 20800ebc7ef05637134c3915798e13a272663341)
+
+Conflicts:
+	sd/source/ui/view/grviewsh.cxx
+
+Change-Id: Ibe22cf5e7d5863ccf276c19bfa969f5b5fc16a5a
+---
+ sc/source/ui/view/tabcont.cxx         |  3 +-
+ sc/source/ui/view/tabview.cxx         | 60 ++++++++++++++++-------------------
+ sd/source/ui/dlg/LayerTabBar.cxx      |  2 +-
+ sd/source/ui/inc/FrameView.hxx        |  4 ---
+ sd/source/ui/inc/GraphicViewShell.hxx |  3 --
+ sd/source/ui/view/drviews5.cxx        |  3 +-
+ sd/source/ui/view/frmview.cxx         |  2 --
+ sd/source/ui/view/grviewsh.cxx        | 55 ++++----------------------------
+ sd/source/ui/view/viewshel.cxx        | 11 +++----
+ 9 files changed, 42 insertions(+), 101 deletions(-)
+
+diff --git a/sc/source/ui/view/tabcont.cxx b/sc/source/ui/view/tabcont.cxx
+index e609277..dbecb26 100644
+--- a/sc/source/ui/view/tabcont.cxx
++++ b/sc/source/ui/view/tabcont.cxx
+@@ -39,8 +39,7 @@
+ 
+ ScTabControl::ScTabControl( Window* pParent, ScViewData* pData ) :
+     TabBar( pParent,
+-            WinBits(WB_BORDER | WB_3DLOOK | WB_SCROLL | WB_RANGESELECT |
+-                    WB_MULTISELECT | WB_DRAG | WB_SIZEABLE) ),
++            WinBits(WB_BORDER | WB_3DLOOK | WB_SCROLL | WB_RANGESELECT | WB_MULTISELECT | WB_DRAG ) ),
+             DropTargetHelper( this ),
+             DragSourceHelper( this ),
+             pViewData( pData ),
+diff --git a/sc/source/ui/view/tabview.cxx b/sc/source/ui/view/tabview.cxx
+index 286f1c1..a1ac0d0 100644
+--- a/sc/source/ui/view/tabview.cxx
++++ b/sc/source/ui/view/tabview.cxx
+@@ -57,9 +57,6 @@
+ #define SPLIT_HANDLE_SIZE   5
+ #define SC_ICONSIZE     36
+ 
+-#define SC_SCROLLBAR_MIN    30
+-#define SC_TABBAR_MIN       6
+-
+ using namespace ::com::sun::star;
+ 
+ //  Corner-Button
+@@ -343,7 +340,12 @@ void ScTabView::DoResize( const Point& rOffset, const Size& rSize, bool bInner )
+     aBorderPos = rOffset;
+     aFrameSize = rSize;
+ 
++    const StyleSettings& rStyleSettings = pFrameWin->GetSettings().GetStyleSettings();
++
++    sal_Int32 nTabWidth = pFrameWin->GetFont().GetHeight() + 4;
++
+     if ( aViewData.GetHSplitMode() != SC_SPLIT_NONE )
++    {
+         if ( aViewData.GetHSplitPos() > nSizeX - SPLIT_MARGIN )
+         {
+             aViewData.SetHSplitMode( SC_SPLIT_NONE );
+@@ -351,7 +353,9 @@ void ScTabView::DoResize( const Point& rOffset, const Size& rSize, bool bInner )
+                 ActivatePart( SC_SPLIT_BOTTOMLEFT );
+             InvalidateSplit();
+         }
++    }
+     if ( aViewData.GetVSplitMode() != SC_SPLIT_NONE )
++    {
+         if ( aViewData.GetVSplitPos() > nSizeY - SPLIT_MARGIN )
+         {
+             aViewData.SetVSplitMode( SC_SPLIT_NONE );
+@@ -359,12 +363,13 @@ void ScTabView::DoResize( const Point& rOffset, const Size& rSize, bool bInner )
+                 ActivatePart( SC_SPLIT_BOTTOMLEFT );
+             InvalidateSplit();
+         }
++    }
+ 
+     UpdateShow();
+ 
+     if (bHScroll || bVScroll)       // Scrollbars horizontal oder vertikal
+     {
+-        long nScrollBarSize = pFrameWin->GetSettings().GetStyleSettings().GetScrollBarSize();
++        long nScrollBarSize = rStyleSettings.GetScrollBarSize();
+         if (bVScroll)
+         {
+             nBarX = nScrollBarSize;
+@@ -372,7 +377,7 @@ void ScTabView::DoResize( const Point& rOffset, const Size& rSize, bool bInner )
+         }
+         if (bHScroll)
+         {
+-            nBarY = nScrollBarSize;
++            nBarY = nScrollBarSize + nTabWidth;
+             nSizeY -= nBarY - nOverlap;
+         }
+ 
+@@ -403,7 +408,6 @@ void ScTabView::DoResize( const Point& rOffset, const Size& rSize, bool bInner )
+             }
+             nSizeRt = nSizeX - nSizeLt - nSizeSp;
+ 
+-            long nTabSize = 0;
+             if (bTabControl)
+             {
+                 // pending relative tab bar width from extended document options
+@@ -412,39 +416,30 @@ void ScTabView::DoResize( const Point& rOffset, const Size& rSize, bool bInner )
+                     SetRelTabBarWidth( mfPendingTabBarWidth );
+                     mfPendingTabBarWidth = -1.0;
+                 }
+-
+-                nTabSize = pTabControl->GetSizePixel().Width()-nOverlap;
+-
+-                if ( aViewData.GetHSplitMode() != SC_SPLIT_FIX )    // bei linkem Scrollbar
+-                {
+-                    if (nTabSize > nSizeLt-SC_SCROLLBAR_MIN) nTabSize = nSizeLt-SC_SCROLLBAR_MIN;
+-                    if (nTabSize < SC_TABBAR_MIN) nTabSize = SC_TABBAR_MIN;
+-                    nSizeLt -= nTabSize;
+-                }
+-                else                                                // bei rechtem Scrollbar
+-                {
+-                    if (nTabSize > nSizeRt-SC_SCROLLBAR_MIN) nTabSize = nSizeRt-SC_SCROLLBAR_MIN;
+-                    if (nTabSize < SC_TABBAR_MIN) nTabSize = SC_TABBAR_MIN;
+-                    nSizeRt -= nTabSize;
+-                }
+             }
+ 
+-            lcl_SetPosSize( *pTabControl, Point(nPosX-nOverlap, nPosY+nSizeY),
+-                                                Size(nTabSize+nOverlap, nBarY), nTotalWidth, bLayoutRTL );
++            Point aTabPoint(nPosX - nOverlap, nPosY + nSizeY + nScrollBarSize);
++            Size aTabSize(nSizeX, nBarY - nScrollBarSize);
++            lcl_SetPosSize( *pTabControl, aTabPoint, aTabSize, nTotalWidth, bLayoutRTL );
+             pTabControl->SetSheetLayoutRTL( bLayoutRTL );
+ 
+-            lcl_SetPosSize( aHScrollLeft, Point(nPosX+nTabSize-nOverlap, nPosY+nSizeY),
+-                                                Size(nSizeLt+2*nOverlap, nBarY), nTotalWidth, bLayoutRTL );
+-            lcl_SetPosSize( *pHSplitter, Point( nPosX+nTabSize+nSizeLt, nPosY+nSizeY ),
+-                                            Size( nSizeSp, nBarY ), nTotalWidth, bLayoutRTL );
+-            lcl_SetPosSize( aHScrollRight, Point(nPosX+nTabSize+nSizeLt+nSizeSp-nOverlap,
+-                                                    nPosY+nSizeY),
+-                                            Size(nSizeRt+2*nOverlap, nBarY), nTotalWidth, bLayoutRTL );
++            Point aHScrollLeftPoint(nPosX - nOverlap, nPosY + nSizeY);
++            Size aHScrollLeftSize(nSizeLt + 2 * nOverlap, nScrollBarSize);
++            lcl_SetPosSize( aHScrollLeft, aHScrollLeftPoint, aHScrollLeftSize, nTotalWidth, bLayoutRTL );
++
++            Point aHSplitterPoint(nPosX + nSizeLt, nPosY + nSizeY);
++            Size aHSplitterSize(nSizeSp, nScrollBarSize);
++            lcl_SetPosSize( *pHSplitter, aHSplitterPoint, aHSplitterSize, nTotalWidth, bLayoutRTL );
++
++            Point aHScrollRightPoint(nPosX + nSizeLt + nSizeSp - nOverlap, nPosY + nSizeY);
++            Size aHScrollRightSize(nSizeRt + 2 * nOverlap, nScrollBarSize);
++
++            lcl_SetPosSize( aHScrollRight, aHScrollRightPoint, aHScrollRightSize, nTotalWidth, bLayoutRTL );
+ 
+             //  SetDragRectPixel is done below
+         }
+ 
+-        if (bVScroll)                               // Scrollbars vertikal
++        if (bVScroll)
+         {
+             long nSizeUp = 0;       // upper scroll bar
+             long nSizeSp = 0;       // splitter
+@@ -564,7 +559,8 @@ void ScTabView::DoResize( const Point& rOffset, const Size& rSize, bool bInner )
+         }
+         nSplitPosX = aViewData.GetHSplitPos();
+         lcl_SetPosSize( *pHSplitter,
+-            Point( nSplitPosX, nOutPosY ), Size( nSplitSizeX, nSplitHeight ), nTotalWidth, bLayoutRTL );
++                        Point(nSplitPosX, nOutPosY),
++                        Size( nSplitSizeX, nSplitHeight - nTabWidth ), nTotalWidth, bLayoutRTL );
+         nLeftSize = nSplitPosX - nPosX;
+         nSplitPosX += nSplitSizeX;
+         nRightSize = nSizeX - nLeftSize - nSplitSizeX;
+diff --git a/sd/source/ui/dlg/LayerTabBar.cxx b/sd/source/ui/dlg/LayerTabBar.cxx
+index fa14066..db9a764 100644
+--- a/sd/source/ui/dlg/LayerTabBar.cxx
++++ b/sd/source/ui/dlg/LayerTabBar.cxx
+@@ -48,7 +48,7 @@ namespace sd {
+  * default constructor
+  */
+ LayerTabBar::LayerTabBar(DrawViewShell* pViewSh, Window* pParent)
+-    : TabBar( pParent, WinBits( WB_BORDER | WB_3DLOOK | WB_SCROLL | WB_SIZEABLE ) ),
++    : TabBar( pParent, WinBits( WB_BORDER | WB_3DLOOK | WB_SCROLL ) ),
+     DropTargetHelper( this ),
+     pDrViewSh(pViewSh)
+ {
+diff --git a/sd/source/ui/inc/FrameView.hxx b/sd/source/ui/inc/FrameView.hxx
+index 40bdffe..120570f 100644
+--- a/sd/source/ui/inc/FrameView.hxx
++++ b/sd/source/ui/inc/FrameView.hxx
+@@ -163,9 +163,6 @@ public:
+     void SetDrawMode(sal_uLong nNewDrawMode) { mnDrawMode = nNewDrawMode; };
+     sal_uLong GetDrawMode() const { return mnDrawMode; };
+ 
+-    void SetTabCtrlPercent( double nPercent ) { mnTabCtrlPercent = nPercent; }
+-    double GetTabCtrlPercent() const { return mnTabCtrlPercent; }
+-
+     void SetIsNavigatorShowingAllShapes (const bool bIsNavigatorShowingAllShapes);
+     bool IsNavigatorShowingAllShapes (void) const;
+ 
+@@ -200,7 +197,6 @@ private:
+     sal_uInt16          mnSlotId;           ///< SlotId, which was initial mentioned
+     sal_uInt16          mnSlidesPerRow;     ///< slides per row on the slide-desk
+     sal_uLong           mnDrawMode;         ///< draw mode for the normal window
+-    double              mnTabCtrlPercent;
+     /** Remember whether the navigator shows all shapes (<TRUE/>) or only
+         the names ones (<FALSE/>).  Not persistent.
+     */
+diff --git a/sd/source/ui/inc/GraphicViewShell.hxx b/sd/source/ui/inc/GraphicViewShell.hxx
+index 632a31e..3f35b78 100644
+--- a/sd/source/ui/inc/GraphicViewShell.hxx
++++ b/sd/source/ui/inc/GraphicViewShell.hxx
+@@ -72,9 +72,6 @@ public:
+ protected:
+     void ConstructGraphicViewShell (void);
+     virtual void ArrangeGUIElements (void) SAL_OVERRIDE;
+-
+-private:
+-    DECL_LINK(TabBarSplitHandler, TabBar*);
+ };
+ 
+ } // end of namespace sd
+diff --git a/sd/source/ui/view/drviews5.cxx b/sd/source/ui/view/drviews5.cxx
+index 2e98ec5..fbe01c1 100644
+--- a/sd/source/ui/view/drviews5.cxx
++++ b/sd/source/ui/view/drviews5.cxx
+@@ -113,8 +113,7 @@ void DrawViewShell::ArrangeGUIElements (void)
+     // Retrieve the current size (thickness) of the scroll bars.  That is
+     // the width of the vertical and the height of the horizontal scroll
+     // bar.
+-    int nScrollBarSize =
+-        GetParentWindow()->GetSettings().GetStyleSettings().GetScrollBarSize();
++    int nScrollBarSize = GetParentWindow()->GetSettings().GetStyleSettings().GetScrollBarSize();
+     maScrBarWH = Size (nScrollBarSize, nScrollBarSize);
+ 
+     Point aHPos = maViewPos;
+diff --git a/sd/source/ui/view/frmview.cxx b/sd/source/ui/view/frmview.cxx
+index 3121d64..c114d81 100644
+--- a/sd/source/ui/view/frmview.cxx
++++ b/sd/source/ui/view/frmview.cxx
+@@ -194,7 +194,6 @@ FrameView::FrameView(SdDrawDocument* pDrawDoc, FrameView* pFrameView /* = NULK *
+         mbClickChangeRotation = pFrameView->IsClickChangeRotation();
+         mnSlidesPerRow = pFrameView->GetSlidesPerRow();
+         mnDrawMode = pFrameView->GetDrawMode();
+-        mnTabCtrlPercent = pFrameView->GetTabCtrlPercent();
+         mbIsNavigatorShowingAllShapes = pFrameView->IsNavigatorShowingAllShapes();
+         SetPreviousViewShellType (pFrameView->GetPreviousViewShellType());
+         SetViewShellTypeOnLoad (pFrameView->GetViewShellTypeOnLoad());
+@@ -228,7 +227,6 @@ FrameView::FrameView(SdDrawDocument* pDrawDoc, FrameView* pFrameView /* = NULK *
+             bool bUseContrast = Application::GetSettings().GetStyleSettings().GetHighContrastMode();
+             mnDrawMode = bUseContrast ? OUTPUT_DRAWMODE_CONTRAST : OUTPUT_DRAWMODE_COLOR;
+         }
+-        mnTabCtrlPercent = 0.0;
+         mbIsNavigatorShowingAllShapes = false;
+         SetPreviousViewShellType (ViewShell::ST_NONE);
+         SetViewShellTypeOnLoad (ViewShell::ST_IMPRESS);
+diff --git a/sd/source/ui/view/grviewsh.cxx b/sd/source/ui/view/grviewsh.cxx
+index 253a6e7..01af5d6 100644
+--- a/sd/source/ui/view/grviewsh.cxx
++++ b/sd/source/ui/view/grviewsh.cxx
+@@ -30,9 +30,6 @@
+ 
+ namespace sd {
+ 
+-static const int TABCONTROL_INITIAL_SIZE = 350;
+-
+-
+ GraphicViewShell::GraphicViewShell (
+     SfxViewFrame* pFrame,
+     ViewShellBase& rViewShellBase,
+@@ -59,10 +56,9 @@ void GraphicViewShell::ConstructGraphicViewShell(void)
+ {
+     meShellType = ST_DRAW;
+ 
+-    mpLayerTabBar.reset (new LayerTabBar(this,GetParentWindow()));
+-    mpLayerTabBar->SetSplitHdl(LINK(this,GraphicViewShell,TabBarSplitHandler));
++    mpLayerTabBar.reset (new LayerTabBar(this, GetParentWindow()));
+ 
+-    // pb: #i67363# no layer tabbar on preview mode
++    // #i67363# no layer tabbar in preview mode
+     if ( !GetObjectShell()->IsPreview() )
+         mpLayerTabBar->Show();
+ }
+@@ -88,58 +84,19 @@ void GraphicViewShell::ArrangeGUIElements (void)
+     if (mpLayerTabBar.get()!=NULL && mpLayerTabBar->IsVisible())
+     {
+         Size aSize = mpLayerTabBar->GetSizePixel();
+-        const Size aFrameSize (
+-            GetViewFrame()->GetWindow().GetOutputSizePixel());
+-
+-        if (aSize.Width() == 0)
+-        {
+-            if (mpFrameView->GetTabCtrlPercent() == 0.0)
+-                aSize.Width() = TABCONTROL_INITIAL_SIZE;
+-            else
+-                aSize.Width() = FRound(aFrameSize.Width()
+-                    * mpFrameView->GetTabCtrlPercent());
+-        }
+-        aSize.Height() = GetParentWindow()->GetSettings().GetStyleSettings()
+-            .GetScrollBarSize();
++        const Size aFrameSize (GetViewFrame()->GetWindow().GetOutputSizePixel());
++
++        aSize.Height() = GetParentWindow()->GetFont().GetHeight() + 4;
++        aSize.Width() = aFrameSize.Width();
+ 
+         Point aPos (0, maViewSize.Height() - aSize.Height());
+ 
+         mpLayerTabBar->SetPosSizePixel (aPos, aSize);
+-
+-        if (aFrameSize.Width() > 0)
+-            mpFrameView->SetTabCtrlPercent (
+-                (double) maTabControl.GetSizePixel().Width()
+-                / aFrameSize.Width());
+-        else
+-            mpFrameView->SetTabCtrlPercent( 0.0 );
+     }
+ 
+     DrawViewShell::ArrangeGUIElements();
+ }
+ 
+-
+-
+-
+-IMPL_LINK(GraphicViewShell, TabBarSplitHandler, TabBar*, pTabBar)
+-{
+-    const long int nMax = maViewSize.Width()
+-        - maScrBarWH.Width()
+-        - pTabBar->GetPosPixel().X();
+-
+-    Size aTabSize = pTabBar->GetSizePixel();
+-    aTabSize.Width() = std::min(pTabBar->GetSplitSize(), (long)(nMax-1));
+-
+-    pTabBar->SetSizePixel (aTabSize);
+-
+-    Point aPos = pTabBar->GetPosPixel();
+-    aPos.X() += aTabSize.Width();
+-
+-    Size aScrSize (nMax - aTabSize.Width(), maScrBarWH.Height());
+-    mpHorizontalScrollBar->SetPosSizePixel(aPos, aScrSize);
+-
+-    return 0;
+-}
+-
+ } // end of namespace sd
+ 
+ /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+diff --git a/sd/source/ui/view/viewshel.cxx b/sd/source/ui/view/viewshel.cxx
+index 28e272e..4d6804d 100644
+--- a/sd/source/ui/view/viewshel.cxx
++++ b/sd/source/ui/view/viewshel.cxx
+@@ -914,13 +914,12 @@ void ViewShell::ArrangeGUIElements (void)
+     if (mpHorizontalScrollBar.get()!=NULL
+         && mpHorizontalScrollBar->IsVisible())
+     {
+-        int nLocalLeft = nLeft;
+-        if (mpLayerTabBar.get()!=NULL && mpLayerTabBar->IsVisible())
+-            nLocalLeft += mpLayerTabBar->GetSizePixel().Width();
+         nBottom -= maScrBarWH.Height();
++        if (mpLayerTabBar.get()!=NULL && mpLayerTabBar->IsVisible())
++            nBottom -= mpLayerTabBar->GetSizePixel().Height();
+         mpHorizontalScrollBar->SetPosSizePixel (
+-            Point(nLocalLeft,nBottom),
+-            Size(nRight-nLocalLeft-maScrBarWH.Width(),maScrBarWH.Height()));
++            Point(nLeft, nBottom),
++            Size(nRight - nLeft - maScrBarWH.Width(), maScrBarWH.Height()));
+     }
+ 
+     // Vertical scrollbar.
+@@ -930,7 +929,7 @@ void ViewShell::ArrangeGUIElements (void)
+         nRight -= maScrBarWH.Width();
+         mpVerticalScrollBar->SetPosSizePixel (
+             Point(nRight,nTop),
+-            Size (maScrBarWH.Width(),nBottom-nTop));
++            Size (maScrBarWH.Width(), nBottom-nTop));
+     }
+ 
+     // Filler in the lower right corner.
+-- 
+1.9.3
+

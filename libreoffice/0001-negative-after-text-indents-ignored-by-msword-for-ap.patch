@@ -1,0 +1,87 @@
+From b5ce50d1d07394f6b59b028373120369c83d5d66 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Caol=C3=A1n=20McNamara?= <caolanm@redhat.com>
+Date: Tue, 7 Apr 2015 09:56:43 +0100
+Subject: [PATCH] negative after-text indents ignored by msword for apos
+
+Change-Id: I33e178f23bc4b1372c4c329954b301ae68902154
+---
+ sw/source/filter/ww8/ww8graf.cxx |  3 +++
+ sw/source/filter/ww8/ww8par.hxx  |  2 ++
+ sw/source/filter/ww8/ww8par6.cxx | 26 ++++++++++++++++++++++++++
+ 3 files changed, 31 insertions(+)
+
+diff --git a/sw/source/filter/ww8/ww8graf.cxx b/sw/source/filter/ww8/ww8graf.cxx
+index 456ce25..3a11d1e 100644
+--- a/sw/source/filter/ww8/ww8graf.cxx
++++ b/sw/source/filter/ww8/ww8graf.cxx
+@@ -2905,7 +2905,10 @@ SwFlyFrmFmt* SwWW8ImplReader::ConvertDrawTextToFly(SdrObject* &rpObject,
+             MoveOutsideFly(pRetFrmFmt, aSave.GetStartPos(),!bJoined);
+ 
+             aSave.Restore( this );
++
++            StripNegativeAfterIndent(pRetFrmFmt);
+         }
++
+     }
+     return pRetFrmFmt;
+ }
+diff --git a/sw/source/filter/ww8/ww8par.hxx b/sw/source/filter/ww8/ww8par.hxx
+index a7fdff5..0a34059 100644
+--- a/sw/source/filter/ww8/ww8par.hxx
++++ b/sw/source/filter/ww8/ww8par.hxx
+@@ -1488,6 +1488,7 @@ private:
+     bool IsDropCap();
+     bool IsListOrDropcap() { return (!pAktItemSet  || bDropCap); };
+ 
++    //Apo == Absolutely Positioned Object, MSWord's old-style frames
+     WW8FlyPara *ConstructApo(const ApoTestResults &rApo,
+         const WW8_TablePos *pTabPos);
+     bool StartApo(const ApoTestResults &rApo, const WW8_TablePos *pTabPos, SvxULSpaceItem* pULSpaceItem = 0);
+@@ -1495,6 +1496,7 @@ private:
+     bool TestSameApo(const ApoTestResults &rApo, const WW8_TablePos *pTabPos);
+     ApoTestResults TestApo(int nCellLevel, bool bTableRowEnd,
+         const WW8_TablePos *pTabPos);
++    void StripNegativeAfterIndent(SwFrmFmt *pFlyFmt) const;
+ 
+     void EndSpecial();
+     bool ProcessSpecial(bool &rbReSync, WW8_CP nStartCp);
+diff --git a/sw/source/filter/ww8/ww8par6.cxx b/sw/source/filter/ww8/ww8par6.cxx
+index 418e130..b63e639 100644
+--- a/sw/source/filter/ww8/ww8par6.cxx
++++ b/sw/source/filter/ww8/ww8par6.cxx
+@@ -2430,6 +2430,32 @@ bool SwWW8ImplReader::JoinNode(SwPaM &rPam, bool bStealAttr)
+     return bRet;
+ }
+ 
++//In auto-width word frames negative after-indent values are ignored
++void SwWW8ImplReader::StripNegativeAfterIndent(SwFrmFmt *pFlyFmt) const
++{
++    const SwNodeIndex* pSttNd = pFlyFmt->GetCntnt().GetCntntIdx();
++    if (!pSttNd)
++        return;
++
++    SwNodeIndex aIdx(*pSttNd, 1);
++    SwNodeIndex aEnd(*pSttNd->GetNode().EndOfSectionNode());
++    while (aIdx < aEnd)
++    {
++        SwTxtNode *pNd = aIdx.GetNode().GetTxtNode();
++        if (pNd)
++        {
++            const SvxLRSpaceItem& rLR = ItemGet<SvxLRSpaceItem>(*pNd, RES_LR_SPACE);
++            if (rLR.GetRight() < 0)
++            {
++                SvxLRSpaceItem aLR(rLR);
++                aLR.SetRight(0);
++                pNd->SetAttr(aLR);
++            }
++        }
++        ++aIdx;
++    }
++}
++
+ void SwWW8ImplReader::StopApo()
+ {
+     OSL_ENSURE(pWFlyPara, "no pWFlyPara to close");
+-- 
+1.9.3
+

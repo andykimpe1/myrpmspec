@@ -1,0 +1,146 @@
+From 6698a143ebf961519884aefb8b00dc2d61c66818 Mon Sep 17 00:00:00 2001
+From: Norbert Thiebaud <nthiebaud@gmail.com>
+Date: Fri, 27 Jun 2014 10:29:46 +0200
+Subject: [PATCH] fdo#69036 do not try to create a sfxApplication when we are
+ tearing-down
+
+This was triggered by connectivity calc driver, which on shutdown
+was trying to 'dispose()' it's connection
+which in turn would, if the shutdown of calc was already done
+try to re-create an sfxApplication instance, just to delete
+illusory inexistant documents...
+
+Change-Id: Ic166367ca399d613743f379ebbfbffb5813701c0
+---
+ include/sfx2/app.hxx        |  2 +-
+ sfx2/source/doc/objxtor.cxx | 35 ++++++++++++++++++++---------------
+ 2 files changed, 21 insertions(+), 16 deletions(-)
+
+diff --git a/include/sfx2/app.hxx b/include/sfx2/app.hxx
+index 3f81077..fe12622 100644
+--- a/include/sfx2/app.hxx
++++ b/include/sfx2/app.hxx
+@@ -149,6 +149,7 @@ public:
+                                 SfxApplication();
+                                 virtual ~SfxApplication();
+     static SfxApplication*      GetOrCreate();
++    static SfxApplication*      Get() { return pApp;}
+ 
+     // Resource Manager
+     ResMgr*                     GetSfxResManager();
+@@ -202,7 +203,6 @@ public:
+     bool                        IsDowning() const;
+     void                        ResetLastDir();
+ 
+-    SAL_DLLPRIVATE static SfxApplication* Get() { return pApp;}
+     SAL_DLLPRIVATE SfxDispatcher* GetAppDispatcher_Impl();
+     SAL_DLLPRIVATE SfxDispatcher* GetDispatcher_Impl();
+ 
+diff --git a/sfx2/source/doc/objxtor.cxx b/sfx2/source/doc/objxtor.cxx
+index 1fbe840..32e8b6c 100644
+--- a/sfx2/source/doc/objxtor.cxx
++++ b/sfx2/source/doc/objxtor.cxx
+@@ -462,12 +462,17 @@ bool SfxObjectShell::Close()
+         if ( pImp->bClosing )
+         {
+             // remove from Document list
+-            SfxApplication *pSfxApp = SFX_APP();
+-            SfxObjectShellArr_Impl &rDocs = pSfxApp->GetObjectShells_Impl();
+-            SfxObjectShellArr_Impl::iterator it = std::find( rDocs.begin(), rDocs.end(), this );
+-            if ( it != rDocs.end() )
+-                rDocs.erase( it );
+-            pImp->bInList = false;
++            // If there is no App, there is no document to remove
++            // no need to call GetOrCreate here
++            SfxApplication *pSfxApp = SfxApplication::Get();
++            if(pSfxApp)
++            {
++                SfxObjectShellArr_Impl &rDocs = pSfxApp->GetObjectShells_Impl();
++                SfxObjectShellArr_Impl::iterator it = std::find( rDocs.begin(), rDocs.end(), this );
++                if ( it != rDocs.end() )
++                    rDocs.erase( it );
++                pImp->bInList = false;
++            }
+         }
+     }
+ 
+@@ -501,7 +506,7 @@ SfxObjectShell* SfxObjectShell::GetFirst
+     bool          bOnlyVisible
+ )
+ {
+-    SfxObjectShellArr_Impl &rDocs = SFX_APP()->GetObjectShells_Impl();
++    SfxObjectShellArr_Impl &rDocs = SfxGetpApp()->GetObjectShells_Impl();
+ 
+     // seach for a SfxDocument of the specified type
+     for ( sal_uInt16 nPos = 0; nPos < rDocs.size(); ++nPos )
+@@ -528,7 +533,7 @@ SfxObjectShell* SfxObjectShell::GetNext
+     bool                    bOnlyVisible
+ )
+ {
+-    SfxObjectShellArr_Impl &rDocs = SFX_APP()->GetObjectShells_Impl();
++    SfxObjectShellArr_Impl &rDocs = SfxGetpApp()->GetObjectShells_Impl();
+ 
+     // refind the specified predecessor
+     sal_uInt16 nPos;
+@@ -607,7 +612,7 @@ bool SfxObjectShell::PrepareClose
+         }
+     }
+ 
+-    SfxApplication *pSfxApp = SFX_APP();
++    SfxApplication *pSfxApp = SfxGetpApp();
+     pSfxApp->NotifyEvent( SfxEventHint(SFX_EVENT_PREPARECLOSEDOC, GlobalEventConfig::GetEventName(STR_EVENT_PREPARECLOSEDOC), this) );
+ 
+     if( GetCreateMode() == SFX_CREATE_MODE_EMBEDDED )
+@@ -713,7 +718,7 @@ BasicManager* SfxObjectShell::GetBasicManager() const
+ #else
+     BasicManager* pBasMgr = lcl_getBasicManagerForDocument( *this );
+     if ( !pBasMgr )
+-        pBasMgr = SFX_APP()->GetBasicManager();
++        pBasMgr = SfxGetpApp()->GetBasicManager();
+     return pBasMgr;
+ #endif
+ }
+@@ -787,7 +792,7 @@ Reference< XLibraryContainer > SfxObjectShell::GetDialogContainer()
+ 
+     OSL_FAIL( "SfxObjectShell::GetDialogContainer: falling back to the application - is this really expected here?" );
+ #endif
+-    return SFX_APP()->GetDialogContainer();
++    return SfxGetpApp()->GetDialogContainer();
+ }
+ 
+ 
+@@ -804,7 +809,7 @@ Reference< XLibraryContainer > SfxObjectShell::GetBasicContainer()
+ 
+     OSL_FAIL( "SfxObjectShell::GetBasicContainer: falling back to the application - is this really expected here?" );
+ #endif
+-    return SFX_APP()->GetBasicContainer();
++    return SfxGetpApp()->GetBasicContainer();
+ }
+ 
+ 
+@@ -947,7 +952,7 @@ void SfxObjectShell::SetCurrentComponent( const Reference< XInterface >& _rxComp
+     // but we should have filtered quite some unnecessary calls already.
+ 
+ #ifndef DISABLE_SCRIPTING
+-    BasicManager* pAppMgr = SFX_APP()->GetBasicManager();
++    BasicManager* pAppMgr = SfxGetpApp()->GetBasicManager();
+     rTheCurrentComponent = _rxComponent;
+     if ( pAppMgr )
+     {
+@@ -1142,11 +1147,11 @@ void SfxObjectShell::SetInitialized_Impl( const bool i_fromInitNew )
+     if ( i_fromInitNew )
+     {
+         SetActivateEvent_Impl( SFX_EVENT_CREATEDOC );
+-        SFX_APP()->NotifyEvent( SfxEventHint( SFX_EVENT_DOCCREATED, GlobalEventConfig::GetEventName(STR_EVENT_DOCCREATED), this ) );
++        SfxGetpApp()->NotifyEvent( SfxEventHint( SFX_EVENT_DOCCREATED, GlobalEventConfig::GetEventName(STR_EVENT_DOCCREATED), this ) );
+     }
+     else
+     {
+-        SFX_APP()->NotifyEvent( SfxEventHint( SFX_EVENT_LOADFINISHED, GlobalEventConfig::GetEventName(STR_EVENT_LOADFINISHED), this ) );
++        SfxGetpApp()->NotifyEvent( SfxEventHint( SFX_EVENT_LOADFINISHED, GlobalEventConfig::GetEventName(STR_EVENT_LOADFINISHED), this ) );
+     }
+ }
+ 
+-- 
+1.9.3
+

@@ -1,0 +1,86 @@
+From dcc2e18191652bdffb7b4a2e4ee536c24635a4fb Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Caol=C3=A1n=20McNamara?= <caolanm@redhat.com>
+Date: Mon, 19 Jan 2015 12:09:17 +0000
+Subject: [PATCH] if we change the keys we have to resort based on the new keys
+
+Change-Id: Ied95c2d1490554d9ba5402c936a9720c8a325771
+---
+ sw/source/core/doc/docredln.cxx | 26 ++++++++++++++++++++++----
+ 1 file changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/sw/source/core/doc/docredln.cxx b/sw/source/core/doc/docredln.cxx
+index cb1520a..8d3d704 100644
+--- a/sw/source/core/doc/docredln.cxx
++++ b/sw/source/core/doc/docredln.cxx
+@@ -3820,6 +3820,8 @@ void SwRangeRedline::MoveFromSection()
+         SwDoc* pDoc = GetDoc();
+         const SwRedlineTbl& rTbl = pDoc->GetRedlineTbl();
+         std::vector<SwPosition*> aBeforeArr, aBehindArr;
++        typedef std::map<sal_uInt16, SwRangeRedline*> IndexAndRange;
++        IndexAndRange aIndexAndRangeMap;
+         sal_uInt16 nMyPos = rTbl.GetPos( this );
+         OSL_ENSURE( this, "this is not in the array?" );
+         bool bBreak = false;
+@@ -3830,12 +3832,16 @@ void SwRangeRedline::MoveFromSection()
+             bBreak = true;
+             if( rTbl[ n ]->GetBound(true) == *GetPoint() )
+             {
+-                aBehindArr.push_back( &rTbl[ n ]->GetBound(true) );
++                SwRangeRedline* pRedl = rTbl[n];
++                aBehindArr.push_back(&pRedl->GetBound(true));
++                aIndexAndRangeMap.insert(std::make_pair(n, pRedl));
+                 bBreak = false;
+             }
+             if( rTbl[ n ]->GetBound(false) == *GetPoint() )
+             {
+-                aBehindArr.push_back( &rTbl[ n ]->GetBound(false) );
++                SwRangeRedline* pRedl = rTbl[n];
++                aBehindArr.push_back(&pRedl->GetBound(false));
++                aIndexAndRangeMap.insert(std::make_pair(n, pRedl));
+                 bBreak = false;
+             }
+         }
+@@ -3845,12 +3851,16 @@ void SwRangeRedline::MoveFromSection()
+             bBreak = true;
+             if( rTbl[ n ]->GetBound(true) == *GetPoint() )
+             {
+-                aBeforeArr.push_back( &rTbl[ n ]->GetBound(true) );
++                SwRangeRedline* pRedl = rTbl[n];
++                aBeforeArr.push_back(&pRedl->GetBound(true));
++                aIndexAndRangeMap.insert(std::make_pair(n, pRedl));
+                 bBreak = false;
+             }
+             if( rTbl[ n ]->GetBound(false) == *GetPoint() )
+             {
+-                aBeforeArr.push_back( &rTbl[ n ]->GetBound(false) );
++                SwRangeRedline* pRedl = rTbl[n];
++                aBeforeArr.push_back(&pRedl->GetBound(false));
++                aIndexAndRangeMap.insert(std::make_pair(n, pRedl));
+                 bBreak = false;
+             }
+         }
+@@ -3904,6 +3914,7 @@ void SwRangeRedline::MoveFromSection()
+             if( pColl && pCNd )
+                 pCNd->ChgFmtColl( pColl );
+         }
++
+         // #i95771#
+         // Under certain conditions the previous <SwDoc::Move(..)> has already
+         // removed the change tracking section of this <SwRangeRedline> instance from
+@@ -3924,6 +3935,13 @@ void SwRangeRedline::MoveFromSection()
+             *aBeforeArr[ n ] = *Start();
+         for( n = 0; n < aBehindArr.size(); ++n )
+             *aBehindArr[ n ] = *End();
++        SwRedlineTbl& rResortTbl = const_cast<SwRedlineTbl&>(rTbl);
++        for (auto& a : aIndexAndRangeMap)
++        {
++            // re-insert
++            rResortTbl.Remove(a.first);
++            rResortTbl.Insert(a.second);
++        }
+     }
+     else
+         InvalidateRange();
+-- 
+1.9.3
+

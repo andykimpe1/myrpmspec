@@ -1,0 +1,131 @@
+From 1ce01e210deb636f62688f9c41112a4f46948976 Mon Sep 17 00:00:00 2001
+Message-Id: <1ce01e210deb636f62688f9c41112a4f46948976.1443537351.git.erack@redhat.com>
+From: Eike Rathke <erack@redhat.com>
+Date: Tue, 29 Sep 2015 15:54:19 +0200
+Subject: [PATCH] use exponential 'E' format for General when appropriate
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="------------erAck-patch-parts"
+
+This is a multi-part message in MIME format.
+--------------erAck-patch-parts
+Content-Type: text/plain; charset=UTF-8; format=fixed
+Content-Transfer-Encoding: 8bit
+
+
+Fixes all these test case scenarios:
+1. in A1 enter =1E222
+   * move cell cursor back onto A1
+   * status bar displays Sum=100000... repeated until
+     filled (or 222 '0' characters)
+2. invoke number format dialog on A1
+   * for General format 100000... is displayed in the preview
+3. move cell cursor to A2
+   * open Function Wizard (Ctrl+F2)
+   * choose (double click) ABS function
+   * enter A1 as parameter
+   * see 100000... displayed as Function result and Result
+4. save as .ods
+   * in content.xml see display text of A1 being saved as 100000...
+
+(cherry picked from commit ef0a26835e68deb31906c40cfe48c66674d9d0d1)
+
+Conflicts:
+	svl/source/numbers/zformat.cxx
+
+Change-Id: I7c22c0461a6783c85c1d51c31e8607fb2edb821c
+---
+ svl/source/numbers/zformat.cxx | 52 ++++++++++++++++++++++++++++--------------
+ 1 file changed, 35 insertions(+), 17 deletions(-)
+
+
+--------------erAck-patch-parts
+Content-Type: text/x-patch; name="0001-use-exponential-E-format-for-General-when-appropriat.patch"
+Content-Transfer-Encoding: 8bit
+Content-Disposition: attachment; filename="0001-use-exponential-E-format-for-General-when-appropriat.patch"
+
+diff --git a/svl/source/numbers/zformat.cxx b/svl/source/numbers/zformat.cxx
+index a48c029..92c52f4 100644
+--- a/svl/source/numbers/zformat.cxx
++++ b/svl/source/numbers/zformat.cxx
+@@ -60,6 +60,11 @@ struct Gregorian : public rtl::StaticWithInit<const OUString, Gregorian>
+ 
+ const sal_uInt16 UPPER_PRECISION = 300; // entirely arbitrary...
+ const double EXP_LOWER_BOUND = 1.0E-4; // prefer scientific notation below this value.
++const double EXP_ABS_UPPER_BOUND = 1.0E15;  // use exponential notation above that absolute value.
++                                            // Back in time was E16 that lead
++                                            // to display rounding errors, see
++                                            // also sal/rtl/math.cxx
++                                            // doubleToString()
+ 
+ } // namespace
+ 
+@@ -2125,7 +2130,7 @@ void SvNumberformat::ImpGetOutputStandard(double& fNumber, OUString& OutString)
+ {
+     sal_uInt16 nStandardPrec = rScan.GetStandardPrec();
+ 
+-    if ( fabs(fNumber) > 1.0E15 ) // #58531# was E16
++    if ( fabs(fNumber) > EXP_ABS_UPPER_BOUND )
+     {
+         nStandardPrec = ::std::min(nStandardPrec, static_cast<sal_uInt16>(14)); // limits to 14 decimals
+         OutString = ::rtl::math::doubleToUString( fNumber,
+@@ -2513,27 +2518,40 @@ bool SvNumberformat::GetOutputString(double fNumber,
+                     }
+                     fNumber = -fNumber;
+                 }
++                /* TODO: why did we insist on 10 decimals for the non-exponent
++                 * case? doubleToUString() handles rtl_math_DecimalPlaces_Max
++                 * gracefully when used with rtl_math_StringFormat_Automatic,
++                 * so all that special casing and mumbo-jumbo in the else
++                 * branch below might not be needed at all. */
++                if (fNumber > EXP_ABS_UPPER_BOUND)
++                {
++                    sBuff.append( ::rtl::math::doubleToUString( fNumber,
++                                rtl_math_StringFormat_Automatic,
++                                rtl_math_DecimalPlaces_Max,
++                                GetFormatter().GetNumDecimalSep()[0], true));
++                }
++                else
+                 {
+                     OUString sTemp;
+                     ImpGetOutputStdToPrecision(fNumber, sTemp, 10); // Use 10 decimals for general 'unlimited' format.
+                     sBuff.append(sTemp);
+-                }
+-                if (fNumber < EXP_LOWER_BOUND)
+-                {
+-                    sal_Int32 nLen = sBuff.getLength();
+-                    if (!nLen)
++                    if (fNumber < EXP_LOWER_BOUND)
+                     {
+-                        return false;
+-                    }
+-                    // #i112250# With the 10-decimal limit, small numbers are formatted as "0".
+-                    // Switch to scientific in that case, too:
+-                    if (nLen > 11 || ((nLen == 1 && sBuff[0] == '0') && fNumber != 0.0))
+-                    {
+-                        sal_uInt16 nStandardPrec = rScan.GetStandardPrec();
+-                        nStandardPrec = ::std::min(nStandardPrec, static_cast<sal_uInt16>(14)); // limits to 14 decimals
+-                        sBuff = ::rtl::math::doubleToUString( fNumber,
+-                                                              rtl_math_StringFormat_E, nStandardPrec /*2*/,
+-                                                              GetFormatter().GetNumDecimalSep()[0], true);
++                        sal_Int32 nLen = sBuff.getLength();
++                        if (!nLen)
++                        {
++                            return false;
++                        }
++                        // #i112250# With the 10-decimal limit, small numbers are formatted as "0".
++                        // Switch to scientific in that case, too:
++                        if (nLen > 11 || ((nLen == 1 && sBuff[0] == '0') && fNumber != 0.0))
++                        {
++                            sal_uInt16 nStandardPrec = rScan.GetStandardPrec();
++                            nStandardPrec = ::std::min(nStandardPrec, static_cast<sal_uInt16>(14)); // limits to 14 decimals
++                            sBuff = ::rtl::math::doubleToUString( fNumber,
++                                    rtl_math_StringFormat_E, nStandardPrec /*2*/,
++                                    GetFormatter().GetNumDecimalSep()[0], true);
++                        }
+                     }
+                 }
+                 if (bSign)
+
+--------------erAck-patch-parts--
+
+

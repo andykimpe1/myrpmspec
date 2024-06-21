@@ -1,0 +1,510 @@
+From 13e0e4f24c5620f8018c91589ece1710d063e38c Mon Sep 17 00:00:00 2001
+Message-Id: <13e0e4f24c5620f8018c91589ece1710d063e38c.1440585014.git.erack@redhat.com>
+From: Eike Rathke <erack@redhat.com>
+Date: Tue, 25 Aug 2015 21:16:43 +0200
+Subject: [PATCH] Resolves: rhbz#1255811 implement Edit modify handler
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="------------erAck-patch-parts"
+
+This is a multi-part message in MIME format.
+--------------erAck-patch-parts
+Content-Type: text/plain; charset=UTF-8; format=fixed
+Content-Transfer-Encoding: 8bit
+
+
+... and disable/enable Apply/Ok buttons for in/valid ranges.
+
+(cherry picked from commit ad1284df599f3493e7c76c7f8b4230aab1946558)
+
+implement Edit modify handler, rhbz#1255811 related
+
+Same as in ScRandomNumberGeneratorDialog.
+
+(cherry picked from commit da9ecf1a59b85eb93004507fe55b92f74c2cdb4c)
+
+implement Edit modify handler, rhbz#1255811 related
+
+Same as in ScSamplingDialog.
+
+(cherry picked from commit a88fecdcdbf0b3f6a5ba3375f8193a9dc7ba7422)
+
+implement Edit modify handler, rhbz#1255811 related
+
+Same as in ScStatisticsInputOutputDialog.
+
+(cherry picked from commit b2363e98af7b0281279617e43b8fec5b898b9120)
+
+1bc9296bfc8b1b2b8f3fc20183e2c626f94dee09
+ff709ec2284673efa8824a9b8cfc037e4d6d567a
+0e3eb06bc86cf77c405c54f312340c7b2551c1ec
+
+Conflicts:
+	sc/source/ui/StatisticsDialogs/SamplingDialog.cxx
+
+Change-Id: I52b5eae2f34e3fca7c0761b14124477a0d160b01
+---
+ .../RandomNumberGeneratorDialog.cxx                | 29 +++++++
+ sc/source/ui/StatisticsDialogs/SamplingDialog.cxx  | 74 +++++++++++++++++-
+ .../StatisticsInputOutputDialog.cxx                | 71 ++++++++++++++++-
+ .../StatisticsTwoVariableDialog.cxx                | 89 +++++++++++++++++++++-
+ sc/source/ui/inc/RandomNumberGeneratorDialog.hxx   |  1 +
+ sc/source/ui/inc/SamplingDialog.hxx                |  1 +
+ sc/source/ui/inc/StatisticsInputOutputDialog.hxx   |  1 +
+ sc/source/ui/inc/StatisticsTwoVariableDialog.hxx   |  1 +
+ 8 files changed, 258 insertions(+), 9 deletions(-)
+
+
+--------------erAck-patch-parts
+Content-Type: text/x-patch; name="0001-Resolves-rhbz-1255811-implement-Edit-modify-handler.patch"
+Content-Transfer-Encoding: 8bit
+Content-Disposition: attachment; filename="0001-Resolves-rhbz-1255811-implement-Edit-modify-handler.patch"
+
+diff --git a/sc/source/ui/StatisticsDialogs/RandomNumberGeneratorDialog.cxx b/sc/source/ui/StatisticsDialogs/RandomNumberGeneratorDialog.cxx
+index 35b72f8..2571dba 100644
+--- a/sc/source/ui/StatisticsDialogs/RandomNumberGeneratorDialog.cxx
++++ b/sc/source/ui/StatisticsDialogs/RandomNumberGeneratorDialog.cxx
+@@ -104,6 +104,7 @@ void ScRandomNumberGeneratorDialog::Init()
+     mpInputRangeEdit->SetLoseFocusHdl ( aLink );
+     mpInputRangeButton->SetLoseFocusHdl ( aLink );
+ 
++    mpInputRangeEdit->SetModifyHdl( LINK( this, ScRandomNumberGeneratorDialog, InputRangeModified ));
+     mpParameter1Value->SetModifyHdl( LINK( this, ScRandomNumberGeneratorDialog, Parameter1ValueModified ));
+     mpParameter2Value->SetModifyHdl( LINK( this, ScRandomNumberGeneratorDialog, Parameter2ValueModified ));
+ 
+@@ -157,11 +158,17 @@ void ScRandomNumberGeneratorDialog::SetReference( const ScRange& rReferenceRange
+ 
+         OUString aReferenceString(maInputRange.Format(SCR_ABS_3D, pDoc, pDoc->GetAddressConvention()));
+         mpInputRangeEdit->SetRefString( aReferenceString );
++
++        mpButtonApply->Enable();
++        mpButtonOk->Enable();
+     }
+ }
+ 
+ void ScRandomNumberGeneratorDialog::SelectGeneratorAndGenerateNumbers()
+ {
++    if (!maInputRange.IsValid())
++        return;
++
+     sal_Int16 aSelectedIndex = mpDistributionCombo-> GetSelectEntryPos();
+     sal_Int64 aSelectedId = (sal_Int64) mpDistributionCombo->GetEntryData(aSelectedIndex);
+ 
+@@ -345,6 +352,28 @@ IMPL_LINK_NOARG(ScRandomNumberGeneratorDialog, LoseFocusHandler)
+     return 0;
+ }
+ 
++IMPL_LINK_NOARG(ScRandomNumberGeneratorDialog, InputRangeModified)
++{
++    ScRangeList aRangeList;
++    bool bValid = ParseWithNames( aRangeList, mpInputRangeEdit->GetText(), mpDoc);
++    const ScRange* pRange = (bValid && aRangeList.size() == 1) ? aRangeList[0] : 0;
++    if (pRange)
++    {
++        maInputRange = *pRange;
++        mpButtonApply->Enable();
++        mpButtonOk->Enable();
++        // Highlight the resulting range.
++        mpInputRangeEdit->StartUpdateData();
++    }
++    else
++    {
++        maInputRange = ScRange( ScAddress::INITIALIZE_INVALID);
++        mpButtonApply->Disable();
++        mpButtonOk->Disable();
++    }
++    return 0;
++}
++
+ IMPL_LINK_NOARG(ScRandomNumberGeneratorDialog, Parameter1ValueModified)
+ {
+     sal_Int16 aSelectedIndex = mpDistributionCombo-> GetSelectEntryPos();
+diff --git a/sc/source/ui/StatisticsDialogs/SamplingDialog.cxx b/sc/source/ui/StatisticsDialogs/SamplingDialog.cxx
+index 4c2529b..64acad5 100644
+--- a/sc/source/ui/StatisticsDialogs/SamplingDialog.cxx
++++ b/sc/source/ui/StatisticsDialogs/SamplingDialog.cxx
+@@ -34,7 +34,9 @@ ScSamplingDialog::ScSamplingDialog(
+     mpActiveEdit    ( NULL  ),
+     mViewData       ( pViewData ),
+     mDocument       ( pViewData->GetDocument() ),
++    mInputRange     ( ScAddress::INITIALIZE_INVALID ),
+     mAddressDetails ( mDocument->GetAddressConvention(), 0, 0 ),
++    mOutputAddress  ( ScAddress::INITIALIZE_INVALID ),
+     mCurrentAddress ( pViewData->GetCurX(), pViewData->GetCurY(), pViewData->GetTabNo() ),
+     mDialogLostFocus( false )
+ {
+@@ -79,6 +81,10 @@ void ScSamplingDialog::Init()
+     mpOutputRangeEdit->SetLoseFocusHdl( aLink );
+     mpOutputRangeButton->SetLoseFocusHdl( aLink );
+ 
++    aLink = LINK( this, ScSamplingDialog, RefInputModifyHandler);
++    mpInputRangeEdit->SetModifyHdl( aLink);
++    mpOutputRangeEdit->SetModifyHdl( aLink);
++
+     mpSampleSize->SetModifyHdl( LINK( this, ScSamplingDialog, SamplingSizeValueModified ));
+ 
+     mpPeriodicMethodRadio->SetToggleHdl( LINK( this, ScSamplingDialog, ToggleSamplingMethod ) );
+@@ -151,11 +157,12 @@ void ScSamplingDialog::SetReference( const ScRange& rReferenceRange, ScDocument*
+             if (aSelectedSampleSize > 1)
+                 mpSampleSize->SetValue(aSelectedSampleSize);
+             SamplingSizeValueModified(NULL);
+-
+-            // Enable OK, Cancel if output range is set
+-            mpButtonOk->Enable(!mpOutputRangeEdit->GetText().isEmpty());
+         }
+     }
++
++    // Enable OK if both, input range and output address are set.
++    if (mInputRange.IsValid() && mOutputAddress.IsValid())
++        mpButtonOk->Enable();
+ }
+ 
+ ScRange ScSamplingDialog::PerformPeriodicSampling(ScDocShell* pDocShell)
+@@ -322,5 +329,66 @@ IMPL_LINK_NOARG(ScSamplingDialog, ToggleSamplingMethod)
+     return 0;
+ }
+ 
++IMPL_LINK_NOARG(ScSamplingDialog, RefInputModifyHandler)
++{
++    if ( mpActiveEdit )
++    {
++        if ( mpActiveEdit == mpInputRangeEdit )
++        {
++            ScRangeList aRangeList;
++            bool bValid = ParseWithNames( aRangeList, mpInputRangeEdit->GetText(), mDocument);
++            const ScRange* pRange = (bValid && aRangeList.size() == 1) ? aRangeList[0] : 0;
++            if (pRange)
++            {
++                mInputRange = *pRange;
++                // Highlight the resulting range.
++                mpInputRangeEdit->StartUpdateData();
++            }
++            else
++            {
++                mInputRange = ScRange( ScAddress::INITIALIZE_INVALID);
++            }
++        }
++        else if ( mpActiveEdit == mpOutputRangeEdit )
++        {
++            ScRangeList aRangeList;
++            bool bValid = ParseWithNames( aRangeList, mpOutputRangeEdit->GetText(), mDocument);
++            const ScRange* pRange = (bValid && aRangeList.size() == 1) ? aRangeList[0] : 0;
++            if (pRange)
++            {
++                mOutputAddress = pRange->aStart;
++
++                // Crop output range to top left address for Edit field.
++                if (pRange->aStart != pRange->aEnd)
++                {
++                    sal_uInt16 nFormat = ( mOutputAddress.Tab() == mCurrentAddress.Tab() ) ? SCA_ABS : SCA_ABS_3D;
++                    OUString aReferenceString = mOutputAddress.Format(nFormat, mDocument, mDocument->GetAddressConvention());
++                    mpOutputRangeEdit->SetRefString( aReferenceString );
++                }
++
++                // Change sampling size according to output range selection
++                sal_Int64 aSelectedSampleSize = pRange->aEnd.Row() - pRange->aStart.Row() + 1;
++                if (aSelectedSampleSize > 1)
++                    mpSampleSize->SetValue(aSelectedSampleSize);
++                SamplingSizeValueModified(NULL);
++
++                // Highlight the resulting range.
++                mpOutputRangeEdit->StartUpdateData();
++            }
++            else
++            {
++                mOutputAddress = ScAddress( ScAddress::INITIALIZE_INVALID);
++            }
++        }
++    }
++
++    // Enable OK if both, input range and output address are set.
++    if (mInputRange.IsValid() && mOutputAddress.IsValid())
++        mpButtonOk->Enable();
++    else
++        mpButtonOk->Disable();
++
++    return 0;
++}
+ 
+ /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+diff --git a/sc/source/ui/StatisticsDialogs/StatisticsInputOutputDialog.cxx b/sc/source/ui/StatisticsDialogs/StatisticsInputOutputDialog.cxx
+index d8e835a..2fb463a 100644
+--- a/sc/source/ui/StatisticsDialogs/StatisticsInputOutputDialog.cxx
++++ b/sc/source/ui/StatisticsDialogs/StatisticsInputOutputDialog.cxx
+@@ -59,7 +59,9 @@ ScStatisticsInputOutputDialog::ScStatisticsInputOutputDialog(
+     ScAnyRefDlg     ( pSfxBindings, pChildWindow, pParent, rID, rUIXMLDescription ),
+     mViewData       ( pViewData ),
+     mDocument       ( pViewData->GetDocument() ),
++    mInputRange     ( ScAddress::INITIALIZE_INVALID ),
+     mAddressDetails ( mDocument->GetAddressConvention(), 0, 0 ),
++    mOutputAddress  ( ScAddress::INITIALIZE_INVALID ),
+     mGroupedBy      ( BY_COLUMN ),
+     mpActiveEdit    ( NULL ),
+     mCurrentAddress ( pViewData->GetCurX(), pViewData->GetCurY(), pViewData->GetTabNo() ),
+@@ -106,6 +108,10 @@ void ScStatisticsInputOutputDialog::Init()
+     mpOutputRangeEdit->SetLoseFocusHdl( aLink );
+     mpOutputRangeButton->SetLoseFocusHdl( aLink );
+ 
++    aLink = LINK( this, ScStatisticsInputOutputDialog, RefInputModifyHandler);
++    mpInputRangeEdit->SetModifyHdl( aLink);
++    mpOutputRangeEdit->SetModifyHdl( aLink);
++
+     mpOutputRangeEdit->GrabFocus();
+ 
+     mpGroupByColumnsRadio->SetToggleHdl( LINK( this, ScStatisticsInputOutputDialog, GroupByChanged ) );
+@@ -159,11 +165,14 @@ void ScStatisticsInputOutputDialog::SetReference( const ScRange& rReferenceRange
+             sal_uInt16 nFormat = ( mOutputAddress.Tab() == mCurrentAddress.Tab() ) ? SCA_ABS : SCA_ABS_3D;
+             aReferenceString = mOutputAddress.Format(nFormat, pDocument, pDocument->GetAddressConvention());
+             mpOutputRangeEdit->SetRefString( aReferenceString );
+-
+-            // Enable OK, Cancel if output range is set
+-            mpButtonOk->Enable(!mpOutputRangeEdit->GetText().isEmpty());
+         }
+     }
++
++    // Enable OK if both, input range and output address are set.
++    if (mInputRange.IsValid() && mOutputAddress.IsValid())
++        mpButtonOk->Enable();
++    else
++        mpButtonOk->Disable();
+ }
+ 
+ IMPL_LINK( ScStatisticsInputOutputDialog, OkClicked, PushButton*, /*pButton*/ )
+@@ -204,6 +213,62 @@ IMPL_LINK_NOARG( ScStatisticsInputOutputDialog, GroupByChanged )
+     return 0;
+ }
+ 
++IMPL_LINK_NOARG( ScStatisticsInputOutputDialog, RefInputModifyHandler )
++{
++    if ( mpActiveEdit )
++    {
++        if ( mpActiveEdit == mpInputRangeEdit )
++        {
++            ScRangeList aRangeList;
++            bool bValid = ParseWithNames( aRangeList, mpInputRangeEdit->GetText(), mDocument);
++            const ScRange* pRange = (bValid && aRangeList.size() == 1) ? aRangeList[0] : 0;
++            if (pRange)
++            {
++                mInputRange = *pRange;
++                // Highlight the resulting range.
++                mpInputRangeEdit->StartUpdateData();
++            }
++            else
++            {
++                mInputRange = ScRange( ScAddress::INITIALIZE_INVALID);
++            }
++        }
++        else if ( mpActiveEdit == mpOutputRangeEdit )
++        {
++            ScRangeList aRangeList;
++            bool bValid = ParseWithNames( aRangeList, mpOutputRangeEdit->GetText(), mDocument);
++            const ScRange* pRange = (bValid && aRangeList.size() == 1) ? aRangeList[0] : 0;
++            if (pRange)
++            {
++                mOutputAddress = pRange->aStart;
++
++                // Crop output range to top left address for Edit field.
++                if (pRange->aStart != pRange->aEnd)
++                {
++                    sal_uInt16 nFormat = ( mOutputAddress.Tab() == mCurrentAddress.Tab() ) ? SCA_ABS : SCA_ABS_3D;
++                    OUString aReferenceString = mOutputAddress.Format(nFormat, mDocument, mDocument->GetAddressConvention());
++                    mpOutputRangeEdit->SetRefString( aReferenceString );
++                }
++
++                // Highlight the resulting range.
++                mpOutputRangeEdit->StartUpdateData();
++            }
++            else
++            {
++                mOutputAddress = ScAddress( ScAddress::INITIALIZE_INVALID);
++            }
++        }
++    }
++
++    // Enable OK if both, input range and output address are set.
++    if (mInputRange.IsValid() && mOutputAddress.IsValid())
++        mpButtonOk->Enable();
++    else
++        mpButtonOk->Disable();
++
++    return 0;
++}
++
+ void ScStatisticsInputOutputDialog::CalculateInputAndWriteToOutput()
+ {
+     OUString aUndo(SC_STRLOAD(RID_STATISTICS_DLGS, GetUndoNameId()));
+diff --git a/sc/source/ui/StatisticsDialogs/StatisticsTwoVariableDialog.cxx b/sc/source/ui/StatisticsDialogs/StatisticsTwoVariableDialog.cxx
+index a55da6d..1d47458 100644
+--- a/sc/source/ui/StatisticsDialogs/StatisticsTwoVariableDialog.cxx
++++ b/sc/source/ui/StatisticsDialogs/StatisticsTwoVariableDialog.cxx
+@@ -31,7 +31,10 @@ ScStatisticsTwoVariableDialog::ScStatisticsTwoVariableDialog(
+     ScAnyRefDlg     ( pSfxBindings, pChildWindow, pParent, rID, rUIXMLDescription ),
+     mViewData       ( pViewData ),
+     mDocument       ( pViewData->GetDocument() ),
++    mVariable1Range ( ScAddress::INITIALIZE_INVALID ),
++    mVariable2Range ( ScAddress::INITIALIZE_INVALID ),
+     mAddressDetails ( mDocument->GetAddressConvention(), 0, 0 ),
++    mOutputAddress  ( ScAddress::INITIALIZE_INVALID ),
+     mGroupedBy      ( BY_COLUMN ),
+     mpActiveEdit    ( NULL ),
+     mCurrentAddress ( pViewData->GetCurX(), pViewData->GetCurY(), pViewData->GetTabNo() ),
+@@ -88,6 +91,11 @@ void ScStatisticsTwoVariableDialog::Init()
+     mpOutputRangeEdit->SetLoseFocusHdl( aLink );
+     mpOutputRangeButton->SetLoseFocusHdl( aLink );
+ 
++    aLink = LINK( this, ScStatisticsTwoVariableDialog, RefInputModifyHandler);
++    mpVariable1RangeEdit->SetModifyHdl( aLink);
++    mpVariable2RangeEdit->SetModifyHdl( aLink);
++    mpOutputRangeEdit->SetModifyHdl( aLink);
++
+     mpOutputRangeEdit->GrabFocus();
+ 
+     mpGroupByColumnsRadio->SetToggleHdl( LINK( this, ScStatisticsTwoVariableDialog, GroupByChanged ) );
+@@ -167,11 +175,14 @@ void ScStatisticsTwoVariableDialog::SetReference( const ScRange& rReferenceRange
+             sal_uInt16 nFormat = ( mOutputAddress.Tab() == mCurrentAddress.Tab() ) ? SCA_ABS : SCA_ABS_3D;
+             aReferenceString = mOutputAddress.Format(nFormat, pDocument, pDocument->GetAddressConvention());
+             mpOutputRangeEdit->SetRefString( aReferenceString );
+-
+-            // Enable OK, Cancel if output range is set
+-            mpButtonOk->Enable(!mpOutputRangeEdit->GetText().isEmpty());
+         }
+     }
++
++    // Enable OK if all ranges are set.
++    if (mVariable1Range.IsValid() && mVariable2Range.IsValid() && mOutputAddress.IsValid())
++        mpButtonOk->Enable();
++    else
++        mpButtonOk->Disable();
+ }
+ 
+ IMPL_LINK( ScStatisticsTwoVariableDialog, OkClicked, PushButton*, /*pButton*/ )
+@@ -222,6 +233,78 @@ IMPL_LINK_NOARG( ScStatisticsTwoVariableDialog, GroupByChanged )
+     return 0;
+ }
+ 
++IMPL_LINK_NOARG( ScStatisticsTwoVariableDialog, RefInputModifyHandler )
++{
++    if ( mpActiveEdit )
++    {
++        if ( mpActiveEdit == mpVariable1RangeEdit )
++        {
++            ScRangeList aRangeList;
++            bool bValid = ParseWithNames( aRangeList, mpVariable1RangeEdit->GetText(), mDocument);
++            const ScRange* pRange = (bValid && aRangeList.size() == 1) ? aRangeList[0] : 0;
++            if (pRange)
++            {
++                mVariable1Range = *pRange;
++                // Highlight the resulting range.
++                mpVariable1RangeEdit->StartUpdateData();
++            }
++            else
++            {
++                mVariable1Range = ScRange( ScAddress::INITIALIZE_INVALID);
++            }
++        }
++        else if ( mpActiveEdit == mpVariable2RangeEdit )
++        {
++            ScRangeList aRangeList;
++            bool bValid = ParseWithNames( aRangeList, mpVariable2RangeEdit->GetText(), mDocument);
++            const ScRange* pRange = (bValid && aRangeList.size() == 1) ? aRangeList[0] : 0;
++            if (pRange)
++            {
++                mVariable2Range = *pRange;
++                // Highlight the resulting range.
++                mpVariable2RangeEdit->StartUpdateData();
++            }
++            else
++            {
++                mVariable2Range = ScRange( ScAddress::INITIALIZE_INVALID);
++            }
++        }
++        else if ( mpActiveEdit == mpOutputRangeEdit )
++        {
++            ScRangeList aRangeList;
++            bool bValid = ParseWithNames( aRangeList, mpOutputRangeEdit->GetText(), mDocument);
++            const ScRange* pRange = (bValid && aRangeList.size() == 1) ? aRangeList[0] : 0;
++            if (pRange)
++            {
++                mOutputAddress = pRange->aStart;
++
++                // Crop output range to top left address for Edit field.
++                if (pRange->aStart != pRange->aEnd)
++                {
++                    sal_uInt16 nFormat = ( mOutputAddress.Tab() == mCurrentAddress.Tab() ) ? SCA_ABS : SCA_ABS_3D;
++                    OUString aReferenceString = mOutputAddress.Format(nFormat, mDocument, mDocument->GetAddressConvention());
++                    mpOutputRangeEdit->SetRefString( aReferenceString );
++                }
++
++                // Highlight the resulting range.
++                mpOutputRangeEdit->StartUpdateData();
++            }
++            else
++            {
++                mOutputAddress = ScAddress( ScAddress::INITIALIZE_INVALID);
++            }
++        }
++    }
++
++    // Enable OK if all ranges are set.
++    if (mVariable1Range.IsValid() && mVariable2Range.IsValid() && mOutputAddress.IsValid())
++        mpButtonOk->Enable();
++    else
++        mpButtonOk->Disable();
++
++    return 0;
++}
++
+ void ScStatisticsTwoVariableDialog::CalculateInputAndWriteToOutput()
+ {
+     OUString aUndo(SC_STRLOAD(RID_STATISTICS_DLGS, GetUndoNameId()));
+diff --git a/sc/source/ui/inc/RandomNumberGeneratorDialog.hxx b/sc/source/ui/inc/RandomNumberGeneratorDialog.hxx
+index ffb95d5..908f7a4 100644
+--- a/sc/source/ui/inc/RandomNumberGeneratorDialog.hxx
++++ b/sc/source/ui/inc/RandomNumberGeneratorDialog.hxx
+@@ -75,6 +75,7 @@ private:
+     DECL_LINK( GetFocusHandler,  Control* );
+     DECL_LINK( LoseFocusHandler, void* );
+ 
++    DECL_LINK( InputRangeModified, void* );
+     DECL_LINK( Parameter1ValueModified, void* );
+     DECL_LINK( Parameter2ValueModified, void* );
+     DECL_LINK( DistributionChanged, void* );
+diff --git a/sc/source/ui/inc/SamplingDialog.hxx b/sc/source/ui/inc/SamplingDialog.hxx
+index 9cebb6c..169dda8 100644
+--- a/sc/source/ui/inc/SamplingDialog.hxx
++++ b/sc/source/ui/inc/SamplingDialog.hxx
+@@ -76,6 +76,7 @@ private:
+     DECL_LINK( LoseFocusHandler, void* );
+     DECL_LINK( SamplingSizeValueModified, void* );
+     DECL_LINK( ToggleSamplingMethod, void* );
++    DECL_LINK( RefInputModifyHandler, void* );
+ };
+ 
+ #endif
+diff --git a/sc/source/ui/inc/StatisticsInputOutputDialog.hxx b/sc/source/ui/inc/StatisticsInputOutputDialog.hxx
+index d54ac00..7e0981c 100644
+--- a/sc/source/ui/inc/StatisticsInputOutputDialog.hxx
++++ b/sc/source/ui/inc/StatisticsInputOutputDialog.hxx
+@@ -82,6 +82,7 @@ private:
+     DECL_LINK( OkClicked,        PushButton* );
+     DECL_LINK( GetFocusHandler,  Control* );
+     DECL_LINK( LoseFocusHandler, void* );
++    DECL_LINK( RefInputModifyHandler, void* );
+ };
+ 
+ #endif
+diff --git a/sc/source/ui/inc/StatisticsTwoVariableDialog.hxx b/sc/source/ui/inc/StatisticsTwoVariableDialog.hxx
+index 87c1d6b..7e93517 100644
+--- a/sc/source/ui/inc/StatisticsTwoVariableDialog.hxx
++++ b/sc/source/ui/inc/StatisticsTwoVariableDialog.hxx
+@@ -85,6 +85,7 @@ private:
+     DECL_LINK( OkClicked,        PushButton* );
+     DECL_LINK( GetFocusHandler,  Control* );
+     DECL_LINK( LoseFocusHandler, void* );
++    DECL_LINK( RefInputModifyHandler, void* );
+ };
+ 
+ #endif
+
+--------------erAck-patch-parts--
+
+

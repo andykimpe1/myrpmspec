@@ -1,0 +1,414 @@
+From f3974a01283674f016ebd564652964302b1ab1e8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Caol=C3=A1n=20McNamara?= <caolanm@redhat.com>
+Date: Fri, 30 Jan 2015 15:34:30 +0000
+Subject: [PATCH] During DocumentRedlineManager::SetRedlineMode the array
+ becomes unsorted
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+so GetPos cannot be used safely, so pass down the known index
+of the redline and propogate it everywhere the redline goes
+
+This reverts
+
+commit 36e158ce7a0effb130936ba4598a193102faa6a1
+Author: Caolán McNamara <caolanm@redhat.com>
+Date:   Mon Jan 19 12:09:17 2015 +0000
+
+    if we change the keys we have to resort based on the new keys
+
+which tried to keep the table sorted, but thats no use because
+DocumentRedlineManager::SetRedlineMode loops over by index
+so sorting the table during the process busts that.
+
+Taking a copy of the entries and looping over that shows another
+gadzillion problems.
+
+So try this approach instead.
+
+I imagine it should be possible to calculate the correct
+current index of pRedl in DocumentRedlineManager::AppendRedline
+but for now assume that we are sorted correctly at that
+point and can use GetPos
+
+(cherry picked from commit a5a20187c3a5e5956492f932c49501f9547e4915)
+
+Conflicts:
+	sw/source/core/doc/DocumentRedlineManager.cxx
+	sw/source/core/doc/docredln.cxx
+	sw/source/core/undo/unredln.cxx
+
+Change-Id: If092dce185e3b36fd256db390132358cba155847
+---
+ sw/inc/docary.hxx               |  1 +
+ sw/inc/redline.hxx              | 12 +++---
+ sw/source/core/doc/docredln.cxx | 90 ++++++++++++++++++++---------------------
+ sw/source/core/undo/unredln.cxx |  2 +-
+ 4 files changed, 51 insertions(+), 54 deletions(-)
+
+diff --git a/sw/inc/docary.hxx b/sw/inc/docary.hxx
+index 94f8229..34f22ed 100644
+--- a/sw/inc/docary.hxx
++++ b/sw/inc/docary.hxx
+@@ -195,6 +195,7 @@ public:
+     using _SwRedlineTbl::size;
+     using _SwRedlineTbl::operator[];
+     using _SwRedlineTbl::empty;
++    using _SwRedlineTbl::Resort;
+ };
+ 
+ /// Table that holds 'extra' redlines, such as 'table row insert\delete', 'paragraph moves' etc...
+diff --git a/sw/inc/redline.hxx b/sw/inc/redline.hxx
+index ab1945b..b639063 100644
+--- a/sw/inc/redline.hxx
++++ b/sw/inc/redline.hxx
+@@ -190,8 +190,8 @@ class SW_DLLPUBLIC SwRangeRedline : public SwPaM
+ 
+     void MoveToSection();
+     void CopyToSection();
+-    void DelCopyOfSection();
+-    void MoveFromSection();
++    void DelCopyOfSection(size_t nMyPos);
++    void MoveFromSection(size_t nMyPos);
+ 
+ public:
+     SwRangeRedline( RedlineType_t eType, const SwPaM& rPam );
+@@ -263,10 +263,10 @@ public:
+     // hide the Del-Redlines via Copy and Delete.
+     // Otherwise at Move the attribution would be handled incorrectly.
+     // All other callers must always give 0.
+-    void CallDisplayFunc( sal_uInt16 nLoop = 0 );
+-    void Show( sal_uInt16 nLoop = 0 );
+-    void Hide( sal_uInt16 nLoop = 0 );
+-    void ShowOriginal( sal_uInt16 nLoop = 0 );
++    void CallDisplayFunc(sal_uInt16 nLoop, size_t nMyPos);
++    void Show(sal_uInt16 nLoop , size_t nMyPos);
++    void Hide(sal_uInt16 nLoop , size_t nMyPos);
++    void ShowOriginal(sal_uInt16 nLoop, size_t nMyPos);
+ 
+     /// Calculates the intersection with text node number nNdIdx.
+     void CalcStartEnd(sal_uLong nNdIdx, sal_Int32& rStart, sal_Int32& rEnd) const;
+diff --git a/sw/source/core/doc/docredln.cxx b/sw/source/core/doc/docredln.cxx
+index 8d3d704..fd2730e 100644
+--- a/sw/source/core/doc/docredln.cxx
++++ b/sw/source/core/doc/docredln.cxx
+@@ -157,7 +157,7 @@ void SwDoc::SetRedlineMode( RedlineMode_t eMode )
+             bool bSaveInXMLImportFlag = IsInXMLImport();
+             SetInXMLImport( false );
+             // and then hide/display everything
+-            void (SwRangeRedline::*pFnc)( sal_uInt16 ) = 0;
++            void (SwRangeRedline::*pFnc)(sal_uInt16, size_t) = 0;
+ 
+             switch( nsRedlineMode_t::REDLINE_SHOW_MASK & eMode )
+             {
+@@ -179,10 +179,17 @@ void SwDoc::SetRedlineMode( RedlineMode_t eMode )
+ 
+             _CHECK_REDLINE( this )
+ 
+-            if( pFnc )
+-                for( sal_uInt16 nLoop = 1; nLoop <= 2; ++nLoop )
+-                    for( sal_uInt16 i = 0; i < mpRedlineTbl->size(); ++i )
+-                        ((*mpRedlineTbl)[ i ]->*pFnc)( nLoop );
++            if (pFnc)
++            {
++                for (sal_uInt16 nLoop = 1; nLoop <= 2; ++nLoop)
++                    for (size_t i = 0; i < mpRedlineTbl->size(); ++i)
++                        ((*mpRedlineTbl)[i]->*pFnc)(nLoop, i);
++
++                //SwRangeRedline::MoveFromSection routinely changes
++                //the keys that mpRedlineTbl is sorted by
++                mpRedlineTbl->Resort();
++            }
++
+             _CHECK_REDLINE( this )
+             SetInXMLImport( bSaveInXMLImportFlag );
+         }
+@@ -705,7 +712,7 @@ bool SwDoc::AppendRedline( SwRangeRedline* pNewRedl, bool bCallDelete )
+                                 // We insert temporarily so that pNew is
+                                 // also dealt with when moving the indices.
+                                 mpRedlineTbl->Insert( pNewRedl );
+-                                pRedl->Show();
++                                pRedl->Show(0, mpRedlineTbl->GetPos(pRedl));
+                                 mpRedlineTbl->Remove( pNewRedl );
+                                 pRStt = pRedl->Start();
+                                 pREnd = pRedl->End();
+@@ -882,7 +889,7 @@ bool SwDoc::AppendRedline( SwRangeRedline* pNewRedl, bool bCallDelete )
+                                 pRedl->PushData( *pNewRedl );
+                                 delete pNewRedl, pNewRedl = 0;
+                                 if( IsHideChanges( meRedlineMode ))
+-                                    pRedl->Hide();
++                                    pRedl->Hide(0, mpRedlineTbl->GetPos(pRedl));
+                                 bCompress = true;
+                             }
+                             break;
+@@ -946,7 +953,7 @@ bool SwDoc::AppendRedline( SwRangeRedline* pNewRedl, bool bCallDelete )
+                                     if( IsHideChanges( meRedlineMode ))
+                                     {
+                                         mpRedlineTbl->Insert( pNewRedl );
+-                                        pRedl->Hide();
++                                        pRedl->Hide(0, mpRedlineTbl->GetPos(pRedl));
+                                         mpRedlineTbl->Remove( pNewRedl );
+                                     }
+                                 }
+@@ -974,7 +981,7 @@ bool SwDoc::AppendRedline( SwRangeRedline* pNewRedl, bool bCallDelete )
+                                     if( IsHideChanges( meRedlineMode ))
+                                     {
+                                         mpRedlineTbl->Insert( pNewRedl );
+-                                        pRedl->Hide();
++                                        pRedl->Hide(0, mpRedlineTbl->GetPos(pRedl));
+                                         mpRedlineTbl->Remove( pNewRedl );
+                                     }
+                                 }
+@@ -1255,7 +1262,7 @@ void SwDoc::CompressRedlines()
+ {
+     _CHECK_REDLINE( this )
+ 
+-    void (SwRangeRedline::*pFnc)(sal_uInt16) = 0;
++    void (SwRangeRedline::*pFnc)(sal_uInt16, size_t) = 0;
+     switch( nsRedlineMode_t::REDLINE_SHOW_MASK & meRedlineMode )
+     {
+     case nsRedlineMode_t::REDLINE_SHOW_INSERT | nsRedlineMode_t::REDLINE_SHOW_DELETE:
+@@ -1283,14 +1290,15 @@ void SwDoc::CompressRedlines()
+             !pCurEnd->nNode.GetNode().StartOfSectionNode()->IsTableNode() )
+         {
+             // we then can merge them
+-            pPrev->Show();
+-            pCur->Show();
++            size_t nPrevIndex = n-1;
++            pPrev->Show(0, nPrevIndex);
++            pCur->Show(0, n);
+ 
+             pPrev->SetEnd( *pCur->End() );
+             mpRedlineTbl->DeleteAndDestroy( n );
+             --n;
+             if( pFnc )
+-                (pPrev->*pFnc)(0);
++                (pPrev->*pFnc)(0, nPrevIndex);
+         }
+     }
+     _CHECK_REDLINE( this )
+@@ -2751,8 +2759,10 @@ bool SwRedlineTbl::Insert( SwRangeRedline* p, bool bIns )
+     bool bRet = false;
+     if( p->HasValidRange() )
+     {
+-        bRet = insert( p ).second;
+-        p->CallDisplayFunc();
++        std::pair<_SwRedlineTbl::const_iterator, bool> rv = insert( p );
++        size_t nP = rv.first - begin();
++        bRet = rv.second;
++        p->CallDisplayFunc(0, nP);
+     }
+     else if( bIns )
+         bRet = InsertWithValidRanges( p );
+@@ -2771,7 +2781,7 @@ bool SwRedlineTbl::Insert( SwRangeRedline* p, sal_uInt16& rP, bool bIns )
+         std::pair<_SwRedlineTbl::const_iterator, bool> rv = insert( p );
+         rP = rv.first - begin();
+         bRet = rv.second;
+-        p->CallDisplayFunc();
++        p->CallDisplayFunc(0, rP);
+     }
+     else if( bIns )
+         bRet = InsertWithValidRanges( p, &rP );
+@@ -2873,7 +2883,7 @@ bool SwRedlineTbl::InsertWithValidRanges( SwRangeRedline* p, sal_uInt16* pInsPos
+                 pNew->HasValidRange() &&
+                 Insert( pNew, nInsPos ) )
+             {
+-                pNew->CallDisplayFunc();
++                pNew->CallDisplayFunc(0, nInsPos);
+                 bAnyIns = true;
+                 pNew = 0;
+                 if( pInsPos && *pInsPos < nInsPos )
+@@ -3382,23 +3392,23 @@ bool SwRangeRedline::HasValidRange() const
+     return false;
+ }
+ 
+-void SwRangeRedline::CallDisplayFunc( sal_uInt16 nLoop )
++void SwRangeRedline::CallDisplayFunc(sal_uInt16 nLoop, size_t nMyPos)
+ {
+     switch( nsRedlineMode_t::REDLINE_SHOW_MASK & GetDoc()->GetRedlineMode() )
+     {
+     case nsRedlineMode_t::REDLINE_SHOW_INSERT | nsRedlineMode_t::REDLINE_SHOW_DELETE:
+-        Show( nLoop );
++        Show(nLoop, nMyPos);
+         break;
+     case nsRedlineMode_t::REDLINE_SHOW_INSERT:
+-        Hide( nLoop );
++        Hide(nLoop, nMyPos);
+         break;
+     case nsRedlineMode_t::REDLINE_SHOW_DELETE:
+-        ShowOriginal( nLoop );
++        ShowOriginal(nLoop, nMyPos);
+         break;
+     }
+ }
+ 
+-void SwRangeRedline::Show( sal_uInt16 nLoop )
++void SwRangeRedline::Show(sal_uInt16 nLoop, size_t nMyPos)
+ {
+     if( 1 <= nLoop )
+     {
+@@ -3411,12 +3421,12 @@ void SwRangeRedline::Show( sal_uInt16 nLoop )
+         {
+         case nsRedlineType_t::REDLINE_INSERT:           // Content has been inserted
+             bIsVisible = true;
+-            MoveFromSection();
++            MoveFromSection(nMyPos);
+             break;
+ 
+         case nsRedlineType_t::REDLINE_DELETE:           // Content has been deleted
+             bIsVisible = true;
+-            MoveFromSection();
++            MoveFromSection(nMyPos);
+             break;
+ 
+         case nsRedlineType_t::REDLINE_FORMAT:           // Attributes have been applied
+@@ -3430,7 +3440,7 @@ void SwRangeRedline::Show( sal_uInt16 nLoop )
+     }
+ }
+ 
+-void SwRangeRedline::Hide( sal_uInt16 nLoop )
++void SwRangeRedline::Hide(sal_uInt16 nLoop, size_t nMyPos)
+ {
+     SwDoc* pDoc = GetDoc();
+     RedlineMode_t eOld = pDoc->GetRedlineMode();
+@@ -3442,7 +3452,7 @@ void SwRangeRedline::Hide( sal_uInt16 nLoop )
+     case nsRedlineType_t::REDLINE_INSERT:           // Content has been inserted
+         bIsVisible = true;
+         if( 1 <= nLoop )
+-            MoveFromSection();
++            MoveFromSection(nMyPos);
+         break;
+ 
+     case nsRedlineType_t::REDLINE_DELETE:           // Content has been deleted
+@@ -3451,7 +3461,7 @@ void SwRangeRedline::Hide( sal_uInt16 nLoop )
+         {
+         case 0: MoveToSection();    break;
+         case 1: CopyToSection();    break;
+-        case 2: DelCopyOfSection(); break;
++        case 2: DelCopyOfSection(nMyPos); break;
+         }
+         break;
+ 
+@@ -3466,7 +3476,7 @@ void SwRangeRedline::Hide( sal_uInt16 nLoop )
+     pDoc->SetRedlineMode_intern( eOld );
+ }
+ 
+-void SwRangeRedline::ShowOriginal( sal_uInt16 nLoop )
++void SwRangeRedline::ShowOriginal(sal_uInt16 nLoop, size_t nMyPos)
+ {
+     SwDoc* pDoc = GetDoc();
+     RedlineMode_t eOld = pDoc->GetRedlineMode();
+@@ -3487,14 +3497,14 @@ void SwRangeRedline::ShowOriginal( sal_uInt16 nLoop )
+         {
+         case 0: MoveToSection();    break;
+         case 1: CopyToSection();    break;
+-        case 2: DelCopyOfSection(); break;
++        case 2: DelCopyOfSection(nMyPos); break;
+         }
+         break;
+ 
+     case nsRedlineType_t::REDLINE_DELETE:           // Inhalt wurde eingefuegt
+         bIsVisible = true;
+         if( 1 <= nLoop )
+-            MoveFromSection();
++            MoveFromSection(nMyPos);
+         break;
+ 
+     case nsRedlineType_t::REDLINE_FORMAT:           // Attributes have been applied
+@@ -3725,7 +3735,7 @@ void SwRangeRedline::CopyToSection()
+     }
+ }
+ 
+-void SwRangeRedline::DelCopyOfSection()
++void SwRangeRedline::DelCopyOfSection(size_t nMyPos)
+ {
+     if( pCntntSect )
+     {
+@@ -3772,7 +3782,7 @@ void SwRangeRedline::DelCopyOfSection()
+                 // bDelLastPara condition above), only redlines before the
+                 // current ones can be affected.
+                 const SwRedlineTbl& rTbl = pDoc->GetRedlineTbl();
+-                sal_uInt16 n = rTbl.GetPos( this );
++                sal_uInt16 n = nMyPos;
+                 OSL_ENSURE( n != USHRT_MAX, "How strange. We don't exist!" );
+                 for( bool bBreak = false; !bBreak && n > 0; )
+                 {
+@@ -3813,16 +3823,13 @@ void SwRangeRedline::DelCopyOfSection()
+     }
+ }
+ 
+-void SwRangeRedline::MoveFromSection()
++void SwRangeRedline::MoveFromSection(size_t nMyPos)
+ {
+     if( pCntntSect )
+     {
+         SwDoc* pDoc = GetDoc();
+         const SwRedlineTbl& rTbl = pDoc->GetRedlineTbl();
+         std::vector<SwPosition*> aBeforeArr, aBehindArr;
+-        typedef std::map<sal_uInt16, SwRangeRedline*> IndexAndRange;
+-        IndexAndRange aIndexAndRangeMap;
+-        sal_uInt16 nMyPos = rTbl.GetPos( this );
+         OSL_ENSURE( this, "this is not in the array?" );
+         bool bBreak = false;
+         sal_uInt16 n;
+@@ -3834,14 +3841,12 @@ void SwRangeRedline::MoveFromSection()
+             {
+                 SwRangeRedline* pRedl = rTbl[n];
+                 aBehindArr.push_back(&pRedl->GetBound(true));
+-                aIndexAndRangeMap.insert(std::make_pair(n, pRedl));
+                 bBreak = false;
+             }
+             if( rTbl[ n ]->GetBound(false) == *GetPoint() )
+             {
+                 SwRangeRedline* pRedl = rTbl[n];
+                 aBehindArr.push_back(&pRedl->GetBound(false));
+-                aIndexAndRangeMap.insert(std::make_pair(n, pRedl));
+                 bBreak = false;
+             }
+         }
+@@ -3853,14 +3858,12 @@ void SwRangeRedline::MoveFromSection()
+             {
+                 SwRangeRedline* pRedl = rTbl[n];
+                 aBeforeArr.push_back(&pRedl->GetBound(true));
+-                aIndexAndRangeMap.insert(std::make_pair(n, pRedl));
+                 bBreak = false;
+             }
+             if( rTbl[ n ]->GetBound(false) == *GetPoint() )
+             {
+                 SwRangeRedline* pRedl = rTbl[n];
+                 aBeforeArr.push_back(&pRedl->GetBound(false));
+-                aIndexAndRangeMap.insert(std::make_pair(n, pRedl));
+                 bBreak = false;
+             }
+         }
+@@ -3935,13 +3938,6 @@ void SwRangeRedline::MoveFromSection()
+             *aBeforeArr[ n ] = *Start();
+         for( n = 0; n < aBehindArr.size(); ++n )
+             *aBehindArr[ n ] = *End();
+-        SwRedlineTbl& rResortTbl = const_cast<SwRedlineTbl&>(rTbl);
+-        for (auto& a : aIndexAndRangeMap)
+-        {
+-            // re-insert
+-            rResortTbl.Remove(a.first);
+-            rResortTbl.Insert(a.second);
+-        }
+     }
+     else
+         InvalidateRange();
+diff --git a/sw/source/core/undo/unredln.cxx b/sw/source/core/undo/unredln.cxx
+index 283bf30..48b80c7 100644
+--- a/sw/source/core/undo/unredln.cxx
++++ b/sw/source/core/undo/unredln.cxx
+@@ -243,7 +243,7 @@ void SwUndoRedlineSort::UndoRedlineImpl(SwDoc & rDoc, SwPaM & rPam)
+         OSL_ENSURE( USHRT_MAX != nFnd && nFnd+1 < (sal_uInt16)rDoc.GetRedlineTbl().size(),
+                     "could not find an Insert object" );
+         ++nFnd;
+-        rDoc.GetRedlineTbl()[nFnd]->Show( 1 );
++        rDoc.GetRedlineTbl()[nFnd]->Show(1, nFnd);
+     }
+ 
+     {
+-- 
+1.9.3
+

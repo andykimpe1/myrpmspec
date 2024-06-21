@@ -1,0 +1,316 @@
+From 70b0dc50d696905a290290056bdb3df3c71f7dcb Mon Sep 17 00:00:00 2001
+Message-Id: <70b0dc50d696905a290290056bdb3df3c71f7dcb.1436369684.git.erack@redhat.com>
+From: Eike Rathke <erack@redhat.com>
+Date: Tue, 7 Jul 2015 01:45:41 +0200
+Subject: [PATCH] always justify a referenced range in order, tdf#92468
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="------------erAck-patch-parts"
+
+This is a multi-part message in MIME format.
+--------------erAck-patch-parts
+Content-Type: text/plain; charset=UTF-8; format=fixed
+Content-Transfer-Encoding: 8bit
+
+
+(cherry picked from commit d24c6a0280b0287ee6c23ca89068323c6b7c3dd7)
+
+(re-)introduce ScComplexRefData::PutInOrder(), tdf#92468
+
+(cherry picked from commit ad3d2b6c2e88d191d76f90eb5be927f7ca76c670)
+
+introduce ScTokenArray::AdjustReferenceOnCopy(), tdf#92468
+
+(cherry picked from commit 369ee0b1faf79f1bd23c75ee04dd0dcc5bf283af)
+
+call ScTokenArray::AdjustReferenceOnCopy() in ScFormulaCell clone, tdf#92468
+
+(cherry picked from commit 3ddaeaab37d585971e376de6ad7b0f06f55f2e1a)
+
+f551e02a77a416b95f74266de896391d1d72eb3c
+0a7ac0d9d10e96223cd5f095a771aa6f9d271417
+0dc0c3528b35bc6ea2525bafb94d72ee65e4791a
+
+Backported.
+
+Reviewed-on: https://gerrit.libreoffice.org/16829
+Reviewed-by: Caolán McNamara <caolanm@redhat.com>
+Tested-by: Caolán McNamara <caolanm@redhat.com>
+
+Backported to 4-3, plus simple TokenPointers implementation.
+
+Change-Id: Id69c58800d28f1733777f7931a20d8ee7bdf034f
+---
+ sc/inc/refdata.hxx                  |  9 ++++
+ sc/inc/tokenarray.hxx               |  6 +++
+ sc/source/core/data/formulacell.cxx |  3 ++
+ sc/source/core/tool/interpr4.cxx    |  1 +
+ sc/source/core/tool/refdata.cxx     | 92 +++++++++++++++++++++++++++++++++++++
+ sc/source/core/tool/token.cxx       | 56 ++++++++++++++++++++++
+ 6 files changed, 167 insertions(+)
+
+
+--------------erAck-patch-parts
+Content-Type: text/x-patch; name="0001-always-justify-a-referenced-range-in-order-tdf-92468.patch"
+Content-Transfer-Encoding: 8bit
+Content-Disposition: attachment; filename="0001-always-justify-a-referenced-range-in-order-tdf-92468.patch"
+
+diff --git a/sc/inc/refdata.hxx b/sc/inc/refdata.hxx
+index 4d1e790..3fa6116 100644
+--- a/sc/inc/refdata.hxx
++++ b/sc/inc/refdata.hxx
+@@ -104,6 +104,9 @@ public:
+     SCCOL Col() const;
+     SCTAB Tab() const;
+ 
++    /** Adjust ordering (front-top-left/rear-bottom-right) to a new position. */
++    static void PutInOrder( ScSingleRefData& rRef1, ScSingleRefData& rRef2, const ScAddress& rPos );
++
+     bool operator==( const ScSingleRefData& ) const;
+     bool operator!=( const ScSingleRefData& ) const;
+ 
+@@ -147,8 +150,14 @@ struct ScComplexRefData
+     bool ValidExternal() const;
+ 
+     SC_DLLPUBLIC ScRange toAbs( const ScAddress& rPos ) const;
++
++    /** Set a new range, assuming that the ordering of the range matches the
++        ordering of the reference data flags already set. */
+     void SetRange( const ScRange& rRange, const ScAddress& rPos );
+ 
++    /** Adjust ordering (front-top-left/rear-bottom-right) to a new position. */
++    void PutInOrder( const ScAddress& rPos );
++
+     inline bool operator==( const ScComplexRefData& r ) const
+         { return Ref1 == r.Ref1 && Ref2 == r.Ref2; }
+     /** Enlarge range if reference passed is not within existing range.
+diff --git a/sc/inc/tokenarray.hxx b/sc/inc/tokenarray.hxx
+index e134f12..7e193b7 100644
+--- a/sc/inc/tokenarray.hxx
++++ b/sc/inc/tokenarray.hxx
+@@ -216,6 +216,12 @@ public:
+     void AdjustReferenceOnMovedOriginIfOtherSheet( const ScAddress& rOldPos, const ScAddress& rNewPos );
+ 
+     /**
++     * Adjust internal range references on base position change to justify /
++     * put in order the relative references.
++     */
++    void AdjustReferenceOnCopy( const ScAddress& rNewPos );
++
++    /**
+      * Clear sheet deleted flag from internal reference tokens if the sheet
+      * index falls within specified range.  Note that when a reference is on a
+      * sheet that's been deleted, its referenced sheet index retains the
+diff --git a/sc/source/core/data/formulacell.cxx b/sc/source/core/data/formulacell.cxx
+index da68f68..d0b227f 100644
+--- a/sc/source/core/data/formulacell.cxx
++++ b/sc/source/core/data/formulacell.cxx
+@@ -768,6 +768,9 @@ ScFormulaCell::ScFormulaCell( const ScFormulaCell& rCell, ScDocument& rDoc, cons
+         pCode->AdjustAbsoluteRefs( rCell.pDocument, rCell.aPos, aPos, false, bCopyBetweenDocs );
+     }
+ 
++    if (!pDocument->IsClipOrUndo())
++        pCode->AdjustReferenceOnCopy( aPos);
++
+     if ( nCloneFlags & SC_CLONECELL_ADJUST3DREL )
+         pCode->ReadjustRelative3DReferences( rCell.aPos, aPos );
+ 
+diff --git a/sc/source/core/tool/interpr4.cxx b/sc/source/core/tool/interpr4.cxx
+index 428fd9e..18dfec7 100644
+--- a/sc/source/core/tool/interpr4.cxx
++++ b/sc/source/core/tool/interpr4.cxx
+@@ -1327,6 +1327,7 @@ void ScInterpreter::DoubleRefToRange( const ScComplexRefData & rCRef,
+     rRange.aStart.Set( nCol, nRow, nTab );
+     SingleRefToVars( rCRef.Ref2, nCol, nRow, nTab);
+     rRange.aEnd.Set( nCol, nRow, nTab );
++    rRange.Justify();
+     if (! pDok->aTableOpList.empty() && !bDontCheckForTableOp )
+     {
+         if ( IsTableOpInRange( rRange ) )
+diff --git a/sc/source/core/tool/refdata.cxx b/sc/source/core/tool/refdata.cxx
+index 7990df0..1c6455d 100644
+--- a/sc/source/core/tool/refdata.cxx
++++ b/sc/source/core/tool/refdata.cxx
+@@ -259,6 +259,93 @@ SCTAB ScSingleRefData::Tab() const
+     return mnTab;
+ }
+ 
++// static
++void ScSingleRefData::PutInOrder( ScSingleRefData& rRef1, ScSingleRefData& rRef2, const ScAddress& rPos )
++{
++    sal_uInt8 nRelState1 = rRef1.Flags.bRelName ?
++        ((rRef1.Flags.bTabRel ? 4 : 0) |
++         (rRef1.Flags.bRowRel ? 2 : 0) |
++         (rRef1.Flags.bColRel ? 1 : 0)) :
++        0;
++
++    sal_uInt8 nRelState2 = rRef2.Flags.bRelName ?
++        ((rRef2.Flags.bTabRel ? 4 : 0) |
++         (rRef2.Flags.bRowRel ? 2 : 0) |
++         (rRef2.Flags.bColRel ? 1 : 0)) :
++        0;
++
++    SCCOL nCol1 = rRef1.Flags.bColRel ? rPos.Col() + rRef1.mnCol : rRef1.mnCol;
++    SCCOL nCol2 = rRef2.Flags.bColRel ? rPos.Col() + rRef2.mnCol : rRef2.mnCol;
++    if (nCol2 < nCol1)
++    {
++        rRef1.mnCol = rRef2.Flags.bColRel ? nCol2 - rPos.Col() : nCol2;
++        rRef2.mnCol = rRef1.Flags.bColRel ? nCol1 - rPos.Col() : nCol1;
++        if (rRef1.Flags.bRelName && rRef1.Flags.bColRel)
++            nRelState2 |= 1;
++        else
++            nRelState2 &= ~1;
++        if (rRef2.Flags.bRelName && rRef2.Flags.bColRel)
++            nRelState1 |= 1;
++        else
++            nRelState1 &= ~1;
++        bool bTmp = rRef1.Flags.bColRel;
++        rRef1.Flags.bColRel = rRef2.Flags.bColRel;
++        rRef2.Flags.bColRel = bTmp;
++        bTmp = rRef1.Flags.bColDeleted;
++        rRef1.Flags.bColDeleted = rRef2.Flags.bColDeleted;
++        rRef2.Flags.bColDeleted = bTmp;
++    }
++
++    SCROW nRow1 = rRef1.Flags.bRowRel ? rPos.Row() + rRef1.mnRow : rRef1.mnRow;
++    SCROW nRow2 = rRef2.Flags.bRowRel ? rPos.Row() + rRef2.mnRow : rRef2.mnRow;
++    if (nRow2 < nRow1)
++    {
++        rRef1.mnRow = rRef2.Flags.bRowRel ? nRow2 - rPos.Row() : nRow2;
++        rRef2.mnRow = rRef1.Flags.bRowRel ? nRow1 - rPos.Row() : nRow1;
++        if (rRef1.Flags.bRelName && rRef1.Flags.bRowRel)
++            nRelState2 |= 2;
++        else
++            nRelState2 &= ~2;
++        if (rRef2.Flags.bRelName && rRef2.Flags.bRowRel)
++            nRelState1 |= 2;
++        else
++            nRelState1 &= ~2;
++        bool bTmp = rRef1.Flags.bRowRel;
++        rRef1.Flags.bRowRel = rRef2.Flags.bRowRel;
++        rRef2.Flags.bRowRel = bTmp;
++        bTmp = rRef1.Flags.bRowDeleted;
++        rRef1.Flags.bRowDeleted = rRef2.Flags.bRowDeleted;
++        rRef2.Flags.bRowDeleted = bTmp;
++    }
++
++    SCTAB nTab1 = rRef1.Flags.bTabRel ? rPos.Tab() + rRef1.mnTab : rRef1.mnTab;
++    SCTAB nTab2 = rRef2.Flags.bTabRel ? rPos.Tab() + rRef2.mnTab : rRef2.mnTab;
++    if (nTab2 < nTab1)
++    {
++        rRef1.mnTab = rRef2.Flags.bTabRel ? nTab2 - rPos.Tab() : nTab2;
++        rRef2.mnTab = rRef1.Flags.bTabRel ? nTab1 - rPos.Tab() : nTab1;
++        if (rRef1.Flags.bRelName && rRef1.Flags.bTabRel)
++            nRelState2 |= 4;
++        else
++            nRelState2 &= ~4;
++        if (rRef2.Flags.bRelName && rRef2.Flags.bTabRel)
++            nRelState1 |= 4;
++        else
++            nRelState1 &= ~4;
++        bool bTmp = rRef1.Flags.bTabRel;
++        rRef1.Flags.bTabRel = rRef2.Flags.bTabRel;
++        rRef2.Flags.bTabRel = bTmp;
++        bTmp = rRef1.Flags.bTabDeleted;
++        rRef1.Flags.bTabDeleted = rRef2.Flags.bTabDeleted;
++        rRef2.Flags.bTabDeleted = bTmp;
++    }
++
++    // bFlag3D stays the same on both references.
++
++    rRef1.Flags.bRelName = (nRelState1 != 0);
++    rRef2.Flags.bRelName = (nRelState2 != 0);
++}
++
+ bool ScSingleRefData::operator==( const ScSingleRefData& r ) const
+ {
+     return mnFlagValue == r.mnFlagValue && mnCol == r.mnCol && mnRow == r.mnRow && mnTab == r.mnTab;
+@@ -403,6 +490,11 @@ void ScComplexRefData::SetRange( const ScRange& rRange, const ScAddress& rPos )
+     Ref2.SetAddress(rRange.aEnd, rPos);
+ }
+ 
++void ScComplexRefData::PutInOrder( const ScAddress& rPos )
++{
++    ScSingleRefData::PutInOrder( Ref1, Ref2, rPos);
++}
++
+ #if DEBUG_FORMULA_COMPILER
+ void ScComplexRefData::Dump( int nIndent ) const
+ {
+diff --git a/sc/source/core/tool/token.cxx b/sc/source/core/tool/token.cxx
+index 4c7edd8..f9fcb47 100644
+--- a/sc/source/core/tool/token.cxx
++++ b/sc/source/core/tool/token.cxx
+@@ -112,6 +112,34 @@ namespace
+         rRef.SetAbsTab(0);
+     }
+ 
++    struct TokenPointerRange
++    {
++        FormulaToken**  mpStart;
++        FormulaToken**  mpStop;
++
++        TokenPointerRange() : mpStart(NULL), mpStop(NULL) {}
++        TokenPointerRange( FormulaToken** p, sal_uInt16 n ) :
++            mpStart(p), mpStop( p + static_cast<size_t>(n)) {}
++    };
++    struct TokenPointers
++    {
++        TokenPointerRange maPointerRange[2];
++
++        TokenPointers( FormulaToken** pCode, sal_uInt16 nLen, FormulaToken** pRPN, sal_uInt16 nRPN )
++        {
++            maPointerRange[0] = TokenPointerRange( pCode, nLen);
++            maPointerRange[1] = TokenPointerRange( pRPN, nRPN);
++        }
++
++        static bool skipToken( size_t i, const FormulaToken* const * pp )
++        {
++            // Handle all tokens in RPN, and code tokens only if they have a
++            // reference count of 1, which means they are not referenced in
++            // RPN.
++            return i == 0 && (*pp)->GetRef() > 1;
++        }
++    };
++
+ } // namespace
+ 
+ // Align MemPools on 4k boundaries - 64 bytes (4k is a MUST for OS/2)
+@@ -3707,6 +3735,34 @@ void ScTokenArray::AdjustReferenceOnMovedOriginIfOtherSheet( const ScAddress& rO
+     }
+ }
+ 
++void ScTokenArray::AdjustReferenceOnCopy( const ScAddress& rNewPos )
++{
++    TokenPointers aPtrs( pCode, nLen, pRPN, nRPN);
++    for (size_t j=0; j<2; ++j)
++    {
++        FormulaToken** pp = aPtrs.maPointerRange[j].mpStart;
++        FormulaToken** pEnd = aPtrs.maPointerRange[j].mpStop;
++        for (; pp != pEnd; ++pp)
++        {
++            if (TokenPointers::skipToken(j,pp))
++                continue;
++
++            switch ((*pp)->GetType())
++            {
++                case svDoubleRef:
++                    {
++                        ScToken* pToken = static_cast<ScToken*>(*pp);
++                        ScComplexRefData& rRef = pToken->GetDoubleRef();
++                        rRef.PutInOrder( rNewPos);
++                    }
++                    break;
++                default:
++                    ;
++            }
++        }
++    }
++}
++
+ namespace {
+ 
+ void clearTabDeletedFlag( ScSingleRefData& rRef, const ScAddress& rPos, SCTAB nStartTab, SCTAB nEndTab )
+
+--------------erAck-patch-parts--
+
+

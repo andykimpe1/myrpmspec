@@ -1,0 +1,559 @@
+From bc839c159d4ee94ef8ca08975cf65be37378ae04 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Caol=C3=A1n=20McNamara?= <caolanm@redhat.com>
+Date: Thu, 11 Dec 2014 16:20:49 +0000
+Subject: [PATCH] Related: fdo#87242 init VirtualDevice with size of surface
+
+otherwise vcl's clipping doesn't work quite right when the render text
+with vcl apis fallback is used.
+
+Manually forced in my case, but it should happen in practice with vertical
+text, so if there is a bug about vertical text not appearing in slideshows then
+this is part of the fix for that.
+
+Windows and Mac remain unchanged as initialized with 1, 1. If the same problem
+affects those platforms then they'll need to be adjusted to remember their
+height/widths from the ctor and those values plugged in here instead
+
+(cherry picked from commit f95b0743da4239e047db8638c61f90f8bbe54306)
+(cherry picked from commit e2be2c23c1ad61b3bd640be6f16d66f5cd925d38)
+
+Conflicts:
+	desktop/source/lib/init.cxx
+
+Related: fdo#87242 merge duplicate clip setup code
+
+favoring the vclcanvas one for the places where
+they diverge
+
+(cherry picked from commit f88b5ab8692ee7ecf58b570e703d0e7f10cc2f0d)
+(cherry picked from commit e0e96579ce3a248ee5d3b07ecf90f38e2020c555)
+
+Conflicts:
+	canvas/source/cairo/cairo_canvashelper_text.cxx
+	canvas/source/vcl/canvashelper.cxx
+
+Resolves: fdo#87242 reuse vcl clip for cairo during animations
+
+(cherry picked from commit 94d935eecbba0161de2616c2234b4a5d9d3cad88)
+(cherry picked from commit 3a108b0600ce61f7960d561cee9989ab3a48780f)
+
+stray debugging code
+
+(cherry picked from commit 067b560335195b24eeedc4514956029ea975fbbf)
+(cherry picked from commit fafc85559097166eceb67c4db4528cc9977e4184)
+
+Change-Id: I2f82f0db0cf446d7db21f0a7ee4f8c15c7ebdb42
+18e3d4e7659ebd4cb90c86718c1b1035671b4be3
+0a26d4c4092226732620c3852b0402ee45d4fa1d
+953389e236739c01226365c33ab777fc3972b69d
+---
+ canvas/source/cairo/cairo_canvashelper.hxx      |   3 +
+ canvas/source/cairo/cairo_canvashelper_text.cxx | 117 ++++++++++--------------
+ canvas/source/cairo/cairo_quartz_cairo.cxx      |   2 +-
+ canvas/source/cairo/cairo_win32_cairo.cxx       |   2 +-
+ canvas/source/cairo/cairo_xlib_cairo.cxx        |   7 +-
+ canvas/source/tools/canvastools.cxx             |  75 +++++++++++++++
+ canvas/source/vcl/canvashelper.cxx              |  79 +---------------
+ include/canvas/canvastools.hxx                  |   6 ++
+ include/vcl/virdev.hxx                          |   3 +-
+ vcl/source/gdi/virdev.cxx                       |   6 +-
+ 10 files changed, 147 insertions(+), 153 deletions(-)
+
+diff --git a/canvas/source/cairo/cairo_canvashelper.hxx b/canvas/source/cairo/cairo_canvashelper.hxx
+index 9258e7c..ccb03ac 100644
+--- a/canvas/source/cairo/cairo_canvashelper.hxx
++++ b/canvas/source/cairo/cairo_canvashelper.hxx
+@@ -310,6 +310,9 @@ namespace cairocanvas
+         ::cairo::CairoSharedPtr     mpCairo;
+         ::cairo::SurfaceSharedPtr   mpSurface;
+         ::basegfx::B2ISize maSize;
++
++        void clip_cairo_from_dev(::OutputDevice& rOutDev);
++
+     };
+ 
+     /// also needed from SpriteHelper
+diff --git a/canvas/source/cairo/cairo_canvashelper_text.cxx b/canvas/source/cairo/cairo_canvashelper_text.cxx
+index d65f2de..78a2ddf 100644
+--- a/canvas/source/cairo/cairo_canvashelper_text.cxx
++++ b/canvas/source/cairo/cairo_canvashelper_text.cxx
+@@ -127,73 +127,7 @@ namespace cairocanvas
+ 
+         // TODO(P2): Don't change clipping all the time, maintain current clip
+         // state and change only when update is necessary
+-
+-        // accumulate non-empty clips into one region
+-        // ==========================================
+-
+-        Region aClipRegion;
+-
+-        if( viewState.Clip.is() )
+-        {
+-            ::basegfx::B2DPolyPolygon aClipPoly(
+-                ::basegfx::unotools::b2DPolyPolygonFromXPolyPolygon2D(
+-                    viewState.Clip) );
+-
+-            if( aClipPoly.count() )
+-            {
+-                // setup non-empty clipping
+-                ::basegfx::B2DHomMatrix aMatrix;
+-                aClipPoly.transform(
+-                    ::basegfx::unotools::homMatrixFromAffineMatrix( aMatrix,
+-                                                                    viewState.AffineTransform ) );
+-
+-                aClipRegion = Region::GetRegionFromPolyPolygon( ::PolyPolygon( aClipPoly ) );
+-            }
+-        }
+-
+-        if( renderState.Clip.is() )
+-        {
+-            ::basegfx::B2DPolyPolygon aClipPoly(
+-                ::basegfx::unotools::b2DPolyPolygonFromXPolyPolygon2D(
+-                    renderState.Clip) );
+-
+-            ::basegfx::B2DHomMatrix aMatrix;
+-            aClipPoly.transform(
+-                ::canvas::tools::mergeViewAndRenderTransform( aMatrix,
+-                                                              viewState,
+-                                                              renderState ) );
+-
+-            if( aClipPoly.count() )
+-            {
+-                // setup non-empty clipping
+-                Region aRegion = Region::GetRegionFromPolyPolygon( ::PolyPolygon( aClipPoly ) );
+-
+-                if( aClipRegion.IsEmpty() )
+-                    aClipRegion = aRegion;
+-                else
+-                    aClipRegion.Intersect( aRegion );
+-            }
+-            else
+-            {
+-                // clip polygon is empty
+-                aClipRegion.SetEmpty();
+-            }
+-        }
+-
+-        // setup accumulated clip region. Note that setting an
+-        // empty clip region denotes "clip everything" on the
+-        // OutputDevice (which is why we translate that into
+-        // SetClipRegion() here). When both view and render clip
+-        // are empty, aClipRegion remains default-constructed,
+-        // i.e. empty, too.
+-        if( aClipRegion.IsEmpty() )
+-        {
+-            rOutDev.SetClipRegion();
+-        }
+-        else
+-        {
+-            rOutDev.SetClipRegion( aClipRegion );
+-        }
++        ::canvas::tools::clipOutDev(viewState, renderState, rOutDev);
+ 
+         if( eColorType != IGNORE_COLOR )
+         {
+@@ -238,6 +172,31 @@ namespace cairocanvas
+         return nTransparency;
+     }
+ 
++    class DeviceSettingsGuard
++    {
++    private:
++        OutputDevice *mpVirtualDevice;
++        cairo_t *mpCairo;
++        bool mbMappingWasEnabled;
++    public:
++        DeviceSettingsGuard(OutputDevice *pVirtualDevice, cairo_t *pCairo)
++            : mpVirtualDevice(pVirtualDevice)
++            , mpCairo(pCairo)
++            , mbMappingWasEnabled(mpVirtualDevice->IsMapModeEnabled())
++        {
++            cairo_save(mpCairo);
++            mpVirtualDevice->Push();
++            mpVirtualDevice->EnableMapMode(false);
++        }
++
++        ~DeviceSettingsGuard()
++        {
++            mpVirtualDevice->EnableMapMode(mbMappingWasEnabled);
++            mpVirtualDevice->Pop();
++            cairo_restore(mpCairo);
++        }
++    };
++
+     bool setupTextOutput( OutputDevice&                                     rOutDev,
+                           const rendering::XCanvas*                         pOwner,
+                           ::Point&                                          o_rOutPos,
+@@ -247,14 +206,12 @@ namespace cairocanvas
+     {
+         setupOutDevState( rOutDev, pOwner, viewState, renderState, TEXT_COLOR );
+ 
+-        ::Font aVCLFont;
+-
+         CanvasFont* pFont = dynamic_cast< CanvasFont* >( xFont.get() );
+ 
+         ENSURE_ARG_OR_THROW( pFont,
+                          "CanvasHelper::setupTextOutput(): Font not compatible with this canvas" );
+ 
+-        aVCLFont = pFont->getVCLFont();
++        ::Font aVCLFont = pFont->getVCLFont();
+ 
+         Color aColor( COL_BLACK );
+ 
+@@ -273,10 +230,20 @@ namespace cairocanvas
+ 
+         rOutDev.SetFont( aVCLFont );
+ 
+-
+         return true;
+     }
+ 
++    //set the clip of the rOutDev to the cairo surface
++    void CanvasHelper::clip_cairo_from_dev(::OutputDevice& rOutDev)
++    {
++        Region aRegion(rOutDev.GetClipRegion());
++        if (!aRegion.IsEmpty() && !aRegion.IsNull())
++        {
++            doPolyPolygonImplementation(aRegion.GetAsB2DPolyPolygon(), Clip, mpCairo.get(),
++                                        NULL, mpSurfaceProvider, rendering::FillRule_EVEN_ODD);
++        }
++    }
++
+     uno::Reference< rendering::XCachedPrimitive > CanvasHelper::drawText( const rendering::XCanvas*                         pOwner,
+                                                                           const rendering::StringContext&                   text,
+                                                                           const uno::Reference< rendering::XCanvasFont >&   xFont,
+@@ -297,6 +264,8 @@ namespace cairocanvas
+ 
+         if( mpVirtualDevice )
+         {
++            DeviceSettingsGuard aGuard(mpVirtualDevice.get(), mpCairo.get());
++
+ #if defined CAIRO_HAS_WIN32_SURFACE
+             // FIXME: Some kind of work-araound...
+             cairo_rectangle (mpSurface->getCairo().get(), 0, 0, 0, 0);
+@@ -330,6 +299,8 @@ namespace cairocanvas
+             // TODO(F2): alpha
+             mpVirtualDevice->SetLayoutMode( nLayoutMode );
+ 
++            clip_cairo_from_dev(*mpVirtualDevice);
++
+             OSL_TRACE(":cairocanvas::CanvasHelper::drawText(O,t,f,v,r,d): %s", OUStringToOString( text.Text.copy( text.StartPosition, text.Length ),
+                                                                                                          RTL_TEXTENCODING_UTF8 ).getStr());
+ 
+@@ -357,6 +328,8 @@ namespace cairocanvas
+ 
+             if( mpVirtualDevice )
+             {
++                DeviceSettingsGuard aGuard(mpVirtualDevice.get(), mpCairo.get());
++
+ #if defined CAIRO_HAS_WIN32_SURFACE
+                 // FIXME: Some kind of work-araound...
+                 cairo_rectangle( mpSurface->getCairo().get(), 0, 0, 0, 0);
+@@ -371,6 +344,8 @@ namespace cairocanvas
+                 if( !setupTextOutput( *mpVirtualDevice, pOwner, aOutpos, viewState, renderState, xLayoutedText->getFont() ) )
+                     return uno::Reference< rendering::XCachedPrimitive >(NULL); // no output necessary
+ 
++                clip_cairo_from_dev(*mpVirtualDevice);
++
+                 // TODO(F2): What about the offset scalings?
+                 pTextLayout->draw( mpSurface, *mpVirtualDevice, aOutpos, viewState, renderState );
+             }
+diff --git a/canvas/source/cairo/cairo_quartz_cairo.cxx b/canvas/source/cairo/cairo_quartz_cairo.cxx
+index 07951ee..6b8b9aa 100644
+--- a/canvas/source/cairo/cairo_quartz_cairo.cxx
++++ b/canvas/source/cairo/cairo_quartz_cairo.cxx
+@@ -269,7 +269,7 @@ namespace cairo
+         aSystemGraphicsData.nSize = sizeof(SystemGraphicsData);
+         aSystemGraphicsData.rCGContext = getCGContext();
+         return boost::shared_ptr<VirtualDevice>(
+-            new VirtualDevice( &aSystemGraphicsData, getDepth() ));
++            new VirtualDevice( &aSystemGraphicsData, Size(1, 1), getDepth() ));
+     }
+ 
+     /**
+diff --git a/canvas/source/cairo/cairo_win32_cairo.cxx b/canvas/source/cairo/cairo_win32_cairo.cxx
+index a70add9..8d53b4f 100644
+--- a/canvas/source/cairo/cairo_win32_cairo.cxx
++++ b/canvas/source/cairo/cairo_win32_cairo.cxx
+@@ -197,7 +197,7 @@ namespace cairo
+         aSystemGraphicsData.hDC = cairo_win32_surface_get_dc( mpSurface.get() );
+ 
+         return boost::shared_ptr<VirtualDevice>(
+-            new VirtualDevice( &aSystemGraphicsData, sal::static_int_cast<USHORT>(getDepth()) ));
++            new VirtualDevice( &aSystemGraphicsData, Size(1, 1), sal::static_int_cast<USHORT>(getDepth()) ));
+     }
+ 
+ 
+diff --git a/canvas/source/cairo/cairo_xlib_cairo.cxx b/canvas/source/cairo/cairo_xlib_cairo.cxx
+index 9b49c7e..79ab2a5 100644
+--- a/canvas/source/cairo/cairo_xlib_cairo.cxx
++++ b/canvas/source/cairo/cairo_xlib_cairo.cxx
+@@ -277,8 +277,13 @@ namespace cairo
+         aSystemGraphicsData.hDrawable = getDrawable();
+         aSystemGraphicsData.pXRenderFormat = getRenderFormat();
+ 
++        int width = cairo_xlib_surface_get_width(mpSurface.get());
++        int height = cairo_xlib_surface_get_height(mpSurface.get());
++
+         return boost::shared_ptr<VirtualDevice>(
+-            new VirtualDevice( &aSystemGraphicsData, std::max( getDepth(), 0 ) ));
++            new VirtualDevice(&aSystemGraphicsData,
++                              Size(width, height),
++                              std::max(getDepth(), 0)));
+     }
+ 
+     /**
+diff --git a/canvas/source/tools/canvastools.cxx b/canvas/source/tools/canvastools.cxx
+index ae79cc9..6698f58 100644
+--- a/canvas/source/tools/canvastools.cxx
++++ b/canvas/source/tools/canvastools.cxx
+@@ -1290,6 +1290,81 @@ namespace canvas
+                                    nColorSteps ) );
+         }
+ 
++        void clipOutDev(const rendering::ViewState& viewState,
++                        const rendering::RenderState& renderState,
++                        OutputDevice& rOutDev,
++                        OutputDevice* p2ndOutDev)
++        {
++            // accumulate non-empty clips into one region
++            Region aClipRegion(true);
++
++            if( viewState.Clip.is() )
++            {
++                ::basegfx::B2DPolyPolygon aClipPoly(
++                    ::basegfx::unotools::b2DPolyPolygonFromXPolyPolygon2D(viewState.Clip) );
++
++                if( aClipPoly.count() )
++                {
++                    // setup non-empty clipping
++                    ::basegfx::B2DHomMatrix aMatrix;
++                    aClipPoly.transform(
++                        ::basegfx::unotools::homMatrixFromAffineMatrix( aMatrix,
++                                                                        viewState.AffineTransform ) );
++
++                    aClipRegion = Region::GetRegionFromPolyPolygon( PolyPolygon( aClipPoly ) );
++                }
++                else
++                {
++                    // clip polygon is empty
++                    aClipRegion.SetEmpty();
++                }
++            }
++
++            if( renderState.Clip.is() )
++            {
++                ::basegfx::B2DPolyPolygon aClipPoly(
++                    ::basegfx::unotools::b2DPolyPolygonFromXPolyPolygon2D(renderState.Clip) );
++
++                ::basegfx::B2DHomMatrix aMatrix;
++                aClipPoly.transform(
++                    ::canvas::tools::mergeViewAndRenderTransform( aMatrix,
++                                                                  viewState,
++                                                                  renderState ) );
++
++                if( aClipPoly.count() )
++                {
++                    // setup non-empty clipping
++                    Region aRegion = Region::GetRegionFromPolyPolygon( PolyPolygon( aClipPoly ) );
++                    aClipRegion.Intersect( aRegion );
++                }
++                else
++                {
++                    // clip polygon is empty
++                    aClipRegion.SetEmpty();
++                }
++            }
++
++            // setup accumulated clip region. Note that setting an
++            // empty clip region denotes "clip everything" on the
++            // OutputDevice (which is why we translate that into
++            // SetClipRegion() here). When both view and render clip
++            // are empty, aClipRegion remains default-constructed,
++            // i.e. empty, too.
++            if( aClipRegion.IsNull() )
++            {
++                rOutDev.SetClipRegion();
++
++                if( p2ndOutDev )
++                    p2ndOutDev->SetClipRegion();
++            }
++            else
++            {
++                rOutDev.SetClipRegion( aClipRegion );
++
++                if( p2ndOutDev )
++                    p2ndOutDev->SetClipRegion( aClipRegion );
++            }
++        }
+     } // namespace tools
+ 
+ } // namespace canvas
+diff --git a/canvas/source/vcl/canvashelper.cxx b/canvas/source/vcl/canvashelper.cxx
+index 0bd3954..5424e9e 100644
+--- a/canvas/source/vcl/canvashelper.cxx
++++ b/canvas/source/vcl/canvashelper.cxx
+@@ -1236,78 +1236,7 @@ namespace vclcanvas
+ 
+         // TODO(P2): Don't change clipping all the time, maintain current clip
+         // state and change only when update is necessary
+-
+-        // accumulate non-empty clips into one region
+-        // ==========================================
+-
+-        Region aClipRegion(true);
+-
+-        if( viewState.Clip.is() )
+-        {
+-            ::basegfx::B2DPolyPolygon aClipPoly(
+-                ::basegfx::unotools::b2DPolyPolygonFromXPolyPolygon2D(viewState.Clip) );
+-
+-            if( aClipPoly.count() )
+-            {
+-                // setup non-empty clipping
+-                ::basegfx::B2DHomMatrix aMatrix;
+-                aClipPoly.transform(
+-                    ::basegfx::unotools::homMatrixFromAffineMatrix( aMatrix,
+-                                                                    viewState.AffineTransform ) );
+-
+-                aClipRegion = Region::GetRegionFromPolyPolygon( ::PolyPolygon( aClipPoly ) );
+-            }
+-            else
+-            {
+-                // clip polygon is empty
+-                aClipRegion.SetEmpty();
+-            }
+-        }
+-
+-        if( renderState.Clip.is() )
+-        {
+-            ::basegfx::B2DPolyPolygon aClipPoly(
+-                ::basegfx::unotools::b2DPolyPolygonFromXPolyPolygon2D(renderState.Clip) );
+-
+-            ::basegfx::B2DHomMatrix aMatrix;
+-            aClipPoly.transform(
+-                ::canvas::tools::mergeViewAndRenderTransform( aMatrix,
+-                                                              viewState,
+-                                                              renderState ) );
+-
+-            if( aClipPoly.count() )
+-            {
+-                // setup non-empty clipping
+-                Region aRegion = Region::GetRegionFromPolyPolygon( ::PolyPolygon( aClipPoly ) );
+-                aClipRegion.Intersect( aRegion );
+-            }
+-            else
+-            {
+-                // clip polygon is empty
+-                aClipRegion.SetEmpty();
+-            }
+-        }
+-
+-        // setup accumulated clip region. Note that setting an
+-        // empty clip region denotes "clip everything" on the
+-        // OutputDevice (which is why we translate that into
+-        // SetClipRegion() here). When both view and render clip
+-        // are empty, aClipRegion remains default-constructed,
+-        // i.e. empty, too.
+-        if( aClipRegion.IsNull() )
+-        {
+-            rOutDev.SetClipRegion();
+-
+-            if( p2ndOutDev )
+-                p2ndOutDev->SetClipRegion();
+-        }
+-        else
+-        {
+-            rOutDev.SetClipRegion( aClipRegion );
+-
+-            if( p2ndOutDev )
+-                p2ndOutDev->SetClipRegion( aClipRegion );
+-        }
++        ::canvas::tools::clipOutDev(viewState, renderState, rOutDev, p2ndOutDev);
+ 
+         Color aColor( COL_WHITE );
+ 
+@@ -1373,18 +1302,16 @@ namespace vclcanvas
+         ENSURE_OR_THROW( mpOutDev.get(),
+                          "outdev null. Are we disposed?" );
+ 
+-        setupOutDevState( viewState, renderState, TEXT_COLOR );
+-
+         OutputDevice& rOutDev( mpOutDev->getOutDev() );
+ 
+-        ::Font aVCLFont;
++        setupOutDevState( viewState, renderState, TEXT_COLOR );
+ 
+         CanvasFont* pFont = dynamic_cast< CanvasFont* >( xFont.get() );
+ 
+         ENSURE_ARG_OR_THROW( pFont,
+                              "Font not compatible with this canvas" );
+ 
+-        aVCLFont = pFont->getVCLFont();
++        ::Font aVCLFont = pFont->getVCLFont();
+ 
+         Color aColor( COL_BLACK );
+ 
+diff --git a/include/canvas/canvastools.hxx b/include/canvas/canvastools.hxx
+index de5a76c..3881537 100644
+--- a/include/canvas/canvastools.hxx
++++ b/include/canvas/canvastools.hxx
+@@ -77,6 +77,7 @@ namespace com { namespace sun { namespace star { namespace awt
+ } } } }
+ 
+ class Color;
++class OutputDevice;
+ 
+ namespace canvas
+ {
+@@ -579,6 +580,11 @@ namespace canvas
+             ::std::size_t       mnEntries;
+             bool                mbCaseSensitive;
+         };
++
++        CANVASTOOLS_DLLPUBLIC void clipOutDev(const css::rendering::ViewState& viewState,
++                        const css::rendering::RenderState& renderState,
++                        OutputDevice& rOutDev,
++                        OutputDevice* p2ndOutDev=NULL);
+     }
+ }
+ 
+diff --git a/include/vcl/virdev.hxx b/include/vcl/virdev.hxx
+index 87205c7..1c0a412 100644
+--- a/include/vcl/virdev.hxx
++++ b/include/vcl/virdev.hxx
+@@ -110,7 +110,8 @@ public:
+         Any rendering will happen directly on the context and not on any intermediate bitmap.
+         Note: This might not be supported on all platforms !
+     */
+-    explicit            VirtualDevice( const SystemGraphicsData *pData, sal_uInt16 nBitCount );
++    explicit            VirtualDevice(const SystemGraphicsData *pData, const Size &rSize,
++                                      sal_uInt16 nBitCount);
+ 
+     virtual             ~VirtualDevice();
+ 
+diff --git a/vcl/source/gdi/virdev.cxx b/vcl/source/gdi/virdev.cxx
+index 6378785..9dcc286 100644
+--- a/vcl/source/gdi/virdev.cxx
++++ b/vcl/source/gdi/virdev.cxx
+@@ -236,13 +236,15 @@ VirtualDevice::VirtualDevice( const OutputDevice& rCompDev, sal_uInt16 nBitCount
+     mnAlphaDepth = sal::static_int_cast<sal_Int8>(nAlphaBitCount);
+ }
+ 
+-VirtualDevice::VirtualDevice( const SystemGraphicsData *pData, sal_uInt16 nBitCount )
++VirtualDevice::VirtualDevice(const SystemGraphicsData *pData, const Size &rSize,
++                             sal_uInt16 nBitCount)
+ :   mpVirDev( NULL ),
+     meRefDevMode( REFDEV_NONE )
+ {
+     SAL_INFO( "vcl.gdi", "VirtualDevice::VirtualDevice( " << nBitCount << " )" );
+ 
+-    ImplInitVirDev( Application::GetDefaultDevice(), 1, 1, nBitCount, pData );
++    ImplInitVirDev(Application::GetDefaultDevice(), rSize.Width(), rSize.Height(),
++                   nBitCount, pData);
+ }
+ 
+ VirtualDevice::~VirtualDevice()
+-- 
+1.9.3
+

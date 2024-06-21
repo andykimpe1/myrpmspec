@@ -1,0 +1,560 @@
+From 9638e6207c7fc48712b1b238177462c00f5011e8 Mon Sep 17 00:00:00 2001
+From: David Tardon <dtardon@redhat.com>
+Date: Wed, 3 Dec 2014 22:01:57 +0100
+Subject: [PATCH] ooo#93212 avoid slicing during construction of SdrPage
+
+Also hide copy ctor and assignment operator of all derived classes, to
+ensure that Clone() is the only method to make copies of them.
+
+Change-Id: Icb3b50c63b086abe8c9add32e3041fe19692d20b
+---
+ basctl/source/dlged/dlgedpage.cxx        | 10 +++-
+ basctl/source/inc/dlgedpage.hxx          |  5 ++
+ include/svx/fmpage.hxx                   |  9 +++-
+ include/svx/obj3d.hxx                    |  8 ++-
+ include/svx/svdpage.hxx                  | 27 +++++++---
+ reportdesign/inc/RptPage.hxx             |  2 +
+ reportdesign/source/core/sdr/RptPage.cxx |  4 +-
+ sc/inc/drawpage.hxx                      |  3 ++
+ sd/inc/sdpage.hxx                        |  6 ++-
+ sd/source/core/sdpage2.cxx               | 28 ++++++-----
+ svx/source/engine3d/obj3d.cxx            | 11 ++++-
+ svx/source/form/fmpage.cxx               | 11 ++++-
+ svx/source/svdraw/svdpage.cxx            | 84 +++++++++-----------------------
+ sw/inc/dpage.hxx                         |  3 ++
+ 14 files changed, 122 insertions(+), 89 deletions(-)
+
+diff --git a/basctl/source/dlged/dlgedpage.cxx b/basctl/source/dlged/dlgedpage.cxx
+index 86a792f..15f7f12 100644
+--- a/basctl/source/dlged/dlgedpage.cxx
++++ b/basctl/source/dlged/dlgedpage.cxx
+@@ -33,6 +33,12 @@ DlgEdPage::DlgEdPage(DlgEdModel& rModel, bool bMasterPage)
+ {
+ }
+ 
++DlgEdPage::DlgEdPage(const DlgEdPage& rSrcPage)
++    : SdrPage(rSrcPage)
++    , pDlgEdForm(0)
++{
++}
++
+ DlgEdPage::~DlgEdPage()
+ {
+     Clear();
+@@ -41,7 +47,9 @@ DlgEdPage::~DlgEdPage()
+ 
+ SdrPage* DlgEdPage::Clone() const
+ {
+-    return new DlgEdPage( *this );
++    DlgEdPage* const pNewPage = new DlgEdPage( *this );
++    pNewPage->lateInit( *this );
++    return pNewPage;
+ }
+ 
+ 
+diff --git a/basctl/source/inc/dlgedpage.hxx b/basctl/source/inc/dlgedpage.hxx
+index b92760f..0275292 100644
+--- a/basctl/source/inc/dlgedpage.hxx
++++ b/basctl/source/inc/dlgedpage.hxx
+@@ -34,6 +34,8 @@ class DlgEdForm;
+ 
+ class DlgEdPage : public SdrPage
+ {
++    DlgEdPage& operator=(const DlgEdPage&) SAL_DELETED_FUNCTION;
++
+ private:
+     DlgEdForm*      pDlgEdForm;
+ 
+@@ -50,6 +52,9 @@ public:
+     DlgEdForm*      GetDlgEdForm() const { return pDlgEdForm; }
+ 
+     virtual SdrObject* SetObjectOrdNum(sal_uLong nOldObjNum, sal_uLong nNewObjNum) SAL_OVERRIDE;
++
++protected:
++    DlgEdPage(const DlgEdPage& rSrcPage);
+ };
+ 
+ } // namespace basctl
+diff --git a/include/svx/fmpage.hxx b/include/svx/fmpage.hxx
+index e381a64..a48df9c 100644
+--- a/include/svx/fmpage.hxx
++++ b/include/svx/fmpage.hxx
+@@ -40,6 +40,8 @@ class HelpEvent;
+ 
+ class SVX_DLLPUBLIC FmFormPage : public SdrPage
+ {
++    FmFormPage& operator=(const FmFormPage&) SAL_DELETED_FUNCTION;
++
+     friend class FmFormObj;
+     FmFormPageImpl*     m_pImpl;
+     OUString            m_sPageName;
+@@ -48,12 +50,12 @@ public:
+     TYPEINFO_OVERRIDE();
+ 
+     FmFormPage(FmFormModel& rModel, bool bMasterPage=false);
+-    FmFormPage(const FmFormPage& rPage);
+     virtual ~FmFormPage();
+ 
+     virtual void    SetModel(SdrModel* pNewModel) SAL_OVERRIDE;
+ 
+     virtual SdrPage* Clone() const SAL_OVERRIDE;
++    // TODO: Uh huh, how is this supposed to work? Creating a SdrPage from FmFormPage?
+     using SdrPage::Clone;
+ 
+     virtual void    InsertObject(SdrObject* pObj, sal_uLong nPos = CONTAINER_APPEND,
+@@ -73,6 +75,11 @@ public:
+                             Window* pWin,
+                             SdrView* pView,
+                             const HelpEvent& rEvt );
++
++protected:
++    FmFormPage(const FmFormPage& rPage);
++
++    void lateInit(const FmFormPage& rPage);
+ };
+ 
+ #endif // INCLUDED_SVX_FMPAGE_HXX
+diff --git a/include/svx/obj3d.hxx b/include/svx/obj3d.hxx
+index bdba2c3..f370f20 100644
+--- a/include/svx/obj3d.hxx
++++ b/include/svx/obj3d.hxx
+@@ -78,16 +78,22 @@ public:
+ 
+ class E3dObjList : public SdrObjList
+ {
++    E3dObjList &operator=(const E3dObjList& rSrcList) SAL_DELETED_FUNCTION;
++
+ public:
+     TYPEINFO_OVERRIDE();
+     E3dObjList(SdrModel* pNewModel = 0, SdrPage* pNewPage = 0, E3dObjList* pNewUpList = 0);
+-    SVX_DLLPUBLIC E3dObjList(const E3dObjList& rSrcList);
+     SVX_DLLPUBLIC virtual ~E3dObjList();
+ 
++    virtual E3dObjList* Clone() const;
++
+     virtual void NbcInsertObject(SdrObject* pObj, sal_uIntPtr nPos=CONTAINER_APPEND, const SdrInsertReason* pReason=NULL) SAL_OVERRIDE;
+     virtual void InsertObject(SdrObject* pObj, sal_uIntPtr nPos=CONTAINER_APPEND, const SdrInsertReason* pReason=NULL) SAL_OVERRIDE;
+     virtual SdrObject* NbcRemoveObject(sal_uIntPtr nObjNum) SAL_OVERRIDE;
+     virtual SdrObject* RemoveObject(sal_uIntPtr nObjNum) SAL_OVERRIDE;
++
++protected:
++    SVX_DLLPUBLIC E3dObjList(const E3dObjList& rSrcList);
+ };
+ 
+ /*************************************************************************
+diff --git a/include/svx/svdpage.hxx b/include/svx/svdpage.hxx
+index c737186..87bf2f3 100644
+--- a/include/svx/svdpage.hxx
++++ b/include/svx/svdpage.hxx
+@@ -78,6 +78,9 @@ public:
+ 
+ class SVX_DLLPUBLIC SdrObjList
+ {
++    SdrObjList(const SdrObjList& rSrcList) SAL_DELETED_FUNCTION;
++    SdrObjList &operator=(const SdrObjList& rSrcList) SAL_DELETED_FUNCTION;
++
+ private:
+     typedef ::std::vector<SdrObject*> SdrObjectContainerType;
+     SdrObjectContainerType maList;
+@@ -97,20 +100,23 @@ friend class SdrEditView;
+ protected:
+     virtual void RecalcRects();
+ 
++    SdrObjList();
++    void lateInit(const SdrObjList& rSrcList);
++
+ private:
+     /// simple ActionChildInserted forwarder to have it on a central place
+     void impChildInserted(SdrObject& rChild) const;
+ public:
+     TYPEINFO();
+     SdrObjList(SdrModel* pNewModel, SdrPage* pNewPage, SdrObjList* pNewUpList=NULL);
+-    SdrObjList(const SdrObjList& rSrcList);
+     virtual ~SdrObjList();
++
++    virtual SdrObjList* Clone() const;
++
+     // !!! Diese Methode nur fuer Leute, die ganz genau wissen was sie tun !!!
+ 
+     // #110094# This should not be needed (!)
+     void SetObjOrdNumsDirty()                           { bObjOrdNumsDirty=true; }
+-    // pModel, pPage, pUpList und pOwnerObj werden Zuweisungeoperator nicht veraendert!
+-    void operator=(const SdrObjList& rSrcList);
+     void CopyObjects(const SdrObjList& rSrcList);
+     // alles Aufraeumen (ohne Undo)
+     void    Clear();
+@@ -403,6 +409,7 @@ public:
+ 
+ class SVX_DLLPUBLIC SdrPage : public SdrObjList, public tools::WeakBase< SdrPage >
+ {
++    SdrPage& operator=(const SdrPage& rSrcPage) SAL_DELETED_FUNCTION;
+ 
+     // start PageUser section
+ private:
+@@ -473,15 +480,19 @@ protected:
+                         ::com::sun::star::drawing::XDrawPage> const&);
+     virtual ::com::sun::star::uno::Reference< ::com::sun::star::uno::XInterface > createUnoPage();
+ 
++    // Copying of pages is split into two parts: construction and copying of page objects,
++    // because the copying might need access to fully initialized page. Clone() is responsible
++    // to call lateInit() after copy-construction of a new object. Any initialization in derived
++    // classes that needs access to the page objects must be deferred to lateInit. And it must
++    // call lateInit() of its parent class.
++    SdrPage(const SdrPage& rSrcPage);
++    void lateInit(const SdrPage& rSrcPage);
++
+ public:
+     TYPEINFO_OVERRIDE();
+     SdrPage(SdrModel& rNewModel, bool bMasterPage=false);
+-    // Copy-Ctor und Zuweisungeoperator sind nicht getestet!
+-    SdrPage(const SdrPage& rSrcPage);
+     virtual ~SdrPage();
+-    // pModel, pPage, pUpList, pOwnerObj und mbInserted werden Zuweisungeoperator nicht veraendert!
+-    SdrPage& operator=(const SdrPage& rSrcPage);
+-    virtual SdrPage* Clone() const;
++    virtual SdrPage* Clone() const SAL_OVERRIDE;
+     virtual SdrPage* Clone(SdrModel* pNewModel) const;
+     bool IsMasterPage() const       { return mbMaster; }
+     void SetInserted(bool bNew = true);
+diff --git a/reportdesign/inc/RptPage.hxx b/reportdesign/inc/RptPage.hxx
+index b320a3e..9ea966a 100644
+--- a/reportdesign/inc/RptPage.hxx
++++ b/reportdesign/inc/RptPage.hxx
+@@ -34,6 +34,8 @@ class OReportModel;
+ 
+ class REPORTDESIGN_DLLPUBLIC OReportPage : public SdrPage
+ {
++    OReportPage& operator=(const OReportPage&) SAL_DELETED_FUNCTION;
++
+     OReportModel&           rModel;
+     ::com::sun::star::uno::Reference< ::com::sun::star::report::XSection > m_xSection;
+     bool                    m_bSpecialInsertMode;
+diff --git a/reportdesign/source/core/sdr/RptPage.cxx b/reportdesign/source/core/sdr/RptPage.cxx
+index 5009a66..c55a360 100644
+--- a/reportdesign/source/core/sdr/RptPage.cxx
++++ b/reportdesign/source/core/sdr/RptPage.cxx
+@@ -61,7 +61,9 @@ OReportPage::~OReportPage()
+ 
+ SdrPage* OReportPage::Clone() const
+ {
+-    return new OReportPage( *this );
++    OReportPage *const pNewPage = new OReportPage( *this );
++    pNewPage->lateInit( *this );
++    return pNewPage;
+ }
+ 
+ 
+diff --git a/sc/inc/drawpage.hxx b/sc/inc/drawpage.hxx
+index c11d4cc..6f7b68e 100644
+--- a/sc/inc/drawpage.hxx
++++ b/sc/inc/drawpage.hxx
+@@ -26,6 +26,9 @@ class ScDrawLayer;
+ 
+ class ScDrawPage: public FmFormPage
+ {
++    ScDrawPage(const ScDrawPage&) SAL_DELETED_FUNCTION;
++    ScDrawPage& operator=(const ScDrawPage&) SAL_DELETED_FUNCTION;
++
+ public:
+     ScDrawPage(ScDrawLayer& rNewModel, bool bMasterPage = false);
+     virtual ~ScDrawPage();
+diff --git a/sd/inc/sdpage.hxx b/sd/inc/sdpage.hxx
+index 767cf39..13ec1c2 100644
+--- a/sd/inc/sdpage.hxx
++++ b/sd/inc/sdpage.hxx
+@@ -98,6 +98,8 @@ namespace sd {
+ 
+ class SD_DLLPUBLIC SdPage : public FmFormPage, public SdrObjUserCall
+ {
++    SdPage& operator=(const SdPage&) SAL_DELETED_FUNCTION;
++
+ friend class SdGenericDrawPage;
+ friend class SdDrawPage;
+ friend class sd::UndoAnimation;
+@@ -153,11 +155,13 @@ protected:
+     sal_Int32 mnTransitionFadeColor;
+     double mfTransitionDuration;
+ 
++    SdPage(const SdPage& rSrcPage);
++    void lateInit(const SdPage& rSrcPage);
++
+ public:
+     TYPEINFO_OVERRIDE();
+ 
+     SdPage(SdDrawDocument& rNewDoc, bool bMasterPage=false);
+-    SdPage(const SdPage& rSrcPage);
+     virtual ~SdPage();
+     virtual SdrPage* Clone() const SAL_OVERRIDE;
+     virtual SdrPage* Clone(SdrModel* pNewModel) const SAL_OVERRIDE;
+diff --git a/sd/source/core/sdpage2.cxx b/sd/source/core/sdpage2.cxx
+index 450c646..57f4699 100644
+--- a/sd/source/core/sdpage2.cxx
++++ b/sd/source/core/sdpage2.cxx
+@@ -377,15 +377,6 @@ SdPage::SdPage(const SdPage& rSrcPage)
+     mePageKind           = rSrcPage.mePageKind;
+     meAutoLayout         = rSrcPage.meAutoLayout;
+ 
+-    // use shape list directly to preserve constness of rSrcPage
+-    const std::list< SdrObject* >& rShapeList = rSrcPage.maPresentationShapeList.getList();
+-    for( std::list< SdrObject* >::const_iterator aIter = rShapeList.begin();
+-         aIter != rShapeList.end(); ++aIter )
+-    {
+-        SdrObject* pObj = *aIter;
+-        InsertPresObj(GetObj(pObj->GetOrdNum()), rSrcPage.GetPresObjKind(pObj));
+-    }
+-
+     mbSelected           = false;
+     mnTransitionType    = rSrcPage.mnTransitionType;
+     mnTransitionSubtype = rSrcPage.mnTransitionSubtype;
+@@ -410,10 +401,24 @@ SdPage::SdPage(const SdPage& rSrcPage)
+     mnPaperBin           = rSrcPage.mnPaperBin;
+     meOrientation        = rSrcPage.meOrientation;
+ 
++    mpPageLink           = NULL;    // is set when inserting via ConnectLink()
++}
++
++void SdPage::lateInit(const SdPage& rSrcPage)
++{
++    FmFormPage::lateInit(rSrcPage);
++
++    // use shape list directly to preserve constness of rSrcPage
++    const std::list< SdrObject* >& rShapeList = rSrcPage.maPresentationShapeList.getList();
++    for( std::list< SdrObject* >::const_iterator aIter = rShapeList.begin();
++         aIter != rShapeList.end(); ++aIter )
++    {
++        SdrObject* pObj = *aIter;
++        InsertPresObj(GetObj(pObj->GetOrdNum()), rSrcPage.GetPresObjKind(pObj));
++    }
++
+     // header footer
+     setHeaderFooterSettings( rSrcPage.getHeaderFooterSettings() );
+-
+-    mpPageLink           = NULL;    // is set when inserting via ConnectLink()
+ }
+ 
+ 
+@@ -433,6 +438,7 @@ SdrPage* SdPage::Clone(SdrModel* pNewModel) const
+     (void)pNewModel;
+ 
+     SdPage* pNewPage = new SdPage(*this);
++    pNewPage->lateInit( *this );
+ 
+     cloneAnimations( *pNewPage );
+ 
+diff --git a/svx/source/engine3d/obj3d.cxx b/svx/source/engine3d/obj3d.cxx
+index eee59ad..ef50b3d 100644
+--- a/svx/source/engine3d/obj3d.cxx
++++ b/svx/source/engine3d/obj3d.cxx
+@@ -91,11 +91,18 @@ E3dObjList::E3dObjList(SdrModel* pNewModel, SdrPage* pNewPage, E3dObjList* pNewU
+ {
+ }
+ 
+-E3dObjList::E3dObjList(const E3dObjList& rSrcList)
+-:   SdrObjList(rSrcList)
++E3dObjList::E3dObjList(const E3dObjList&)
++:   SdrObjList()
+ {
+ }
+ 
++E3dObjList* E3dObjList::Clone() const
++{
++    E3dObjList* const pObjList = new E3dObjList(*this);
++    pObjList->lateInit(*this);
++    return pObjList;
++}
++
+ E3dObjList::~E3dObjList()
+ {
+ }
+diff --git a/svx/source/form/fmpage.cxx b/svx/source/form/fmpage.cxx
+index 365dfd3..96c3baa 100644
+--- a/svx/source/form/fmpage.cxx
++++ b/svx/source/form/fmpage.cxx
+@@ -66,6 +66,12 @@ FmFormPage::FmFormPage(const FmFormPage& rPage)
+            :SdrPage(rPage)
+            ,m_pImpl(new FmFormPageImpl( *this ) )
+ {
++}
++
++void FmFormPage::lateInit(const FmFormPage& rPage)
++{
++    SdrPage::lateInit( rPage );
++
+     m_pImpl->initFrom( rPage.GetImpl() );
+     m_sPageName = rPage.m_sPageName;
+ }
+@@ -113,8 +119,9 @@ void FmFormPage::SetModel(SdrModel* pNewModel)
+ 
+ SdrPage* FmFormPage::Clone() const
+ {
+-    return new FmFormPage(*this);
+-    // hier fehlt noch ein kopieren der Objekte
++    FmFormPage* const pNewPage = new FmFormPage(*this);
++    pNewPage->lateInit(*this);
++    return pNewPage;
+ }
+ 
+ 
+diff --git a/svx/source/svdraw/svdpage.cxx b/svx/source/svdraw/svdpage.cxx
+index 94139448..da27d4a 100644
+--- a/svx/source/svdraw/svdpage.cxx
++++ b/svx/source/svdraw/svdpage.cxx
+@@ -88,7 +88,7 @@ SdrObjList::SdrObjList(SdrModel* pNewModel, SdrPage* pNewPage, SdrObjList* pNewU
+     eListKind=SDROBJLIST_UNKNOWN;
+ }
+ 
+-SdrObjList::SdrObjList(const SdrObjList& rSrcList):
++SdrObjList::SdrObjList():
+     maList(),
+     mpNavigationOrder(),
+     mbIsNavigationOrderDirty(false)
+@@ -101,7 +101,6 @@ SdrObjList::SdrObjList(const SdrObjList& rSrcList):
+     bRectsDirty=false;
+     pOwnerObj=NULL;
+     eListKind=SDROBJLIST_UNKNOWN;
+-    *this=rSrcList;
+ }
+ 
+ SdrObjList::~SdrObjList()
+@@ -115,9 +114,18 @@ SdrObjList::~SdrObjList()
+     Clear(); // delete contents of container
+ }
+ 
+-void SdrObjList::operator=(const SdrObjList& rSrcList)
++SdrObjList* SdrObjList::Clone() const
+ {
+-    Clear();
++    SdrObjList* const pObjList = new SdrObjList();
++    pObjList->lateInit(*this);
++    return pObjList;
++}
++
++void SdrObjList::lateInit(const SdrObjList& rSrcList)
++{
++    // this function is only supposed to be called once, right after construction
++    assert(maList.empty());
++
+     eListKind=rSrcList.eListKind;
+     CopyObjects(rSrcList);
+ }
+@@ -1246,31 +1254,6 @@ SdrPage::SdrPage(const SdrPage& rSrcPage)
+     mbPageBorderOnlyLeftRight(rSrcPage.mbPageBorderOnlyLeftRight)
+ {
+     aPrefVisiLayers.SetAll();
+-    eListKind = (mbMaster) ? SDROBJLIST_MASTERPAGE : SDROBJLIST_DRAWPAGE;
+-
+-    // copy things from source
+-    // Warning: this leads to slicing (see issue 93186) and has to be
+-    // removed as soon as possible.
+-    *this = rSrcPage;
+-    OSL_ENSURE(mpSdrPageProperties,
+-        "SdrPage::SdrPage: operator= did not create needed SdrPageProperties (!)");
+-
+-    // be careful and correct eListKind, a member of SdrObjList which
+-    // will be changed by the SdrOIbjList::operator= before...
+-    eListKind = (mbMaster) ? SDROBJLIST_MASTERPAGE : SDROBJLIST_DRAWPAGE;
+-
+-    // The previous assignment to *this may have resulted in a call to
+-    // createUnoPage at a partially initialized (sliced) SdrPage object.
+-    // Due to the vtable being not yet fully set-up at this stage,
+-    // createUnoPage() may have been called at the wrong class.
+-    // To force a call to the right createUnoPage() at a later time when the
+-    // new object is full constructed mxUnoPage is disposed now.
+-    uno::Reference<lang::XComponent> xComponent (mxUnoPage, uno::UNO_QUERY);
+-    if (xComponent.is())
+-    {
+-        mxUnoPage = NULL;
+-        xComponent->dispose();
+-    }
+ }
+ 
+ SdrPage::~SdrPage()
+@@ -1319,20 +1302,10 @@ SdrPage::~SdrPage()
+ 
+ }
+ 
+-SdrPage& SdrPage::operator=(const SdrPage& rSrcPage)
++void SdrPage::lateInit(const SdrPage& rSrcPage)
+ {
+-    if( this == &rSrcPage )
+-        return *this;
+-    if(mpViewContact)
+-    {
+-        delete mpViewContact;
+-        mpViewContact = 0L;
+-    }
+-
+-    // Joe also sets some parameters for the class this one
+-    // is derived from. SdrObjList does the same bad handling of
+-    // copy constructor and operator=, so i better let it stand here.
+-    pPage = this;
++    assert(!mpViewContact);
++    assert(!mpSdrPageProperties);
+ 
+     // copy all the local parameters to make this instance
+     // a valid copy of source page before copying and inserting
+@@ -1361,21 +1334,7 @@ SdrPage& SdrPage::operator=(const SdrPage& rSrcPage)
+     mbObjectsNotPersistent = rSrcPage.mbObjectsNotPersistent;
+ 
+     {
+-        // #i111122# delete SdrPageProperties when model is different
+-        if(mpSdrPageProperties && GetModel() != rSrcPage.GetModel())
+-        {
+-            delete mpSdrPageProperties;
+-            mpSdrPageProperties = 0;
+-        }
+-
+-        if(!mpSdrPageProperties)
+-        {
+-            mpSdrPageProperties = new SdrPageProperties(*this);
+-        }
+-        else
+-        {
+-            mpSdrPageProperties->ClearItem(0);
+-        }
++        mpSdrPageProperties = new SdrPageProperties(*this);
+ 
+         if(!IsMasterPage())
+         {
+@@ -1385,9 +1344,12 @@ SdrPage& SdrPage::operator=(const SdrPage& rSrcPage)
+         mpSdrPageProperties->SetStyleSheet(rSrcPage.getSdrPageProperties().GetStyleSheet());
+     }
+ 
+-    // Now copy the contained objects (by cloning them)
+-    SdrObjList::operator=(rSrcPage);
+-    return *this;
++    // Now copy the contained objects
++    SdrObjList::lateInit(rSrcPage);
++
++    // be careful and correct eListKind, a member of SdrObjList which
++    // will be changed by the SdrObjList::lateInit before...
++    eListKind = (mbMaster) ? SDROBJLIST_MASTERPAGE : SDROBJLIST_DRAWPAGE;
+ }
+ 
+ SdrPage* SdrPage::Clone() const
+@@ -1399,7 +1361,7 @@ SdrPage* SdrPage::Clone(SdrModel* pNewModel) const
+ {
+     if (pNewModel==NULL) pNewModel=pModel;
+     SdrPage* pPage2=new SdrPage(*pNewModel);
+-    *pPage2=*this;
++    pPage2->lateInit(*this);
+     return pPage2;
+ }
+ 
+diff --git a/sw/inc/dpage.hxx b/sw/inc/dpage.hxx
+index 54aa789..8284f6e 100644
+--- a/sw/inc/dpage.hxx
++++ b/sw/inc/dpage.hxx
+@@ -28,6 +28,9 @@ class SwDoc;
+ 
+ class SwDPage : public FmFormPage, public SdrObjUserCall
+ {
++    SwDPage(const SwDPage&) SAL_DELETED_FUNCTION;
++    SwDPage &operator=(const SwDPage&) SAL_DELETED_FUNCTION;
++
+     SdrPageGridFrameList*   pGridLst;
+     SwDoc&                  rDoc;
+ 
+-- 
+2.1.0
+

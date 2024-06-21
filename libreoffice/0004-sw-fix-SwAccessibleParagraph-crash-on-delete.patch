@@ -1,0 +1,52 @@
+From db92a0c238d82a32fd915f05fc7efb6167e4ea91 Mon Sep 17 00:00:00 2001
+From: Michael Stahl <mstahl@redhat.com>
+Date: Fri, 24 Apr 2015 23:31:06 +0200
+Subject: [PATCH 4/4] sw: fix SwAccessibleParagraph crash on delete
+
+It happens that SwAccessibleParagraph::getCharacterBounds() is called
+from ATK with a clearly invalid pPortionData member; the SwTxtNode has
+no text but there are portions.
+
+This is because after a deletion both a POS_CHANGED and a
+INVALID_CONTENT event are created for the same SwAccessibleParagraph,
+and they are merged into one POS_CHANGED event by
+SwAccessibleMap::AppendEvent(), but
+SwAccessibleContext::InvalidatePosOrSize() returns early if the
+paragraph happens to not be visible, skipping the invalidation.
+
+(regression from 76c549eb01dcb7b5bf28a271ce00e386f3d388ba, which
+ removed a Dispose() call; not sure if the Dispose() is needed here)
+
+Change-Id: I985e9a439ee6c7024963eace876186f2247b9e03
+(cherry picked from commit 104ed86c382b73505b477bf3024982dd27823023)
+Reviewed-on: https://gerrit.libreoffice.org/15534
+Reviewed-by: Miklos Vajna <vmiklos@collabora.co.uk>
+Tested-by: Miklos Vajna <vmiklos@collabora.co.uk>
+(cherry picked from commit 84f10b5f154e130981de5826f83d63b5eadd33ac)
+---
+ sw/source/core/access/acccontext.cxx | 9 +++------
+ 1 file changed, 3 insertions(+), 6 deletions(-)
+
+diff --git a/sw/source/core/access/acccontext.cxx b/sw/source/core/access/acccontext.cxx
+index 1e84758..7152006 100644
+--- a/sw/source/core/access/acccontext.cxx
++++ b/sw/source/core/access/acccontext.cxx
+@@ -1166,12 +1166,9 @@ void SwAccessibleContext::InvalidatePosOrSize( const SwRect& )
+         FireVisibleDataEvent();
+     }
+ 
+-    if( !bIsNewShowingState &&
+-        SwAccessibleChild( GetParent() ).IsVisibleChildrenOnly() )
+-    {
+-        return;
+-    }
+-
++    // note: InvalidatePosOrSize must call _InvalidateContent so that
++    // SwAccessibleParagraph updates its portions, or dispose it
++    // (see accmap.cxx: INVALID_CONTENT is contained in POS_CHANGED)
+     _InvalidateContent( true );
+ }
+ 
+-- 
+2.1.0
+

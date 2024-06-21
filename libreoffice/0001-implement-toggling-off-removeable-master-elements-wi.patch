@@ -1,0 +1,205 @@
+From ff0eba6c1cbf4a5816c5b9b48d4e29778f0e0869 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Caol=C3=A1n=20McNamara?= <caolanm@redhat.com>
+Date: Thu, 6 Nov 2014 14:59:49 +0000
+Subject: [PATCH] implement toggling off removeable master elements with direct
+ delete
+
+i.e. selecting footers/headers/slidenumber/datetime previes placeholders in
+master page view and pressing delete will toggle those master elements off.
+
+Change-Id: I91f745703e43cbb4fdd037da4eab7c8f6bf9fbf5
+(cherry picked from commit e36dae401fc8963c9a92cb2c11d9b650b943c6d3)
+---
+ sd/inc/sdpage.hxx                    |  1 +
+ sd/source/core/sdpage.cxx            | 19 +++++++++
+ sd/source/ui/dlg/masterlayoutdlg.cxx | 19 ++-------
+ sd/source/ui/inc/DrawViewShell.hxx   |  1 +
+ sd/source/ui/view/drviewse.cxx       | 74 ++++++++++++++++++++++++++++--------
+ 5 files changed, 83 insertions(+), 31 deletions(-)
+
+diff --git a/sd/inc/sdpage.hxx b/sd/inc/sdpage.hxx
+index 4cce906..0d3b138 100644
+--- a/sd/inc/sdpage.hxx
++++ b/sd/inc/sdpage.hxx
+@@ -176,6 +176,7 @@ public:
+     void EnsureMasterPageDefaultBackground();
+     SdrObject*      CreatePresObj(PresObjKind eObjKind, bool bVertical, const Rectangle& rRect, bool bInsert=false);
+     SdrObject*      CreateDefaultPresObj(PresObjKind eObjKind, bool bInsert);
++    void            DestroyDefaultPresObj(PresObjKind eObjKind);
+     SdrObject*      GetPresObj(PresObjKind eObjKind, int nIndex = 1, bool bFuzzySearch = false );
+     PresObjKind     GetPresObjKind(SdrObject* pObj) const;
+     OUString        GetPresObjText(PresObjKind eObjKind) const;
+diff --git a/sd/source/core/sdpage.cxx b/sd/source/core/sdpage.cxx
+index 477ea48..fccd7cf 100644
+--- a/sd/source/core/sdpage.cxx
++++ b/sd/source/core/sdpage.cxx
+@@ -1018,6 +1018,25 @@ SdrObject* SdPage::CreateDefaultPresObj(PresObjKind eObjKind, bool bInsert)
+     }
+ }
+ 
++void SdPage::DestroyDefaultPresObj(PresObjKind eObjKind)
++{
++    SdrObject* pObject = GetPresObj( eObjKind );
++
++    if( pObject )
++    {
++        SdDrawDocument *pDoc = static_cast<SdDrawDocument*>(pModel);
++
++        const bool bUndo = pDoc->IsUndoEnabled();
++        if( bUndo )
++            pDoc->AddUndo(pDoc->GetSdrUndoFactory().CreateUndoDeleteObject(*pObject));
++        SdrObjList* pOL = pObject->GetObjList();
++        pOL->RemoveObject(pObject->GetOrdNumDirect());
++
++        if( !bUndo )
++            SdrObject::Free(pObject);
++    }
++}
++
+ /*************************************************************************
+ |*
+ |* return title area
+diff --git a/sd/source/ui/dlg/masterlayoutdlg.cxx b/sd/source/ui/dlg/masterlayoutdlg.cxx
+index 21aa64b..acfd28a 100644
+--- a/sd/source/ui/dlg/masterlayoutdlg.cxx
++++ b/sd/source/ui/dlg/masterlayoutdlg.cxx
+@@ -121,27 +121,14 @@ void MasterLayoutDialog::applyChanges()
+     mpDoc->EndUndo();
+ }
+ 
+-void MasterLayoutDialog::create( PresObjKind eKind )
++void MasterLayoutDialog::create(PresObjKind eKind)
+ {
+-    mpCurrentPage->CreateDefaultPresObj( eKind, true );
++    mpCurrentPage->CreateDefaultPresObj(eKind, true);
+ }
+ 
+ void MasterLayoutDialog::remove( PresObjKind eKind )
+ {
+-    SdrObject* pObject = mpCurrentPage->GetPresObj( eKind );
+-
+-    if( pObject )
+-    {
+-        const bool bUndo = mpDoc->IsUndoEnabled();
+-        if( bUndo )
+-            mpDoc->AddUndo(mpDoc->GetSdrUndoFactory().CreateUndoDeleteObject(*pObject));
+-        SdrObjList* pOL =pObject->GetObjList();
+-        sal_uInt32 nOrdNum=pObject->GetOrdNumDirect();
+-        pOL->RemoveObject(nOrdNum);
+-
+-        if( !bUndo )
+-            SdrObject::Free(pObject);
+-    }
++    mpCurrentPage->DestroyDefaultPresObj(eKind);
+ }
+ 
+ /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+diff --git a/sd/source/ui/inc/DrawViewShell.hxx b/sd/source/ui/inc/DrawViewShell.hxx
+index 96c5c9c..a6f5a13 100644
+--- a/sd/source/ui/inc/DrawViewShell.hxx
++++ b/sd/source/ui/inc/DrawViewShell.hxx
+@@ -216,6 +216,7 @@ public:
+     void            FuTemporary(SfxRequest& rReq);
+     void            FuPermanent(SfxRequest& rReq);
+     void            FuSupport(SfxRequest& rReq);
++    void            FuDeleteSelectedObjects();
+     void            FuSupportRotate(SfxRequest& rReq);
+     void            FuTable(SfxRequest& rReq);
+ 
+diff --git a/sd/source/ui/view/drviewse.cxx b/sd/source/ui/view/drviewse.cxx
+index cd643b0..6e7cb8d 100644
+--- a/sd/source/ui/view/drviewse.cxx
++++ b/sd/source/ui/view/drviewse.cxx
+@@ -625,6 +625,64 @@ void DrawViewShell::FuPermanent(SfxRequest& rReq)
+     }
+ }
+ 
++void DrawViewShell::FuDeleteSelectedObjects()
++{
++    bool bConsumed = false;
++
++    //if any placeholders are selected
++    if (mpDrawView->IsPresObjSelected(false, true, false, false))
++    {
++        //If there are placeholders in the list which can be toggled
++        //off in edit->master->master elements then do that here,
++        std::vector<SdrObject*> aPresMarksToRemove;
++        const SdrMarkList& rMarkList = mpDrawView->GetMarkedObjectList();
++        for (size_t i=0; i < rMarkList.GetMarkCount(); ++i)
++        {
++            SdrObject* pObj = rMarkList.GetMark(i)->GetMarkedSdrObj();
++            SdPage* pPage = (SdPage*)pObj->GetPage();
++            PresObjKind eKind = pPage->GetPresObjKind(pObj);
++            if (eKind == PRESOBJ_FOOTER || eKind == PRESOBJ_HEADER ||
++                eKind == PRESOBJ_DATETIME || eKind == PRESOBJ_SLIDENUMBER)
++            {
++                aPresMarksToRemove.push_back(pObj);
++            }
++        }
++
++        for (std::vector<SdrObject*>::iterator aI = aPresMarksToRemove.begin(); aI < aPresMarksToRemove.end(); ++aI)
++        {
++            //Unmark object
++            mpDrawView->MarkObj((*aI), mpDrawView->GetSdrPageView(), true);
++            SdPage* pPage = (SdPage*)(*aI)->GetPage();
++            //remove placeholder from master page
++            pPage->DestroyDefaultPresObj(pPage->GetPresObjKind((*aI)));
++        }
++
++        bConsumed = true;
++    }
++
++    // placeholders which cannot be deleted selected
++    if (mpDrawView->IsPresObjSelected(false, true, false, true))
++    {
++        ::sd::Window* pWindow = GetActiveWindow();
++        InfoBox(pWindow, SD_RESSTR(STR_ACTION_NOTPOSSIBLE) ).Execute();
++        bConsumed = true;
++    }
++
++    if (!bConsumed)
++    {
++        KeyCode aKCode(KEY_DELETE);
++        KeyEvent aKEvt( 0, aKCode);
++
++        bConsumed = mpDrawView && mpDrawView->getSmartTags().KeyInput( aKEvt );
++
++        if( !bConsumed && HasCurrentFunction() )
++            bConsumed = GetCurrentFunction()->KeyInput(aKEvt);
++
++        if( !bConsumed && mpDrawView )
++            mpDrawView->DeleteMarked();
++    }
++}
++
+ void DrawViewShell::FuSupport(SfxRequest& rReq)
+ {
+     if( rReq.GetSlot() == SID_STYLE_FAMILY && rReq.GetArgs())
+@@ -873,23 +931,9 @@ void DrawViewShell::FuSupport(SfxRequest& rReq)
+                     pOLV->PostKeyEvent(aKEvt);
+                 }
+             }
+-            else if ( mpDrawView->IsPresObjSelected(false, true, false, true) )
+-            {
+-                ::sd::Window* pWindow = GetActiveWindow();
+-                InfoBox(pWindow, SD_RESSTR(STR_ACTION_NOTPOSSIBLE) ).Execute();
+-            }
+             else
+             {
+-                KeyCode aKCode(KEY_DELETE);
+-                KeyEvent aKEvt( 0, aKCode);
+-
+-                bool bConsumed = mpDrawView && mpDrawView->getSmartTags().KeyInput( aKEvt );
+-
+-                if( !bConsumed && HasCurrentFunction() )
+-                    bConsumed = GetCurrentFunction()->KeyInput(aKEvt);
+-
+-                if( !bConsumed && mpDrawView )
+-                    mpDrawView->DeleteMarked();
++                FuDeleteSelectedObjects();
+             }
+             rReq.Ignore ();
+         }
+-- 
+1.9.3
+

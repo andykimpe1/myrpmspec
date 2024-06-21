@@ -1,0 +1,259 @@
+From 43c6130f152066ce751033f5b0fd205b4912e332 Mon Sep 17 00:00:00 2001
+Message-Id: <43c6130f152066ce751033f5b0fd205b4912e332.1430929664.git.erack@redhat.com>
+From: Eike Rathke <erack@redhat.com>
+Date: Wed, 6 May 2015 17:15:12 +0200
+Subject: [PATCH] Resolves: tdf#91078 check also DBData modified, not only
+ named expressions
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="------------erAck-patch-parts"
+
+This is a multi-part message in MIME format.
+--------------erAck-patch-parts
+Content-Type: text/plain; charset=UTF-8; format=fixed
+Content-Transfer-Encoding: 8bit
+
+
+This adds ScDocument& to all RefUpdate...Context; another approach could
+had been to add an UpdatedDBData similar to UpdatedRangeNames and gather
+those in the ScDBData::Update...() methods, but as long as
+ScDBData::IsModified() works that isn't necessary.
+
+(cherry picked from commit 848dc76e76c1c4a9040be4a0088c4d4527af6f40)
+
+Backported.
+
+Change-Id: Iae3ec6c8b8356cbd8acb2445489e91e7d6922fb3
+---
+ sc/inc/refupdatecontext.hxx              |  9 ++++++---
+ sc/source/core/data/documen2.cxx         |  4 ++--
+ sc/source/core/data/document.cxx         |  8 ++++----
+ sc/source/core/data/refupdatecontext.cxx | 12 ++++++------
+ sc/source/core/tool/token.cxx            | 29 +++++++++++++++++++++--------
+ 5 files changed, 39 insertions(+), 23 deletions(-)
+
+
+--------------erAck-patch-parts
+Content-Type: text/x-patch; name="0001-Resolves-tdf-91078-check-also-DBData-modified-not-on.patch"
+Content-Transfer-Encoding: 8bit
+Content-Disposition: attachment; filename="0001-Resolves-tdf-91078-check-also-DBData-modified-not-on.patch"
+
+diff --git a/sc/inc/refupdatecontext.hxx b/sc/inc/refupdatecontext.hxx
+index 393a855..3b4db92 100644
+--- a/sc/inc/refupdatecontext.hxx
++++ b/sc/inc/refupdatecontext.hxx
+@@ -103,29 +103,32 @@ struct RefUpdateResult
+ 
+ struct RefUpdateInsertTabContext
+ {
++    ScDocument& mrDoc;
+     SCTAB mnInsertPos;
+     SCTAB mnSheets;
+     UpdatedRangeNames maUpdatedNames;
+ 
+-    RefUpdateInsertTabContext(SCTAB nInsertPos, SCTAB nSheets);
++    RefUpdateInsertTabContext(ScDocument& rDoc, SCTAB nInsertPos, SCTAB nSheets);
+ };
+ 
+ struct RefUpdateDeleteTabContext
+ {
++    ScDocument& mrDoc;
+     SCTAB mnDeletePos;
+     SCTAB mnSheets;
+     UpdatedRangeNames maUpdatedNames;
+ 
+-    RefUpdateDeleteTabContext(SCTAB nInsertPos, SCTAB nSheets);
++    RefUpdateDeleteTabContext(ScDocument& rDoc, SCTAB nInsertPos, SCTAB nSheets);
+ };
+ 
+ struct RefUpdateMoveTabContext
+ {
++    ScDocument& mrDoc;
+     SCTAB mnOldPos;
+     SCTAB mnNewPos;
+     UpdatedRangeNames maUpdatedNames;
+ 
+-    RefUpdateMoveTabContext(SCTAB nOldPos, SCTAB nNewPos);
++    RefUpdateMoveTabContext(ScDocument& rDoc, SCTAB nOldPos, SCTAB nNewPos);
+ 
+     SCTAB getNewTab(SCTAB nOldTab) const;
+ };
+diff --git a/sc/source/core/data/documen2.cxx b/sc/source/core/data/documen2.cxx
+index 79e6f63..5e73cb9 100644
+--- a/sc/source/core/data/documen2.cxx
++++ b/sc/source/core/data/documen2.cxx
+@@ -744,7 +744,7 @@ bool ScDocument::MoveTab( SCTAB nOldPos, SCTAB nNewPos, ScProgress* pProgress )
+             //  Referenz-Updaterei
+             //! mit UpdateReference zusammenfassen!
+ 
+-            sc::RefUpdateMoveTabContext aCxt(nOldPos, nNewPos);
++            sc::RefUpdateMoveTabContext aCxt( *this, nOldPos, nNewPos);
+ 
+             SCsTAB nDz = ((SCsTAB)nNewPos) - (SCsTAB)nOldPos;
+             ScRange aSourceRange( 0,0,nOldPos, MAXCOL,MAXROW,nOldPos );
+@@ -820,7 +820,7 @@ bool ScDocument::CopyTab( SCTAB nOldPos, SCTAB nNewPos, const ScMarkData* pOnlyM
+         bValid = !GetTable( aName, nDummy );
+ 
+     sc::AutoCalcSwitch aACSwitch(*this, false);
+-    sc::RefUpdateInsertTabContext aCxt(nNewPos, 1);
++    sc::RefUpdateInsertTabContext aCxt( *this, nNewPos, 1);
+ 
+     if (bValid)
+     {
+diff --git a/sc/source/core/data/document.cxx b/sc/source/core/data/document.cxx
+index 524f97f..cfa6c7c 100644
+--- a/sc/source/core/data/document.cxx
++++ b/sc/source/core/data/document.cxx
+@@ -494,7 +494,7 @@ bool ScDocument::InsertTab(
+         {
+             if (ValidTab(nPos) && (nPos < nTabCount))
+             {
+-                sc::RefUpdateInsertTabContext aCxt(nPos, 1);
++                sc::RefUpdateInsertTabContext aCxt( *this, nPos, 1);
+ 
+                 ScRange aRange( 0,0,nPos, MAXCOL,MAXROW,MAXTAB );
+                 xColNameRanges->UpdateReference( URM_INSDEL, this, aRange, 0,0,1 );
+@@ -588,7 +588,7 @@ bool ScDocument::InsertTabs( SCTAB nPos, const std::vector<OUString>& rNames,
+         {
+             if (ValidTab(nPos) && (nPos < nTabCount))
+             {
+-                sc::RefUpdateInsertTabContext aCxt(nPos, nNewSheets);
++                sc::RefUpdateInsertTabContext aCxt( *this, nPos, nNewSheets);
+                 ScRange aRange( 0,0,nPos, MAXCOL,MAXROW,MAXTAB );
+                 xColNameRanges->UpdateReference( URM_INSDEL, this, aRange, 0,0,nNewSheets );
+                 xRowNameRanges->UpdateReference( URM_INSDEL, this, aRange, 0,0,nNewSheets );
+@@ -666,7 +666,7 @@ bool ScDocument::DeleteTab( SCTAB nTab )
+             if (nTabCount > 1)
+             {
+                 sc::AutoCalcSwitch aACSwitch(*this, false);
+-                sc::RefUpdateDeleteTabContext aCxt(nTab, 1);
++                sc::RefUpdateDeleteTabContext aCxt( *this, nTab, 1);
+ 
+                 ScRange aRange( 0, 0, nTab, MAXCOL, MAXROW, nTab );
+                 DelBroadcastAreasInRange( aRange );
+@@ -752,7 +752,7 @@ bool ScDocument::DeleteTabs( SCTAB nTab, SCTAB nSheets )
+             if (nTabCount > nSheets)
+             {
+                 sc::AutoCalcSwitch aACSwitch(*this, false);
+-                sc::RefUpdateDeleteTabContext aCxt(nTab, nSheets);
++                sc::RefUpdateDeleteTabContext aCxt( *this, nTab, nSheets);
+ 
+                 for (SCTAB aTab = 0; aTab < nSheets; ++aTab)
+                 {
+diff --git a/sc/source/core/data/refupdatecontext.cxx b/sc/source/core/data/refupdatecontext.cxx
+index 8bf52985..6727765 100644
+--- a/sc/source/core/data/refupdatecontext.cxx
++++ b/sc/source/core/data/refupdatecontext.cxx
+@@ -61,14 +61,14 @@ RefUpdateResult::RefUpdateResult(const RefUpdateResult& r) :
+     mbReferenceModified(r.mbReferenceModified),
+     mbNameModified(r.mbNameModified) {}
+ 
+-RefUpdateInsertTabContext::RefUpdateInsertTabContext(SCTAB nInsertPos, SCTAB nSheets) :
+-    mnInsertPos(nInsertPos), mnSheets(nSheets) {}
++RefUpdateInsertTabContext::RefUpdateInsertTabContext(ScDocument& rDoc, SCTAB nInsertPos, SCTAB nSheets) :
++    mrDoc(rDoc), mnInsertPos(nInsertPos), mnSheets(nSheets) {}
+ 
+-RefUpdateDeleteTabContext::RefUpdateDeleteTabContext(SCTAB nDeletePos, SCTAB nSheets) :
+-    mnDeletePos(nDeletePos), mnSheets(nSheets) {}
++RefUpdateDeleteTabContext::RefUpdateDeleteTabContext(ScDocument& rDoc, SCTAB nDeletePos, SCTAB nSheets) :
++    mrDoc(rDoc), mnDeletePos(nDeletePos), mnSheets(nSheets) {}
+ 
+-RefUpdateMoveTabContext::RefUpdateMoveTabContext(SCTAB nOldPos, SCTAB nNewPos) :
+-    mnOldPos(nOldPos), mnNewPos(nNewPos) {}
++RefUpdateMoveTabContext::RefUpdateMoveTabContext(ScDocument& rDoc, SCTAB nOldPos, SCTAB nNewPos) :
++    mrDoc(rDoc), mnOldPos(nOldPos), mnNewPos(nNewPos) {}
+ 
+ SCTAB RefUpdateMoveTabContext::getNewTab(SCTAB nOldTab) const
+ {
+diff --git a/sc/source/core/tool/token.cxx b/sc/source/core/tool/token.cxx
+index 9961b58..a83ba8e 100644
+--- a/sc/source/core/tool/token.cxx
++++ b/sc/source/core/tool/token.cxx
+@@ -42,6 +42,7 @@
+ #include "types.hxx"
+ #include "globstr.hrc"
+ #include "addincol.hxx"
++#include "dbdata.hxx"
+ #include <svl/sharedstring.hxx>
+ 
+ using ::std::vector;
+@@ -2748,9 +2749,6 @@ bool expandRangeByEdge( const sc::RefUpdateContext& rCxt, ScRange& rRefRange, co
+ 
+ bool isNameModified( const sc::UpdatedRangeNames& rUpdatedNames, SCTAB nOldTab, const formula::FormulaToken& rToken )
+ {
+-    if (rToken.GetOpCode() != ocName)
+-        return false;
+-
+     SCTAB nTab = -1;
+     if (!rToken.IsGlobal())
+         nTab = nOldTab;
+@@ -2759,6 +2757,16 @@ bool isNameModified( const sc::UpdatedRangeNames& rUpdatedNames, SCTAB nOldTab,
+     return rUpdatedNames.isNameUpdated(nTab, rToken.GetIndex());
+ }
+ 
++bool isDBDataModified( const ScDocument& rDoc, const formula::FormulaToken& rToken )
++{
++    // Check if this DBData has been modified.
++    const ScDBData* pDBData = rDoc.GetDBCollection()->getNamedDBs().findByIndex( rToken.GetIndex());
++    if (!pDBData)
++        return false;
++
++    return pDBData->IsModified();
++}
++
+ }
+ 
+ sc::RefUpdateResult ScTokenArray::AdjustReferenceOnShift( const sc::RefUpdateContext& rCxt, const ScAddress& rOldPos )
+@@ -2897,7 +2905,8 @@ sc::RefUpdateResult ScTokenArray::AdjustReferenceOnShift( const sc::RefUpdateCon
+             break;
+             case svIndex:
+             {
+-                if (isNameModified(rCxt.maUpdatedNames, rOldPos.Tab(), **p))
++                if (((*p)->GetOpCode() == ocName && isNameModified(rCxt.maUpdatedNames, rOldPos.Tab(), **p)) ||
++                        ((*p)->GetOpCode() == ocDBArea && isDBDataModified(rCxt.mrDoc, **p)))
+                     aRes.mbNameModified = true;
+             }
+             break;
+@@ -2965,7 +2974,8 @@ sc::RefUpdateResult ScTokenArray::AdjustReferenceOnMove(
+             break;
+             case svIndex:
+             {
+-                if (isNameModified(rCxt.maUpdatedNames, rOldPos.Tab(), **p))
++                if (((*p)->GetOpCode() == ocName && isNameModified(rCxt.maUpdatedNames, rOldPos.Tab(), **p)) ||
++                        ((*p)->GetOpCode() == ocDBArea && isDBDataModified(rCxt.mrDoc, **p)))
+                     aRes.mbNameModified = true;
+             }
+             break;
+@@ -3489,7 +3499,8 @@ sc::RefUpdateResult ScTokenArray::AdjustReferenceOnDeletedTab( sc::RefUpdateDele
+             break;
+             case svIndex:
+             {
+-                if (isNameModified(rCxt.maUpdatedNames, rOldPos.Tab(), **p))
++                if (((*p)->GetOpCode() == ocName && isNameModified(rCxt.maUpdatedNames, rOldPos.Tab(), **p)) ||
++                        ((*p)->GetOpCode() == ocDBArea && isDBDataModified(rCxt.mrDoc, **p)))
+                     aRes.mbNameModified = true;
+             }
+             break;
+@@ -3533,7 +3544,8 @@ sc::RefUpdateResult ScTokenArray::AdjustReferenceOnInsertedTab( sc::RefUpdateIns
+             break;
+             case svIndex:
+             {
+-                if (isNameModified(rCxt.maUpdatedNames, rOldPos.Tab(), **p))
++                if (((*p)->GetOpCode() == ocName && isNameModified(rCxt.maUpdatedNames, rOldPos.Tab(), **p)) ||
++                        ((*p)->GetOpCode() == ocDBArea && isDBDataModified(rCxt.mrDoc, **p)))
+                     aRes.mbNameModified = true;
+             }
+             break;
+@@ -3598,7 +3610,8 @@ sc::RefUpdateResult ScTokenArray::AdjustReferenceOnMovedTab( sc::RefUpdateMoveTa
+             break;
+             case svIndex:
+             {
+-                if (isNameModified(rCxt.maUpdatedNames, rOldPos.Tab(), **p))
++                if (((*p)->GetOpCode() == ocName && isNameModified(rCxt.maUpdatedNames, rOldPos.Tab(), **p)) ||
++                        ((*p)->GetOpCode() == ocDBArea && isDBDataModified(rCxt.mrDoc, **p)))
+                     aRes.mbNameModified = true;
+             }
+             break;
+
+--------------erAck-patch-parts--
+
+

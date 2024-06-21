@@ -1,0 +1,148 @@
+From 1fa8860a788431a77af7f6ee6ce082cd63ce9f97 Mon Sep 17 00:00:00 2001
+Message-Id: <1fa8860a788431a77af7f6ee6ce082cd63ce9f97.1441909284.git.erack@redhat.com>
+From: Eike Rathke <erack@redhat.com>
+Date: Thu, 10 Sep 2015 15:52:21 +0200
+Subject: [PATCH] Resolves: tdf#92995 do not delete caption objects that are
+ held by Undo
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="------------erAck-patch-parts"
+
+This is a multi-part message in MIME format.
+--------------erAck-patch-parts
+Content-Type: text/plain; charset=UTF-8; format=fixed
+Content-Transfer-Encoding: 8bit
+
+
+Drag&Drop Undo is a special case of ownership..
+
+(cherry picked from commit 44f34c1163882c2e3086282374fee9cd55ee211f)
+
+Backported.
+
+Change-Id: I2fe7769c4d84efe09d432335d5d8e72d506bf7a1
+---
+ sc/inc/column.hxx               |  2 +-
+ sc/inc/global.hxx               |  1 +
+ sc/source/core/data/column2.cxx | 21 ++++++++++++++++++++-
+ sc/source/core/data/column3.cxx |  5 ++++-
+ sc/source/core/data/column4.cxx |  2 +-
+ sc/source/ui/undo/undoblk.cxx   |  9 ++++++++-
+ 6 files changed, 35 insertions(+), 5 deletions(-)
+
+
+--------------erAck-patch-parts
+Content-Type: text/x-patch; name="0001-Resolves-tdf-92995-do-not-delete-caption-objects-tha.patch"
+Content-Transfer-Encoding: 8bit
+Content-Disposition: attachment; filename="0001-Resolves-tdf-92995-do-not-delete-caption-objects-tha.patch"
+
+diff --git a/sc/inc/column.hxx b/sc/inc/column.hxx
+index 539c916..60e7e7e 100644
+--- a/sc/inc/column.hxx
++++ b/sc/inc/column.hxx
+@@ -539,7 +539,7 @@ public:
+     ScPostIt* GetCellNote( SCROW nRow );
+     const ScPostIt* GetCellNote( SCROW nRow ) const;
+     const ScPostIt* GetCellNote( sc::ColumnBlockConstPosition& rBlockPos, SCROW nRow ) const;
+-    void DeleteCellNotes( sc::ColumnBlockPosition& rBlockPos, SCROW nRow1, SCROW nRow2 );
++    void DeleteCellNotes( sc::ColumnBlockPosition& rBlockPos, SCROW nRow1, SCROW nRow2, bool bForgetCaptionOwnership );
+     bool HasCellNotes() const;
+     void SetCellNote( SCROW nRow, ScPostIt* pNote);
+     bool IsNotesEmptyBlock(SCROW nStartRow, SCROW nEndRow) const;
+diff --git a/sc/inc/global.hxx b/sc/inc/global.hxx
+index 0614bce..24b4a81 100644
+--- a/sc/inc/global.hxx
++++ b/sc/inc/global.hxx
+@@ -169,6 +169,7 @@ const sal_uInt16 IDF_OUTLINE    = 0x0800;   /// Sheet / outlining (grouping) inf
+ const sal_uInt16 IDF_NOCAPTIONS = 0x0200;   /// Internal use only (undo etc.): do not copy/delete caption objects of cell notes.
+ const sal_uInt16 IDF_ADDNOTES   = 0x0400;   /// Internal use only (copy from clip): do not delete existing cell contents when pasting notes.
+ const sal_uInt16 IDF_SPECIAL_BOOLEAN = 0x1000;
++const sal_uInt16 IDF_FORGETCAPTIONS = 0x2000; /// Internal use only (d&d undo): do not delete caption objects of cell notes.
+ const sal_uInt16 IDF_ATTRIB     = IDF_HARDATTR | IDF_STYLES;
+ const sal_uInt16 IDF_CONTENTS   = IDF_VALUE | IDF_DATETIME | IDF_STRING | IDF_NOTE | IDF_FORMULA | IDF_OUTLINE;
+ const sal_uInt16 IDF_ALL        = IDF_CONTENTS | IDF_ATTRIB | IDF_OBJECTS;
+diff --git a/sc/source/core/data/column2.cxx b/sc/source/core/data/column2.cxx
+index 06ee75a..7e71db9 100644
+--- a/sc/source/core/data/column2.cxx
++++ b/sc/source/core/data/column2.cxx
+@@ -1801,8 +1801,27 @@ void ScColumn::SetCellNote(SCROW nRow, ScPostIt* pNote)
+     maCellNotes.set(nRow, pNote);
+ }
+ 
+-void ScColumn::DeleteCellNotes( sc::ColumnBlockPosition& rBlockPos, SCROW nRow1, SCROW nRow2 )
++namespace {
++class ForgetCellNoteCaptionsHandler
++{
++
++public:
++    ForgetCellNoteCaptionsHandler() {}
++
++    void operator() ( size_t /*nRow*/, ScPostIt* p )
++    {
++        p->ForgetCaption();
++    }
++};
++}
++
++void ScColumn::DeleteCellNotes( sc::ColumnBlockPosition& rBlockPos, SCROW nRow1, SCROW nRow2, bool bForgetCaptionOwnership )
+ {
++    if (bForgetCaptionOwnership)
++    {
++        ForgetCellNoteCaptionsHandler aFunc;
++        sc::ParseNote(maCellNotes.begin(), maCellNotes, nRow1, nRow2, aFunc);
++    }
+     rBlockPos.miCellNotePos =
+         maCellNotes.set_empty(rBlockPos.miCellNotePos, nRow1, nRow2);
+ }
+diff --git a/sc/source/core/data/column3.cxx b/sc/source/core/data/column3.cxx
+index 3f0ebd4..4393ab1 100644
+--- a/sc/source/core/data/column3.cxx
++++ b/sc/source/core/data/column3.cxx
+@@ -652,7 +652,10 @@ void ScColumn::DeleteArea(
+         DeleteCells(aBlockPos, nStartRow, nEndRow, nDelFlag, aDeletedRows);
+ 
+     if (nDelFlag & IDF_NOTE)
+-        DeleteCellNotes(aBlockPos, nStartRow, nEndRow);
++    {
++        bool bForgetCaptionOwnership = ((nDelFlag & IDF_FORGETCAPTIONS) != IDF_NONE);
++        DeleteCellNotes(aBlockPos, nStartRow, nEndRow, bForgetCaptionOwnership);
++    }
+ 
+     if ( nDelFlag & IDF_EDITATTR )
+     {
+diff --git a/sc/source/core/data/column4.cxx b/sc/source/core/data/column4.cxx
+index 19c2c2c..027f909 100644
+--- a/sc/source/core/data/column4.cxx
++++ b/sc/source/core/data/column4.cxx
+@@ -111,7 +111,7 @@ void ScColumn::DeleteBeforeCopyFromClip( sc::CopyFromClipContext& rCxt, const Sc
+             DeleteCells(aBlockPos, nRow1, nRow2, nDelFlag, aDeletedRows);
+ 
+         if (nDelFlag & IDF_NOTE)
+-            DeleteCellNotes(aBlockPos, nRow1, nRow2);
++            DeleteCellNotes(aBlockPos, nRow1, nRow2, false);
+ 
+         if (nDelFlag & IDF_EDITATTR)
+             RemoveEditAttribs(nRow1, nRow2);
+diff --git a/sc/source/ui/undo/undoblk.cxx b/sc/source/ui/undo/undoblk.cxx
+index 0c5c495..f79a46b 100644
+--- a/sc/source/ui/undo/undoblk.cxx
++++ b/sc/source/ui/undo/undoblk.cxx
+@@ -1239,7 +1239,14 @@ void ScUndoDragDrop::DoUndo( ScRange aRange )
+     // do not undo objects and note captions, they are handled via drawing undo
+     sal_uInt16 nUndoFlags = (IDF_ALL & ~IDF_OBJECTS) | IDF_NOCAPTIONS;
+ 
+-    pDoc->DeleteAreaTab( aRange, nUndoFlags );
++    // Additionally discard/forget caption ownership during deletion, as
++    // Drag&Drop is a special case in that the Undo holds captions of the
++    // transfered target range, which would get deleted and
++    // SdrGroupUndo::Undo() would attempt to access invalidated captions and
++    // crash, tdf#92995
++    sal_uInt16 nDelFlags = nUndoFlags | IDF_FORGETCAPTIONS;
++
++    pDoc->DeleteAreaTab( aRange, nDelFlags );
+     pRefUndoDoc->CopyToDocument( aRange, nUndoFlags, false, pDoc );
+     if ( pDoc->HasAttrib( aRange, HASATTR_MERGED ) )
+         pDoc->ExtendMerge( aRange, true );
+
+--------------erAck-patch-parts--
+
+

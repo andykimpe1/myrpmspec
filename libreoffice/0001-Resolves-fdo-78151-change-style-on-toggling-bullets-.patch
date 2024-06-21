@@ -1,0 +1,810 @@
+From 34dcadf5f7bec6a02e3269d4cffb27e036303b2a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Caol=C3=A1n=20McNamara?= <caolanm@redhat.com>
+Date: Fri, 6 Jun 2014 15:13:26 +0100
+Subject: [PATCH] Resolves: fdo#78151 change style on toggling bullets on
+ master page outliners
+
+"do what I mean"
+
+In master pages prior to this if we toggle bullets on and off the that changes
+the *level* of the paragraph. And because the paragraph is effectively a
+preview of the equivalent style level, changing the level disconnects it from
+the style which is useless for us.
+
+So instead turn the numbering off at the given outline level. In order to
+toggle the numbering back split the defaults-setting into a reusable piece that
+sets the numbering indent which we can call to toggle numbering back on
+
+Also split out the broadcast style change *and explicit child* broadcast code
+into a reusable method, the absence of which left me stumped for well over an
+hour as to why my changes only worked on level 1
+
+Related: fdo#78151 force outliners in master view to be read-only text
+
+because these contain place-holder text and it doesn't make sense
+to be able to edit them (unless some-day we support custom place-holder
+prompts)
+
+because they are now read-only add a pair of "show next level" and "hide
+last level" features so on right clicking the last outline paragraph
+you can make the next one visible, or make the last one invisible
+
+Change-Id: Iea24d810f298156cfe2f32aa53d0515da45e08eb
+(cherry picked from commit 7e600aca08ebbd69b0c8ef924c84af4dcf80df56)
+
+Change-Id: I311c7f35f1ca7dff1d151c6141ff5faa7f15c5a2
+(cherry picked from commit 8a5b3971057237b178f7e65437deec766b56f9c4)
+---
+ .../openoffice/Office/UI/DrawImpressCommands.xcu   | 10 +++
+ sd/inc/app.hrc                                     |  5 +-
+ sd/inc/sdcommands.h                                |  2 +
+ sd/inc/stlpool.hxx                                 |  2 +
+ sd/inc/stlsheet.hxx                                |  8 +++
+ sd/sdi/_drvwsh.sdi                                 | 10 +++
+ sd/sdi/sdraw.sdi                                   | 48 ++++++++++++++
+ sd/source/core/stlpool.cxx                         | 57 +++++++++++-----
+ sd/source/core/stlsheet.cxx                        | 30 ++++++++-
+ sd/source/ui/app/popup.src                         | 13 ++++
+ sd/source/ui/func/futempl.cxx                      | 21 +-----
+ sd/source/ui/inc/DrawViewShell.hxx                 |  6 ++
+ sd/source/ui/inc/View.hxx                          | 19 ++++++
+ sd/source/ui/view/drtxtob1.cxx                     | 76 ++++++++++++++++++++--
+ sd/source/ui/view/drviews2.cxx                     | 50 ++++++++++++++
+ sd/source/ui/view/drviews7.cxx                     | 66 +++++++++++++++++++
+ sd/source/ui/view/sdview.cxx                       | 30 ++++++++-
+ 17 files changed, 408 insertions(+), 45 deletions(-)
+
+diff --git a/officecfg/registry/data/org/openoffice/Office/UI/DrawImpressCommands.xcu b/officecfg/registry/data/org/openoffice/Office/UI/DrawImpressCommands.xcu
+index b4b6366..31aa4d7 100644
+--- a/officecfg/registry/data/org/openoffice/Office/UI/DrawImpressCommands.xcu
++++ b/officecfg/registry/data/org/openoffice/Office/UI/DrawImpressCommands.xcu
+@@ -584,6 +584,16 @@
+           <value xml:lang="en-US">H~yperlink...</value>
+         </prop>
+       </node>
++      <node oor:name=".uno:HideLastLevel" oor:op="replace">
++        <prop oor:name="Label" oor:type="xs:string">
++          <value xml:lang="en-US">~Hide Last Level</value>
++        </prop>
++      </node>
++      <node oor:name=".uno:ShowNextLevel" oor:op="replace">
++        <prop oor:name="Label" oor:type="xs:string">
++          <value xml:lang="en-US">~Show Next Level</value>
++        </prop>
++      </node>
+       <node oor:name=".uno:PageSetup" oor:op="replace">
+         <prop oor:name="Label" oor:type="xs:string">
+           <value xml:lang="en-US">~Page...</value>
+diff --git a/sd/inc/app.hrc b/sd/inc/app.hrc
+index ef8631f..fae13da 100644
+--- a/sd/inc/app.hrc
++++ b/sd/inc/app.hrc
+@@ -447,9 +447,10 @@
+ 
+ #define SID_ADD_MOTION_PATH                 (SID_SD_START+442)
+ #define SID_TABLE_TOOLBOX                   (SID_SD_START+443)
+-
+ // free
+-#define SID_PRESENTATION_MINIMIZER         (SID_SD_START+450)
++#define SID_HIDE_LAST_LEVEL                 (SID_SD_START+448)
++#define SID_SHOW_NEXT_LEVEL                 (SID_SD_START+449)
++#define SID_PRESENTATION_MINIMIZER          (SID_SD_START+450)
+ #endif
+ 
+ /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+diff --git a/sd/inc/sdcommands.h b/sd/inc/sdcommands.h
+index 2041d8f..276bf6d 100644
+--- a/sd/inc/sdcommands.h
++++ b/sd/inc/sdcommands.h
+@@ -119,6 +119,8 @@
+ #define CMD_SID_INSERTPAGE_LAYOUT_MENU              ".uno:TaskPaneInsertPage"
+ #define CMD_SID_PHOTOALBUM                          ".uno:PhotoAlbumDialog"
+ #define CMD_SID_PRESENTATION_MINIMIZER              ".uno:PresentationMinimizer"
++#define CMD_SID_HIDE_LAST_LEVEL                     ".uno:HideLastLevel"
++#define CMD_SID_SHOW_NEXT_LEVEL                     ".uno:ShowNextLevel"
+ 
+ #endif
+ 
+diff --git a/sd/inc/stlpool.hxx b/sd/inc/stlpool.hxx
+index 31cb814..7af9fe9 100644
+--- a/sd/inc/stlpool.hxx
++++ b/sd/inc/stlpool.hxx
+@@ -42,6 +42,7 @@ class SdStyleSheet;
+ class SdDrawDocument;
+ class SdPage;
+ class SfxStyleSheetBase;
++class SvxNumberFormat;
+ 
+ typedef std::map< const SdPage*, SdStyleFamilyRef > SdStyleFamilyMap;
+ 
+@@ -92,6 +93,7 @@ public:
+ 
+     static  SdStyleSheetVector CreateChildList( SdStyleSheet* pSheet );
+ 
++    static void setDefaultOutlineNumberFormatBulletAndIndent(sal_uInt16 i, SvxNumberFormat &rNumberFormat);
+ 
+ public:
+     void throwIfDisposed() throw(::com::sun::star::uno::RuntimeException);
+diff --git a/sd/inc/stlsheet.hxx b/sd/inc/stlsheet.hxx
+index a64366b..d8b1183 100644
+--- a/sd/inc/stlsheet.hxx
++++ b/sd/inc/stlsheet.hxx
+@@ -39,6 +39,8 @@
+ 
+ #include <boost/scoped_ptr.hpp>
+ 
++#include "prlayout.hxx"
++
+ class ModifyListenerForewarder;
+ 
+ typedef cppu::ImplInheritanceHelper5< SfxUnoStyleSheet,
+@@ -75,6 +77,12 @@ public:
+ 
+     static SdStyleSheet* CreateEmptyUserStyle( SfxStyleSheetBasePool& rPool, SfxStyleFamily eFamily );
+ 
++    //Broadcast that a SdStyleSheet has changed, taking into account outline sublevels
++    //which need to be explicitly broadcast as changing if their parent style was
++    //the one that changed
++    static void BroadcastSdStyleSheetChange(SfxStyleSheetBase* pStyleSheet, PresentationObjects ePO,
++        SfxStyleSheetBasePool* pSSPool);
++
+     // XInterface
+     virtual void SAL_CALL release(  ) throw () SAL_OVERRIDE;
+ 
+diff --git a/sd/sdi/_drvwsh.sdi b/sd/sdi/_drvwsh.sdi
+index d328cf4..f8119e9 100644
+--- a/sd/sdi/_drvwsh.sdi
++++ b/sd/sdi/_drvwsh.sdi
+@@ -2309,6 +2309,16 @@ interface DrawView
+         ExecMethod = FuTemporary ;
+         StateMethod = GetMenuState ;
+     ]
++    SID_HIDE_LAST_LEVEL // ole : no, status : ?
++    [
++        ExecMethod = FuTemporary ;
++        StateMethod = GetMenuState ;
++    ]
++    SID_SHOW_NEXT_LEVEL // ole : no, status : ?
++    [
++        ExecMethod = FuTemporary ;
++        StateMethod = GetMenuState ;
++    ]
+     SID_TRANSLITERATE_UPPER // ole : no, status : ?
+     [
+         ExecMethod = FuSupport ;
+diff --git a/sd/sdi/sdraw.sdi b/sd/sdi/sdraw.sdi
+index 9a03c4f..de7f1a2 100644
+--- a/sd/sdi/sdraw.sdi
++++ b/sd/sdi/sdraw.sdi
+@@ -7025,3 +7025,51 @@ SfxVoidItem PresentationMinimizer SID_PRESENTATION_MINIMIZER
+     ToolBoxConfig = TRUE,
+     GroupId = GID_OPTIONS;
+ ]
++
++SfxVoidItem HideLastLevel SID_HIDE_LAST_LEVEL
++()
++[
++    /* flags: */
++    AutoUpdate = FALSE,
++    Cachable = Cachable,
++    FastCall = FALSE,
++    HasCoreId = FALSE,
++    HasDialog = TRUE,
++    ReadOnlyDoc = FALSE,
++    Toggle = FALSE,
++    Container = FALSE,
++    RecordAbsolute = FALSE,
++    RecordPerSet;
++    Synchron;
++
++    /* config: */
++    AccelConfig = FALSE,
++    MenuConfig = FALSE,
++    StatusBarConfig = FALSE,
++    ToolBoxConfig = FALSE,
++    GroupId = GID_OPTIONS;
++]
++
++SfxVoidItem ShowNextLevel SID_SHOW_NEXT_LEVEL
++()
++[
++    /* flags: */
++    AutoUpdate = FALSE,
++    Cachable = Cachable,
++    FastCall = FALSE,
++    HasCoreId = FALSE,
++    HasDialog = TRUE,
++    ReadOnlyDoc = FALSE,
++    Toggle = FALSE,
++    Container = FALSE,
++    RecordAbsolute = FALSE,
++    RecordPerSet;
++    Synchron;
++
++    /* config: */
++    AccelConfig = FALSE,
++    MenuConfig = FALSE,
++    StatusBarConfig = FALSE,
++    ToolBoxConfig = FALSE,
++    GroupId = GID_OPTIONS;
++]
+diff --git a/sd/source/core/stlpool.cxx b/sd/source/core/stlpool.cxx
+index c98dff7..8fdec5e 100644
+--- a/sd/source/core/stlpool.cxx
++++ b/sd/source/core/stlpool.cxx
+@@ -1052,9 +1052,49 @@ void SdStyleSheetPool::UpdateStdNames()
+     }
+ }
+ 
+-// Set new SvxNumBulletItem for the respective style sheet
++void SdStyleSheetPool::setDefaultOutlineNumberFormatBulletAndIndent(sal_uInt16 i, SvxNumberFormat &rNumberFormat)
++{
++    rNumberFormat.SetBulletChar( 0x25CF );  // StarBats: 0xF000 + 34
++    rNumberFormat.SetBulletRelSize(45);
++    const short nLSpace = (i + 1) * 1200;
++    rNumberFormat.SetLSpace(nLSpace);
++    rNumberFormat.SetAbsLSpace(nLSpace);
++    short nFirstLineOffset = -600;
++
++    switch(i)
++    {
++        case 0:
++        {
++            nFirstLineOffset = -900;
++        }
++        break;
+ 
++        case 1:
++        {
++            rNumberFormat.SetBulletChar( 0x2013 );  // StarBats: 0xF000 + 150
++            rNumberFormat.SetBulletRelSize(75);
++            nFirstLineOffset = -900;
++        }
++        break;
+ 
++        case 2:
++        {
++            nFirstLineOffset = -800;
++        }
++        break;
++
++        case 3:
++        {
++            rNumberFormat.SetBulletChar( 0x2013 );  // StarBats: 0xF000 + 150
++            rNumberFormat.SetBulletRelSize(75);
++        }
++        break;
++    }
++
++    rNumberFormat.SetFirstLineOffset(nFirstLineOffset);
++}
++
++// Set new SvxNumBulletItem for the respective style sheet
+ void SdStyleSheetPool::PutNumBulletItem( SfxStyleSheetBase* pSheet,
+                                          Font& rBulletFont )
+ {
+@@ -1134,12 +1174,7 @@ void SdStyleSheetPool::PutNumBulletItem( SfxStyleSheetBase* pSheet,
+                                  SVX_MAX_NUM, false );
+             for( sal_uInt16 i = 0; i < aNumRule.GetLevelCount(); i++ )
+             {
+-                aNumberFormat.SetBulletChar( 0x25CF );  // StarBats: 0xF000 + 34
+-                aNumberFormat.SetBulletRelSize(45);
+-                const short nLSpace = (i + 1) * 1200;
+-                aNumberFormat.SetLSpace(nLSpace);
+-                aNumberFormat.SetAbsLSpace(nLSpace);
+-                short nFirstLineOffset = -600;
++                setDefaultOutlineNumberFormatBulletAndIndent(i, aNumberFormat);
+ 
+                 sal_uLong nFontSize = 20;
+                 switch(i)
+@@ -1147,36 +1182,28 @@ void SdStyleSheetPool::PutNumBulletItem( SfxStyleSheetBase* pSheet,
+                     case 0:
+                     {
+                         nFontSize = 32;
+-                        nFirstLineOffset = -900;
+                     }
+                     break;
+ 
+                     case 1:
+                     {
+-                        aNumberFormat.SetBulletChar( 0x2013 );  // StarBats: 0xF000 + 150
+-                        aNumberFormat.SetBulletRelSize(75);
+                         nFontSize = 32;
+-                        nFirstLineOffset = -900;
+                     }
+                     break;
+ 
+                     case 2:
+                     {
+                         nFontSize = 28;
+-                        nFirstLineOffset = -800;
+                     }
+                     break;
+ 
+                     case 3:
+                     {
+-                        aNumberFormat.SetBulletChar( 0x2013 );  // StarBats: 0xF000 + 150
+-                        aNumberFormat.SetBulletRelSize(75);
+                         nFontSize = 24;
+                     }
+                     break;
+                 }
+ 
+-                aNumberFormat.SetFirstLineOffset(nFirstLineOffset);
+                 nFontSize = (sal_uInt16)((nFontSize * 2540L) / 72);  // Pt --> 1/100 mm
+                 rBulletFont.SetSize(Size(0,846));       // 24 pt
+                 aNumberFormat.SetBulletFont(&rBulletFont);
+diff --git a/sd/source/core/stlsheet.cxx b/sd/source/core/stlsheet.cxx
+index 5df055f..c0f34e0 100644
+--- a/sd/source/core/stlsheet.cxx
++++ b/sd/source/core/stlsheet.cxx
+@@ -1364,12 +1364,38 @@ Any SAL_CALL SdStyleSheet::getPropertyDefault( const OUString& aPropertyName ) t
+     return aRet;
+ }
+ 
+-
+-
+ /** this is used because our property map is not sorted yet */
+ const SfxItemPropertySimpleEntry* SdStyleSheet::getPropertyMapEntry( const OUString& rPropertyName ) const throw()
+ {
+     return GetStylePropertySet().getPropertyMapEntry(rPropertyName);
+ }
+ 
++//Broadcast that a SdStyleSheet has changed, taking into account outline sublevels
++//which need to be explicitly broadcast as changing if their parent style was
++//the one that changed
++void SdStyleSheet::BroadcastSdStyleSheetChange(SfxStyleSheetBase* pStyleSheet,
++    PresentationObjects ePO, SfxStyleSheetBasePool* pSSPool)
++{
++    SdStyleSheet* pRealSheet =((SdStyleSheet*)pStyleSheet)->GetRealStyleSheet();
++    pRealSheet->Broadcast(SfxSimpleHint(SFX_HINT_DATACHANGED));
++
++    if( (ePO >= PO_OUTLINE_1) && (ePO <= PO_OUTLINE_8) )
++    {
++        OUString sStyleName(SD_RESSTR(STR_PSEUDOSHEET_OUTLINE) + " ");
++
++        for( sal_uInt16 n = (sal_uInt16)(ePO - PO_OUTLINE_1 + 2); n < 10; n++ )
++        {
++            OUString aName( sStyleName + OUString::number(n) );
++
++            SfxStyleSheetBase* pSheet = pSSPool->Find( aName, SD_STYLE_FAMILY_PSEUDO);
++
++            if(pSheet)
++            {
++                SdStyleSheet* pRealStyleSheet = ((SdStyleSheet*)pSheet)->GetRealStyleSheet();
++                pRealStyleSheet->Broadcast(SfxSimpleHint(SFX_HINT_DATACHANGED));
++            }
++        }
++    }
++}
++
+ /* vim:set shiftwidth=4 softtabstop=4 expandtab: */
+diff --git a/sd/source/ui/app/popup.src b/sd/source/ui/app/popup.src
+index 7f8692f..1fd5561 100644
+--- a/sd/source/ui/app/popup.src
++++ b/sd/source/ui/app/popup.src
+@@ -33,6 +33,19 @@ Menu RID_DRAW_TEXTOBJ_INSIDE_POPUP
+ {
+     ItemList =
+     {
++        MenuItem
++        {
++            Identifier = SID_HIDE_LAST_LEVEL;
++            Command = CMD_SID_HIDE_LAST_LEVEL;
++            Text [ en-US ] = "~Hide Last Level";
++        };
++        MenuItem
++        {
++            Identifier = SID_SHOW_NEXT_LEVEL;
++            Command = CMD_SID_SHOW_NEXT_LEVEL;
++            Text [ en-US ] = "~Show Next Level";
++        };
++        SEPARATOR
+         MN_SET_DEFAULT
+         SEPARATOR
+         MN_TEXTATTR
+diff --git a/sd/source/ui/func/futempl.cxx b/sd/source/ui/func/futempl.cxx
+index 1dd0c40..42b453c 100644
+--- a/sd/source/ui/func/futempl.cxx
++++ b/sd/source/ui/func/futempl.cxx
+@@ -428,27 +428,8 @@ void FuTemplate::DoExecute( SfxRequest& rReq )
+                                 }
+                             }
+ 
+-                            OUString sStyleName(SD_RESSTR(STR_PSEUDOSHEET_OUTLINE) + " ");
+-
+                             pStyleSheet->GetItemSet().Put(aTempSet);
+-                            SdStyleSheet* pRealSheet =((SdStyleSheet*)pStyleSheet)->GetRealStyleSheet();
+-                            pRealSheet->Broadcast(SfxSimpleHint(SFX_HINT_DATACHANGED));
+-
+-                            if( (ePO >= PO_OUTLINE_1) && (ePO <= PO_OUTLINE_8) )
+-                            {
+-                                for( sal_uInt16 n = (sal_uInt16)(ePO - PO_OUTLINE_1 + 2); n < 10; n++ )
+-                                {
+-                                    OUString aName( sStyleName + OUString::number(n) );
+-
+-                                    SfxStyleSheetBase* pSheet = pSSPool->Find( aName, SD_STYLE_FAMILY_PSEUDO);
+-
+-                                    if(pSheet)
+-                                    {
+-                                        SdStyleSheet* pRealStyleSheet = ((SdStyleSheet*)pSheet)->GetRealStyleSheet();
+-                                        pRealStyleSheet->Broadcast(SfxSimpleHint(SFX_HINT_DATACHANGED));
+-                                    }
+-                                }
+-                            }
++                            SdStyleSheet::BroadcastSdStyleSheetChange(pStyleSheet, ePO, pSSPool);
+                         }
+ 
+                         SfxItemSet& rAttr = pStyleSheet->GetItemSet();
+diff --git a/sd/source/ui/inc/DrawViewShell.hxx b/sd/source/ui/inc/DrawViewShell.hxx
+index 7ec42ea..6e4b55a 100644
+--- a/sd/source/ui/inc/DrawViewShell.hxx
++++ b/sd/source/ui/inc/DrawViewShell.hxx
+@@ -32,6 +32,7 @@
+ #include <unotools/caserotate.hxx>
+ #include <boost/shared_ptr.hpp>
+ 
++class Outliner;
+ class SdPage;
+ class SdrExternalToolEdit;
+ class DrawDocShell;
+@@ -43,6 +44,7 @@ class TransferableClipboardListener;
+ class AbstractSvxNameDialog;
+ class SdrLayer;
+ class SvxClipboardFmtItem;
++struct ESelection;
+ 
+ namespace sd {
+ 
+@@ -163,6 +165,10 @@ public:
+     virtual OUString GetSelectionText( bool bCompleteWords = false );
+     virtual bool    HasSelection( bool bText = true ) const;
+ 
++    //If we are editing an PRESOBJ_OUTLINE return the Outliner and fill rSel
++    //with the current selection
++    ::Outliner*     GetOutlinerForMasterPageOutlineTextObj(ESelection &rSel);
++
+     void            ExecCtrl(SfxRequest& rReq);
+     void            GetCtrlState(SfxItemSet& rSet);
+     void            GetDrawAttrState(SfxItemSet& rSet);
+diff --git a/sd/source/ui/inc/View.hxx b/sd/source/ui/inc/View.hxx
+index cd80568..2c59ade 100644
+--- a/sd/source/ui/inc/View.hxx
++++ b/sd/source/ui/inc/View.hxx
+@@ -63,6 +63,24 @@ struct SdViewRedrawRec
+     Rectangle     aRect;
+ };
+ 
++//For master view we want to force that master
++//textboxes have readonly text, because the
++//text is the auto-generated click-here-to-edit
++//and it doesn't help to change it
++class OutlinerMasterViewFilter
++{
++private:
++    SdrOutliner *m_pOutl;
++    bool m_bReadOnly;
++public:
++    OutlinerMasterViewFilter()
++        : m_pOutl(0)
++        , m_bReadOnly(false)
++    {
++    }
++    void Start(SdrOutliner *pOutl);
++    void End();
++};
+ 
+ class View : public FmFormView
+ {
+@@ -275,6 +293,7 @@ protected:
+ 
+ private:
+     ::std::auto_ptr<ViewClipboard> mpClipboard;
++    OutlinerMasterViewFilter maMasterViewFilter;
+ };
+ 
+ 
+diff --git a/sd/source/ui/view/drtxtob1.cxx b/sd/source/ui/view/drtxtob1.cxx
+index 605983c..761ed63 100644
+--- a/sd/source/ui/view/drtxtob1.cxx
++++ b/sd/source/ui/view/drtxtob1.cxx
+@@ -57,10 +57,14 @@
+ #include <editeng/cmapitem.hxx>
+ 
+ #include "app.hrc"
+-
++#include "glob.hrc"
++#include "sdresid.hxx"
++#include "prlayout.hxx"
+ #include "ViewShell.hxx"
+ #include "drawview.hxx"
+ #include "drawdoc.hxx"
++#include "stlpool.hxx"
++#include "stlsheet.hxx"
+ #include "OutlineView.hxx"
+ #include "Window.hxx"
+ #include "futempl.hxx"
+@@ -316,10 +320,74 @@ void TextObjectBar::Execute( SfxRequest &rReq )
+         break;
+ 
+         case FN_NUM_BULLET_ON:
+-            if( pOLV )
+-                pOLV->ToggleBullets();
+-            break;
++        {
++            if (pOLV)
++            {
++                bool bMasterPage = false;
++                SdrPageView* pPageView = mpView->GetSdrPageView();
++                if (pPageView)
++                {
++                    SdPage* pPage = (SdPage*)pPageView->GetPage();
++                    bMasterPage = pPage && (pPage->GetPageKind() == PK_STANDARD) && pPage->IsMasterPage();
++                }
+ 
++                if (!bMasterPage)
++                    pOLV->ToggleBullets();
++                else
++                {
++                    //Resolves: fdo#78151 in master pages if we toggle bullets on
++                    //and off then just disable/enable the bulleting, but do not
++                    //change the *level* of the paragraph, because the paragraph is
++                    //effectively a preview of the equivalent style level, and
++                    //changing the level disconnects it from the style
++
++                    ::Outliner* pOL = pOLV->GetOutliner();
++                    if (pOL)
++                    {
++                        const SvxNumBulletItem *pItem = NULL;
++                        SfxStyleSheetBasePool* pSSPool = mpView->GetDocSh()->GetStyleSheetPool();
++                        OUString sStyleName(SD_RESSTR(STR_PSEUDOSHEET_OUTLINE) + " 1");
++                        SfxStyleSheetBase* pFirstStyleSheet = pSSPool->Find(sStyleName, SD_STYLE_FAMILY_PSEUDO);
++                        if( pFirstStyleSheet )
++                            pFirstStyleSheet->GetItemSet().GetItemState(EE_PARA_NUMBULLET, false, (const SfxPoolItem**)&pItem);
++
++                        if (pItem )
++                        {
++                            SvxNumRule aNewRule(*((SvxNumBulletItem*)pItem)->GetNumRule());
++                            ESelection aSel = pOLV->GetSelection();
++                            aSel.Adjust();
++                            sal_Int32 nStartPara = aSel.nStartPara;
++                            sal_Int32 nEndPara = aSel.nEndPara;
++                            for (sal_Int32 nPara = nStartPara; nPara <= nEndPara; ++nPara)
++                            {
++                                sal_uInt16 nLevel = pOL->GetDepth(nPara);
++                                SvxNumberFormat aFmt(aNewRule.GetLevel(nLevel));
++
++                                if (aFmt.GetNumberingType() == SVX_NUM_NUMBER_NONE)
++                                {
++                                    aFmt.SetNumberingType(SVX_NUM_CHAR_SPECIAL);
++                                    SdStyleSheetPool::setDefaultOutlineNumberFormatBulletAndIndent(nLevel, aFmt);
++                                }
++                                else
++                                {
++                                    aFmt.SetNumberingType(SVX_NUM_NUMBER_NONE);
++                                    aFmt.SetLSpace(0);
++                                    aFmt.SetAbsLSpace(0);
++                                    aFmt.SetFirstLineOffset(0);
++                                }
++
++                                aNewRule.SetLevel(nLevel, aFmt);
++                            }
++
++                            pFirstStyleSheet->GetItemSet().Put(SvxNumBulletItem(aNewRule, EE_PARA_NUMBULLET));
++
++                            SdStyleSheet::BroadcastSdStyleSheetChange(pFirstStyleSheet, PO_OUTLINE_1, pSSPool);
++                        }
++                    }
++                }
++            }
++            break;
++        }
+         case SID_GROW_FONT_SIZE:
+         case SID_SHRINK_FONT_SIZE:
+         {
+diff --git a/sd/source/ui/view/drviews2.cxx b/sd/source/ui/view/drviews2.cxx
+index 688432e..685adbd 100644
+--- a/sd/source/ui/view/drviews2.cxx
++++ b/sd/source/ui/view/drviews2.cxx
+@@ -1799,6 +1799,56 @@ void DrawViewShell::FuTemporary(SfxRequest& rReq)
+         }
+         break;
+ 
++        case SID_HIDE_LAST_LEVEL:
++        {
++            ESelection aSel;
++            // fdo#78151 editing a PRESOBJ_OUTLINE in a master page ?
++            ::Outliner* pOL = GetOutlinerForMasterPageOutlineTextObj(aSel);
++            if (pOL)
++            {
++                //we are on the last paragraph
++                aSel.Adjust();
++                if (aSel.nEndPara == pOL->GetParagraphCount() - 1)
++                {
++                    sal_uInt16 nDepth = pOL->GetDepth(aSel.nEndPara);
++                    //there exists a previous numbering level
++                    if (nDepth != sal_uInt16(-1) && nDepth > 0)
++                    {
++                        Paragraph* pPara = pOL->GetParagraph(aSel.nEndPara);
++                        pOL->Remove(pPara, 1);
++                    }
++                }
++            }
++            Cancel();
++            rReq.Done ();
++        }
++        break;
++
++        case SID_SHOW_NEXT_LEVEL:
++        {
++            ESelection aSel;
++            // fdo#78151 editing a PRESOBJ_OUTLINE in a master page ?
++            ::Outliner* pOL = GetOutlinerForMasterPageOutlineTextObj(aSel);
++            if (pOL)
++            {
++                //we are on the last paragraph
++                aSel.Adjust();
++                if (aSel.nEndPara == pOL->GetParagraphCount() - 1)
++                {
++                    sal_uInt16 nDepth = pOL->GetDepth(aSel.nEndPara);
++                    //there exists a previous numbering level
++                    if (nDepth != sal_uInt16(-1) && nDepth < 8)
++                    {
++                        sal_uInt16 nNewDepth = nDepth+1;
++                        pOL->Insert(SD_RESSTR(STR_PRESOBJ_MPOUTLINE+nNewDepth), EE_PARA_APPEND, nNewDepth);
++                    }
++                }
++            }
++            Cancel();
++            rReq.Done ();
++        }
++        break;
++
+         case SID_INSERT_FLD_DATE_FIX:
+         case SID_INSERT_FLD_DATE_VAR:
+         case SID_INSERT_FLD_TIME_FIX:
+diff --git a/sd/source/ui/view/drviews7.cxx b/sd/source/ui/view/drviews7.cxx
+index 81e2e00..d57b4a6 100644
+--- a/sd/source/ui/view/drviews7.cxx
++++ b/sd/source/ui/view/drviews7.cxx
+@@ -212,6 +212,37 @@ void DrawViewShell::GetDrawAttrState(SfxItemSet& rSet)
+     rSet.Put(aSet,false);
+ }
+ 
++::Outliner* DrawViewShell::GetOutlinerForMasterPageOutlineTextObj(ESelection &rSel)
++{
++    if( !mpDrawView )
++        return NULL;
++
++    //when there is one object selected
++    if (!mpDrawView->AreObjectsMarked() || (mpDrawView->GetMarkedObjectList().GetMarkCount() != 1))
++        return NULL;
++
++    //and we are editing the outline object
++    if (!mpDrawView->IsTextEdit())
++        return NULL;
++
++    SdrPageView* pPageView = mpDrawView->GetSdrPageView();
++    if (!pPageView)
++        return NULL;
++
++    SdPage* pPage = (SdPage*)pPageView->GetPage();
++    //only show these in a normal master page
++    if (!pPage || (pPage->GetPageKind() != PK_STANDARD) || !pPage->IsMasterPage())
++        return NULL;
++
++    OutlinerView* pOLV = mpDrawView->GetTextEditOutlinerView();
++    ::Outliner* pOL = pOLV ? pOLV->GetOutliner() : NULL;
++    if (!pOL)
++        return NULL;
++    rSel = pOLV->GetSelection();
++
++    return pOL;
++}
++
+ void DrawViewShell::GetMenuState( SfxItemSet &rSet )
+ {
+     if (mpDrawView == NULL)
+@@ -1565,6 +1596,41 @@ void DrawViewShell::GetMenuState( SfxItemSet &rSet )
+     if ( bDisableEditHyperlink )
+         rSet.DisableItem( SID_OPEN_HYPERLINK );
+ 
++    //fdo#78151 enable show next level/hide last level if editing a master page
++    //PRESOBJ_OUTLINE object and the current selection allow that to happen
++    {
++        bool bDisableShowNextLevel = true;
++        bool bDisableHideLastLevel = true;
++
++        ESelection aSel;
++        ::Outliner* pOL = GetOutlinerForMasterPageOutlineTextObj(aSel);
++        if (pOL)
++        {
++            //and are on the last paragraph
++            aSel.Adjust();
++            if (aSel.nEndPara == pOL->GetParagraphCount() - 1)
++            {
++                sal_uInt16 nDepth = pOL->GetDepth(aSel.nEndPara);
++                if (nDepth != sal_uInt16(-1))
++                {
++                    //there exists another numbering level that
++                    //is currently hidden
++                    if (nDepth < 8)
++                        bDisableShowNextLevel = false;
++                    //there exists a previous numbering level
++                    if (nDepth > 0)
++                        bDisableHideLastLevel = false;
++                }
++            }
++        }
++
++        if (bDisableShowNextLevel)
++            rSet.DisableItem(SID_SHOW_NEXT_LEVEL);
++
++        if (bDisableHideLastLevel)
++            rSet.DisableItem(SID_HIDE_LAST_LEVEL);
++    }
++
+ #if defined WNT || defined UNX
+     if( !mxScannerManager.is() )
+     {
+diff --git a/sd/source/ui/view/sdview.cxx b/sd/source/ui/view/sdview.cxx
+index 53e48a5..8755f8e 100644
+--- a/sd/source/ui/view/sdview.cxx
++++ b/sd/source/ui/view/sdview.cxx
+@@ -653,12 +653,33 @@ static void SetSpellOptions( const SdDrawDocument& rDoc, sal_uLong& rCntrl )
+         rCntrl &= ~EE_CNTRL_ONLINESPELLING;
+ }
+ 
++void OutlinerMasterViewFilter::Start(SdrOutliner *pOutl)
++{
++    m_pOutl = pOutl;
++    OutlinerView* pOutlView = m_pOutl->GetView(0);
++    m_bReadOnly = pOutlView->IsReadOnly();
++    pOutlView->SetReadOnly(true);
++}
++
++void OutlinerMasterViewFilter::End()
++{
++    if (m_pOutl)
++    {
++        OutlinerView* pOutlView = m_pOutl->GetView(0);
++        pOutlView->SetReadOnly(m_bReadOnly);
++        m_pOutl = NULL;
++    }
++}
++
+ bool View::SdrBeginTextEdit(
+     SdrObject* pObj, SdrPageView* pPV, ::Window* pWin,
+     bool bIsNewObj,
+     SdrOutliner* pOutl, OutlinerView* pGivenOutlinerView,
+     bool bDontDeleteOutliner, bool bOnlyOneView, bool bGrabFocus )
+ {
++    SdrPage* pPage = pObj->GetPage();
++    bool bMasterPage = pPage && pPage->IsMasterPage();
++
+     GetViewShell()->GetViewShellBase().GetEventMultiplexer()->MultiplexEvent(
+         sd::tools::EventMultiplexerEvent::EID_BEGIN_TEXT_EDIT, (void*)pObj );
+ 
+@@ -731,12 +752,17 @@ bool View::SdrBeginTextEdit(
+         }
+     }
+ 
+-    return(bReturn);
++    if (bMasterPage && bReturn)
++        maMasterViewFilter.Start(pOutl);
++
++    return bReturn;
+ }
+ 
+ /** ends current text editing */
+-SdrEndTextEditKind View::SdrEndTextEdit(bool bDontDeleteReally )
++SdrEndTextEditKind View::SdrEndTextEdit(bool bDontDeleteReally)
+ {
++    maMasterViewFilter.End();
++
+     SdrObjectWeakRef xObj( GetTextEditObject() );
+ 
+     bool bDefaultTextRestored = RestoreDefaultText( dynamic_cast< SdrTextObj* >( GetTextEditObject() ) );
+-- 
+2.1.0
+
