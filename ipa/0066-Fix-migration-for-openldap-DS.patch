@@ -1,0 +1,74 @@
+From dd499c559c960f8c01287bcfe28c158e3780daa4 Mon Sep 17 00:00:00 2001
+From: Martin Kosek <mkosek@redhat.com>
+Date: Wed, 30 Jan 2013 09:46:02 +0100
+Subject: [PATCH] Fix migration for openldap DS
+
+openldap server does not store its schema in cn=schema entry, but
+rather in cn=subschema. Add a fallback to ldap2 plugin to read from
+this entry when cn=schema is not found. ldap2 plugin uses the schema
+when doing some of the automatic encoding, like an automatic
+encoding of DN object.
+
+IPA migration plugin DN attribute processing is now also more
+tolerant when it finds that some DN attribute was not autoencoded.
+It tries to convert it to DN on its own and report a warning and
+continue with user processing when the conversion fails instead of
+crashing with AssertionError and thus abandoning the whole
+migration run.
+
+https://fedorahosted.org/freeipa/ticket/3372
+---
+ ipalib/plugins/migration.py | 14 +++++++++++++-
+ ipaserver/plugins/ldap2.py  | 11 +++++++++--
+ 2 files changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/ipalib/plugins/migration.py b/ipalib/plugins/migration.py
+index 05036c9c1ca28aad09ecfad13c374ec382cc9d3a..81df59a23ff46b770076cb56a7d78fed8db26029 100644
+--- a/ipalib/plugins/migration.py
++++ b/ipalib/plugins/migration.py
+@@ -191,7 +191,19 @@ def _pre_migrate_user(ldap, pkey, dn, entry_attrs, failed, config, ctx, **kwargs
+     for attr in entry_attrs.keys():
+         if ldap.has_dn_syntax(attr):
+             for ind, value in enumerate(entry_attrs[attr]):
+-                assert isinstance(value, DN)
++                if not isinstance(value, DN):
++                    # value is not DN instance, the automatic encoding may have
++                    # failed due to missing schema or the remote attribute type OID was
++                    # not detected as DN type. Try to work this around
++                    api.log.debug('%s: value %s of type %s in attribute %s is not a DN'
++                        ', convert it', pkey, value, type(value), attr)
++                    try:
++                        value = DN(value)
++                    except ValueError, e:
++                        api.log.warn('%s: skipping normalization of value %s of type %s '
++                            'in attribute %s which could not be converted to DN: %s',
++                                pkey, value, type(value), attr, e)
++                        continue
+                 try:
+                     (remote_dn, remote_entry) = ds_ldap.get_entry(value, [api.Object.user.primary_key.name, api.Object.group.primary_key.name])
+                 except errors.NotFound:
+diff --git a/ipaserver/plugins/ldap2.py b/ipaserver/plugins/ldap2.py
+index 8e8e1604ff0a3d36fe3501ec6f54abdb717d78ae..731df1aa4557a39508eb23c0161f25ed659d514a 100644
+--- a/ipaserver/plugins/ldap2.py
++++ b/ipaserver/plugins/ldap2.py
+@@ -218,8 +218,15 @@ class SchemaCache(object):
+                     conn.set_option(_ldap.OPT_HOST_NAME, api.env.host)
+                 conn.sasl_interactive_bind_s(None, SASL_AUTH)
+ 
+-            schema_entry = conn.search_s('cn=schema', _ldap.SCOPE_BASE,
+-                                         attrlist=['attributetypes', 'objectclasses'])[0]
++            try:
++                schema_entry = conn.search_s('cn=schema', _ldap.SCOPE_BASE,
++                    attrlist=['attributetypes', 'objectclasses'])[0]
++            except _ldap.NO_SUCH_OBJECT:
++                # try different location for schema
++                # openldap has schema located in cn=subschema
++                self.debug('cn=schema not found, fallback to cn=subschema')
++                schema_entry = conn.search_s('cn=subschema', _ldap.SCOPE_BASE,
++                    attrlist=['attributetypes', 'objectclasses'])[0]
+             if not has_conn:
+                 conn.unbind_s()
+         except _ldap.SERVER_DOWN:
+-- 
+1.7.11.7
+

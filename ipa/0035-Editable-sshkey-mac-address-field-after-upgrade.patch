@@ -1,0 +1,69 @@
+From 592041b0de8fa72f1f95a515e36aa1a6e899e5e6 Mon Sep 17 00:00:00 2001
+From: Petr Vobornik <pvoborni@redhat.com>
+Date: Mon, 19 Nov 2012 13:22:36 +0100
+Subject: [PATCH] Editable sshkey, mac address field after upgrade
+
+After upgrade, sshkeys of existing users and hosts or mac address are not editable because attribute level rights are not send to Web UI due to lack of ipasshuser/ieee802device object classes.
+
+'w_if_no_aci' attribute flag was introduced to bypass this issue. It makes attribute writable when AttributeLevelRights for the attribute are not present and only when user posses rights for modifying object class attribute.
+
+The flag was set for sshkeys_field and mac address field.
+
+https://fedorahosted.org/freeipa/ticket/3260
+---
+ install/ui/field.js | 17 +++++++++++++++--
+ install/ui/host.js  |  3 ++-
+ 2 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/install/ui/field.js b/install/ui/field.js
+index c5c999e685500765f09af084531def144bbbd10b..612c8eb5aa76848d23961c7b66c89b30539a03ac 100644
+--- a/install/ui/field.js
++++ b/install/ui/field.js
+@@ -190,7 +190,17 @@ IPA.field = function(spec) {
+ 
+         if (record.attributelevelrights) {
+             var rights = record.attributelevelrights[that.param];
+-            if (!rights || rights.indexOf('w') < 0) {
++            var oc_rights= record.attributelevelrights['objectclass'];
++            var write_oc = oc_rights && oc_rights.indexOf('w') > -1;
++
++            // Some objects in LDAP may not have set proper object class and
++            // therefore server doesn't send proper attribute rights. Flag
++            // 'w_if_no_aci' should be used when we want to ensure that UI
++            // shows edit interface in such cases. Usable only when user can
++            // modify object classes.
++            // For all others, lack of rights means no write.
++            if ((!rights && !(that.flags.indexOf('w_if_no_aci') > -1 && write_oc)) ||
++                 (rights && rights.indexOf('w') < 0)) {
+                 that.writable = false;
+             }
+         }
+@@ -644,7 +654,10 @@ IPA.sshkeys_field = function(spec) {
+ 
+     var that = IPA.multivalued_field(spec);
+ 
+-    that.sshfp_attr = 'sshpubkeyfp' || spec.sshfp_attr;
++    // Fixes upgrade issue. When attr rights are missing due to lack of object class.
++    that.flags = spec.flags || ['w_if_no_aci'];
++
++    that.sshfp_attr = spec.sshfp_attr || 'sshpubkeyfp';
+ 
+     that.load = function(record) {
+ 
+diff --git a/install/ui/host.js b/install/ui/host.js
+index a2b91b6b36186ee6ff26d24166dbe55355216ce9..6aff2c50dfebb6d9a61cfe1a4667989f25b9cee4 100644
+--- a/install/ui/host.js
++++ b/install/ui/host.js
+@@ -71,7 +71,8 @@ IPA.host.entity = function(spec) {
+                         },
+                         {
+                             type: 'multivalued',
+-                            name: 'macaddress'
++                            name: 'macaddress',
++                            flags: ['w_if_no_aci']
+                         }
+                     ]
+                 },
+-- 
+1.7.11.7
+

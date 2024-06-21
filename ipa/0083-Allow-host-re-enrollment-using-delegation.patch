@@ -1,0 +1,140 @@
+From 141e736e4ae7805dafb8053206a0d1844fd96e83 Mon Sep 17 00:00:00 2001
+From: Tomas Babej <tbabej@redhat.com>
+Date: Fri, 2 Aug 2013 10:49:07 +0200
+Subject: [PATCH] Allow host re-enrollment using delegation
+
+A new option --force-join has been added to ipa-client-install.
+It forces the host enrollment even if the host entry exists.
+Old certificate is revoked, new certificate and ssh key pair
+generated. See the relevant design for the re-enrollment part:
+http://freeipa.org/page/V3/Forced_client_re-enrollment
+
+https://fedorahosted.org/freeipa/ticket/3482
+---
+ ipa-client/ipa-install/ipa-client-install |  5 +++++
+ ipa-client/ipa-join.c                     | 14 +++++++++-----
+ ipa-client/man/ipa-client-install.1       |  3 +++
+ ipa-client/man/ipa-join.1                 |  3 +++
+ 4 files changed, 20 insertions(+), 5 deletions(-)
+
+diff --git a/ipa-client/ipa-install/ipa-client-install b/ipa-client/ipa-install/ipa-client-install
+index 61cf1395de80e04276b9dc5ae127f7ee5f33111b..a19efb06ac9d1cf861384c6ada221d928bb19388 100755
+--- a/ipa-client/ipa-install/ipa-client-install
++++ b/ipa-client/ipa-install/ipa-client-install
+@@ -112,6 +112,9 @@ def parse_options():
+                       help="The hostname of this machine (FQDN). If specified, the hostname will be set and "
+                            "the system configuration will be updated to persist over reboot. "
+                            "By default a nodename result from uname(2) is used.")
++    basic_group.add_option("", "--force-join", dest="force_join",
++                      action="store_true", default=False,
++                      help="Force client enrollment even if already enrolled")
+     basic_group.add_option("--ntp-server", dest="ntp_server", help="ntp server to use")
+     basic_group.add_option("-N", "--no-ntp", action="store_false",
+                       help="do not configure ntp", default=True, dest="conf_ntp")
+@@ -1921,6 +1924,8 @@ def install(options, env, fstore, statestore):
+             if options.hostname:
+                 join_args.append("-h")
+                 join_args.append(options.hostname)
++            if options.force_join:
++                join_args.append("-f")
+             if options.principal is not None:
+                 stdin = None
+                 principal = options.principal
+diff --git a/ipa-client/ipa-join.c b/ipa-client/ipa-join.c
+index 6a9770fe12325202444e002d909e34189697ad95..f06fbdb4224bcf992bff0bea1c3c46c62c185ee5 100644
+--- a/ipa-client/ipa-join.c
++++ b/ipa-client/ipa-join.c
+@@ -558,7 +558,7 @@ done:
+ }
+ 
+ static int
+-join_krb5(const char *ipaserver, char *hostname, char **hostdn, const char **princ, const char **subject, int quiet) {
++join_krb5(const char *ipaserver, char *hostname, char **hostdn, const char **princ, const char **subject, int force, int quiet) {
+     xmlrpc_env env;
+     xmlrpc_value * argArrayP = NULL;
+     xmlrpc_value * paramArrayP = NULL;
+@@ -663,7 +663,7 @@ join_krb5(const char *ipaserver, char *hostname, char **hostdn, const char **pri
+         goto cleanup;
+     }
+     xmlrpc_struct_find_value(&env, structP, "krblastpwdchange", &krblastpwdchangeP);
+-    if (krblastpwdchangeP) {
++    if (krblastpwdchangeP && !force) {
+         xmlrpc_value * singleprincP = NULL;
+ 
+         /* FIXME: all values are returned as lists currently. Once this is
+@@ -924,7 +924,7 @@ cleanup:
+ 
+ 
+ static int
+-join(const char *server, const char *hostname, const char *bindpw, const char *basedn, const char *keytab, int quiet)
++join(const char *server, const char *hostname, const char *bindpw, const char *basedn, const char *keytab, int force, int quiet)
+ {
+     int rval = 0;
+     pid_t childpid = 0;
+@@ -998,7 +998,8 @@ join(const char *server, const char *hostname, const char *bindpw, const char *b
+             rval = 6;
+             goto cleanup;
+         }
+-        rval = join_krb5(ipaserver, host, &hostdn, &princ, &subject, quiet);
++        rval = join_krb5(ipaserver, host, &hostdn, &princ, &subject, force,
++                         quiet);
+     }
+ 
+     if (rval) goto cleanup;
+@@ -1095,6 +1096,7 @@ main(int argc, const char **argv) {
+     static const char *basedn = NULL;
+     int quiet = 0;
+     int unenroll = 0;
++    int force = 0;
+     struct poptOption options[] = {
+         { "debug", 'd', POPT_ARG_NONE, &debug, 0,
+           _("Print the raw XML-RPC output in GSSAPI mode"), NULL },
+@@ -1108,6 +1110,8 @@ main(int argc, const char **argv) {
+           _("IPA Server to use"), _("hostname") },
+         { "keytab", 'k', POPT_ARG_STRING, &keytab, 0,
+           _("Specifies where to store keytab information."), _("filename") },
++        { "force", 'f', POPT_ARG_NONE, &force, 0,
++          _("Force the host join. Rejoin even if already joined."), NULL },
+         { "bindpw", 'w', POPT_ARG_STRING, &bindpw, 0,
+           _("LDAP password (if not using Kerberos)"), _("password") },
+         { "basedn", 'b', POPT_ARG_STRING, &basedn, 0,
+@@ -1144,7 +1148,7 @@ main(int argc, const char **argv) {
+     } else {
+         ret = check_perms(keytab);
+         if (ret == 0)
+-            ret = join(server, hostname, bindpw, basedn, keytab, quiet);
++            ret = join(server, hostname, bindpw, basedn, keytab, force, quiet);
+     }
+ 
+     exit(ret);
+diff --git a/ipa-client/man/ipa-client-install.1 b/ipa-client/man/ipa-client-install.1
+index d0b0f9943bdbf28be9fc5b9faa6c1ec930ca18cc..6d2740ea957dd23f1d66f2cfb88c3255842fea82 100644
+--- a/ipa-client/man/ipa-client-install.1
++++ b/ipa-client/man/ipa-client-install.1
+@@ -65,6 +65,9 @@ Configure PAM to create a users home directory if it does not exist.
+ \fB\-\-hostname\fR
+ The hostname of this machine (FQDN). If specified, the hostname will be set and the system configuration will be updated to persist over reboot. By default a nodename result from uname(2) is used.
+ .TP
++\fB\-\-force\-join\fR
++Join the host even if it is already enrolled.
++.TP
+ \fB\-\-ntp\-server\fR=\fINTP_SERVER\fR
+ Configure ntpd to use this NTP server.
+ .TP
+diff --git a/ipa-client/man/ipa-join.1 b/ipa-client/man/ipa-join.1
+index bd33b16cc7cdd12173875b18b78c75d5f71a3069..5dd4004b36c096bbccf1cd966e3f189fa2e356ca 100644
+--- a/ipa-client/man/ipa-join.1
++++ b/ipa-client/man/ipa-join.1
+@@ -64,6 +64,9 @@ The password to use if not using Kerberos to authenticate. Use a password of thi
+ \fB\-b,\-\-basedn basedn\fR
+ The basedn of the IPA server (of the form dc=example,dc=com). This is only needed when not using Kerberos to authenticate and anonymous binds are disallowed in the IPA LDAP server.
+ .TP
++\fB\-f,\-\-force\fR
++Force enrolling the host even if host entry exists.
++.TP
+ \fB\-u,\-\-unenroll\fR
+ Unenroll this host from the IPA server. No keytab entry is removed in the process
+ (see
+-- 
+1.8.3.1
+

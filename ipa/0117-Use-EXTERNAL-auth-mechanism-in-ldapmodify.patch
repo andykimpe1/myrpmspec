@@ -1,0 +1,74 @@
+From 79a8f1dc965f43a8c7140a3c3301d4c7f63ae3b1 Mon Sep 17 00:00:00 2001
+From: Ana Krivokapic <akrivoka@redhat.com>
+Date: Thu, 19 Jun 2014 10:04:01 +0200
+Subject: [PATCH] Use EXTERNAL auth mechanism in ldapmodify
+
+Default to using the EXTERNAL authorization mechanism in calls to ldapmodify
+
+https://fedorahosted.org/freeipa/ticket/3895
+---
+ ipaserver/install/service.py | 20 ++++++++++----------
+ 1 file changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/ipaserver/install/service.py b/ipaserver/install/service.py
+index 88b47da342fc4bf27defe64a4105221fa1d6b1c1..55a9b26af51ba6900c2f423ddb4eb78277a42068 100644
+--- a/ipaserver/install/service.py
++++ b/ipaserver/install/service.py
+@@ -124,17 +124,15 @@ class Service(object):
+ 
+         self.admin_conn = conn
+ 
+-
+     def ldap_disconnect(self):
+         self.admin_conn.unbind()
+         self.admin_conn = None
+ 
+-    def _ldap_mod(self, ldif, sub_dict = None):
+-
++    def _ldap_mod(self, ldif, sub_dict=None):
+         pw_name = None
+         fd = None
+         path = ipautil.SHARE_DIR + ldif
+-        nologlist=[]
++        nologlist = []
+ 
+         if sub_dict is not None:
+             txt = ipautil.template_file(path, sub_dict)
+@@ -142,9 +140,9 @@ class Service(object):
+             path = fd.name
+ 
+             # do not log passwords
+-            if sub_dict.has_key('PASSWORD'):
++            if 'PASSWORD' in sub_dict:
+                 nologlist.append(sub_dict['PASSWORD'])
+-            if sub_dict.has_key('RANDOM_PASSWORD'):
++            if 'RANDOM_PASSWORD' in sub_dict:
+                 nologlist.append(sub_dict['RANDOM_PASSWORD'])
+ 
+         args = ["/usr/bin/ldapmodify", "-v", "-f", path]
+@@ -155,16 +153,18 @@ class Service(object):
+             self.ldap_connect()
+         args += ["-H", self.admin_conn.uri]
+ 
+-        auth_parms = []
++        # If DM password is available, use it
+         if self.dm_password:
+             [pw_fd, pw_name] = tempfile.mkstemp()
+             os.write(pw_fd, self.dm_password)
+             os.close(pw_fd)
+             auth_parms = ["-x", "-D", "cn=Directory Manager", "-y", pw_name]
++        # Use GSSAPI auth when not using DM password or not being root
++        elif os.getegid() != 0:
++            auth_parms = ["-Y", "GSSAPI"]
++        # Default to EXTERNAL auth mechanism
+         else:
+-            # always try GSSAPI auth when not using DM password or not being root
+-            if os.getegid() != 0:
+-                auth_parms = ["-Y", "GSSAPI"]
++            auth_parms = ["-Y", "EXTERNAL"]
+ 
+         args += auth_parms
+ 
+-- 
+2.4.3
+

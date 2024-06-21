@@ -1,0 +1,68 @@
+From ad2a2002457ec74a9372f4de1b6fcee37494daef Mon Sep 17 00:00:00 2001
+From: Martin Kosek <mkosek@redhat.com>
+Date: Fri, 11 Jan 2013 13:43:15 +0100
+Subject: [PATCH] Sort LDAP updates properly
+
+LDAP updates were sorted by number of RDNs in DN. This, however,
+sometimes caused updates to be executed before cn=schema updates.
+If the update required an objectClass or attributeType added during
+the cn=schema update, the update operation failed.
+
+Fix the sorting so that the cn=schema updates are always run first
+and then the other updates sorted by RDN count.
+
+https://fedorahosted.org/freeipa/ticket/3342
+---
+ ipaserver/install/ldapupdate.py | 35 ++++++++++++++++-------------------
+ 1 file changed, 16 insertions(+), 19 deletions(-)
+
+diff --git a/ipaserver/install/ldapupdate.py b/ipaserver/install/ldapupdate.py
+index eb95858f9f3b7e06287ac38fc6f3270ebfb70894..1c23d7595fc096b6d5fe7c3e6e0007ee44cdb78a 100644
+--- a/ipaserver/install/ldapupdate.py
++++ b/ipaserver/install/ldapupdate.py
+@@ -881,26 +881,23 @@ class LDAPUpdate:
+ 
+     def _run_updates(self, all_updates):
+         # For adds and updates we want to apply updates from shortest
+-        # to greatest length of the DN. For deletes we want the reverse.
+-
+-        dn_by_rdn_count = {}
+-        for dn in all_updates.keys():
++        # to greatest length of the DN. cn=schema must always go first to add
++        # new objectClasses and attributeTypes
++        # For deletes we want the reverse
++        def update_sort_key(dn_update):
++            dn, update = dn_update
+             assert isinstance(dn, DN)
+-            rdn_count = len(dn)
+-            rdn_count_list = dn_by_rdn_count.setdefault(rdn_count, [])
+-            if dn not in rdn_count_list:
+-                rdn_count_list.append(dn)
+-
+-        sortedkeys = dn_by_rdn_count.keys()
+-        sortedkeys.sort()
+-        for rdn_count in sortedkeys:
+-            for dn in dn_by_rdn_count[rdn_count]:
+-                self._update_record(all_updates[dn])
+-
+-        sortedkeys.reverse()
+-        for rdn_count in sortedkeys:
+-            for dn in dn_by_rdn_count[rdn_count]:
+-                self._delete_record(all_updates[dn])
++            return dn != DN(('cn', 'schema')), len(dn)
++
++        sorted_updates = sorted(all_updates.iteritems(), key=update_sort_key)
++
++        for dn, update in sorted_updates:
++            self._update_record(update)
++
++        # Now run the deletes in reversed order
++        sorted_updates.reverse()
++        for dn, update in sorted_updates:
++            self._delete_record(update)
+ 
+     def update(self, files):
+         """Execute the update. files is a list of the update files to use.
+-- 
+1.7.11.7
+

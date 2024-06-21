@@ -1,0 +1,86 @@
+From 504e501eed60e48406dbf7f2da7c03916f4d222e Mon Sep 17 00:00:00 2001
+From: Rob Crittenden <rcritten@redhat.com>
+Date: Wed, 17 Oct 2012 11:54:14 -0400
+Subject: [PATCH] Improve error messages in ipa-replica-manage.
+
+Correctly handle case where we bind using GSSAPI with an unauthorized user.
+
+Remove extraneous except clause. We now have handle for LDAP errors.
+
+Make it explicit in a few places what server we can't connect to.
+
+When the remote replica is down and we are forcing its removal, remove
+a duplicate entry from the list of servers to remove.
+
+https://fedorahosted.org/freeipa/ticket/2871
+---
+ install/tools/ipa-replica-manage |   22 ++++++++++++++--------
+ 1 files changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/install/tools/ipa-replica-manage b/install/tools/ipa-replica-manage
+index 897d117681d3e1559d5710366101b50540b705c8..a62974a0f909cb6d45943dc42e4e446d8ee2b207 100755
+--- a/install/tools/ipa-replica-manage
++++ b/install/tools/ipa-replica-manage
+@@ -129,6 +129,10 @@ def test_connection(realm, host):
+         return True
+     except ldap.LOCAL_ERROR:
+         return False
++    except errors.NotFound:
++        # We do a search in cn=config. NotFound in this case means no
++        # permission
++        return False
+ 
+ def list_replicas(realm, host, replica, dirman_passwd, verbose):
+ 
+@@ -267,11 +271,6 @@ def del_link(realm, replica1, replica2, dirman_passwd, force=False):
+             repl2.delete_agreement(replica1)
+             repl2.delete_referral(replica1)
+             repl2.set_readonly(readonly=False)
+-        except ldap.LDAPError, e:
+-            desc = e.args[0]['desc'].strip()
+-            info = e.args[0].get('info', '').strip()
+-            print "Unable to remove agreement on %s: %s: %s" % (replica2, desc, info)
+-            failed = True
+         except Exception, e:
+             print "Unable to remove agreement on %s: %s" % (replica2, convert_error(e))
+             failed = True
+@@ -547,11 +546,12 @@ def del_master(realm, hostname, options):
+         try:
+             delrepl = replication.ReplicationManager(realm, hostname, options.dirman_passwd)
+         except Exception, e:
++            print "Connection to '%s' failed: %s" % (hostname, convert_error(e))
+             if not options.force:
+-                print "Unable to delete replica %s: %s" % (hostname, convert_error(e))
++                print "Unable to delete replica '%s'" % hostname
+                 sys.exit(1)
+             else:
+-                print "Unable to connect to replica %s, forcing removal" % hostname
++                print "Forcing removal of %s" % hostname
+                 force_del = True
+ 
+         if force_del:
+@@ -560,6 +560,12 @@ def del_master(realm, hostname, options):
+             replica_names = []
+             for entry in entries:
+                 replica_names.append(entry.getValue('cn'))
++            # The host we're removing gets included in this list, remove it.
++            # Otherwise we try to delete an agreement from the host to itself.
++            try:
++                replica_names.remove(hostname)
++            except ValueError:
++                pass
+         else:
+             # Get list of agreements.
+             replica_names = delrepl.find_ipa_replication_agreements()
+@@ -611,7 +617,7 @@ def del_master(realm, hostname, options):
+             if not del_link(realm, r, hostname, options.dirman_passwd, force=True):
+                 print "Unable to remove replication agreement for %s from %s." % (hostname, r)
+         except Exception, e:
+-            print "There were issues removing a connection: %s" % convert_error(e)
++            print "There were issues removing a connection for %s from %s: %s" % (hostname, r, convert_error(e))
+ 
+     # 5. Clean RUV for the deleted master
+     if repltype == replication.IPA_REPLICA:
+-- 
+1.6.0.6
+

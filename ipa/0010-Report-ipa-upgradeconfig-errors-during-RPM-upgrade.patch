@@ -1,0 +1,97 @@
+From 3488770fe98e2ed59b4611dfe356ba9b6f22a2b3 Mon Sep 17 00:00:00 2001
+From: Martin Kosek <mkosek@redhat.com>
+Date: Wed, 17 Oct 2012 13:05:24 +0200
+Subject: [PATCH] Report ipa-upgradeconfig errors during RPM upgrade
+
+Report errors just like with ipa-ldap-updater. These messages should warn
+user that some parts of the upgrades may have not been successful and
+he should follow up on them. Otherwise, user may not notice them at all.
+
+ipa-upgradeconfig now has a new --quiet option to make it output only error
+level log messages or higher. ipa-upgradeconfig run without options still
+pring INFO log messages as it can provide a clean overview about its
+actions (unlike ipa-ldap-updater).
+
+https://fedorahosted.org/freeipa/ticket/3157
+---
+ freeipa.spec.in                       |    5 ++++-
+ install/tools/ipa-upgradeconfig       |   15 ++++++++++++---
+ install/tools/man/ipa-upgradeconfig.8 |    4 ++++
+ 3 files changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/freeipa.spec.in b/freeipa.spec.in
+index 060f09b12e6891defc8cb00d4f52a0d019198a70..916630029f6dfac8ef32dabb00f338052cbbf08e 100644
+--- a/freeipa.spec.in
++++ b/freeipa.spec.in
+@@ -493,7 +493,7 @@ if [ $1 = 1 ]; then
+ fi
+ %endif
+ if [ $1 -gt 1 ] ; then
+-    /usr/sbin/ipa-upgradeconfig >/dev/null 2>&1 || :
++    /usr/sbin/ipa-upgradeconfig --quiet >/dev/null || :
+ fi
+ 
+ %posttrans server
+@@ -815,6 +815,9 @@ fi
+ %ghost %attr(0644,root,apache) %config(noreplace) %{_sysconfdir}/ipa/ca.crt
+ 
+ %changelog
++* Wed Oct 17 2012 Martin Kosek <mkosek@redhat.com> - 2.99.0-51
++- Print ipa-upgradeconfig errors during RPM update
++
+ * Wed Oct 10 2012 Alexander Bokovoy <abokovoy@redhat.com> - 2.99.0-50
+ - Make sure server-trust-ad subpackage alternates winbind_krb5_locator.so
+   plugin to /dev/null since they cannot be used when trusts are configured
+diff --git a/install/tools/ipa-upgradeconfig b/install/tools/ipa-upgradeconfig
+index 38426149864017789614095445f947a997d63b3c..14d4e0829162ab78665f794c582e704b5901ea41 100644
+--- a/install/tools/ipa-upgradeconfig
++++ b/install/tools/ipa-upgradeconfig
+@@ -61,6 +61,9 @@ def parse_options():
+     parser = IPAOptionParser(version=version.VERSION)
+     parser.add_option("-d", "--debug", dest="debug", action="store_true",
+                       default=False, help="print debugging information")
++    parser.add_option("-q", "--quiet", dest="quiet",
++                      action="store_true",
++                      default=False, help="Output only errors")
+ 
+     options, args = parser.parse_args()
+     safe_options = parser.get_safe_opts(options)
+@@ -577,9 +580,15 @@ def main():
+ 
+     safe_options, options = parse_options()
+ 
+-    standard_logging_setup('/var/log/ipaupgrade.log', verbose=True,
+-        debug=options.debug, console_format='%(message)s',
+-        filemode='a')
++    verbose = not options.quiet
++    if options.debug:
++        console_format = '%(levelname)s: %(message)s'
++    else:
++        console_format = '%(message)s'
++
++    standard_logging_setup('/var/log/ipaupgrade.log', debug=options.debug,
++        verbose=verbose, console_format=console_format, filemode='a')
++    root_logger.debug('%s was invoked with options: %s' % (sys.argv[0], safe_options))
+ 
+     fstore = sysrestore.FileStore('/var/lib/ipa/sysrestore')
+ 
+diff --git a/install/tools/man/ipa-upgradeconfig.8 b/install/tools/man/ipa-upgradeconfig.8
+index 740ec554ac3487cbddf1eed18f61de93d50bee0c..43e2ab90e587aba027404474f60a854fde48b600 100644
+--- a/install/tools/man/ipa-upgradeconfig.8
++++ b/install/tools/man/ipa-upgradeconfig.8
+@@ -30,8 +30,12 @@ It also will convert a CA configured to be accessible via ports 9443, 9444, 9445
+ 
+ This is not intended to be run by an end\-user. It is executed when the IPA rpms are upgraded. This must be run as the root user.
+ .SH "OPTIONS"
++.TP
+ \fB\-d\fR, \fB\-\-debug\fR
+ Enable debug logging when more verbose output is needed
++.TP
++\fB\-q\fR, \fB\-\-quiet\fR
++Output only errors
+ .SH "EXIT STATUS"
+ 0 if the update was successful or there was nothing to do
+ 
+-- 
+1.6.0.6
+

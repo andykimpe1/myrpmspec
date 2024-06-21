@@ -1,0 +1,510 @@
+From dc406253821ba7a616dd12e2bcc5dd602247a279 Mon Sep 17 00:00:00 2001
+From: Martin Kosek <mkosek@redhat.com>
+Date: Thu, 25 Oct 2012 08:47:34 +0200
+Subject: [PATCH] Process relative nameserver DNS record correctly
+
+Nameserver hostname passed to dnszone_add command was always treated
+as FQDN even though it was a relative DNS name to the new zone. All
+relative names were being rejected as unresolvable.
+
+Modify --name-server option processing in dnszone_add and dnszone_mod
+to respect FQDN/relative DNS name and do the checks accordingly. With
+this change, user can add a new zone "example.com" and let dnszone_add
+to create NS record "ns" in it, when supplied with its IP address. IP
+address check is more strict so that it is not entered when no forward
+record is created. Places misusing the option were fixed.
+
+Nameserver option now also accepts zone name, which means that NS and A
+record is placed to DNS zone itself. Also "@" is accepted as a nameserver
+name, BIND understand it also as a zone name. As a side-effect of this
+change, other records with hostname part (MX, KX, NS, SRV) accept "@"
+as valid hostname. BIND replaces it with respective zone name as well.
+
+Unit tests were updated to test the new format.
+
+https://fedorahosted.org/freeipa/ticket/3204
+---
+ API.txt                              |   3 +-
+ VERSION                              |   2 +-
+ ipalib/plugins/dns.py                | 111 ++++++++++++++++++++++++++------
+ ipaserver/install/bindinstance.py    |  25 ++++----
+ tests/test_xmlrpc/test_dns_plugin.py | 119 +++++++++++++++++++++++++++++++++--
+ 5 files changed, 224 insertions(+), 36 deletions(-)
+
+diff --git a/API.txt b/API.txt
+index 7bd046c8d504bb7e39059a4f2b6743c7c0b6d8ef..04a4f23174289c3b1540254674cc996442e570a0 100644
+--- a/API.txt
++++ b/API.txt
+@@ -1097,7 +1097,7 @@ output: ListOfEntries('result', (<type 'list'>, <type 'tuple'>), Gettext('A list
+ output: Output('count', <type 'int'>, None)
+ output: Output('truncated', <type 'bool'>, None)
+ command: dnszone_mod
+-args: 1,24,3
++args: 1,25,3
+ arg: Str('idnsname', attribute=True, cli_name='name', multivalue=False, primary_key=True, query=True, required=True)
+ option: Str('name_from_ip', attribute=False, autofill=False, cli_name='name_from_ip', multivalue=False, required=False)
+ option: Str('idnssoamname', attribute=True, autofill=False, cli_name='name_server', multivalue=False, required=False)
+@@ -1120,6 +1120,7 @@ option: Str('setattr*', cli_name='setattr', exclude='webui')
+ option: Str('addattr*', cli_name='addattr', exclude='webui')
+ option: Str('delattr*', cli_name='delattr', exclude='webui')
+ option: Flag('rights', autofill=True, default=False)
++option: Flag('force', autofill=True, default=False)
+ option: Flag('all', autofill=True, cli_name='all', default=False, exclude='webui')
+ option: Flag('raw', autofill=True, cli_name='raw', default=False, exclude='webui')
+ option: Str('version?', exclude='webui')
+diff --git a/VERSION b/VERSION
+index 4d09f06a69a55991dae9004d92291030c589f607..69f9cfabe36ad482304db2196d8a9becbe8bf096 100644
+--- a/VERSION
++++ b/VERSION
+@@ -79,4 +79,4 @@ IPA_DATA_VERSION=20100614120000
+ #                                                      #
+ ########################################################
+ IPA_API_VERSION_MAJOR=2
+-IPA_API_VERSION_MINOR=44
++IPA_API_VERSION_MINOR=45
+diff --git a/ipalib/plugins/dns.py b/ipalib/plugins/dns.py
+index febd4d17c06e46291715d1ecdcded2d5bdea5aea..e7ac58d231ad53ba5ae86d711c4cda3beac89468 100644
+--- a/ipalib/plugins/dns.py
++++ b/ipalib/plugins/dns.py
+@@ -31,7 +31,7 @@ from ipalib import Command
+ from ipalib.parameters import Flag, Bool, Int, Decimal, Str, StrEnum, Any
+ from ipalib.plugins.baseldap import *
+ from ipalib import _, ngettext
+-from ipalib.util import (validate_zonemgr, normalize_zonemgr,
++from ipalib.util import (validate_zonemgr, normalize_zonemgr, normalize_zone,
+         validate_hostname, validate_dns_label, validate_domain_name,
+         get_dns_forward_zone_update_policy, get_dns_reverse_zone_update_policy,
+         get_reverse_zone_default, zone_is_reverse, REVERSE_DNS_ZONES)
+@@ -72,8 +72,9 @@ ipa dnsrecord-mod --mx-rec="0 mx.example.com." --mx-preference=1
+ EXAMPLES:
+ 
+  Add new zone:
+-   ipa dnszone-add example.com --name-server=nameserver.example.com \\
+-                               --admin-email=admin@example.com
++   ipa dnszone-add example.com --name-server=ns \\
++                               --admin-email=admin@example.com \\
++                               --ip-address=10.0.0.1
+ 
+  Add system permission that can be used for per-zone privilege delegation:
+    ipa dnszone-add-permission example.com
+@@ -90,7 +91,7 @@ EXAMPLES:
+ 
+  Add new reverse zone specified by network IP address:
+    ipa dnszone-add --name-from-ip=80.142.15.0/24 \\
+-                   --name-server=nameserver.example.com
++                   --name-server=ns.example.com.
+ 
+  Add second nameserver for example.com:
+    ipa dnsrecord-add example.com @ --ns-rec=nameserver2.example.com
+@@ -357,6 +358,8 @@ def _normalize_bind_aci(bind_acis):
+     return acis
+ 
+ def _bind_hostname_validator(ugettext, value):
++    if value == _dns_zone_record:
++        return
+     try:
+         # Allow domain name which is not fully qualified. These are supported
+         # in bind and then translated as <non-fqdn-name>.<domain>.
+@@ -1500,7 +1503,9 @@ _dns_supported_record_types = tuple(record.rrtype for record in _dns_records \
+                                     if record.supported)
+ 
+ def check_ns_rec_resolvable(zone, name):
+-    if not name.endswith('.'):
++    if name == _dns_zone_record:
++        name = normalize_zone(zone)
++    elif not name.endswith('.'):
+         # this is a DNS name relative to the zone
+         zone = dns.name.from_text(zone)
+         name = unicode(dns.name.from_text(name, origin=zone))
+@@ -1567,6 +1572,7 @@ class dnszone(LDAPObject):
+             cli_name='name_server',
+             label=_('Authoritative nameserver'),
+             doc=_('Authoritative nameserver domain name'),
++            normalizer=lambda value: value.lower(),
+         ),
+         Str('idnssoarname',
+             _rname_validator,
+@@ -1716,6 +1722,38 @@ class dnszone(LDAPObject):
+     def permission_name(self, zone):
+         return u"Manage DNS zone %s" % zone
+ 
++    def get_name_in_zone(self, zone, hostname):
++        """
++        Get name of a record that is to be added to a new zone. I.e. when
++        we want to add record "ipa.lab.example.com" in a zone "example.com",
++        this function should return "ipa.lab". Returns None when record cannot
++        be added to a zone
++        """
++        if hostname == _dns_zone_record:
++            # special case: @ --> zone name
++            return hostname
++
++        if hostname.endswith(u'.'):
++            hostname = hostname[:-1]
++        if zone.endswith(u'.'):
++            zone = zone[:-1]
++
++        hostname_parts = hostname.split(u'.')
++        zone_parts = zone.split(u'.')
++
++        dns_name = list(hostname_parts)
++        for host_part, zone_part in zip(reversed(hostname_parts),
++                                        reversed(zone_parts)):
++            if host_part != zone_part:
++                return None
++            dns_name.pop()
++
++        if not dns_name:
++            # hostname is directly in zone itself
++            return _dns_zone_record
++
++        return u'.'.join(dns_name)
++
+ api.register(dnszone)
+ 
+ 
+@@ -1726,10 +1764,10 @@ class dnszone_add(LDAPCreate):
+     takes_options = LDAPCreate.takes_options + (
+         Flag('force',
+              label=_('Force'),
+-             doc=_('Force DNS zone creation even if nameserver not in DNS.'),
++             doc=_('Force DNS zone creation even if nameserver is not resolvable.'),
+         ),
+         Str('ip_address?', _validate_ipaddr,
+-            doc=_('Add the nameserver to DNS with this IP address'),
++            doc=_('Add forward record for nameserver located in the created zone'),
+         ),
+     )
+ 
+@@ -1746,13 +1784,32 @@ class dnszone_add(LDAPCreate):
+         # NS record must contain domain name
+         if valid_ip(nameserver):
+             raise errors.ValidationError(name='name-server',
+-                    error=unicode(_("Nameserver address is not a fully qualified domain name")))
++                    error=_("Nameserver address is not a domain name"))
+ 
+-        if nameserver[-1] != '.':
+-            nameserver += '.'
++        nameserver_ip_address = options.get('ip_address')
++        normalized_zone = normalize_zone(keys[-1])
+ 
+-        if not 'ip_address' in options and not options['force']:
+-            check_ns_rec_resolvable(keys[0], nameserver)
++        if nameserver.endswith('.'):
++            record_in_zone = self.obj.get_name_in_zone(keys[-1], nameserver)
++        else:
++            record_in_zone = nameserver
++
++        if zone_is_reverse(normalized_zone):
++            if not nameserver.endswith('.'):
++                raise errors.ValidationError(name='name-server',
++                        error=_("Nameserver for reverse zone cannot be "
++                                "a relative DNS name"))
++            elif nameserver_ip_address:
++                raise errors.ValidationError(name='ip_address',
++                        error=_("Nameserver DNS record is created for "
++                                "for forward zones only"))
++        elif nameserver_ip_address and nameserver.endswith('.') and not record_in_zone:
++            raise errors.ValidationError(name='ip_address',
++                    error=_("Nameserver DNS record is created only for "
++                            "nameservers in current zone"))
++
++        if not nameserver_ip_address and not options['force']:
++             check_ns_rec_resolvable(keys[0], nameserver)
+ 
+         entry_attrs['nsrecord'] = nameserver
+         entry_attrs['idnssoamname'] = nameserver
+@@ -1760,12 +1817,16 @@ class dnszone_add(LDAPCreate):
+ 
+     def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
+         assert isinstance(dn, DN)
+-        if 'ip_address' in options:
+-            nameserver = entry_attrs['idnssoamname'][0][:-1] # ends with a dot
+-            nsparts = nameserver.split('.')
+-            add_forward_record('.'.join(nsparts[1:]),
+-                               nsparts[0],
+-                               options['ip_address'])
++        nameserver_ip_address = options.get('ip_address')
++        if nameserver_ip_address:
++            nameserver = entry_attrs['idnssoamname'][0]
++            if nameserver.endswith('.'):
++                dns_record = self.obj.get_name_in_zone(keys[-1], nameserver)
++            else:
++                dns_record = nameserver
++            add_forward_record(keys[-1],
++                               dns_record,
++                               nameserver_ip_address)
+ 
+         return dn
+ 
+@@ -1789,8 +1850,22 @@ api.register(dnszone_del)
+ class dnszone_mod(LDAPUpdate):
+     __doc__ = _('Modify DNS zone (SOA record).')
+ 
++    takes_options = LDAPUpdate.takes_options + (
++        Flag('force',
++             label=_('Force'),
++             doc=_('Force nameserver change even if nameserver not in DNS'),
++        ),
++    )
++
+     has_output_params = LDAPUpdate.has_output_params + dnszone_output_params
+ 
++    def pre_callback(self, ldap, dn, entry_attrs, attrs_list,  *keys, **options):
++        nameserver = entry_attrs.get('idnssoamname')
++        if nameserver and nameserver != _dns_zone_record and not options['force']:
++            check_ns_rec_resolvable(keys[0], nameserver)
++
++        return dn
++
+ api.register(dnszone_mod)
+ 
+ 
+diff --git a/ipaserver/install/bindinstance.py b/ipaserver/install/bindinstance.py
+index 39063294d50d45ab1b6eda202fc0f25b116cf50a..ecd697d42a2af8f6d99dc6323ca7517d16ea3532 100644
+--- a/ipaserver/install/bindinstance.py
++++ b/ipaserver/install/bindinstance.py
+@@ -251,7 +251,7 @@ def read_reverse_zone(default, ip_address):
+     return normalize_zone(zone)
+ 
+ def add_zone(name, zonemgr=None, dns_backup=None, ns_hostname=None, ns_ip_address=None,
+-       update_policy=None):
++       update_policy=None, force=False):
+     if zone_is_reverse(name):
+         # always normalize reverse zones
+         name = normalize_zone(name)
+@@ -273,13 +273,6 @@ def add_zone(name, zonemgr=None, dns_backup=None, ns_hostname=None, ns_ip_addres
+                 "No IPA server with DNS support found!")
+         ns_main = dns_masters.pop(0)
+         ns_replicas = dns_masters
+-        addresses = resolve_host(ns_main)
+-
+-        if len(addresses) > 0:
+-            # use the first address
+-            ns_ip_address = addresses[0]
+-        else:
+-            ns_ip_address = None
+     else:
+         ns_main = ns_hostname
+         ns_replicas = []
+@@ -296,12 +289,14 @@ def add_zone(name, zonemgr=None, dns_backup=None, ns_hostname=None, ns_ip_addres
+                                 idnsallowdynupdate=True,
+                                 idnsupdatepolicy=unicode(update_policy),
+                                 idnsallowquery=u'any',
+-                                idnsallowtransfer=u'none',)
++                                idnsallowtransfer=u'none',
++                                force=force)
+     except (errors.DuplicateEntry, errors.EmptyModlist):
+         pass
+ 
+     nameservers = ns_replicas + [ns_main]
+     for hostname in nameservers:
++        hostname = normalize_zone(hostname)
+         add_ns_rr(name, hostname, dns_backup=None, force=True)
+ 
+ def add_rr(zone, name, type, rdata, dns_backup=None, **kwargs):
+@@ -568,6 +563,8 @@ class BindInstance(service.Service):
+         self._ldap_mod("dns.ldif", self.sub_dict)
+ 
+     def __setup_zone(self):
++        nameserver_ip_address = self.ip_address
++        force = False
+         if not self.host_in_default_domain():
+             # add DNS domain for host first
+             root_logger.debug("Host domain (%s) is different from DNS domain (%s)!" \
+@@ -576,8 +573,14 @@ class BindInstance(service.Service):
+ 
+             add_zone(self.host_domain, self.zonemgr, dns_backup=self.dns_backup,
+                     ns_hostname=api.env.host, ns_ip_address=self.ip_address)
++            # Nameserver is in self.host_domain, no forward record added to self.domain
++            nameserver_ip_address = None
++            # Set force=True in case nameserver added in previous step
++            # is not resolvable yet
++            force = True
+         add_zone(self.domain, self.zonemgr, dns_backup=self.dns_backup,
+-                ns_hostname=api.env.host, ns_ip_address=self.ip_address)
++                ns_hostname=api.env.host, ns_ip_address=nameserver_ip_address,
++                force=force)
+ 
+     def __add_self_ns(self):
+         add_ns_rr(self.domain, api.env.host, self.dns_backup, force=True)
+@@ -610,7 +613,7 @@ class BindInstance(service.Service):
+ 
+     def __setup_reverse_zone(self):
+         add_zone(self.reverse_zone, self.zonemgr, ns_hostname=api.env.host,
+-                ns_ip_address=self.ip_address, dns_backup=self.dns_backup)
++                dns_backup=self.dns_backup)
+ 
+     def __setup_principal(self):
+         dns_principal = "DNS/" + self.fqdn + "@" + self.realm
+diff --git a/tests/test_xmlrpc/test_dns_plugin.py b/tests/test_xmlrpc/test_dns_plugin.py
+index 3c2dc005ddedab2e3e32325fea809307a53654ea..eb4356afb0d333cb2912a064f885a668eb68a69c 100644
+--- a/tests/test_xmlrpc/test_dns_plugin.py
++++ b/tests/test_xmlrpc/test_dns_plugin.py
+@@ -97,7 +97,7 @@ class test_dns(Declarative):
+ 
+         dict(
+             desc='Try to update non-existent zone %r' % dnszone1,
+-            command=('dnszone_mod', [dnszone1], {'idnssoamname': u'foobar'}),
++            command=('dnszone_mod', [dnszone1], {'idnssoaminimum': 3500}),
+             expected=errors.NotFound(
+                 reason=u'%s: DNS zone not found' % dnszone1),
+         ),
+@@ -283,12 +283,24 @@ class test_dns(Declarative):
+ 
+ 
+         dict(
++            desc='Try to create reverse zone %r with NS record in it' % revdnszone1,
++            command=(
++                'dnszone_add', [revdnszone1], {
++                    'idnssoamname': u'ns',
++                    'idnssoarname': dnszone1_rname,
++                }
++            ),
++            expected=errors.ValidationError(name='name-server',
++                error=u"Nameserver for reverse zone cannot be a relative DNS name"),
++        ),
++
++
++        dict(
+             desc='Create reverse zone %r' % revdnszone1,
+             command=(
+                 'dnszone_add', [revdnszone1], {
+                     'idnssoamname': dnszone1_mname,
+                     'idnssoarname': dnszone1_rname,
+-                    'ip_address' : u'1.2.3.4',
+                 }
+             ),
+             expected={
+@@ -951,7 +963,6 @@ class test_dns(Declarative):
+                     'name_from_ip': u'foo',
+                     'idnssoamname': dnszone1_mname,
+                     'idnssoarname': dnszone1_rname,
+-                    'ip_address' : u'1.2.3.4',
+                 }
+             ),
+             expected=errors.ValidationError(name='name_from_ip',
+@@ -965,7 +976,6 @@ class test_dns(Declarative):
+                     'name_from_ip': revdnszone1_ip,
+                     'idnssoamname': dnszone1_mname,
+                     'idnssoarname': dnszone1_rname,
+-                    'ip_address' : u'1.2.3.4',
+                 }
+             ),
+             expected={
+@@ -1001,7 +1011,6 @@ class test_dns(Declarative):
+                     'name_from_ip': revdnszone2_ip,
+                     'idnssoamname': dnszone1_mname,
+                     'idnssoarname': dnszone1_rname,
+-                    'ip_address' : u'1.2.3.4',
+                 }
+             ),
+             expected={
+@@ -1303,4 +1312,104 @@ class test_dns(Declarative):
+             },
+         ),
+ 
++
++        dict(
++            desc='Try to create zone %r nameserver not in it' % dnszone1,
++            command=(
++                'dnszone_add', [dnszone1], {
++                    'idnssoamname': u'not.in.this.zone.',
++                    'idnssoarname': dnszone1_rname,
++                    'ip_address' : u'1.2.3.4',
++                }
++            ),
++            expected=errors.ValidationError(name='ip_address',
++                error=u"Nameserver DNS record is created only for nameservers"
++                      u" in current zone"),
++        ),
++
++
++        dict(
++            desc='Create zone %r with relative nameserver' % dnszone1,
++            command=(
++                'dnszone_add', [dnszone1], {
++                    'idnssoamname': u'ns',
++                    'idnssoarname': dnszone1_rname,
++                    'ip_address' : u'1.2.3.4',
++                }
++            ),
++            expected={
++                'value': dnszone1,
++                'summary': None,
++                'result': {
++                    'dn': dnszone1_dn,
++                    'idnsname': [dnszone1],
++                    'idnszoneactive': [u'TRUE'],
++                    'idnssoamname': [u'ns'],
++                    'nsrecord': [u'ns'],
++                    'idnssoarname': [dnszone1_rname],
++                    'idnssoaserial': [fuzzy_digits],
++                    'idnssoarefresh': [fuzzy_digits],
++                    'idnssoaretry': [fuzzy_digits],
++                    'idnssoaexpire': [fuzzy_digits],
++                    'idnssoaminimum': [fuzzy_digits],
++                    'idnsallowdynupdate': [u'FALSE'],
++                    'idnsupdatepolicy': [u'grant %(realm)s krb5-self * A; '
++                                         u'grant %(realm)s krb5-self * AAAA; '
++                                         u'grant %(realm)s krb5-self * SSHFP;'
++                                         % dict(realm=api.env.realm)],
++                    'idnsallowtransfer': [u'none;'],
++                    'idnsallowquery': [u'any;'],
++                    'objectclass': objectclasses.dnszone,
++                },
++            },
++        ),
++
++
++        dict(
++            desc='Delete zone %r' % dnszone1,
++            command=('dnszone_del', [dnszone1], {}),
++            expected={
++                'value': dnszone1,
++                'summary': None,
++                'result': {'failed': u''},
++            },
++        ),
++
++
++        dict(
++            desc='Create zone %r with nameserver in the zone itself' % dnszone1,
++            command=(
++                'dnszone_add', [dnszone1], {
++                    'idnssoamname': dnszone1 + u'.',
++                    'idnssoarname': dnszone1_rname,
++                    'ip_address' : u'1.2.3.4',
++                }
++            ),
++            expected={
++                'value': dnszone1,
++                'summary': None,
++                'result': {
++                    'dn': dnszone1_dn,
++                    'idnsname': [dnszone1],
++                    'idnszoneactive': [u'TRUE'],
++                    'idnssoamname': [dnszone1 + u'.'],
++                    'nsrecord': [dnszone1 + u'.'],
++                    'idnssoarname': [dnszone1_rname],
++                    'idnssoaserial': [fuzzy_digits],
++                    'idnssoarefresh': [fuzzy_digits],
++                    'idnssoaretry': [fuzzy_digits],
++                    'idnssoaexpire': [fuzzy_digits],
++                    'idnssoaminimum': [fuzzy_digits],
++                    'idnsallowdynupdate': [u'FALSE'],
++                    'idnsupdatepolicy': [u'grant %(realm)s krb5-self * A; '
++                                         u'grant %(realm)s krb5-self * AAAA; '
++                                         u'grant %(realm)s krb5-self * SSHFP;'
++                                         % dict(realm=api.env.realm)],
++                    'idnsallowtransfer': [u'none;'],
++                    'idnsallowquery': [u'any;'],
++                    'objectclass': objectclasses.dnszone,
++                },
++            },
++        ),
++
+     ]
+-- 
+1.7.11.7
+

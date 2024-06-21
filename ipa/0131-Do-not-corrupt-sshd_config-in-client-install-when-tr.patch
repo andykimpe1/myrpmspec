@@ -1,0 +1,90 @@
+From c3ac6314d97a8c9a6efcdc8070973eee8b806db2 Mon Sep 17 00:00:00 2001
+From: Jan Cholasta <jcholast@redhat.com>
+Date: Wed, 18 Jun 2014 15:26:17 +0200
+Subject: [PATCH] Do not corrupt sshd_config in client install when trailing
+ newline is missing.
+
+https://fedorahosted.org/freeipa/ticket/4373
+---
+ ipa-client/ipa-install/ipa-client-install | 42 +++++++++++++------------------
+ 1 file changed, 17 insertions(+), 25 deletions(-)
+
+diff --git a/ipa-client/ipa-install/ipa-client-install b/ipa-client/ipa-install/ipa-client-install
+index c5b23f8a7b436b18fe7957b4af5405c3c9dddb03..e5f414f0577984bd5186a1f133a464c1bd3fd360 100755
+--- a/ipa-client/ipa-install/ipa-client-install
++++ b/ipa-client/ipa-install/ipa-client-install
+@@ -1201,7 +1201,7 @@ def configure_sssd_conf(fstore, cli_realm, cli_domain, cli_server, options, clie
+     return 0
+ 
+ def change_ssh_config(filename, changes, sections):
+-    if len(changes) == 0:
++    if not changes:
+         return True
+ 
+     try:
+@@ -1210,38 +1210,30 @@ def change_ssh_config(filename, changes, sections):
+         root_logger.error("Failed to open '%s': %s", filename, str(e))
+         return False
+ 
++    change_keys = tuple(key.lower() for key in changes)
++    section_keys = tuple(key.lower() for key in sections)
++
+     lines = []
+-    in_section = False
+     for line in f:
+-        if in_section:
+-            lines.append(line)
+-            continue
++        line = line.rstrip('\n')
+         pline = line.strip()
+-        if len(pline) == 0 or pline.startswith('#'):
++        if not pline or pline.startswith('#'):
+             lines.append(line)
+             continue
+-        parts = pline.split()
+-        option = parts[0].lower()
+-        for key in sections:
+-            if key.lower() == option:
+-                in_section = True
+-                break
+-        if in_section:
+-            break
+-        for opt in changes:
+-            if opt.lower() == option:
+-                line = None
+-                break
+-        if line is not None:
++        option = pline.split()[0].lower()
++        if option in section_keys:
+             lines.append(line)
+-    for opt in changes:
+-        if changes[opt] is not None:
+-            lines.append('%s %s\n' % (opt, changes[opt]))
+-    lines.append('\n')
+-    if in_section:
++            break
++        if option in change_keys:
++            line = '#' + line
+         lines.append(line)
++    for option, value in changes.items():
++        if value is not None:
++            lines.append('%s %s' % (option, value))
+     for line in f:
++        line = line.rstrip('\n')
+         lines.append(line)
++    lines.append('')
+ 
+     f.close()
+ 
+@@ -1251,7 +1243,7 @@ def change_ssh_config(filename, changes, sections):
+         root_logger.error("Failed to open '%s': %s", filename, str(e))
+         return False
+ 
+-    f.write(''.join(lines))
++    f.write('\n'.join(lines))
+ 
+     f.close()
+ 
+-- 
+2.4.3
+

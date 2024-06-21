@@ -1,0 +1,48 @@
+From d8f54f8fc5592e4b550876c28be95a011ba96d9b Mon Sep 17 00:00:00 2001
+From: Rob Crittenden <rcritten@redhat.com>
+Date: Thu, 10 Jan 2013 15:31:11 -0500
+Subject: [PATCH] Convert uniqueMember members into DN objects.
+
+We were asserting that they should be DN objects but weren't converting
+them anywhere.
+
+https://fedorahosted.org/freeipa/ticket/3339
+---
+ ipalib/plugins/migration.py | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/ipalib/plugins/migration.py b/ipalib/plugins/migration.py
+index 157ab4447e08ccf441df11f3528a16bc896fe449..05036c9c1ca28aad09ecfad13c374ec382cc9d3a 100644
+--- a/ipalib/plugins/migration.py
++++ b/ipalib/plugins/migration.py
+@@ -244,7 +244,13 @@ def _pre_migrate_group(ldap, pkey, dn, entry_attrs, failed, config, ctx, **kwarg
+         new_members = []
+         entry_attrs.setdefault(member_attr, [])
+         for m in entry_attrs[member_attr]:
+-            assert isinstance(m, DN)
++            try:
++                m = DN(m)
++            except ValueError, e:
++                # This should be impossible unless the remote server
++                # doesn't enforce syntax checking.
++                api.log.error('Malformed DN %s: %s'  % (m, e))
++                continue
+             try:
+                 rdnval = m[0].value
+             except IndexError:
+@@ -252,10 +258,10 @@ def _pre_migrate_group(ldap, pkey, dn, entry_attrs, failed, config, ctx, **kwarg
+                 continue
+ 
+             if m.endswith(search_bases['user']):
+-                api.log.info('migrating user %s' % m)
++                api.log.info('migrating %s user %s' % (member_attr, m))
+                 m = DN((api.Object.user.primary_key.name, rdnval), api.env.container_user)
+             elif m.endswith(search_bases['group']):
+-                api.log.info('migrating group %s' % m)
++                api.log.info('migrating %s group %s' % (member_attr, m))
+                 m = DN((api.Object.group.primary_key.name, rdnval), api.env.container_group)
+             else:
+                 api.log.error('entry %s does not belong into any known container' % m)
+-- 
+1.7.11.7
+

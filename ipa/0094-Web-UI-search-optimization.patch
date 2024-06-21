@@ -1,0 +1,161 @@
+From f565a52b6c18367ce419eabf34d88e8c7abcedb2 Mon Sep 17 00:00:00 2001
+From: Petr Vobornik <pvoborni@redhat.com>
+Date: Thu, 18 Jul 2013 16:17:40 +0200
+Subject: [PATCH 94/98] Web UI search optimization
+
+This patch optimizes options used in commands executed by search pages.
+
+1) Removed --all from _find and _show commands used by search pages. All displayed attributes should be already included in default attributes.
+
+2) Removed search_all_attributes - Not needed since introduction of paging.
+
+3) Added --no-members options to search _show commmands. Members are not displayed on search pages and such change drastically improves performance. It reduces computations on server and amount of data transferred to Web UI.
+---
+ install/ui/entity.js  | 16 +++++++++++++++-
+ install/ui/facet.js   | 13 +++++++------
+ install/ui/hbac.js    |  1 -
+ install/ui/search.js  |  7 ++-----
+ install/ui/selinux.js |  3 +--
+ 5 files changed, 25 insertions(+), 15 deletions(-)
+
+diff --git a/install/ui/entity.js b/install/ui/entity.js
+index d474ad95b4ce49bfa98d0b01336781797f2fe2e7..5e0b9ad7186f92b81c47b5f82ea493c4da2d7d72 100644
+--- a/install/ui/entity.js
++++ b/install/ui/entity.js
+@@ -243,6 +243,20 @@ IPA.entity = function(spec) {
+         return [that.name + '-pkey'];
+     };
+ 
++    that.has_members = function() {
++        var members = that.metadata.attribute_members;
++        var has = false;
++        if (members) {
++            for (var member in members) {
++                if (members.hasOwnProperty(member)) {
++                    has = true;
++                    break;
++                }
++            }
++        }
++        return has;
++    };
++
+     that.entity_init = that.init;
+ 
+     return that;
+@@ -728,4 +742,4 @@ IPA.details_facet_update_policy = function(spec) {
+     spec.dest_facet = 'search';
+ 
+     return IPA.facet_update_policy(spec);
+-};
+\ No newline at end of file
++};
+diff --git a/install/ui/facet.js b/install/ui/facet.js
+index 372022dbea6ab9a61b840c62c7e7ea08037cd1c9..af22072fdd49aa03bfdb1c455b5e590aae838a55 100644
+--- a/install/ui/facet.js
++++ b/install/ui/facet.js
+@@ -740,7 +740,6 @@ IPA.table_facet = function(spec, no_init) {
+ 
+     that.pagination = spec.pagination === undefined ? true : spec.pagination;
+     that.search_all_entries = spec.search_all_entries;
+-    that.search_all_attributes = spec.search_all_attributes;
+     that.sort_enabled = spec.sort_enabled === undefined ? true : spec.sort_enabled;
+     that.selectable = spec.selectable === undefined ? true : spec.selectable;
+     that.select_changed = IPA.observer();
+@@ -972,7 +971,7 @@ IPA.table_facet = function(spec, no_init) {
+ 
+     that.create_get_records_command = function(pkeys, on_success, on_error) {
+ 
+-         var batch = IPA.batch_command({
++        var batch = IPA.batch_command({
+             name: that.get_records_command_name(),
+             on_success: on_success,
+             on_error: on_error
+@@ -984,10 +983,13 @@ IPA.table_facet = function(spec, no_init) {
+             var command = IPA.command({
+                 entity: that.table.entity.name,
+                 method: 'show',
+-                args: [ pkey ],
+-                options: { all: true }
++                args: [pkey]
+             });
+ 
++            if (that.table.entity.has_members()) {
++                command.set_options({no_members: true});
++            }
++
+             batch.add_command(command);
+         }
+ 
+@@ -1013,7 +1015,6 @@ IPA.table_facet = function(spec, no_init) {
+             label: entity.metadata.label,
+             entity: entity,
+             pagination: true,
+-            search_all_attributes: that.search_all_attributes,
+             scrollable: true,
+             selectable: that.selectable && !that.read_only
+         });
+@@ -2037,4 +2038,4 @@ IPA.action_list_widget = function(spec) {
+     };
+ 
+     return that;
+-};
+\ No newline at end of file
++};
+diff --git a/install/ui/hbac.js b/install/ui/hbac.js
+index 7fd99ff13544b3b01214aaa6892debdeb849ed26..d863742a5336d4a5df5549165bcd11da0aca2ef3 100644
+--- a/install/ui/hbac.js
++++ b/install/ui/hbac.js
+@@ -37,7 +37,6 @@ IPA.hbac.rule_entity = function(spec) {
+ 
+         that.builder.search_facet({
+             row_enabled_attribute: 'ipaenabledflag',
+-            search_all_attributes: true,
+             columns: [
+                 'cn',
+                 {
+diff --git a/install/ui/search.js b/install/ui/search.js
+index 7c4939bbbd52f882df048f3a78a22294e1d838ea..98a36172867009cd876ed1a9f14edfcfc87b9632 100644
+--- a/install/ui/search.js
++++ b/install/ui/search.js
+@@ -196,10 +196,7 @@ IPA.search_facet = function(spec, no_init) {
+             name: that.get_search_command_name(),
+             entity: that.managed_entity.name,
+             method: 'find',
+-            args: filter,
+-            options: {
+-                all: that.search_all_attributes
+-            }
++            args: filter
+         });
+ 
+         if (that.pagination) {
+@@ -490,4 +487,4 @@ IPA.batch_enable_action = function(spec) {
+     spec.confirm_msg = spec.confirm_msg || IPA.messages.search.enable_confirm;
+ 
+     return IPA.batch_items_action(spec);
+-};
+\ No newline at end of file
++};
+diff --git a/install/ui/selinux.js b/install/ui/selinux.js
+index ca4700609ce4c940772d7aec08719544666d23b4..233a87ea9fb9e244ddedca8531b64ff782c4c095 100644
+--- a/install/ui/selinux.js
++++ b/install/ui/selinux.js
+@@ -35,7 +35,6 @@ IPA.selinux.selinuxusermap_entity = function(spec) {
+ 
+         that.builder.search_facet({
+             row_enabled_attribute: 'ipaenabledflag',
+-            search_all_attributes: true,
+             columns: [
+                 'cn',
+                 'ipaselinuxuser',
+@@ -312,4 +311,4 @@ IPA.selinux_details_facet = function(spec) {
+     return that;
+ };
+ 
+-IPA.register('selinuxusermap', IPA.selinux.selinuxusermap_entity);
+\ No newline at end of file
++IPA.register('selinuxusermap', IPA.selinux.selinuxusermap_entity);
+-- 
+1.8.3.1
+

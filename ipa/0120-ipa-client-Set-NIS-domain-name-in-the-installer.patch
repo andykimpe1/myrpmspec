@@ -1,0 +1,153 @@
+From 6d6ae3592d3381af5efec052dbe8d3aa9326b74e Mon Sep 17 00:00:00 2001
+From: Tomas Babej <tbabej@redhat.com>
+Date: Thu, 19 Jun 2014 12:47:05 +0200
+Subject: [PATCH 120/121] ipa-client: Set NIS domain name in the installer
+
+Provides two new options for the ipa-client-install:
+    --nisdomain: specifies the NIS domain name
+    --no_nisdomain: flag to aviod setting the NIS domain name
+
+In case no --nisdomain is specified and --no_nisdomain flag was
+not set, the IPA domain is used.
+
+Manual pages updated.
+
+http://fedorahosted.org/freeipa/ticket/3202
+
+---
+Martin Kosek: removed setting domainname service as RHEL-6.x sets
+NIS domain name automatically after reboot when it is set in
+/etc/sysconfig/network.
+
+Reviewed-By: Jakub Hrozek <jhrozek@redhat.com>
+Reviewed-By: Alexander Bokovoy <abokovoy@redhat.com>
+---
+ ipa-client/ipa-install/ipa-client-install | 66 +++++++++++++++++++++++++++++++
+ ipa-client/man/ipa-client-install.1       |  6 +++
+ 2 files changed, 72 insertions(+)
+
+diff --git a/ipa-client/ipa-install/ipa-client-install b/ipa-client/ipa-install/ipa-client-install
+index 7a5ea1c9ed74bd7352fef33a39c0ab164aa863a0..429ae45326fef6813054174776963a74b8bf2a0e 100755
+--- a/ipa-client/ipa-install/ipa-client-install
++++ b/ipa-client/ipa-install/ipa-client-install
+@@ -120,6 +120,11 @@ def parse_options():
+     basic_group.add_option("--ntp-server", dest="ntp_server", help="ntp server to use")
+     basic_group.add_option("-N", "--no-ntp", action="store_false",
+                       help="do not configure ntp", default=True, dest="conf_ntp")
++    basic_group.add_option("--nisdomain", dest="nisdomain",
++                           help="NIS domain name")
++    basic_group.add_option("--no-nisdomain", action="store_true", default=False,
++                      help="do not configure NIS domain name",
++                      dest="no_nisdomain")
+     basic_group.add_option("--ssh-trust-dns", dest="trust_sshfp", default=False, action="store_true",
+                       help="configure OpenSSH client to trust DNS SSHFP records")
+     basic_group.add_option("--no-ssh", dest="conf_ssh", default=True, action="store_false",
+@@ -176,6 +181,9 @@ def parse_options():
+     if (options.server and not options.domain):
+         parser.error("--server cannot be used without providing --domain")
+ 
++    if options.no_nisdomain and options.nisdomain:
++        parser.error("--no-nisdomain cannot be used together with --nisdomain")
++
+     return safe_opts, options
+ 
+ def logging_setup(options):
+@@ -464,6 +472,8 @@ def uninstall(options, env):
+             "Failed to remove krb5/LDAP configuration: %s", str(e))
+         return CLIENT_INSTALL_ERROR
+ 
++    unconfigure_nisdomain()
++
+     # Next if-elif-elif construction deals with sssd.conf file.
+     # Old pre-IPA domains are preserved due merging the old sssd.conf
+     # during the installation of ipa-client but any new domains are
+@@ -1194,6 +1204,55 @@ def configure_sshd_config(fstore, options):
+         except Exception, e:
+             log_service_error(sshd.service_name, 'restart', e)
+ 
++def configure_nisdomain(options, domain):
++    domain = options.nisdomain or domain
++    root_logger.info('Configuring %s as NIS domain' % domain)
++
++    nis_domain_name = ''
++
++    # First backup the old NIS domain name
++    if os.path.exists('/bin/nisdomainname'):
++        try:
++            nis_domain_name, _, _ = ipautil.run(['/bin/nisdomainname'])
++        except CalledProcessError, e:
++            pass
++
++        if nis_domain_name.strip() == '(none)':
++            # RHEL-6.x nisdomainname returns "(none)" when it is unset
++            nis_domain_name = ''
++
++
++    statestore.backup_state('network', 'nisdomain', nis_domain_name)
++
++    # Set the new NIS domain name
++    set_nisdomain(domain)
++
++def unconfigure_nisdomain():
++    # Set the nisdomain permanent and current nisdomain configuration as it was
++    if statestore.has_state('network'):
++        old_nisdomain = statestore.restore_state('network','nisdomain') or ''
++
++        if old_nisdomain:
++            root_logger.info('Restoring %s as NIS domain.' % old_nisdomain)
++        else:
++            root_logger.info('Unconfiguring the NIS domain.')
++
++        set_nisdomain(old_nisdomain)
++
++def set_nisdomain(nisdomain):
++    # Let authconfig setup the permanent configuration
++    auth_config = ipaservices.authconfig()
++    auth_config.add_parameter("nisdomain", nisdomain)
++    auth_config.add_option("update")
++    auth_config.execute()
++
++    if os.path.exists('/bin/nisdomainname'):
++        try:
++            ipautil.run(['/bin/nisdomainname', nisdomain])
++        except CalledProcessError, e:
++            root_logger.warning("Failed to set NIS domain.")
++
++
+ def resolve_ipaddress(server):
+     """ Connect to the server's LDAP port in order to determine what ip
+         address this machine uses as "public" ip (relative to the server).
+@@ -2245,6 +2304,13 @@ def install(options, env, fstore, statestore):
+         auth_config.add_option("update")
+         auth_config.execute()
+         root_logger.info("%s", message)
++
++    if not options.no_nisdomain:
++        # Configure NIS domain before SSSD is started as authconfig could
++        # stop it otherwise
++        configure_nisdomain(options=options, domain=cli_domain)
++
++    if not options.no_ac:
+         if options.sssd:
+             sssd = ipaservices.service('sssd')
+             try:
+diff --git a/ipa-client/man/ipa-client-install.1 b/ipa-client/man/ipa-client-install.1
+index 6d2740ea957dd23f1d66f2cfb88c3255842fea82..29cf2868e6788b79ff67048a010ed806d3962869 100644
+--- a/ipa-client/man/ipa-client-install.1
++++ b/ipa-client/man/ipa-client-install.1
+@@ -74,6 +74,12 @@ Configure ntpd to use this NTP server.
+ \fB\-N\fR, \fB\-\-no\-ntp\fR
+ Do not configure or enable NTP.
+ .TP
++\fB\-\-nisdomain\fR=\fINIS_DOMAIN\fR
++Set the NIS domain name as specified. By default, this is set to the IPA domain name.
++.TP
++\fB\-\-no\-nisdomain\fR
++Do not configure NIS domain name.
++.TP
+ \fB\-\-ssh\-trust\-dns\fR
+ Configure OpenSSH client to trust DNS SSHFP records.
+ .TP
+-- 
+1.9.3
+

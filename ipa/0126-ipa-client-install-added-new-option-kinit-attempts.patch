@@ -1,0 +1,109 @@
+From 060446aeb34dfc5abddd2e01dc856958d57b9b6e Mon Sep 17 00:00:00 2001
+From: Martin Babinsky <mbabinsk@redhat.com>
+Date: Fri, 9 Jan 2015 17:38:39 +0100
+Subject: [PATCH] ipa-client-install: added new option '--kinit-attempts'
+
+The option specifies a total number of attempts to obtain TGT from KDC before
+giving up and aborting installation.
+---
+ ipa-client/ipa-install/ipa-client-install | 45 ++++++++++++++++++++++++++++---
+ ipa-client/man/ipa-client-install.1       |  5 ++++
+ 2 files changed, 47 insertions(+), 3 deletions(-)
+
+diff --git a/ipa-client/ipa-install/ipa-client-install b/ipa-client/ipa-install/ipa-client-install
+index 21592b436ee8aab0bc1fcf1a12627671f8cba290..c37383e0d1af07e1d27250ee0d8d80695582b028 100755
+--- a/ipa-client/ipa-install/ipa-client-install
++++ b/ipa-client/ipa-install/ipa-client-install
+@@ -94,6 +94,13 @@ def parse_options():
+ 
+         parser.values.ca_cert_file = value
+ 
++    def validate_kinit_attempts_option(option, opt, value, parser):
++        if value < 1 or value > sys.maxint:
++            raise OptionValueError(
++                "%s option has invalid value %d" % (opt, value))
++
++        parser.values.kinit_attempts = value
++
+     parser = IPAOptionParser(version=version.VERSION)
+ 
+     basic_group = OptionGroup(parser, "basic options")
+@@ -142,6 +149,11 @@ def parse_options():
+                       help="do not use Authconfig to modify the nsswitch.conf and PAM configuration")
+     basic_group.add_option("-f", "--force", dest="force", action="store_true",
+                       default=False, help="force setting of LDAP/Kerberos conf")
++    basic_group.add_option('--kinit-attempts', dest='kinit_attempts',
++                           action='callback', type='int', default=5,
++                           callback=validate_kinit_attempts_option,
++                           help=("number of attempts to obtain host TGT"
++                                 " (defaults to %default)."))
+     basic_group.add_option("-d", "--debug", dest="debug", action="store_true",
+                       default=False, help="print debugging information")
+     basic_group.add_option("-U", "--unattended", dest="unattended",
+@@ -972,6 +984,31 @@ def configure_krb5_conf(cli_realm, cli_domain, cli_server, cli_kdc, dnsok,
+ 
+     return 0
+ 
++
++def get_host_tgt(host, realm, keytab, kinit_attempts, env):
++    n_attempts = 0
++    max_attempts = kinit_attempts
++    root_logger.info("Attempting to get host TGT...")
++
++    while True:
++        n_attempts += 1
++        try:
++            run([
++                '/usr/bin/kinit', '-k', '-t', keytab,
++                'host/%s@%s' % (host, realm)
++                ], env=env)
++        except CalledProcessError:
++            root_logger.debug(
++                "Attempt %d/%d failed." % (n_attempts, max_attempts))
++            if n_attempts >= max_attempts:
++                raise
++            time.sleep(1)
++        else:
++            root_logger.debug(
++                "Attempt %d/%d succeeded." % (n_attempts, max_attempts))
++            return
++
++
+ def configure_certmonger(fstore, subject_base, cli_realm, hostname, options,
+                          remote_env):
+     started = True
+@@ -2196,10 +2233,12 @@ def install(options, env, fstore, statestore):
+             # Other KDCs might not have replicated the principal yet.
+             # Once we have the TGT, it's usable on any server.
+             env['KRB5CCNAME'] = os.environ['KRB5CCNAME'] = CCACHE_FILE
++
+             try:
+-                run(['/usr/bin/kinit', '-k', '-t', '/etc/krb5.keytab',
+-                        'host/%s@%s' % (hostname, cli_realm)], env=env)
+-            except CalledProcessError, e:
++                get_host_tgt(hostname, cli_realm, '/etc/krb5.keytab',
++                             options.kinit_attempts, env)
++            except CalledProcessError:
++                print_port_conf_info()
+                 root_logger.error("Failed to obtain host TGT.")
+                 # failure to get ticket makes it impossible to login and bind
+                 # from sssd to LDAP, abort installation and rollback changes
+diff --git a/ipa-client/man/ipa-client-install.1 b/ipa-client/man/ipa-client-install.1
+index f801d8ad89e803978a29309c4dfdf89972299375..1b4f2cb597bd99b137727faf1fc73ec08877425c 100644
+--- a/ipa-client/man/ipa-client-install.1
++++ b/ipa-client/man/ipa-client-install.1
+@@ -101,6 +101,11 @@ Do not use Authconfig to modify the nsswitch.conf and PAM configuration.
+ \fB\-f\fR, \fB\-\-force\fR
+ Force the settings even if errors occur
+ .TP
++\fB\-\-kinit\-attempts\fR=\fIKINIT_ATTEMPTS\fR
++Number of unsuccessful attempts to obtain host TGT that will be performed
++before aborting client installation. \fIKINIT_ATTEMPTS\fR should be a number
++greater than zero. By default 5 attempts to get TGT are performed.
++.TP
+ \fB\-d\fR, \fB\-\-debug\fR
+ Print debugging information to stdout
+ .TP
+-- 
+2.1.0
+

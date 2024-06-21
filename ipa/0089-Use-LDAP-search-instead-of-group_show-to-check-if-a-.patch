@@ -1,0 +1,130 @@
+From 4d66e32e132998f90bb75a496ca47b8da37d9b96 Mon Sep 17 00:00:00 2001
+From: Jan Cholasta <jcholast@redhat.com>
+Date: Tue, 25 Jun 2013 12:58:37 +0000
+Subject: [PATCH] Use LDAP search instead of *group_show to check if a group
+ exists.
+
+https://fedorahosted.org/freeipa/ticket/3706
+---
+ ipalib/plugins/aci.py       | 9 +++++----
+ ipalib/plugins/baseldap.py  | 5 +++++
+ ipalib/plugins/config.py    | 2 +-
+ ipalib/plugins/hostgroup.py | 4 ++--
+ ipalib/plugins/netgroup.py  | 2 +-
+ ipalib/plugins/user.py      | 2 +-
+ 6 files changed, 15 insertions(+), 9 deletions(-)
+
+diff --git a/ipalib/plugins/aci.py b/ipalib/plugins/aci.py
+index 24be17458c4738b91dba60d7f05a0f544cb1af02..96ac513b116ba1322b74153fbe04029e028f01d2 100644
+--- a/ipalib/plugins/aci.py
++++ b/ipalib/plugins/aci.py
+@@ -249,7 +249,8 @@ def _make_aci(ldap, current, aciname, kw):
+     elif group:
+         # Not so friendly with groups. This will raise
+         try:
+-            entry_attrs = api.Command['group_show'](kw['group'])['result']
++            group_dn = api.Object['group'].get_dn_if_exists(kw['group'])
++            entry_attrs = {'dn': group_dn}
+         except errors.NotFound:
+             raise errors.NotFound(reason=_("Group '%s' does not exist") % kw['group'])
+ 
+@@ -266,7 +267,7 @@ def _make_aci(ldap, current, aciname, kw):
+             a.set_target_attr(kw['attrs'])
+         if valid['memberof']:
+             try:
+-                api.Command['group_show'](kw['memberof'])
++                api.Object['group'].get_dn_if_exists(kw['memberof'])
+             except errors.NotFound:
+                 api.Object['group'].handle_not_found(kw['memberof'])
+             groupdn = _group_from_memberof(kw['memberof'])
+@@ -288,8 +289,8 @@ def _make_aci(ldap, current, aciname, kw):
+             a.set_target(target)
+         if valid['targetgroup']:
+             # Purposely no try here so we'll raise a NotFound
+-            entry_attrs = api.Command['group_show'](kw['targetgroup'])['result']
+-            target = 'ldap:///%s' % entry_attrs['dn']
++            group_dn = api.Object['group'].get_dn_if_exists(kw['targetgroup'])
++            target = 'ldap:///%s' % group_dn
+             a.set_target(target)
+         if valid['subtree']:
+             # See if the subtree is a full URI
+diff --git a/ipalib/plugins/baseldap.py b/ipalib/plugins/baseldap.py
+index a55a23244b65dd98b8bcd63b587471e436bf3743..2deb66ea7cc6139846cb1d8e73359440b0d47689 100644
+--- a/ipalib/plugins/baseldap.py
++++ b/ipalib/plugins/baseldap.py
+@@ -525,6 +525,11 @@ class LDAPObject(Object):
+         assert isinstance(parent_dn, DN)
+         return parent_dn
+ 
++    def get_dn_if_exists(self, *keys, **kwargs):
++        dn = self.get_dn(*keys, **kwargs)
++        (dn, entry_attrs) = self.backend.get_entry(dn, [''])
++        return dn
++
+     def get_primary_key_from_dn(self, dn):
+         assert isinstance(dn, DN)
+         try:
+diff --git a/ipalib/plugins/config.py b/ipalib/plugins/config.py
+index 5f916903b9ba98a935935dcf32e4b8c18816defa..03f2355a4227b73b38cd9add1993cceeb2701752 100644
+--- a/ipalib/plugins/config.py
++++ b/ipalib/plugins/config.py
+@@ -213,7 +213,7 @@ class config_mod(LDAPUpdate):
+         if 'ipadefaultprimarygroup' in entry_attrs:
+             group=entry_attrs['ipadefaultprimarygroup']
+             try:
+-                api.Command['group_show'](group)
++                api.Object['group'].get_dn_if_exists(group)
+             except errors.NotFound:
+                 raise errors.NotFound(message=_("The group doesn't exist"))
+         kw = {}
+diff --git a/ipalib/plugins/hostgroup.py b/ipalib/plugins/hostgroup.py
+index 7e6fe6d656fb9d105990bd0c389c2b317cab3d89..6fb326e23620213e837723b8fa3faa09cee61f04 100644
+--- a/ipalib/plugins/hostgroup.py
++++ b/ipalib/plugins/hostgroup.py
+@@ -122,7 +122,7 @@ class hostgroup_add(LDAPCreate):
+         assert isinstance(dn, DN)
+         try:
+             # check duplicity with hostgroups first to provide proper error
+-            netgroup = api.Command['hostgroup_show'](keys[-1])
++            api.Object['hostgroup'].get_dn_if_exists(keys[-1])
+             self.obj.handle_duplicate_entry(*keys)
+         except errors.NotFound:
+             pass
+@@ -130,7 +130,7 @@ class hostgroup_add(LDAPCreate):
+         try:
+             # when enabled, a managed netgroup is created for every hostgroup
+             # make sure that the netgroup can be created
+-            netgroup = api.Command['netgroup_show'](keys[-1])
++            api.Object['netgroup'].get_dn_if_exists(keys[-1])
+             raise errors.DuplicateEntry(message=unicode(_(\
+                     u'netgroup with name "%s" already exists. ' \
+                     u'Hostgroups and netgroups share a common namespace'\
+diff --git a/ipalib/plugins/netgroup.py b/ipalib/plugins/netgroup.py
+index 6321aa7337ebd20da3fa08260b73e0085b361d79..fdf56014a7c86d6e37ab985683109488a3270d54 100644
+--- a/ipalib/plugins/netgroup.py
++++ b/ipalib/plugins/netgroup.py
+@@ -179,7 +179,7 @@ class netgroup_add(LDAPCreate):
+             # when enabled, a managed netgroup is created for every hostgroup
+             # make sure that we don't create a collision if the plugin is
+             # (temporarily) disabled
+-            netgroup = api.Command['hostgroup_show'](keys[-1])
++            api.Object['hostgroup'].get_dn_if_exists(keys[-1])
+             raise errors.DuplicateEntry(message=unicode(self.msg_collision % keys[-1]))
+         except errors.NotFound:
+             pass
+diff --git a/ipalib/plugins/user.py b/ipalib/plugins/user.py
+index 5d667dc94d483c2775d4a1d793624fc081615047..1427def0d207d892b31a7ff3109757af5dd94106 100644
+--- a/ipalib/plugins/user.py
++++ b/ipalib/plugins/user.py
+@@ -454,7 +454,7 @@ class user_add(LDAPCreate):
+                 # The Managed Entries plugin will allow a user to be created
+                 # even if a group has a duplicate name. This would leave a user
+                 # without a private group. Check for both the group and the user.
+-                self.api.Command['group_show'](keys[-1])
++                self.api.Object['group'].get_dn_if_exists(keys[-1])
+                 try:
+                     self.api.Command['user_show'](keys[-1])
+                     self.obj.handle_duplicate_entry(*keys)
+-- 
+2.4.3
+

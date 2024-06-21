@@ -1,0 +1,54 @@
+From c328da6d5013000cf0312cbbdb7d10c9fc6fdfb4 Mon Sep 17 00:00:00 2001
+From: Tomas Babej <tbabej@redhat.com>
+Date: Wed, 11 Nov 2015 14:28:46 +0100
+Subject: [PATCH] ipa-client-automount: Leverage IPAChangeConf to configure the
+ domain for idmapd
+
+Simple regexp substitution caused that the domain directive fell under
+an inapprorpiate section, if the domain directive was not present. Hence
+the idmapd.conf file was not properly parsed.
+
+Use IPAChangeConf to put the directive in its correct place even if it
+the domain directive is missing.
+
+https://fedorahosted.org/freeipa/ticket/5069
+
+Reviewed-By: Gabe Alford <redhatrises@gmail.com>
+---
+ ipa-client/ipa-install/ipa-client-automount | 20 +++++++++++++++-----
+ 1 file changed, 15 insertions(+), 5 deletions(-)
+
+diff --git a/ipa-client/ipa-install/ipa-client-automount b/ipa-client/ipa-install/ipa-client-automount
+index 4c339dfe1425ad26a69bd4eecec972b64c30a2dc..e44853294f8878609cc58880b1579583ca3998c1 100755
+--- a/ipa-client/ipa-install/ipa-client-automount
++++ b/ipa-client/ipa-install/ipa-client-automount
+@@ -313,11 +313,21 @@ def configure_nfs(fstore, statestore):
+ 
+     print "Configured %s" % NFS_CONF
+ 
+-    replacevars = {
+-        'Domain': api.env.domain,
+-    }
+-    ipautil.backup_config_and_replace_variables(fstore,
+-        IDMAPD_CONF, replacevars=replacevars)
++    # Prepare the changes
++    # We need to use IPAChangeConf as simple regexp substitution
++    # does not cut it here
++    conf = ipachangeconf.IPAChangeConf("IPA automount installer")
++    conf.case_insensitive_sections = False
++    conf.setOptionAssignment(" = ")
++    conf.setSectionNameDelimiters(("[", "]"))
++
++    changes = [conf.setOption('Domain', api.env.domain)]
++    section_with_changes = [conf.setSection('General', changes)]
++
++    # Backup the file and apply the changes
++    fstore.backup_file(IDMAPD_CONF)
++    conf.changeConf(IDMAPD_CONF, section_with_changes)
++
+     ipaservices.restore_context(IDMAPD_CONF)
+ 
+     print "Configured %s" % IDMAPD_CONF
+-- 
+2.6.4
+

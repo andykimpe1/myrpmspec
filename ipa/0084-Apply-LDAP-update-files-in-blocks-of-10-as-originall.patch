@@ -1,0 +1,159 @@
+From 20595e868c03f2cbe499e41c35dff9e15ebf4a33 Mon Sep 17 00:00:00 2001
+From: Rob Crittenden <rcritten@redhat.com>
+Date: Fri, 2 Aug 2013 10:51:55 +0200
+Subject: [PATCH] Apply LDAP update files in blocks of 10, as originally
+ designed.
+
+In order to have control over the order that updates are applied
+a numbering system was created for the update files. These values
+were not actually used.
+
+The updates were sorted by DN length and in most cases this was
+adequate for proper function. The exception was with roles where
+in some cases a role was added as a member of a permission before
+the role itself was added so the memberOf value was never created.
+
+Now updates are computed and applied in blocks of 10.
+
+https://fedorahosted.org/freeipa/ticket/3377
+---
+ install/updates/README                | 23 +++++++++++++++++++----
+ ipaserver/install/dsinstance.py       |  2 +-
+ ipaserver/install/ipa_ldap_updater.py |  2 +-
+ ipaserver/install/ldapupdate.py       | 28 +++++++++++++++++++++++++++-
+ ipaserver/install/upgradeinstance.py  |  2 +-
+ 5 files changed, 49 insertions(+), 8 deletions(-)
+
+diff --git a/install/updates/README b/install/updates/README
+index 064c6159fd883be3116cdaf72ed5bd1f5eec0892..175280454cff127fe50d6b82f666f5288f82b17e 100644
+--- a/install/updates/README
++++ b/install/updates/README
+@@ -2,7 +2,22 @@ The update files are sorted before being processed because there are
+ cases where order matters (such as getting schema added first, creating
+ parent entries, etc).
+ 
+-10 - 20: Schema
+-20 - 30: FDS Configuration, new indices
+-30 - 40: Structual elements of the DIT
+-40 - 50: Pre-loaded data
++Updates are applied in blocks of ten so that any entries that are dependant
++on another can be added successfully without having to rely on the length
++of the DN to get the sorting correct.
++
++The file names should use the format #-<description>.update where # conforms
++to this:
++
++10 - 19: Schema
++20 - 29: 389-ds configuration, new indices
++30 - 39: Structual elements of the DIT
++40 - 49: Pre-loaded data
++50 - 59: Cleanup existing data
++60 - 69: AD Trust
++70 - 79: Reserved
++80 - 89: Reserved
++
++These numbers aren't absolute, there may be reasons to put an update
++into one place or another, but by adhereing to the scheme it will be
++easier to find existing updates and know where to put new ones.
+diff --git a/ipaserver/install/dsinstance.py b/ipaserver/install/dsinstance.py
+index d389b1c40c26b2cc9bf59efb69935a0c4a63ee42..55a28e26f840eea50a5f451820198f92072c5376 100644
+--- a/ipaserver/install/dsinstance.py
++++ b/ipaserver/install/dsinstance.py
+@@ -473,7 +473,7 @@ class DsInstance(service.Service):
+     def apply_updates(self):
+         ld = ldapupdate.LDAPUpdate(dm_password=self.dm_password, sub_dict=self.sub_dict, plugins=True)
+         files = ld.get_all_files(ldapupdate.UPDATES_DIR)
+-        ld.update(files)
++        ld.update(files, ordered=True)
+ 
+     def __add_referint_module(self):
+         self._ldap_mod("referint-conf.ldif")
+diff --git a/ipaserver/install/ipa_ldap_updater.py b/ipaserver/install/ipa_ldap_updater.py
+index d9f68092752debcd4e5a3a70878aceb7215aae30..2c5bad5696b069a40ddc25fa9bcdcf75fa959bbc 100644
+--- a/ipaserver/install/ipa_ldap_updater.py
++++ b/ipaserver/install/ipa_ldap_updater.py
+@@ -189,7 +189,7 @@ class LDAPUpdater_NonUpgrade(LDAPUpdater):
+         if not self.files:
+             self.files = ld.get_all_files(UPDATES_DIR)
+ 
+-        modified = ld.update(self.files)
++        modified = ld.update(self.files, ordered=True)
+ 
+         if modified and options.test:
+             self.info('Update complete, changes to be made, test mode')
+diff --git a/ipaserver/install/ldapupdate.py b/ipaserver/install/ldapupdate.py
+index 1c23d7595fc096b6d5fe7c3e6e0007ee44cdb78a..abcb3812b8b2e69b73fbfcc7fa66b199ab210eb8 100644
+--- a/ipaserver/install/ldapupdate.py
++++ b/ipaserver/install/ldapupdate.py
+@@ -46,6 +46,7 @@ import pwd
+ import fnmatch
+ import csv
+ import inspect
++import re
+ from ipaserver.install.plugins import PRE_UPDATE, POST_UPDATE
+ from ipaserver.install.plugins import FIRST, MIDDLE, LAST
+ 
+@@ -899,21 +900,46 @@ class LDAPUpdate:
+         for dn, update in sorted_updates:
+             self._delete_record(update)
+ 
+-    def update(self, files):
++    def update(self, files, ordered=False):
+         """Execute the update. files is a list of the update files to use.
+ 
++           If ordered is True then the updates the file must be of the form
++           ##-name.update where ## is an integer between 10 and 89. The
++           changes are applied to LDAP at the end of each value divisible
++           by 10, so after 20, 30, etc.
++
+            returns True if anything was changed, otherwise False
+         """
+ 
++        pat = re.compile(r'(\d+)-.*\.update')
+         all_updates = {}
++        r = 20
+         if self.plugins:
+             self.info('PRE_UPDATE')
+             updates = api.Backend.updateclient.update(PRE_UPDATE, self.dm_password, self.ldapi, self.live_run)
+             self.merge_updates(all_updates, updates)
+         try:
+             self.create_connection()
++            if ordered and all_updates:
++                # flush out PRE_UPDATE plugin updates before we begin
++                self._run_updates(all_updates)
++                all_updates = {}
+ 
+             for f in files:
++                name = os.path.basename(f)
++                if ordered:
++                    m = pat.match(name)
++                    if not m:
++                        raise RuntimeError("Filename does not match format #-name.update: %s" % f)
++                    index = int(m.group(1))
++                    if index < 10 or index > 90:
++                        raise RuntimeError("Index not legal range: %d" % index)
++
++                    if index >= r:
++                        self._run_updates(all_updates)
++                        all_updates = {}
++                        r += 10
++
+                 try:
+                     self.info("Parsing update file '%s'" % f)
+                     data = self.read_file(f)
+diff --git a/ipaserver/install/upgradeinstance.py b/ipaserver/install/upgradeinstance.py
+index aa4440c71ea04ce1044cb0cd1379039836b1c2ad..895f29b3dede5542c7316f64978e8b1434b5236c 100644
+--- a/ipaserver/install/upgradeinstance.py
++++ b/ipaserver/install/upgradeinstance.py
+@@ -115,7 +115,7 @@ class IPAUpgrade(service.Service):
+             ld = ldapupdate.LDAPUpdate(dm_password='', ldapi=True, live_run=self.live_run, plugins=True)
+             if len(self.files) == 0:
+                 self.files = ld.get_all_files(ldapupdate.UPDATES_DIR)
+-            self.modified = ld.update(self.files)
++            self.modified = ld.update(self.files, ordered=True)
+         except ldapupdate.BadSyntax, e:
+             root_logger.error('Bad syntax in upgrade %s' % str(e))
+             self.modified = False
+-- 
+2.4.3
+

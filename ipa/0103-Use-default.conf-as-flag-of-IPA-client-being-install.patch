@@ -1,0 +1,71 @@
+From 46101c4fec4ae520e2c9c375f0efe26b3e132536 Mon Sep 17 00:00:00 2001
+From: Tomas Babej <tbabej@redhat.com>
+Date: Tue, 19 Feb 2013 17:59:50 +0100
+Subject: [PATCH] Use default.conf as flag of IPA client being installed
+
+When installing / uninstalling IPA client, the checks that
+determine whether IPA client is installed now take the existence
+of /etc/ipa/default.conf into consideration.
+
+The client will not uninstall unless either something is backed
+up or /etc/ipa/default.conf file does exist.
+
+The client will not install if something is backed up or
+default.conf file does exist (unless it's installation on master).
+
+https://fedorahosted.org/freeipa/ticket/3331
+---
+ ipa-client/ipa-install/ipa-client-install | 21 ++++++++++++++++++---
+ 1 file changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/ipa-client/ipa-install/ipa-client-install b/ipa-client/ipa-install/ipa-client-install
+index 8e1b86c868289654c7667130a99e7688611f4daf..7a5ea1c9ed74bd7352fef33a39c0ab164aa863a0 100755
+--- a/ipa-client/ipa-install/ipa-client-install
++++ b/ipa-client/ipa-install/ipa-client-install
+@@ -36,7 +36,9 @@ try:
+     from ipaclient.ipadiscovery import CACERT
+     import ipaclient.ipachangeconf
+     import ipaclient.ntpconf
+-    from ipapython.ipautil import run, user_input, CalledProcessError, file_exists, realm_to_suffix, convert_ldap_error
++    from ipapython.ipautil import run, user_input, CalledProcessError,\
++                                  file_exists, realm_to_suffix,\
++                                  convert_ldap_error
+     import ipapython.services as ipaservices
+     from ipapython import ipautil
+     from ipapython import sysrestore
+@@ -278,9 +280,22 @@ def delete_ipa_domain():
+         root_logger.warning("IPA domain could not be deleted. "
+             "No access to the /etc/sssd/sssd.conf file.")
+ 
++def is_ipa_client_installed(on_master=False):
++    """
++    Consider IPA client not installed if nothing is backed up
++    and default.conf file does not exist. If on_master is set to True,
++    the existence of default.conf file is not taken into consideration,
++    since it has been already created by ipa-server-install.
++    """
++
++    installed = fstore.has_files() or \
++       (not on_master and os.path.exists('/etc/ipa/default.conf'))
++
++    return installed
++
+ def uninstall(options, env):
+ 
+-    if not fstore.has_files():
++    if not is_ipa_client_installed():
+         root_logger.error("IPA client is not configured on this system.")
+         return CLIENT_NOT_CONFIGURED
+ 
+@@ -2338,7 +2353,7 @@ def main():
+     if options.uninstall:
+         return uninstall(options, env)
+ 
+-    if fstore.has_files():
++    if is_ipa_client_installed(on_master=options.on_master):
+         root_logger.error("IPA client is already configured on this system.")
+         root_logger.info(
+             "If you want to reinstall the IPA client, uninstall it first " +
+-- 
+1.8.3.1
+

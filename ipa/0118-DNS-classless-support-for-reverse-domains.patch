@@ -1,0 +1,234 @@
+From c06e6ad3d0c2ee938b60177fbcd98a1e60ee9617 Mon Sep 17 00:00:00 2001
+From: Martin Basti <mbasti@redhat.com>
+Date: Thu, 19 Jun 2014 10:22:34 +0200
+Subject: [PATCH] DNS classless support for reverse domains
+
+Now users can add reverse zones in classless form:
+0/25.1.168.192.in-addr.arpa.
+0-25.1.168.192.in-addr.arpa.
+
+128/25 NS ns.example.com.
+10 CNAME 10.128/25.1.168.192.in-addr.arpa.
+
+Ticket: https://fedorahosted.org/freeipa/ticket/4143
+Reviewed-By: Jan Cholasta <jcholast@redhat.com>
+---
+ ipalib/plugins/dns.py | 46 +++++++++++++++++++++++++++---------
+ ipalib/util.py        | 65 ++++++++++++++++++++++++++++-----------------------
+ 2 files changed, 71 insertions(+), 40 deletions(-)
+
+diff --git a/ipalib/plugins/dns.py b/ipalib/plugins/dns.py
+index 17a794b53143ac665b5474c9105024a4132aa8d0..07e638179614649f9b07c1401265e1a66321576c 100644
+--- a/ipalib/plugins/dns.py
++++ b/ipalib/plugins/dns.py
+@@ -367,25 +367,32 @@ def _normalize_bind_aci(bind_acis):
+     acis += u';'
+     return acis
+ 
+-def _bind_hostname_validator(ugettext, value):
++def _bind_hostname_validator(ugettext, value, allow_slash=False):
+     if value == _dns_zone_record:
+         return
+     try:
+         # Allow domain name which is not fully qualified. These are supported
+         # in bind and then translated as <non-fqdn-name>.<domain>.
+-        validate_hostname(value, check_fqdn=False)
++        validate_hostname(value, check_fqdn=False, allow_underscore=True, allow_slash=allow_slash)
+     except ValueError, e:
+         return _('invalid domain-name: %s') \
+             % unicode(e)
+ 
+     return None
+ 
++def _bind_cname_hostname_validator(ugettext, value):
++    """
++    Validator for CNAME allows classless domain names (25/0.0.10.in-addr.arpa.)
++    """
++    return _bind_hostname_validator(ugettext, value, allow_slash=True)
++
++
+ def _dns_record_name_validator(ugettext, value):
+     if value == _dns_zone_record:
+         return
+ 
+     try:
+-        map(lambda label:validate_dns_label(label, allow_underscore=True), \
++        map(lambda label:validate_dns_label(label, allow_underscore=True, allow_slash=True), \
+             value.split(u'.'))
+     except ValueError, e:
+         return unicode(e)
+@@ -410,7 +417,10 @@ def _validate_bind_forwarder(ugettext, forwarder):
+ 
+ def _domain_name_validator(ugettext, value):
+     try:
+-        validate_domain_name(value)
++        #classless reverse zones can contain slash '/'
++        normalized_zone = normalize_zone(value)
++        validate_domain_name(value, allow_slash=zone_is_reverse(normalized_zone))
++
+     except ValueError, e:
+         return unicode(e)
+ 
+@@ -949,7 +959,7 @@ class CNAMERecord(DNSRecord):
+     rfc = 1035
+     parts = (
+         Str('hostname',
+-            _bind_hostname_validator,
++            _bind_cname_hostname_validator,
+             label=_('Hostname'),
+             doc=_('A hostname which this alias hostname points to'),
+         ),
+@@ -970,7 +980,7 @@ class DNAMERecord(DNSRecord):
+     rfc = 2672
+     parts = (
+         Str('target',
+-            _bind_hostname_validator,
++            _bind_cname_hostname_validator,
+             label=_('Target'),
+         ),
+     )
+@@ -2083,6 +2093,14 @@ class dnsrecord(LDAPObject):
+                            doc=_('Parse all raw DNS records and return them in a structured way'),
+                            )
+ 
++    def _idnsname_pre_callback(self, ldap, dn, entry_attrs, *keys, **options):
++        if not self.is_pkey_zone_record(*keys):
++            zone, addr = normalize_zone(keys[-2]), keys[-1]
++            try:
++                validate_domain_name(addr, allow_underscore=True, allow_slash=zone_is_reverse(zone))
++            except ValueError, e:
++                raise errors.ValidationError(name='idnsname', error=unicode(e))
++
+     def _nsrecord_pre_callback(self, ldap, dn, entry_attrs, *keys, **options):
+         assert isinstance(dn, DN)
+         nsrecords = entry_attrs.get('nsrecord')
+@@ -2096,6 +2114,7 @@ class dnsrecord(LDAPObject):
+         ptrrecords = entry_attrs.get('ptrrecord')
+         if ptrrecords is None:
+             return
++
+         zone = keys[-2]
+         if self.is_pkey_zone_record(*keys):
+             addr = u''
+@@ -2114,11 +2133,16 @@ class dnsrecord(LDAPObject):
+                     error=unicode(_('Reverse zone for PTR record should be a sub-zone of one the following fully qualified domains: %s') % allowed_zones))
+ 
+         addr_len = len(addr.split('.')) if addr else 0
+-        ip_addr_comp_count = addr_len + len(zone.split('.'))
+-        if ip_addr_comp_count != zone_len:
+-            raise errors.ValidationError(name='ptrrecord',
+-                error=unicode(_('Reverse zone %(name)s requires exactly %(count)d IP address components, %(user_count)d given')
+-                % dict(name=zone_name, count=zone_len, user_count=ip_addr_comp_count)))
++
++        #Classless zones (0/25.0.0.10.in-addr.arpa.) -> skip check
++        #zone has to be checked without reverse domain suffix (in-addr.arpa.)
++        if ('/' not in addr and '/' not in zone and
++            '-' not in addr and '-' not in zone):
++            ip_addr_comp_count = addr_len + len(zone.split('.'))
++            if ip_addr_comp_count != zone_len:
++                raise errors.ValidationError(name='ptrrecord',
++                      error=unicode(_('Reverse zone %(name)s requires exactly %(count)d IP address components, %(user_count)d given')
++                      % dict(name=zone_name, count=zone_len, user_count=ip_addr_comp_count)))
+ 
+     def run_precallback_validators(self, dn, entry_attrs, *keys, **options):
+         assert isinstance(dn, DN)
+diff --git a/ipalib/util.py b/ipalib/util.py
+index c52d060b55b51c9dbe2791bf92f8f002be9af9da..75f64bf97a9896f0d99f80da4793240186c1f9da 100644
+--- a/ipalib/util.py
++++ b/ipalib/util.py
+@@ -194,38 +194,45 @@ def normalize_zone(zone):
+     else:
+         return zone
+ 
+-def validate_dns_label(dns_label, allow_underscore=False):
+-    label_chars = r'a-z0-9'
+-    underscore_err_msg = ''
+-    if allow_underscore:
+-        label_chars += "_"
+-        underscore_err_msg = u' _,'
+-    label_regex = r'^[%(chars)s]([%(chars)s-]?[%(chars)s])*$' % dict(chars=label_chars)
+-    regex = re.compile(label_regex, re.IGNORECASE)
+-
+-    if not dns_label:
+-        raise ValueError(_('empty DNS label'))
+-
+-    if len(dns_label) > 63:
+-        raise ValueError(_('DNS label cannot be longer that 63 characters'))
+-
+-    if not regex.match(dns_label):
+-        raise ValueError(_('only letters, numbers,%(underscore)s and - are allowed. ' \
+-                           'DNS label may not start or end with -') \
+-                           % dict(underscore=underscore_err_msg))
+-
+-def validate_domain_name(domain_name, allow_underscore=False):
++
++def validate_dns_label(dns_label, allow_underscore=False, allow_slash=False):
++     base_chars = 'a-z0-9'
++     extra_chars = ''
++     middle_chars = ''
++
++     if allow_underscore:
++         extra_chars += '_'
++     if allow_slash:
++         middle_chars += '/'
++
++     middle_chars = middle_chars + '-' #has to be always the last in the regex [....-]
++
++     label_regex = r'^[%(base)s%(extra)s]([%(base)s%(extra)s%(middle)s]?[%(base)s%(extra)s])*$' \
++         % dict(base=base_chars, extra=extra_chars, middle=middle_chars)
++     regex = re.compile(label_regex, re.IGNORECASE)
++
++     if not dns_label:
++         raise ValueError(_('empty DNS label'))
++
++     if len(dns_label) > 63:
++         raise ValueError(_('DNS label cannot be longer that 63 characters'))
++
++     if not regex.match(dns_label):
++         chars = ', '.join("'%s'" % c for c in extra_chars + middle_chars)
++         chars2 = ', '.join("'%s'" % c for c in middle_chars)
++         raise ValueError(_("only letters, numbers, %(chars)s are allowed. " \
++                            "DNS label may not start or end with %(chars2)s") \
++                            % dict(chars=chars, chars2=chars2))
++
++
++def validate_domain_name(domain_name, allow_underscore=False, allow_slash=False):
+     if domain_name.endswith('.'):
+         domain_name = domain_name[:-1]
+ 
+     domain_name = domain_name.split(".")
+ 
+     # apply DNS name validator to every name part
+-    map(lambda label:validate_dns_label(label,allow_underscore), domain_name)
+-
+-    if not domain_name[-1].isalpha():
+-        # see RFC 1123
+-        raise ValueError(_('top level domain label must be alphabetic'))
++    map(lambda label:validate_dns_label(label, allow_underscore, allow_slash), domain_name)
+ 
+ def validate_zonemgr(zonemgr):
+     """ See RFC 1033, 1035 """
+@@ -269,7 +276,7 @@ def validate_zonemgr(zonemgr):
+                local_part.split(local_part_sep)):
+         raise ValueError(local_part_errmsg)
+ 
+-def validate_hostname(hostname, check_fqdn=True, allow_underscore=False):
++def validate_hostname(hostname, check_fqdn=True, allow_underscore=False, allow_slash=False):
+     """ See RFC 952, 1123
+ 
+     :param hostname Checked value
+@@ -287,9 +294,9 @@ def validate_hostname(hostname, check_fqdn=True, allow_underscore=False):
+     if '.' not in hostname:
+         if check_fqdn:
+             raise ValueError(_('not fully qualified'))
+-        validate_dns_label(hostname,allow_underscore)
++        validate_dns_label(hostname, allow_underscore, allow_slash)
+     else:
+-        validate_domain_name(hostname,allow_underscore)
++        validate_domain_name(hostname, allow_underscore, allow_slash)
+ 
+ def normalize_sshpubkey(value):
+     return SSHPublicKey(value).openssh()
+-- 
+2.4.3
+

@@ -1,0 +1,64 @@
+From 1dade2fde149bc5035d014777138ed111a9c080e Mon Sep 17 00:00:00 2001
+From: Sumit Bose <sbose@redhat.com>
+Date: Fri, 26 Apr 2013 09:21:43 +0200
+Subject: [PATCH] Do not store SID string in a local buffer
+
+https://fedorahosted.org/freeipa/ticket/3596
+---
+ .../ipa-slapi-plugins/ipa-extdom-extop/ipa_extdom_common.c | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/daemons/ipa-slapi-plugins/ipa-extdom-extop/ipa_extdom_common.c b/daemons/ipa-slapi-plugins/ipa-extdom-extop/ipa_extdom_common.c
+index 87e1302a3699d1a20724b565ff17e57b10184803..5eef684394817f37d44beb746b7990696cd2a822 100644
+--- a/daemons/ipa-slapi-plugins/ipa-extdom-extop/ipa_extdom_common.c
++++ b/daemons/ipa-slapi-plugins/ipa-extdom-extop/ipa_extdom_common.c
+@@ -431,7 +431,8 @@ int create_response(struct extdom_req *req, struct domain_info *domain_info,
+     struct extdom_res *res;
+     uint32_t id;
+     enum idmap_error_code err;
+-    char sid_str[WBC_SID_STRING_BUFLEN + 1];
++    char *sid_str;
++    wbcErr werr;
+ 
+     res = malloc(sizeof(struct extdom_res));
+     if (res == NULL) {
+@@ -449,9 +450,8 @@ int create_response(struct extdom_req *req, struct domain_info *domain_info,
+                 case INP_NAME:
+                     res->response_type = RESP_SID;
+ 
+-                    len = wbcSidToStringBuf(sid, sid_str,
+-                                            WBC_SID_STRING_BUFLEN);
+-                    if (len + 1 > WBC_SID_STRING_BUFLEN) {
++                    werr = wbcSidToString(sid, &sid_str);
++                    if (!WBC_ERROR_IS_OK(werr)) {
+                         ret = EINVAL;
+                         goto done;
+                     }
+@@ -464,13 +464,14 @@ int create_response(struct extdom_req *req, struct domain_info *domain_info,
+             }
+             break;
+         case REQ_FULL:
+-            len = wbcSidToStringBuf(sid, sid_str, WBC_SID_STRING_BUFLEN);
+-            if (len + 1 > WBC_SID_STRING_BUFLEN) {
++            len = wbcSidToString(sid, &sid_str);
++            if (!WBC_ERROR_IS_OK(werr)) {
+                 ret = EINVAL;
+                 goto done;
+             }
+ 
+             err = sss_idmap_sid_to_unix(domain_info->idmap_ctx, sid_str, &id);
++            wbcFreeMemory(sid_str);
+             if (err != IDMAP_SUCCESS) {
+                 ret = EINVAL;
+                 goto done;
+@@ -565,6 +566,7 @@ int pack_response(struct extdom_res *res, struct berval **ret_val)
+     switch (res->response_type) {
+         case RESP_SID:
+             ret = ber_printf(ber,"{es}", res->response_type, res->data.sid);
++            wbcFreeMemory(res->data.sid);
+             break;
+         case RESP_NAME:
+             ret = ber_printf(ber,"{e{ss}}", res->response_type,
+-- 
+2.4.3
+

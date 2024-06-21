@@ -1,0 +1,224 @@
+From 10a6645d7d633da0946e18cd7bb35fb534dba243 Mon Sep 17 00:00:00 2001
+From: Jan Cholasta <jcholast@redhat.com>
+Date: Fri, 2 Aug 2013 11:08:31 +0200
+Subject: [PATCH] Use LDAP search instead of *group_show to check for a group
+ objectclass.
+
+https://fedorahosted.org/freeipa/ticket/3706
+---
+ ipalib/plugins/host.py      | 37 ++++++++++++++++++++-----------------
+ ipalib/plugins/hostgroup.py | 40 +++++++++++++++++++++-------------------
+ ipalib/plugins/pwpolicy.py  |  5 +++--
+ 3 files changed, 44 insertions(+), 38 deletions(-)
+
+diff --git a/ipalib/plugins/host.py b/ipalib/plugins/host.py
+index 742a1095b854f5010e679add10f989f88d5ba461..8ccbbde7b97a335cb6aa7e4e8afb9e2dbb68b92b 100644
+--- a/ipalib/plugins/host.py
++++ b/ipalib/plugins/host.py
+@@ -358,22 +358,25 @@ class host(LDAPObject):
+ 
+         return managed_hosts
+ 
+-    def suppress_netgroup_memberof(self, entry_attrs):
++    def suppress_netgroup_memberof(self, ldap, entry_attrs):
+         """
+         We don't want to show managed netgroups so remove them from the
+         memberofindirect list.
+         """
+         ng_container = DN(api.env.container_netgroup, api.env.basedn)
+-        if 'memberofindirect' in entry_attrs:
+-            for member in entry_attrs['memberofindirect']:
+-                memberdn = DN(member)
+-                if memberdn.endswith(ng_container):
+-                    try:
+-                        netgroup = api.Command['netgroup_show'](memberdn['cn'], all=True)['result']
+-                        if self.has_objectclass(netgroup['objectclass'], 'mepmanagedentry'):
+-                            entry_attrs['memberofindirect'].remove(member)
+-                    except errors.NotFound:
+-                        pass
++        for member in list(entry_attrs.get('memberofindirect', [])):
++            memberdn = DN(member)
++            if not memberdn.endswith(ng_container):
++                continue
++
++            filter = ldap.make_filter({'objectclass': 'mepmanagedentry'})
++            try:
++                ldap.find_entries(filter=filter, base_dn=memberdn,
++                                  scope=ldap.SCOPE_BASE, attrs_list=[''])
++            except errors.NotFound:
++                pass
++            else:
++                entry_attrs['memberofindirect'].remove(member)
+ 
+ api.register(host)
+ 
+@@ -727,7 +730,7 @@ class host_mod(LDAPUpdate):
+         if options.get('all', False):
+             entry_attrs['managing'] = self.obj.get_managed_hosts(dn)
+ 
+-        self.obj.suppress_netgroup_memberof(entry_attrs)
++        self.obj.suppress_netgroup_memberof(ldap, entry_attrs)
+ 
+         convert_sshpubkey_post(ldap, dn, entry_attrs)
+ 
+@@ -805,7 +808,7 @@ class host_find(LDAPSearch):
+             (dn, entry_attrs) = entry
+             set_certificate_attrs(entry_attrs)
+             self.obj.get_password_attributes(ldap, dn, entry_attrs)
+-            self.obj.suppress_netgroup_memberof(entry_attrs)
++            self.obj.suppress_netgroup_memberof(ldap, entry_attrs)
+             if entry_attrs['has_password']:
+                 # If an OTP is set there is no keytab, at least not one
+                 # fetched anywhere.
+@@ -846,7 +849,7 @@ class host_show(LDAPRetrieve):
+         if options.get('all', False):
+             entry_attrs['managing'] = self.obj.get_managed_hosts(dn)
+ 
+-        self.obj.suppress_netgroup_memberof(entry_attrs)
++        self.obj.suppress_netgroup_memberof(ldap, entry_attrs)
+ 
+         convert_sshpubkey_post(ldap, dn, entry_attrs)
+ 
+@@ -955,7 +958,7 @@ class host_disable(LDAPQuery):
+ 
+     def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
+         assert isinstance(dn, DN)
+-        self.obj.suppress_netgroup_memberof(entry_attrs)
++        self.obj.suppress_netgroup_memberof(ldap, entry_attrs)
+         return dn
+ 
+ api.register(host_disable)
+@@ -969,7 +972,7 @@ class host_add_managedby(LDAPAddMember):
+ 
+     def post_callback(self, ldap, completed, failed, dn, entry_attrs, *keys, **options):
+         assert isinstance(dn, DN)
+-        self.obj.suppress_netgroup_memberof(entry_attrs)
++        self.obj.suppress_netgroup_memberof(ldap, entry_attrs)
+         return (completed, dn)
+ 
+ api.register(host_add_managedby)
+@@ -983,7 +986,7 @@ class host_remove_managedby(LDAPRemoveMember):
+ 
+     def post_callback(self, ldap, completed, failed, dn, entry_attrs, *keys, **options):
+         assert isinstance(dn, DN)
+-        self.obj.suppress_netgroup_memberof(entry_attrs)
++        self.obj.suppress_netgroup_memberof(ldap, entry_attrs)
+         return (completed, dn)
+ 
+ api.register(host_remove_managedby)
+diff --git a/ipalib/plugins/hostgroup.py b/ipalib/plugins/hostgroup.py
+index 6fb326e23620213e837723b8fa3faa09cee61f04..4e2adf1d627965449327d9b5a10daef720d4ce32 100644
+--- a/ipalib/plugins/hostgroup.py
++++ b/ipalib/plugins/hostgroup.py
+@@ -92,23 +92,25 @@ class hostgroup(LDAPObject):
+         ),
+     )
+ 
+-    def suppress_netgroup_memberof(self, dn, entry_attrs):
++    def suppress_netgroup_memberof(self, ldap, dn, entry_attrs):
+         """
+         We don't want to show managed netgroups so remove them from the
+         memberOf list.
+         """
+-        if 'memberof' in entry_attrs:
+-            hgdn = DN(dn)
+-            for member in entry_attrs['memberof']:
+-                ngdn = DN(member)
+-                if ngdn['cn'] == hgdn['cn']:
+-                    try:
+-                        netgroup = api.Command['netgroup_show'](ngdn['cn'], all=True)['result']
+-                        if self.has_objectclass(netgroup['objectclass'], 'mepmanagedentry'):
+-                            entry_attrs['memberof'].remove(member)
+-                            return
+-                    except errors.NotFound:
+-                        pass
++        hgdn = DN(dn)
++        for member in list(entry_attrs.get('memberof', [])):
++            ngdn = DN(member)
++            if ngdn['cn'] != hgdn['cn']:
++                continue
++
++            filter = ldap.make_filter({'objectclass': 'mepmanagedentry'})
++            try:
++                ldap.find_entries(filter=filter, base_dn=ngdn,
++                                  scope=ldap.SCOPE_BASE, attrs_list=[''])
++            except errors.NotFound:
++                pass
++            else:
++                entry_attrs['memberof'].remove(member)
+ 
+ api.register(hostgroup)
+ 
+@@ -146,7 +148,7 @@ class hostgroup_add(LDAPCreate):
+         # be sure to ignore it in memberOf
+         newentry = wait_for_value(ldap, dn, 'objectclass', 'mepOriginEntry')
+         entry_from_entry(entry_attrs, newentry)
+-        self.obj.suppress_netgroup_memberof(dn, entry_attrs)
++        self.obj.suppress_netgroup_memberof(ldap, dn, entry_attrs)
+ 
+         return dn
+ 
+@@ -169,7 +171,7 @@ class hostgroup_mod(LDAPUpdate):
+ 
+     def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
+         assert isinstance(dn, DN)
+-        self.obj.suppress_netgroup_memberof(dn, entry_attrs)
++        self.obj.suppress_netgroup_memberof(ldap, dn, entry_attrs)
+         return dn
+ 
+ api.register(hostgroup_mod)
+@@ -188,7 +190,7 @@ class hostgroup_find(LDAPSearch):
+             return truncated
+         for entry in entries:
+             (dn, entry_attrs) = entry
+-            self.obj.suppress_netgroup_memberof(dn, entry_attrs)
++            self.obj.suppress_netgroup_memberof(ldap, dn, entry_attrs)
+         return truncated
+ 
+ api.register(hostgroup_find)
+@@ -199,7 +201,7 @@ class hostgroup_show(LDAPRetrieve):
+ 
+     def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
+         assert isinstance(dn, DN)
+-        self.obj.suppress_netgroup_memberof( dn, entry_attrs)
++        self.obj.suppress_netgroup_memberof(ldap, dn, entry_attrs)
+         return dn
+ 
+ api.register(hostgroup_show)
+@@ -210,7 +212,7 @@ class hostgroup_add_member(LDAPAddMember):
+ 
+     def post_callback(self, ldap, completed, failed, dn, entry_attrs, *keys, **options):
+         assert isinstance(dn, DN)
+-        self.obj.suppress_netgroup_memberof(dn, entry_attrs)
++        self.obj.suppress_netgroup_memberof(ldap, dn, entry_attrs)
+         return (completed, dn)
+ 
+ api.register(hostgroup_add_member)
+@@ -221,7 +223,7 @@ class hostgroup_remove_member(LDAPRemoveMember):
+ 
+     def post_callback(self, ldap, completed, failed, dn, entry_attrs, *keys, **options):
+         assert isinstance(dn, DN)
+-        self.obj.suppress_netgroup_memberof(dn, entry_attrs)
++        self.obj.suppress_netgroup_memberof(ldap, dn, entry_attrs)
+         return (completed, dn)
+ 
+ api.register(hostgroup_remove_member)
+diff --git a/ipalib/plugins/pwpolicy.py b/ipalib/plugins/pwpolicy.py
+index 5ae07c40d70109468463d9a3997873e9ce8b1061..ab2d443e577e8d7e0c1c5d4863602b9803c28017 100644
+--- a/ipalib/plugins/pwpolicy.py
++++ b/ipalib/plugins/pwpolicy.py
+@@ -121,8 +121,9 @@ class cosentry_add(LDAPCreate):
+     def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys, **options):
+         assert isinstance(dn, DN)
+         # check for existence of the group
+-        result = self.api.Command.group_show(keys[-1], all=True)['result']
+-        oc = map(lambda x:x.lower(),result['objectclass'])
++        group_dn = self.api.Object.group.get_dn(keys[-1])
++        (group_dn, group_entry_attrs) = ldap.get_entry(group_dn, ['objectclass'])
++        oc = map(lambda x:x.lower(),group_entry_attrs['objectclass'])
+         if 'mepmanagedentry' in oc:
+             raise errors.ManagedPolicyError()
+         self.obj.check_priority_uniqueness(*keys, **options)
+-- 
+2.4.3
+

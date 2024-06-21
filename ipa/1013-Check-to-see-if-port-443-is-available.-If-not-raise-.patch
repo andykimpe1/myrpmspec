@@ -1,0 +1,97 @@
+From 01e78629ff2587280bce084a07289c78caff5477 Mon Sep 17 00:00:00 2001
+From: Rob Crittenden <rcritten@redhat.com>
+Date: Wed, 21 Nov 2012 15:53:21 -0500
+Subject: [PATCH] Check to see if port 443 is available. If not raise an
+ exception.
+
+---
+ install/tools/ipa-replica-install |  4 ++++
+ install/tools/ipa-server-install  |  4 ++++
+ ipaserver/install/httpinstance.py | 27 +++++++++++++++++++++------
+ 3 files changed, 29 insertions(+), 6 deletions(-)
+
+diff --git a/install/tools/ipa-replica-install b/install/tools/ipa-replica-install
+index bcd66903c0bface52d106e92957e2a497b25d006..f7cf023bbccd512e109d63cd0a3d77246a48d308 100755
+--- a/install/tools/ipa-replica-install
++++ b/install/tools/ipa-replica-install
+@@ -324,6 +324,10 @@ def main():
+     if options.setup_dns:
+         check_bind()
+ 
++    # Check to see if mod_ssl is installed and configured on port 443
++    if httpinstance.check_inst():
++        sys.exit("Aborting installation")
++
+     check_dirsrv()
+ 
+     # get the directory manager password
+diff --git a/install/tools/ipa-server-install b/install/tools/ipa-server-install
+index acc47bb0c2c1b7a0e21625c4d6e8bfbe1761a115..28ed9dbd7e3fa5bc28f3ebf694f34dbff8b4b90e 100755
+--- a/install/tools/ipa-server-install
++++ b/install/tools/ipa-server-install
+@@ -735,6 +735,10 @@ def main():
+         # setting up a local DNS server.
+         options.no_host_dns = True
+ 
++    # Check to see if mod_ssl is installed and configured on port 443
++    if httpinstance.check_inst():
++        sys.exit("Aborting installation")
++
+     # check the hostname is correctly configured, it must be as the kldap
+     # utilities just use the hostname as returned by getaddrinfo to set
+     # up some of the standard entries
+diff --git a/ipaserver/install/httpinstance.py b/ipaserver/install/httpinstance.py
+index 925ce5845f6982230b45a3e47b955f903028e43a..76e707ad3e628feb2e2f758065658aad560dc415 100644
+--- a/ipaserver/install/httpinstance.py
++++ b/ipaserver/install/httpinstance.py
+@@ -46,6 +46,27 @@ change with the command:
+ Try updating the policycoreutils and selinux-policy packages.
+ """
+ 
++def check_inst():
++    """
++    We now allow mod_ssl to be installed so don't automatically disable it.
++    However it can't share the same listen port as mod_nss, so check for that.
++
++    Returns True if something other than mod_nss is listening on 443.
++    False otherwise.
++    """
++    (stdout, stderr, rc) = ipautil.run(['/usr/sbin/httpd', '-t', '-D', 'DUMP_VHOSTS'], raiseonerr=False)
++    if rc == 0:
++        lines = stdout.split('\n')
++        for line in lines:
++            if ':443 ' in line:
++                if not 'nss.conf' in line:
++                    print "Apache is already configured with a listener on port 443:"
++                    print line
++                    print "IPA requires that mod_nss be used for port 443."
++                    return True
++
++    return False
++
+ class WebGuiInstance(service.SimpleServiceInstance):
+     def __init__(self):
+         service.SimpleServiceInstance.__init__(self, "ipa_webgui")
+@@ -83,7 +104,6 @@ class HTTPInstance(service.Service):
+         self.ldap_connect()
+ 
+ 
+-        self.step("disabling mod_ssl in httpd", self.__disable_mod_ssl)
+         self.step("setting mod_nss port to 443", self.__set_mod_nss_port)
+         self.step("setting mod_nss protocol list to TLSv1.0 - TLSv1.2",
+                   self.set_mod_nss_protocol)
+@@ -208,11 +228,6 @@ class HTTPInstance(service.Service):
+         http_fd.close()
+         os.chmod(target_fname, 0644)
+ 
+-    def __disable_mod_ssl(self):
+-        if os.path.exists(SSL_CONF):
+-            self.fstore.backup_file(SSL_CONF)
+-            os.unlink(SSL_CONF)
+-
+     def __set_mod_nss_port(self):
+         self.fstore.backup_file(NSS_CONF)
+         if installutils.update_file(NSS_CONF, '8443', '443') != 0:
+-- 
+2.4.3
+

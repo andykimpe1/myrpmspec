@@ -1,0 +1,154 @@
+From 67129c7aa7e79f3744cd24a04194d06281643e24 Mon Sep 17 00:00:00 2001
+From: Rob Crittenden <rcritten@redhat.com>
+Date: Wed, 16 Jan 2013 13:20:14 -0500
+Subject: [PATCH] Don't initialize NSS if we don't have to, clean up unused cert refs
+
+Check to see if NSS is initialized before trying to do so again.
+
+If we are temporarily creating a certificate be sure to delete it in order
+to remove references to it and avoid NSS shutdown issues.
+
+In the certificate load validator shut down NSS if we end up initializing
+it. I'm not entirely sure why but this prevents a later shutdown issue
+if we are passed the --ca-cert-file option.
+---
+ ipa-client/ipa-install/ipa-client-install |   10 ++++++++
+ ipalib/rpc.py                             |    2 +
+ ipalib/x509.py                            |   33 +++++++++++++++++-----------
+ 3 files changed, 32 insertions(+), 13 deletions(-)
+
+diff --git a/ipa-client/ipa-install/ipa-client-install b/ipa-client/ipa-install/ipa-client-install
+index fe08ecd150863bbbfcd3a1937e23263c532b3546..8faa95e979d9b1737f7aa17a4fcd16f87cac84f7 100755
+--- a/ipa-client/ipa-install/ipa-client-install
++++ b/ipa-client/ipa-install/ipa-client-install
+@@ -48,6 +48,7 @@ try:
+     from ipapython.dn import DN
+     from ipapython.ssh import SSHPublicKey
+     from ipalib.rpc import delete_persistent_client_session_data
++    import nss.nss as nss
+     import SSSDConfig
+     from ConfigParser import RawConfigParser
+     from optparse import SUPPRESS_HELP, OptionGroup, OptionValueError
+@@ -77,10 +78,15 @@ def parse_options():
+         if not os.path.isabs(value):
+             raise OptionValueError("%s option '%s' is not an absolute file path" % (opt, value))
+ 
++        initialized = nss.nss_is_initialized()
+         try:
+             cert = x509.load_certificate_from_file(value)
+         except Exception, e:
+             raise OptionValueError("%s option '%s' is not a valid certificate file" % (opt, value))
++        else:
++            del(cert)
++            if not initialized:
++                nss.nss_shutdown()
+ 
+         parser.values.ca_cert_file = value
+ 
+@@ -1366,6 +1372,8 @@ def get_ca_cert_from_file(url):
+     except Exception, e:
+         raise errors.FileError(reason =
+             u"cannot write certificate file '%s': %s" % (CACERT, e))
++    else:
++        del(cert)
+ 
+ def get_ca_cert_from_http(url, ca_file, warn=True):
+     '''
+@@ -1472,6 +1480,8 @@ def validate_new_ca_cert(existing_ca_cert, ca_file, ask, override=False):
+         root_logger.debug(
+                 "Existing CA cert and Retrieved CA cert are identical")
+         os.remove(ca_file)
++        del(existing_ca_cert)
++        del(new_ca_cert)
+ 
+ 
+ def get_ca_cert(fstore, options, server, basedn):
+diff --git a/ipalib/rpc.py b/ipalib/rpc.py
+index 1cc22c509859094630ee64c34ad5d60ee51a4b3d..bd9259340569dbaf1673d625b2fe81e5445bc9b0 100644
+--- a/ipalib/rpc.py
++++ b/ipalib/rpc.py
+@@ -651,6 +651,8 @@ class xmlclient(Connectible):
+             except Exception, e:
+                 if not fallback:
+                     raise
++                else:
++                    self.log.info('Connection to %s failed with %s', url, e)
+                 serverproxy = None
+ 
+         if serverproxy is None:
+diff --git a/ipalib/x509.py b/ipalib/x509.py
+index f8a13577b9ad7c807fcf2aeeeeeb22e03bec1873..4f81fb59a70e0e15126d377a0a1637f8126a536c 100644
+--- a/ipalib/x509.py
++++ b/ipalib/x509.py
+@@ -91,18 +91,18 @@ def load_certificate(data, datatype=PEM, dbdir=None):
+         data = strip_header(data)
+         data = base64.b64decode(data)
+ 
+-    if dbdir is None:
+-        if 'in_tree' in api.env:
+-            if api.env.in_tree:
+-                dbdir = api.env.dot_ipa + os.sep + 'alias'
++    if not nss.nss_is_initialized():
++        if dbdir is None:
++            if 'in_tree' in api.env:
++                if api.env.in_tree:
++                    dbdir = api.env.dot_ipa + os.sep + 'alias'
++                else:
++                    dbdir = "/etc/httpd/alias"
++                nss.nss_init(dbdir)
+             else:
+-                dbdir = "/etc/httpd/alias"
+-            nss.nss_init(dbdir)
++                nss.nss_init_nodb()
+         else:
+-            nss.nss_init_nodb()
+-    else:
+-        nss.nss_init(dbdir)
+-
++            nss.nss_init(dbdir)
+ 
+     return nss.Certificate(buffer(data))
+ 
+@@ -139,7 +139,9 @@ def get_subject(certificate, datatype=PEM, dbdir=None):
+     """
+ 
+     nsscert = load_certificate(certificate, datatype, dbdir)
+-    return nsscert.subject
++    subject = nsscert.subject
++    del(nsscert)
++    return subject
+ 
+ def get_issuer(certificate, datatype=PEM, dbdir=None):
+     """
+@@ -147,14 +149,18 @@ def get_issuer(certificate, datatype=PEM, dbdir=None):
+     """
+ 
+     nsscert = load_certificate(certificate, datatype, dbdir)
+-    return nsscert.issuer
++    issuer = nsscert.issuer
++    del(nsscert)
++    return issuer
+ 
+ def get_serial_number(certificate, datatype=PEM, dbdir=None):
+     """
+     Return the decimal value of the serial number.
+     """
+     nsscert = load_certificate(certificate, datatype, dbdir)
+-    return nsscert.serial_number
++    serial_number = nsscert.serial_number
++    del(nsscert)
++    return serial_number
+ 
+ def make_pem(data):
+     """
+@@ -230,6 +236,7 @@ def verify_cert_subject(ldap, hostname, dercert):
+     nsscert = load_certificate(dercert, datatype=DER)
+     subject = str(nsscert.subject)
+     issuer = str(nsscert.issuer)
++    del(nsscert)
+ 
+     # Handle both supported forms of issuer, from selfsign and dogtag.
+     if (not valid_issuer(issuer)):
+-- 
+1.7.1
+

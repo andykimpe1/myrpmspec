@@ -1,0 +1,70 @@
+From 74b4cbb2602525b6b4bc91b90bb94fbde3446ecc Mon Sep 17 00:00:00 2001
+From: Sumit Bose <sbose@redhat.com>
+Date: Thu, 11 Oct 2012 12:13:53 +0200
+Subject: [PATCH] extdom: handle INP_POSIX_UID and INP_POSIX_GID requests
+
+Fixes https://fedorahosted.org/freeipa/ticket/3166
+---
+ .../ipa-extdom-extop/ipa_extdom_common.c           | 38 ++++++++++++++++++----
+ 1 file changed, 32 insertions(+), 6 deletions(-)
+
+diff --git a/daemons/ipa-slapi-plugins/ipa-extdom-extop/ipa_extdom_common.c b/daemons/ipa-slapi-plugins/ipa-extdom-extop/ipa_extdom_common.c
+index f48bead04cbb18b040557b7b78a6cb27a3368422..8b3475ce0de699efdcec38a60159b62b6bdcddea 100644
+--- a/daemons/ipa-slapi-plugins/ipa-extdom-extop/ipa_extdom_common.c
++++ b/daemons/ipa-slapi-plugins/ipa-extdom-extop/ipa_extdom_common.c
+@@ -327,20 +327,46 @@ int handle_request(struct ipa_extdom_ctx *ctx, struct extdom_req *req,
+     char *name;
+     enum wbcSidType name_type;
+     struct domain_info *domain_info = NULL;
++    uint32_t id;
++    enum idmap_error_code err;
++    char *sid_str;
+ 
+     ret = get_domain_info(ctx, req->data.name.domain_name, &domain_info);
+     if (ret != 0) {
+         return LDAP_OPERATIONS_ERROR;
+     }
++    if (req->input_type == INP_POSIX_UID || req->input_type == INP_POSIX_GID) {
++        if (req->input_type == INP_POSIX_UID) {
++            id = req->data.posix_uid.uid;
++        } else {
++            id = req->data.posix_gid.gid;
++        }
++
++        err = sss_idmap_unix_to_sid(domain_info->idmap_ctx, id, &sid_str);
++        if (err != IDMAP_SUCCESS) {
++            ret = LDAP_OPERATIONS_ERROR;
++            goto done;
++        }
++
++        werr = wbcStringToSid(sid_str, &sid);
++        free(sid_str);
++        if (!WBC_ERROR_IS_OK(werr)) {
++            ret = LDAP_OPERATIONS_ERROR;
++            goto done;
++        }
++
++    } else if (req->input_type == INP_SID) {
++        werr = wbcStringToSid(req->data.sid, &sid);
++        if (!WBC_ERROR_IS_OK(werr)) {
++            ret = LDAP_OPERATIONS_ERROR;
++            goto done;
++        }
++    }
+ 
+     switch (req->input_type) {
++        case INP_POSIX_UID:
++        case INP_POSIX_GID:
+         case INP_SID:
+-            werr = wbcStringToSid(req->data.sid, &sid);
+-            if (!WBC_ERROR_IS_OK(werr)) {
+-                ret = LDAP_OPERATIONS_ERROR;
+-                goto done;
+-            }
+-
+             werr = wbcLookupSid(&sid, &domain_name, &name, &name_type);
+             if (!WBC_ERROR_IS_OK(werr)) {
+                 ret = LDAP_OPERATIONS_ERROR;
+-- 
+2.4.3
+

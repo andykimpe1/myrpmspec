@@ -1,0 +1,77 @@
+From a93301302b789fa3f909821d6db06aefb9034ff4 Mon Sep 17 00:00:00 2001
+From: Tomas Babej <tbabej@redhat.com>
+Date: Fri, 13 Jun 2014 10:49:52 +0200
+Subject: [PATCH] cainstance: Read CS.cfg for preop.pin in a loop
+
+As due to possible race conditions, the preop.pin might not be
+written in the CS.cfg at the time installer tries to read it.
+
+In case no value for preop.pin was found, retry until timeout
+was reached.
+
+https://fedorahosted.org/freeipa/ticket/3382
+
+Reviewed-By: Nathaniel McCallum <npmccallum@redhat.com>
+---
+ ipaserver/install/cainstance.py | 37 +++++++++++++++++++++++--------------
+ 1 file changed, 23 insertions(+), 14 deletions(-)
+
+diff --git a/ipaserver/install/cainstance.py b/ipaserver/install/cainstance.py
+index aea56e835230f6fdd4da8341d891ee936170b50a..fa5d4e8cc4af77663ffd59832ed387be03c9e6ed 100644
+--- a/ipaserver/install/cainstance.py
++++ b/ipaserver/install/cainstance.py
+@@ -38,7 +38,7 @@ import socket
+ from ipapython import dogtag
+ from ipapython.certdb import get_ca_nickname
+ from ipapython import certmonger
+-from ipalib import pkcs10, x509
++from ipalib import pkcs10, x509, api
+ from ipapython.dn import DN
+ import subprocess
+ 
+@@ -105,20 +105,29 @@ def get_preop_pin(instance_root, instance_name):
+ 
+     filename = instance_root + "/" + instance_name + "/conf/CS.cfg"
+ 
+-    # read the config file and get the preop pin
+-    try:
+-        f=open(filename)
+-    except IOError, e:
+-        root_logger.error("Cannot open configuration file." + str(e))
+-        raise e
+-    data = f.read()
+-    data = data.split('\n')
++    # Retry to read the preop.pin several times before timing out
++    # due to possible race conditions
++    # https://fedorahosted.org/freeipa/ticket/3382
++
++    op_timeout = time.time() + api.env.startup_timeout
+     pattern = re.compile("preop.pin=(.*)" )
+-    for line in data:
+-        match = re.search(pattern, line)
+-        if (match):
+-            preop_pin=match.group(1)
+-            break
++
++    while preop_pin is None and time.time() < op_timeout:
++        try:
++            with open(filename, 'r') as f:
++                for line in f:
++                    match = re.search(pattern, line.rstrip('\n'))
++                    if match:
++                        preop_pin = match.group(1)
++                        break
++
++        except IOError, e:
++            root_logger.error("Cannot open configuration file." + str(e))
++        finally:
++            if preop_pin is None:
++                root_logger.debug("Unable to find preop.pin.")
++                root_logger.debug("Possible race condition. Waiting for 1 second.")
++                time.sleep(1)
+ 
+     if preop_pin is None:
+         raise RuntimeError("Unable to find preop.pin in %s. Is your CA already configured?" % filename)
+-- 
+2.4.3
+

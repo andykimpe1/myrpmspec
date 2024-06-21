@@ -1,0 +1,169 @@
+From 6aa9c52e4f2450d2f4255ebd2f98bf74ac52ff92 Mon Sep 17 00:00:00 2001
+From: Tomas Babej <tbabej@redhat.com>
+Date: Thu, 15 Nov 2012 05:21:16 -0500
+Subject: [PATCH] Add detection for users from trusted/invalid realms
+
+When user from other realm than FreeIPA's tries to use Web UI
+(login via forms-based auth or with valid trusted realm ticket),
+the 401 Unauthorized error with X-Ipa-Rejection-Reason=denied
+is returned.
+
+Also, the support for usernames of the form user@SERVER.REALM
+or user@server.realm was added.
+
+https://fedorahosted.org/freeipa/ticket/3252
+---
+ ipalib/util.py             | 15 +++++++++++++++
+ ipaserver/dcerpc.py        | 19 +++----------------
+ ipaserver/plugins/ldap2.py |  2 ++
+ ipaserver/rpcserver.py     | 37 +++++++++++++++++++++++++++++++++++--
+ 4 files changed, 55 insertions(+), 18 deletions(-)
+
+diff --git a/ipalib/util.py b/ipalib/util.py
+index 3fe5c9f446ed2c5cdc5df2cb7b629fae8b319a4b..c52d060b55b51c9dbe2791bf92f8f002be9af9da 100644
+--- a/ipalib/util.py
++++ b/ipalib/util.py
+@@ -105,6 +105,21 @@ def validate_host_dns(log, fqdn):
+         )
+         raise errors.DNSNotARecordError()
+ 
++def normalize_name(name):
++    result = dict()
++    components = name.split('@')
++    if len(components) == 2:
++        result['domain'] = unicode(components[1]).lower()
++        result['name'] = unicode(components[0]).lower()
++    else:
++        components = name.split('\\')
++        if len(components) == 2:
++            result['flatname'] = unicode(components[0]).lower()
++            result['name'] = unicode(components[1]).lower()
++        else:
++            result['name'] = unicode(name).lower()
++    return result
++
+ def isvalid_base64(data):
+     """
+     Validate the incoming data as valid base64 data or not.
+diff --git a/ipaserver/dcerpc.py b/ipaserver/dcerpc.py
+index 8190bf6acd4ac3429ff2d06d2c4592bc46067ab5..54a70defc9df52db58054d29c1c9f9189a88cabb 100644
+--- a/ipaserver/dcerpc.py
++++ b/ipaserver/dcerpc.py
+@@ -31,6 +31,7 @@ from ipapython import ipautil
+ from ipapython.ipa_log_manager import *
+ from ipapython.dn import DN
+ from ipaserver.install import installutils
++from ipalib.util import normalize_name
+ 
+ import os, string, struct, copy
+ import uuid
+@@ -184,21 +185,6 @@ class DomainValidator(object):
+                 return True
+         return False
+ 
+-    def normalize_name(self, name):
+-        result = dict()
+-        components = name.split('@')
+-        if len(components) == 2:
+-            result['domain'] = unicode(components[1]).lower()
+-            result['name'] = unicode(components[0]).lower()
+-        else:
+-            components = name.split('\\')
+-            if len(components) == 2:
+-                result['flatname'] = unicode(components[0]).lower()
+-                result['name'] = unicode(components[1]).lower()
+-            else:
+-                result['name'] = unicode(name).lower()
+-        return result
+-
+     def get_sid_trusted_domain_object(self, object_name):
+         """Returns SID for the trusted domain object (user or group only)"""
+         if not self.domain:
+@@ -209,7 +195,8 @@ class DomainValidator(object):
+         if len(self._domains) == 0:
+             # Our domain is configured but no trusted domains are configured
+             return None
+-        components = self.normalize_name(object_name)
++
++        components = normalize_name(object_name)
+         if not ('domain' in components or 'flatname' in components):
+             # No domain or realm specified, ambiguous search
+             return False
+diff --git a/ipaserver/plugins/ldap2.py b/ipaserver/plugins/ldap2.py
+index bf1a0d3761b90cfa0784363aeaf40686e72c5d49..8e8e1604ff0a3d36fe3501ec6f54abdb717d78ae 100644
+--- a/ipaserver/plugins/ldap2.py
++++ b/ipaserver/plugins/ldap2.py
+@@ -727,6 +727,8 @@ class ldap2(CrudBackend):
+         except _ldap.SERVER_DOWN:
+             raise NetworkError(uri=self.ldap_uri,
+                                error=u'LDAP Server Down')
++        except _ldap.LOCAL_ERROR:
++            raise errors.ACIError(info=info)
+         except _ldap.SUCCESS:
+             pass
+         except _ldap.LDAPError, e:
+diff --git a/ipaserver/rpcserver.py b/ipaserver/rpcserver.py
+index 0856c25cef7904b3913b1666ddcf4965368f368a..d2f2acd9275b858c07fd62f0b5bd26add833905a 100644
+--- a/ipaserver/rpcserver.py
++++ b/ipaserver/rpcserver.py
+@@ -40,7 +40,7 @@ from ipalib.backend import Executioner
+ from ipalib.errors import PublicError, InternalError, CommandError, JSONError, ConversionError, CCacheError, RefererError, InvalidSessionPassword, NotFound, ACIError, ExecutionError
+ from ipalib.request import context, Connection, destroy_context
+ from ipalib.rpc import xml_dumps, xml_loads
+-from ipalib.util import parse_time_duration
++from ipalib.util import parse_time_duration, normalize_name
+ from ipapython.dn import DN
+ from ipaserver.plugins.ldap2 import ldap2
+ from ipapython.compat import json
+@@ -809,7 +809,11 @@ class jsonserver_session(jsonserver, KerberosSession):
+         # Store the session data in the per-thread context
+         setattr(context, 'session_data', session_data)
+ 
+-        self.create_context(ccache=ipa_ccache_name)
++        # This may fail if a ticket from wrong realm was handled via browser
++        try:
++            self.create_context(ccache=ipa_ccache_name)
++        except ACIError, e:
++            return self.unauthorized(environ, start_response, str(e), 'denied')
+ 
+         try:
+             response = super(jsonserver_session, self).__call__(environ, start_response)
+@@ -927,6 +931,35 @@ class login_password(Backend, KerberosSession, HTTP_Status):
+         else:
+             return self.bad_request(environ, start_response, "no user specified")
+ 
++        # allows login in the form user@SERVER_REALM or user@server_realm
++        # FIXME: uppercasing may be removed when better handling of UPN
++        #        is introduced
++
++        parts = normalize_name(user)
++
++        if "domain" in parts:
++            # username is of the form user@SERVER_REALM or user@server_realm
++
++            # check whether the realm is server's realm
++            # Users from other realms are not supported
++            # (they do not have necessary LDAP entry, LDAP connect will fail)
++
++            if parts["domain"].upper()==self.api.env.realm:
++                user=parts["name"]
++            else:
++                return self.unauthorized(environ, start_response, '', 'denied')
++
++        elif "flatname" in parts:
++            # username is of the form NetBIOS\user
++            return self.unauthorized(environ, start_response, '', 'denied')
++
++        else:
++            # username is of the form user or of some wild form, e.g.
++            # user@REALM1@REALM2 or NetBIOS1\NetBIOS2\user (see normalize_name)
++
++            # wild form username will fail at kinit, so nothing needs to be done
++            pass
++
+         password = query_dict.get('password', None)
+         if password is not None:
+             if len(password) == 1:
+-- 
+1.7.11.7
+

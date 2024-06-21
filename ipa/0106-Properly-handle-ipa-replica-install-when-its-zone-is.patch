@@ -1,0 +1,50 @@
+From 30170797e2f83da986f12632a0410cd4828bec9c Mon Sep 17 00:00:00 2001
+From: Tomas Babej <tbabej@redhat.com>
+Date: Fri, 13 Jun 2014 10:59:19 +0200
+Subject: [PATCH 106/116] Properly handle ipa-replica-install when its zone is
+ not  managed by IPA
+
+The ipa-replica-install script tries to add replica's A and PTR
+records to the master DNS, if master does manage DNS. However,
+master need not manage replica's zone. Properly handle this use
+case.
+
+https://fedorahosted.org/freeipa/ticket/3496
+---
+ install/tools/ipa-replica-install | 19 ++++++++++++++-----
+ 1 file changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/install/tools/ipa-replica-install b/install/tools/ipa-replica-install
+index b56fa2ea5826b6fe25e6db02c7e640e50bca0790..4fe387f3cb5cd00e45d93a9c8eef0e3d5a3706e4 100755
+--- a/install/tools/ipa-replica-install
++++ b/install/tools/ipa-replica-install
+@@ -289,12 +289,21 @@ def install_dns_records(config, options):
+     # before our DS server is installed.
+     with temporary_ldap2_connection(
+             config.master_host_name, config.dirman_password):
+-        bind = bindinstance.BindInstance(dm_password=config.dirman_password)
+-        reverse_zone = bindinstance.find_reverse_zone(config.ip)
++        try:
++            bind = bindinstance.BindInstance(dm_password=config.dirman_password)
++            reverse_zone = bindinstance.find_reverse_zone(config.ip)
+ 
+-        bind.add_master_dns_records(config.host_name, config.ip_address,
+-                                    config.realm_name, config.domain_name,
+-                                    reverse_zone, options.conf_ntp)
++            bind.add_master_dns_records(config.host_name, config.ip_address,
++                                        config.realm_name, config.domain_name,
++                                        reverse_zone, options.conf_ntp)
++        except errors.NotFound, e:
++            root_logger.debug('Replica DNS records could not be added '
++                              'on master: %s', str(e))
++
++        # we should not fail here no matter what
++        except Exception, e:
++            root_logger.info('Replica DNS records could not be added '
++                             'on master: %s', str(e))
+ 
+ def check_dirsrv():
+     (ds_unsecure, ds_secure) = dsinstance.check_ports()
+-- 
+1.9.3
+

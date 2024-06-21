@@ -1,0 +1,201 @@
+From a149f01ab5babded6bf2a67c97142c1d82f7354f Mon Sep 17 00:00:00 2001
+From: Rob Crittenden <rcritten@redhat.com>
+Date: Tue, 4 Dec 2012 11:44:39 -0500
+Subject: [PATCH] Honor the kdb options disabling KDC writes in ipa_lockout
+ plugin
+
+Ther3 are two global ipaConfig options to disable undesirable writes that
+have performance impact.
+
+The "KDC:Disable Last Success" will disable writing back to ldap the last
+successful AS Request time (successful kinit)
+
+The "KDC:Disable Lockout" will disable completely writing back lockout
+related data. This means lockout policies will stop working.
+
+https://fedorahosted.org/freeipa/ticket/2734
+---
+ .../ipa-slapi-plugins/ipa-lockout/ipa_lockout.c    | 120 ++++++++++++++++++++-
+ 1 file changed, 119 insertions(+), 1 deletion(-)
+
+diff --git a/daemons/ipa-slapi-plugins/ipa-lockout/ipa_lockout.c b/daemons/ipa-slapi-plugins/ipa-lockout/ipa_lockout.c
+index 78e235dffa0e918513b63214c3d93389203c2248..351273d2af05437c52141164fe78cb97914fd1db 100644
+--- a/daemons/ipa-slapi-plugins/ipa-lockout/ipa_lockout.c
++++ b/daemons/ipa-slapi-plugins/ipa-lockout/ipa_lockout.c
+@@ -40,6 +40,10 @@
+  * Update the Kerberos lockout variables on LDAP binds.
+  *
+  */
++#ifndef _GNU_SOURCE
++#define _GNU_SOURCE 1
++#endif
++#include <stdio.h>
+ #include <string.h>
+ #include <stdbool.h>
+ #include <time.h>
+@@ -65,11 +69,18 @@ static Slapi_PluginDesc pdesc = {
+     IPALOCKOUT_PLUGIN_DESC
+ };
+ 
++struct ipa_context {
++    bool disable_last_success;
++    bool disable_lockout;
++};
++
+ static void *_PluginID = NULL;
+ static char *_PluginDN = NULL;
+ 
+ static int g_plugin_started = 0;
+ 
++static struct ipa_context *global_ipactx = NULL;
++
+ #define GENERALIZED_TIME_LENGTH 15
+ 
+ /**
+@@ -124,6 +135,97 @@ char *getPluginDN(void)
+     return _PluginDN;
+ }
+ 
++static int
++ipalockout_get_global_config(struct ipa_context *ipactx)
++{
++    Slapi_Value *value = NULL;
++    Slapi_Attr *attr = NULL;
++    char *dn = NULL;
++    char *basedn = NULL;
++    Slapi_DN *sdn;
++    Slapi_Entry *config_entry;
++    int ret;
++
++    /* Get cn=config so we can get the default naming context */
++    sdn = slapi_sdn_new_dn_byref("cn=config");
++
++    ret = slapi_search_internal_get_entry(sdn, NULL, &config_entry,
++              getPluginID());
++
++    slapi_sdn_free(&sdn);
++
++    if (ret) {
++        goto done;
++    }
++
++    basedn = slapi_entry_attr_get_charptr(config_entry,
++        "nsslapd-defaultnamingcontext");
++
++    slapi_entry_free(config_entry);
++
++    if (!basedn) {
++        goto done;
++    }
++
++    ret = asprintf(&dn, "cn=ipaConfig,cn=etc,%s", basedn);
++    if (ret == -1) {
++        LOG_OOM();
++        ret = LDAP_OPERATIONS_ERROR;
++        goto done;
++    }
++
++    sdn = slapi_sdn_new_dn_byref(dn);
++
++    ret = slapi_search_internal_get_entry(sdn, NULL, &config_entry,
++              getPluginID());
++
++    slapi_sdn_free(&sdn);
++
++    if (ret) {
++        goto done;
++    }
++
++    ret = slapi_entry_attr_find(config_entry, "ipaConfigString", &attr);
++    if (ret == -1) {
++        /* no config, nothing to do */
++        ret = 0;
++        goto done;
++    }
++
++    ret = slapi_attr_first_value(attr, &value);
++    while (ret != -1) {
++        const struct berval *val;
++
++        val = slapi_value_get_berval(value);
++        if (!val) {
++            ret = LDAP_OPERATIONS_ERROR;
++            slapi_value_free(&value);
++            goto done;
++        }
++
++        if (strncasecmp("KDC:Disable Last Success",
++                        val->bv_val, val->bv_len) == 0) {
++            ipactx->disable_last_success = true;
++        }
++        else if (strncasecmp("KDC:Disable Lockout",
++                        val->bv_val, val->bv_len) == 0) {
++            ipactx->disable_lockout = true;
++        }
++
++        ret = slapi_attr_next_value(attr, ret, &value);
++    }
++    slapi_value_free(&value);
++
++    ret = 0;
++
++done:
++    if (config_entry)
++        slapi_entry_free(config_entry);
++    free(dn);
++    free(basedn);
++    return ret;
++}
++
+ int
+ ipalockout_init(Slapi_PBlock *pb)
+ {
+@@ -214,6 +316,12 @@ ipalockout_start(Slapi_PBlock * pb)
+     }
+ 
+     g_plugin_started = 1;
++
++    global_ipactx = (struct ipa_context *)malloc(sizeof(global_ipactx));
++    global_ipactx->disable_last_success = false;
++    global_ipactx->disable_lockout = false;
++    ipalockout_get_global_config(global_ipactx);
++
+     LOG("ready for service\n");
+     LOG_TRACE("<--out--\n");
+ 
+@@ -267,6 +375,10 @@ static int ipalockout_postop(Slapi_PBlock *pb)
+         goto done;
+     }
+ 
++    if (global_ipactx->disable_lockout) {
++        goto done;
++    }
++
+     slapi_pblock_get(pb, SLAPI_RESULT_CODE, &rc);
+ 
+     /* free the dn here */
+@@ -401,7 +513,9 @@ static int ipalockout_postop(Slapi_PBlock *pb)
+             strftime(timestr, GENERALIZED_TIME_LENGTH+1,
+                  "%Y%m%d%H%M%SZ", &utctime);
+             slapi_mods_add_string(smods, LDAP_MOD_REPLACE, "krbLoginFailedCount", failedcountstr);
+-            slapi_mods_add_string(smods, LDAP_MOD_REPLACE, "krbLastSuccessfulAuth", timestr);
++            if (!global_ipactx->disable_last_success) {
++                slapi_mods_add_string(smods, LDAP_MOD_REPLACE, "krbLastSuccessfulAuth", timestr);
++            }
+         }
+ 
+         pbtm = slapi_pblock_new();
+@@ -499,6 +613,10 @@ static int ipalockout_preop(Slapi_PBlock *pb)
+         goto done;
+     }
+ 
++    if (global_ipactx->disable_lockout) {
++        goto done;
++    }
++
+     if (slapi_pblock_get(pb, SLAPI_BIND_TARGET, &dn) != 0) {
+         LOG_FATAL("Error retrieving target DN\n");
+         ret = LDAP_OPERATIONS_ERROR;
+-- 
+1.7.11.7
+

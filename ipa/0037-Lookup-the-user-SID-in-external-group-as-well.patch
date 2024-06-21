@@ -1,0 +1,67 @@
+From 22c752c230049985cdf9490a96c901d80c3d41c0 Mon Sep 17 00:00:00 2001
+From: Sumit Bose <sbose@redhat.com>
+Date: Wed, 14 Nov 2012 14:22:15 +0100
+Subject: [PATCH] Lookup the user SID in external group as well
+
+Currently only the group SIDs from a PAC are used to find out about the
+membership in local groups. This patch adds the user SID to the list.
+
+Fixes https://fedorahosted.org/freeipa/ticket/3257
+---
+ daemons/ipa-kdb/ipa_kdb_mspac.c | 19 ++++++++++++++-----
+ 1 file changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/daemons/ipa-kdb/ipa_kdb_mspac.c b/daemons/ipa-kdb/ipa_kdb_mspac.c
+index efb4cb9b69b77263b84db4d446adf2dd1c081acf..ed2c7fb8c8c4975ce942335f4688d32f7c84f937 100644
+--- a/daemons/ipa-kdb/ipa_kdb_mspac.c
++++ b/daemons/ipa-kdb/ipa_kdb_mspac.c
+@@ -678,9 +678,9 @@ static char *gen_sid_string(TALLOC_CTX *memctx, struct dom_sid *dom_sid,
+     return str;
+ }
+ 
+-static int get_group_sids(TALLOC_CTX *memctx,
+-                          struct PAC_LOGON_INFO_CTR *logon_info,
+-                          char ***_group_sids)
++static int get_user_and_group_sids(TALLOC_CTX *memctx,
++                                   struct PAC_LOGON_INFO_CTR *logon_info,
++                                   char ***_group_sids)
+ {
+     int ret;
+     size_t c;
+@@ -696,7 +696,7 @@ static int get_group_sids(TALLOC_CTX *memctx,
+     }
+ 
+     group_sids = talloc_array(memctx, char *,
+-                                     2 +
++                                     3 +
+                                      logon_info->info->info3.base.groups.count +
+                                      logon_info->info->info3.sidcount);
+     if (group_sids == NULL) {
+@@ -706,6 +706,15 @@ static int get_group_sids(TALLOC_CTX *memctx,
+     }
+ 
+     group_sids[p] = gen_sid_string(memctx, domain_sid,
++                                  logon_info->info->info3.base.rid);
++    if (group_sids[p] == NULL) {
++        krb5_klog_syslog(LOG_ERR, "gen_sid_string failed");
++        ret = EINVAL;
++        goto done;
++    }
++    p++;
++
++    group_sids[p] = gen_sid_string(memctx, domain_sid,
+                                   logon_info->info->info3.base.primary_gid);
+     if (group_sids[p] == NULL) {
+         krb5_klog_syslog(LOG_ERR, "gen_sid_string failed");
+@@ -949,7 +958,7 @@ static krb5_error_code add_local_groups(krb5_context context,
+     size_t ipa_group_sids_count = 0;
+     struct dom_sid *ipa_group_sids = NULL;
+ 
+-    ret = get_group_sids(memctx, info, &group_sids);
++    ret = get_user_and_group_sids(memctx, info, &group_sids);
+     if (ret != 0) {
+         return KRB5_KDB_INTERNAL_ERROR;
+     }
+-- 
+1.7.11.7
+

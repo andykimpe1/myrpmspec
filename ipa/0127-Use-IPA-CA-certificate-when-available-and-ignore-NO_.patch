@@ -1,0 +1,65 @@
+From 752d02315b75ba90ecca324d290ba163023c4d40 Mon Sep 17 00:00:00 2001
+From: David Kupka <dkupka@redhat.com>
+Date: Thu, 26 Feb 2015 04:44:26 -0500
+Subject: [PATCH] Use IPA CA certificate when available and ignore NO_TLS_LDAP
+ when not.
+
+ipa-client-automount is run after ipa-client-install so the CA certificate
+should be available. If the certificate is not available and ipadiscovery.ipacheckldap
+returns NO_TLS_LDAP warn user and try to continue.
+
+https://fedorahosted.org/freeipa/ticket/4902
+---
+ ipa-client/ipa-install/ipa-client-automount | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/ipa-client/ipa-install/ipa-client-automount b/ipa-client/ipa-install/ipa-client-automount
+index 0031581652f7c18cfe25c2a7bc423185a9956168..4c339dfe1425ad26a69bd4eecec972b64c30a2dc 100755
+--- a/ipa-client/ipa-install/ipa-client-automount
++++ b/ipa-client/ipa-install/ipa-client-automount
+@@ -44,6 +44,7 @@ NSSWITCH_CONF = '/etc/nsswitch.conf'
+ AUTOFS_LDAP_AUTH = '/etc/autofs_ldap_auth.conf'
+ NFS_CONF = '/etc/sysconfig/nfs'
+ IDMAPD_CONF = '/etc/idmapd.conf'
++CACERT = '/etc/ipa/ca.crt'
+ 
+ def parse_options():
+     usage = "%prog [options]\n"
+@@ -372,6 +373,10 @@ def main():
+     api.bootstrap(**cfg)
+     api.finalize()
+ 
++    ca_cert_path = None
++    if os.path.exists(CACERT):
++        ca_cert_path = CACERT
++
+     if options.uninstall:
+         return uninstall(fstore, statestore)
+ 
+@@ -383,7 +388,7 @@ def main():
+     ds = ipadiscovery.IPADiscovery()
+     if not options.server:
+         print "Searching for IPA server..."
+-        ret = ds.search()
++        ret = ds.search(ca_cert_path=ca_cert_path)
+         root_logger.debug('Executing DNS discovery')
+         if ret == ipadiscovery.NO_LDAP_SERVER:
+             root_logger.debug('Autodiscovery did not find LDAP server')
+@@ -399,11 +404,13 @@ def main():
+     else:
+         server = options.server
+         root_logger.debug("Verifying that %s is an IPA server" % server)
+-        ldapret = ds.ipacheckldap(server, api.env.realm)
++        ldapret = ds.ipacheckldap(server, api.env.realm, ca_cert_path)
+         if ldapret[0] == ipadiscovery.NO_ACCESS_TO_LDAP:
+             print "Anonymous access to the LDAP server is disabled."
+             print "Proceeding without strict verification."
+             print "Note: This is not an error if anonymous access has been explicitly restricted."
++        elif ldapret[0] == ipadiscovery.NO_TLS_LDAP:
++            root_logger.warning("Unencrypted access to LDAP is not supported.")
+         elif ldapret[0] != 0:
+             sys.exit('Unable to confirm that %s is an IPA server' % server)
+ 
+-- 
+2.1.0
+

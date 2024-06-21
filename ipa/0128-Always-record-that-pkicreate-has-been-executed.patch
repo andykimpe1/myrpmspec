@@ -1,0 +1,63 @@
+From 1904bbf8837350c28f6874d405b67465aae2eb6e Mon Sep 17 00:00:00 2001
+From: David Kupka <dkupka@redhat.com>
+Date: Mon, 21 Jul 2014 15:57:18 +0200
+Subject: [PATCH] Always record that pkicreate has been executed.
+
+Record that pkicreate/pkispawn has been executed to allow cleanup even if the
+installation did not finish correctly.
+
+https://fedorahosted.org/freeipa/ticket/2796
+
+Reviewed-By: Martin Kosek <mkosek@redhat.com>
+---
+ ipaserver/install/cainstance.py | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/ipaserver/install/cainstance.py b/ipaserver/install/cainstance.py
+index fa5d4e8cc4af77663ffd59832ed387be03c9e6ed..627e7c205d6c26baca429f7423750b0d973dcd41 100644
+--- a/ipaserver/install/cainstance.py
++++ b/ipaserver/install/cainstance.py
+@@ -720,6 +720,7 @@ class CAInstance(service.Service):
+                 'Contents of pkispawn configuration file (%s):\n%s' %
+                     (cfg_file, ipautil.nolog_replace(f.read(), nolog)))
+ 
++        self.backup_state('installed', True)
+         try:
+             ipautil.run(args, nolog=nolog)
+         except ipautil.CalledProcessError, e:
+@@ -767,6 +768,7 @@ class CAInstance(service.Service):
+                 '-redirect', 'logs=/var/log/pki-ca',
+                 '-enable_proxy'
+         ]
++        self.backup_state('installed', True)
+         ipautil.run(args, env={'PKI_HOSTNAME':self.fqdn})
+ 
+     def __enable(self):
+@@ -1322,6 +1324,8 @@ class CAInstance(service.Service):
+         if not enabled is None and not enabled:
+             self.disable()
+ 
++        # Just eat this state if it exists
++        installed = self.restore_state("installed")
+         try:
+             if self.dogtag_constants.DOGTAG_VERSION >= 10:
+                 ipautil.run(["/usr/sbin/pkidestroy", "-i",
+@@ -1345,9 +1349,12 @@ class CAInstance(service.Service):
+ 
+         # remove CRL files
+         root_logger.info("Remove old CRL files")
+-        for f in get_crl_files():
+-            root_logger.debug("Remove %s", f)
+-            installutils.remove_file(f)
++        try:
++            for f in get_crl_files():
++                root_logger.debug("Remove %s", f)
++                installutils.remove_file(f)
++        except OSError, e:
++            root_logger.warning("Error while removing old CRL files: %s" % e)
+ 
+         # remove CRL directory
+         root_logger.info("Remove CRL directory")
+-- 
+2.1.0
+

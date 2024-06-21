@@ -1,0 +1,53 @@
+From 084e893ea10d594a767dfc51dfa317482cd2867b Mon Sep 17 00:00:00 2001
+From: Sumit Bose <sbose@redhat.com>
+Date: Wed, 24 Apr 2013 14:44:54 +0200
+Subject: [PATCH] Do not lookup up the domain too early if only the SID is
+ known
+
+Request with a SID as input parameter do not contain the domain name,
+hence is must be tried to resolve the SID first before the corresponding
+domain can be looked up.
+
+https://fedorahosted.org/freeipa/ticket/3596
+---
+ .../ipa-extdom-extop/ipa_extdom_common.c                 | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/daemons/ipa-slapi-plugins/ipa-extdom-extop/ipa_extdom_common.c b/daemons/ipa-slapi-plugins/ipa-extdom-extop/ipa_extdom_common.c
+index 8b3475ce0de699efdcec38a60159b62b6bdcddea..87e1302a3699d1a20724b565ff17e57b10184803 100644
+--- a/daemons/ipa-slapi-plugins/ipa-extdom-extop/ipa_extdom_common.c
++++ b/daemons/ipa-slapi-plugins/ipa-extdom-extop/ipa_extdom_common.c
+@@ -331,10 +331,13 @@ int handle_request(struct ipa_extdom_ctx *ctx, struct extdom_req *req,
+     enum idmap_error_code err;
+     char *sid_str;
+ 
+-    ret = get_domain_info(ctx, req->data.name.domain_name, &domain_info);
+-    if (ret != 0) {
+-        return LDAP_OPERATIONS_ERROR;
++    if (req->input_type != INP_SID) {
++        ret = get_domain_info(ctx, req->data.name.domain_name, &domain_info);
++        if (ret != 0) {
++            return LDAP_OPERATIONS_ERROR;
++        }
+     }
++
+     if (req->input_type == INP_POSIX_UID || req->input_type == INP_POSIX_GID) {
+         if (req->input_type == INP_POSIX_UID) {
+             id = req->data.posix_uid.uid;
+@@ -373,6 +376,13 @@ int handle_request(struct ipa_extdom_ctx *ctx, struct extdom_req *req,
+                 goto done;
+             }
+ 
++            if (req->input_type == INP_SID) {
++                ret = get_domain_info(ctx, domain_name, &domain_info);
++                if (ret != 0) {
++                    return LDAP_OPERATIONS_ERROR;
++                }
++            }
++
+             ret = create_response(req, domain_info, domain_name, name, &sid,
+                                   name_type, res);
+             if (ret != 0) {
+-- 
+2.4.3
+

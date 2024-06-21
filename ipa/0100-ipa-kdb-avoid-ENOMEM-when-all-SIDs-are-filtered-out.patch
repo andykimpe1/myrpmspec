@@ -1,0 +1,48 @@
+From 5e36c057ceb42c2f49ace16e6794315b41b5a583 Mon Sep 17 00:00:00 2001
+From: Martin Kosek <mkosek@redhat.com>
+Date: Thu, 7 Feb 2013 13:17:28 +0100
+Subject: [PATCH 100/101] ipa-kdb: avoid ENOMEM when all SIDs are filtered out
+
+When all SIDs in info3.sids structure were filtered out, we tried
+to talloc_realloc to zero memory size. talloc_realloc then returned
+NULL pointer and filter_login_info returned with ENOMEM.
+
+The code now rather frees the SID array and set info3.sidcount to
+correct value.
+---
+ daemons/ipa-kdb/ipa_kdb_mspac.c | 18 ++++++++++++++----
+ 1 file changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/daemons/ipa-kdb/ipa_kdb_mspac.c b/daemons/ipa-kdb/ipa_kdb_mspac.c
+index 9ca75bcb2c50f120f754bc9981c2079402afe67c..f00de7bf1148f8f3f58ae4956ac07e4b4195a481 100644
+--- a/daemons/ipa-kdb/ipa_kdb_mspac.c
++++ b/daemons/ipa-kdb/ipa_kdb_mspac.c
+@@ -1288,11 +1288,21 @@ static krb5_error_code filter_logon_info(krb5_context context,
+         } while (i < count);
+ 
+         if (j != 0) {
+-            info->info->info3.sids = talloc_realloc(memctx, info->info->info3.sids, struct netr_SidAttr, count-j);
+-            info->info->info3.sidcount = count-j;
+-            if (!info->info->info3.sids) {
++            count = count-j;
++            if (count == 0) {
++                /* All SIDs were filtered out */
+                 info->info->info3.sidcount = 0;
+-                return ENOMEM;
++                talloc_free(info->info->info3.sids);
++                info->info->info3.sids = NULL;
++            } else {
++                info->info->info3.sids = talloc_realloc(memctx,
++                                                        info->info->info3.sids,
++                                                        struct netr_SidAttr, count);
++                if (!info->info->info3.sids) {
++                    info->info->info3.sidcount = 0;
++                    return ENOMEM;
++                }
++                info->info->info3.sidcount = count;
+             }
+         }
+     }
+-- 
+1.8.3.1
+

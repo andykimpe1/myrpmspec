@@ -1,0 +1,497 @@
+From faefac218544cfcc2195a6c70b7370da1e190703 Mon Sep 17 00:00:00 2001
+From: Rob Crittenden <rcritten@redhat.com>
+Date: Tue, 1 Nov 2016 17:35:09 -0400
+Subject: [PATCH] Use new certmonger locking to prevent NSS database corruption.
+
+dogtag opens its NSS database in read/write mode so we need to be very
+careful during renewal that we don't also open it up read/write. We
+basically need to serialize access to the database. certmonger does the
+majority of this work via internal locking from the point where it generates
+a new key/submits a rewewal through the pre_save and releases the lock after
+the post_save command. This lock is held per NSS database so we're save
+from certmonger. dogtag needs to be shutdown in the pre_save state so
+certmonger can safely add the certificate and we can manipulate trust
+in the post_save command.
+
+Fix a number of bugs in renewal. The CA wasn't actually being restarted
+at all due to a naming change upstream. In python we need to reference
+services using python-ish names but the service is pki-cad. We need a
+translation for non-Fedora systems as well.
+
+https://fedorahosted.org/freeipa/ticket/3292
+
+updated changes
+---
+ install/restart_scripts/Makefile.am    |    1 +
+ install/restart_scripts/renew_ca_cert  |   31 +++++-------
+ install/restart_scripts/restart_pkicad |   18 +++++--
+ install/restart_scripts/stop_pkicad    |   40 ++++++++++++++++
+ install/tools/ipa-upgradeconfig        |   54 ++++++++++++++++++++++-
+ ipapython/certmonger.py                |   38 +++++++++++-----
+ ipapython/platform/base.py             |    2 +-
+ ipapython/platform/redhat.py           |    9 ++++
+ ipaserver/install/cainstance.py        |   77 ++++++++++++++++++++++++++-----
+ 9 files changed, 221 insertions(+), 49 deletions(-)
+ create mode 100644 install/restart_scripts/stop_pkicad
+
+diff --git a/install/restart_scripts/Makefile.am b/install/restart_scripts/Makefile.am
+index 210c4863e3d7d057627370093638e5bf9c47c802..fc45ecc888a9e3a728ef49564c45b7e89ebed465 100644
+--- a/install/restart_scripts/Makefile.am
++++ b/install/restart_scripts/Makefile.am
+@@ -7,6 +7,7 @@ app_DATA =                              \
+ 	restart_pkicad			\
+ 	renew_ca_cert			\
+ 	renew_ra_cert			\
++	stop_pkicad			\
+ 	$(NULL)
+ 
+ EXTRA_DIST =                            \
+diff --git a/install/restart_scripts/renew_ca_cert b/install/restart_scripts/renew_ca_cert
+index 5317835fc6ad7b598290fa5387be0afa46a6ca5b..ea9e28849c0a61792c1915a9243d56bd422b998c 100644
+--- a/install/restart_scripts/renew_ca_cert
++++ b/install/restart_scripts/renew_ca_cert
+@@ -36,6 +36,7 @@ from ipapython import dogtag
+ from ipaserver.install import certs
+ from ipaserver.plugins.ldap2 import ldap2
+ from ipaserver.install.cainstance import update_cert_config
++from ipapython import certmonger
+ 
+ # This script a post-cert-install command for certmonger. When certmonger
+ # has renewed a CA subsystem certificate a copy is put into the replicated
+@@ -82,8 +83,10 @@ except Exception, e:
+ finally:
+     shutil.rmtree(tmpdir)
+ 
+-# Fix permissions on the audit cert if we're updating it
+-if nickname == 'auditSigningCert cert-pki-ca':
++update_cert_config(nickname, cert)
++
++if nickname != 'auditSigningCert cert-pki-ca':
++    # Fix trust on the audit cert
+     db = certs.CertDB(api.env.realm, nssdir=alias_dir)
+     args = ['-M',
+             '-n', nickname,
+@@ -91,25 +94,17 @@ if nickname == 'auditSigningCert cert-pki-ca':
+            ]
+     try:
+         db.run_certutil(args)
++        syslog.syslog(syslog.LOG_NOTICE, 'Updated trust on certificate %s in %s' % (nickname, db.secdir))
+     except ipautil.CalledProcessError:
+         syslog.syslog(syslog.LOG_ERR, 'Updating trust on certificate %s failed in %s' % (nickname, db.secdir))
+ 
+-update_cert_config(nickname, cert)
+-
+-syslog.syslog(
+-    syslog.LOG_NOTICE, 'certmonger restarted %sd instance %s to renew %s' %
+-        (dogtag_instance, dogtag_instance, nickname))
+-
+-# We monitor 3 certs that are all likely to be renewed by certmonger more or
+-# less at the same time. Each cert renewal is going to need to restart
+-# the CA. Add a bit of randomness in this so not all three try to start it
+-# at the same time. A restart is needed for each because there is no guarantee
+-# that they will all be renewed at the same time.
+-pause = random.randint(10,360)
+-syslog.syslog(syslog.LOG_NOTICE, 'Pausing %d seconds to restart pki-ca' % pause)
+-time.sleep(pause)
++# Now we can start the CA. Using the ipaservices start should fire
++# off the servlet to verify that the CA is actually up and responding so
++# when this returns it should be good-to-go. The CA was stopped in the
++# pre-save state.
+ try:
+-    ipaservices.knownservices.pki_cad.restart(dogtag_instance)
++    syslog.syslog(syslog.LOG_NOTICE, 'Starting %sd' % dogtag_instance)
++    ipaservices.knownservices.pki_cad.start()
+ except Exception, e:
+-    syslog.syslog(syslog.LOG_ERR, "Cannot restart %sd: %s" %
++    syslog.syslog(syslog.LOG_ERR, "Cannot start %sd: %s" %
+                   (dogtag_instance, str(e)))
+diff --git a/install/restart_scripts/restart_pkicad b/install/restart_scripts/restart_pkicad
+index 0b6040a9d1f48d3dfcf41149cf3251c53bf2a612..9ef49e834029d0fbe899f21fc705c38377048bad 100644
+--- a/install/restart_scripts/restart_pkicad
++++ b/install/restart_scripts/restart_pkicad
+@@ -35,8 +35,16 @@ configured_constants = dogtag.configured_constants(api)
+ alias_dir = configured_constants.ALIAS_DIR
+ dogtag_instance = configured_constants.PKI_INSTANCE_NAME
+ 
+-syslog.syslog(syslog.LOG_NOTICE, "certmonger restarted %sd, nickname '%s'" %
+-              (dogtag_instance, nickname))
++# dogtag opens its NSS database in read/write mode so we need it
++# shut down so certmonger can open it read/write mode. This avoids
++# database corruption. It should already be stopped by the pre-command
++# but lets be sure.
++if ipaservices.knownservices.pki_cad.is_running(dogtag_instance):
++    try:
++        ipaservices.knownservices.pki_cad.stop(dogtag_instance)
++    except Exception, e:
++        syslog.syslog(syslog.LOG_ERR, "Cannot stop %sd: %s" %
++                      (dogtag_instance, str(e)))
+ 
+ # Fix permissions on the audit cert if we're updating it
+ if nickname == 'auditSigningCert cert-pki-ca':
+@@ -48,10 +56,10 @@ if nickname == 'auditSigningCert cert-pki-ca':
+     db.run_certutil(args)
+ 
+ try:
+-    # I've seen times where systemd restart does not actually restart
+-    # the process. A full stop/start is required. This works around that
+-    ipaservices.knownservices.pki_cad.stop(dogtag_instance)
+     ipaservices.knownservices.pki_cad.start(dogtag_instance)
+ except Exception, e:
+     syslog.syslog(syslog.LOG_ERR, "Cannot restart %sd: %s" %
+                   (dogtag_instance, str(e)))
++else:
++    syslog.syslog(syslog.LOG_NOTICE, "certmonger started %sd, nickname '%s'" %
++                  (dogtag_instance, nickname))
+diff --git a/install/restart_scripts/stop_pkicad b/install/restart_scripts/stop_pkicad
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b570787227119ad2ce71f7ce4b5cbecf04e84ac
+--- /dev/null
++++ b/install/restart_scripts/stop_pkicad
+@@ -0,0 +1,40 @@
++#!/usr/bin/python -E
++#
++# Authors:
++#   Rob Crittenden <rcritten@redhat.com>
++#
++# Copyright (C) 2012  Red Hat
++# see file 'COPYING' for use and warranty information
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation, either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++import sys
++import syslog
++from ipapython import services as ipaservices
++from ipapython import dogtag
++from ipalib import api
++
++api.bootstrap(context='restart')
++api.finalize()
++
++configured_constants = dogtag.configured_constants(api)
++dogtag_instance = configured_constants.PKI_INSTANCE_NAME
++
++syslog.syslog(syslog.LOG_NOTICE, "certmonger stopping %sd" % dogtag_instance)
++
++try:
++    ipaservices.knownservices.pki_cad.stop(dogtag_instance)
++except Exception, e:
++    syslog.syslog(syslog.LOG_ERR, "Cannot stop %sd: %s" %
++                  (dogtag_instance, str(e)))
+diff --git a/install/tools/ipa-upgradeconfig b/install/tools/ipa-upgradeconfig
+index 900985d80113330120ab79490272a11cc862917c..448028a32b52f01a1047f8d9003d3904c9f43ae7 100644
+--- a/install/tools/ipa-upgradeconfig
++++ b/install/tools/ipa-upgradeconfig
+@@ -480,6 +480,53 @@ def enable_certificate_renewal(ca):
+ 
+     return False
+ 
++def certificate_renewal_stop_ca(ca):
++    """
++    Validate the certmonger configuration on certificates that already
++    have renewal configured.
++
++    As of certmonger 0.65 it now does locking from the point where it
++    generates the CSR to the end of the post-command. This is to ensure
++    that only one certmonger renewal, and hopefully, one process at a
++    time holds the NSS database open in read/write.
++    """
++    root_logger.info('[Certificate renewal should stop the CA]')
++    if not ca.is_configured():
++        root_logger.info('CA is not configured')
++        return False
++
++    nss_dir = dogtag.configured_constants().ALIAS_DIR
++    # Using the nickname find the certmonger request_id
++    criteria = (('cert_storage_location', nss_dir, certmonger.NPATH),('cert_nickname', 'auditSigningCert cert-pki-ca', None))
++    id = certmonger.get_request_id(criteria)
++    if id is None:
++        root_logger.error('Unable to find certmonger request ID for auditSigning Cert')
++        return False
++
++    if sysupgrade.get_upgrade_state('dogtag', 'stop_ca_during_renewal'):
++        return False
++
++    # State not set, lets see if we are already configured
++    pre_command = certmonger.get_request_value(id, 'pre_certsave_command')
++    if pre_command is not None:
++        if pre_command.strip().endswith('stop_pkicad'):
++            root_logger.info('Already configured to stop CA')
++            return False
++
++    # Ok, now we need to stop tracking, then we can start tracking them
++    # again with new configuration:
++    cainstance.stop_tracking_certificates(dogtag.configured_constants())
++    if ca.is_master():
++        ca.configure_renewal()
++    else:
++        ca.configure_certmonger_renewal()
++        ca.configure_clone_renewal()
++        ca.configure_agent_renewal()
++    ca.track_servercert()
++    sysupgrade.set_upgrade_state('dogtag', 'stop_ca_during_renewal', True)
++    root_logger.debug('CA subsystem certificate renewal configured to stop the CA')
++    return True
++
+ def copy_crl_file(old_path, new_path=None):
+     """
+     Copy CRL to new location, update permissions and SELinux context
+@@ -666,7 +713,12 @@ def main():
+             bind.restart()
+         except ipautil.CalledProcessError, e:
+             root_logger.error("Failed to restart %s: %s", bind.service_name, e)
+-    ca_restart = ca_restart or enable_certificate_renewal(ca) or upgrade_ipa_profile(ca)
++    ca_restart = any([
++        ca_restart,
++        enable_certificate_renewal(ca),
++        upgrade_ipa_profile(ca),
++        certificate_renewal_stop_ca(ca),
++    ])
+ 
+     if ca_restart:
+         root_logger.info('pki-ca configuration changed, restart pki-ca')
+diff --git a/ipapython/certmonger.py b/ipapython/certmonger.py
+index 22678dadb52780cfadded6cef0e21f81440c9e37..18797c5f8fb098e65dff30cedb81ed013f286222 100644
+--- a/ipapython/certmonger.py
++++ b/ipapython/certmonger.py
+@@ -261,7 +261,7 @@ def stop_tracking(secdir, request_id=None, nickname=None):
+             # Fall back to trying to stop tracking using nickname
+             pass
+ 
+-    args = ['/usr/bin/ipa-getcert',
++    args = ['/usr/bin/getcert',
+             'stop-tracking',
+     ]
+     if request_id:
+@@ -366,7 +366,8 @@ def get_pin(token):
+                 return pin.strip()
+     return None
+ 
+-def dogtag_start_tracking(ca, nickname, pin, pinfile, secdir, command):
++def dogtag_start_tracking(ca, nickname, pin, pinfile, secdir, pre_command,
++                          post_command):
+     """
+     Tell certmonger to start tracking a dogtag CA certificate. These
+     are handled differently because their renewal must be done directly
+@@ -375,7 +376,10 @@ def dogtag_start_tracking(ca, nickname, pin, pinfile, secdir, command):
+     This uses the generic certmonger command getcert so we can specify
+     a different helper.
+ 
+-    command is the script to execute.
++    pre_command is the script to execute before a renewal is done.
++    post_command is the script to execute after a renewal is done.
++
++    Both commands can be None.
+ 
+     Returns the stdout, stderr and returncode from running ipa-getcert
+ 
+@@ -384,20 +388,32 @@ def dogtag_start_tracking(ca, nickname, pin, pinfile, secdir, command):
+     if not cert_exists(nickname, os.path.abspath(secdir)):
+         raise RuntimeError('Nickname "%s" doesn\'t exist in NSS database "%s"' % (nickname, secdir))
+ 
+-    if command is not None and not os.path.isabs(command):
+-        if sys.maxsize > 2**32:
+-            libpath = 'lib64'
+-        else:
+-            libpath = 'lib'
+-        command = '/usr/%s/ipa/certmonger/%s' % (libpath, command)
+-
+     args = ["/usr/bin/getcert", "start-tracking",
+             "-d", os.path.abspath(secdir),
+             "-n", nickname,
+             "-c", ca,
+-            "-C", command,
+            ]
+ 
++    if pre_command is not None:
++        if not os.path.isabs(pre_command):
++            if sys.maxsize > 2**32:
++                libpath = 'lib64'
++            else:
++                libpath = 'lib'
++            pre_command = '/usr/%s/ipa/certmonger/%s' % (libpath, pre_command)
++        args.append("-B")
++        args.append(pre_command)
++
++    if post_command is not None:
++        if not os.path.isabs(post_command):
++            if sys.maxsize > 2**32:
++                libpath = 'lib64'
++            else:
++                libpath = 'lib'
++            post_command = '/usr/%s/ipa/certmonger/%s' % (libpath, post_command)
++        args.append("-C")
++        args.append(post_command)
++
+     if pinfile:
+         args.append("-p")
+         args.append(pinfile)
+diff --git a/ipapython/platform/base.py b/ipapython/platform/base.py
+index 2d39d216991c08c4d439a34af99b67b250058889..1a053c3778ce039144b2109df0a9446d2ddf956f 100644
+--- a/ipapython/platform/base.py
++++ b/ipapython/platform/base.py
+@@ -25,7 +25,7 @@ from ipalib.plugable import MagicDict
+ wellknownservices = ['certmonger', 'dirsrv', 'httpd', 'ipa', 'krb5kdc',
+                      'messagebus', 'nslcd', 'nscd', 'ntpd', 'portmap',
+                      'rpcbind', 'kadmin', 'sshd', 'autofs', 'rpcgssd',
+-                     'rpcidmapd', 'pki_tomcatd', 'pki-cad']
++                     'rpcidmapd', 'pki_cad', 'pki-cad']
+ 
+ 
+ # The common ports for these services. This is used to wait for the
+diff --git a/ipapython/platform/redhat.py b/ipapython/platform/redhat.py
+index 3551c28410ceeabfc1064ac79e86dc7ee40dd8c3..5a8a6d52e5c33f41b533a8e89ba1abc469e0e8dd 100644
+--- a/ipapython/platform/redhat.py
++++ b/ipapython/platform/redhat.py
+@@ -50,7 +50,16 @@ from ipalib import api
+ #                         and restorecon is installed.
+ __all__ = ['authconfig', 'service', 'knownservices', 'backup_and_replace_hostname', 'restore_context', 'check_selinux_status']
+ 
++service_table = dict()
++service_table['pki_cad'] = 'pki-cad'
++
+ class RedHatService(base.PlatformService):
++    def __init__(self, service_name):
++        if service_name in service_table:
++            self.service_name = service_table[service_name]
++        else:
++            self.service_name = service_name
++ 
+     def __wait_for_open_ports(self, instance_name=""):
+         """
+         If this is a service we need to wait for do so.
+diff --git a/ipaserver/install/cainstance.py b/ipaserver/install/cainstance.py
+index d3e4d7aa8e5427a904ec5a0ab3913c1a02c68176..8085983b1f2d1d9732d820aa47fa53a91707c713 100644
+--- a/ipaserver/install/cainstance.py
++++ b/ipaserver/install/cainstance.py
+@@ -444,6 +444,33 @@ class CADSInstance(service.Service):
+             root_logger.error("certmonger failed to stop tracking certificate: %s" % str(e))
+         cmonger.stop()
+ 
++
++def stop_tracking_certificates(dogtag_constants):
++    """Stop tracking our certificates. Called on uninstall.
++    """
++    cmonger = ipaservices.knownservices.certmonger
++    ipaservices.knownservices.messagebus.start()
++    cmonger.start()
++
++    for nickname in ['Server-Cert cert-pki-ca',
++                        'auditSigningCert cert-pki-ca',
++                        'ocspSigningCert cert-pki-ca',
++                        'subsystemCert cert-pki-ca']:
++        try:
++            certmonger.stop_tracking(
++                dogtag_constants.ALIAS_DIR, nickname=nickname)
++        except (ipautil.CalledProcessError, RuntimeError), e:
++            root_logger.error(
++                "certmonger failed to stop tracking certificate: %s" % str(e))
++
++    try:
++        certmonger.stop_tracking('/etc/httpd/alias', nickname='ipaCert')
++    except (ipautil.CalledProcessError, RuntimeError), e:
++        root_logger.error(
++            "certmonger failed to stop tracking certificate: %s" % str(e))
++    cmonger.stop()
++
++
+ class CAInstance(service.Service):
+     """
+     In the self-signed case the CA exists in the NSS_DB database.
+@@ -997,7 +1024,11 @@ class CAInstance(service.Service):
+ 
+         On upgrades this needs to be called from ipa-upgradeconfig.
+         """
+-        certmonger.dogtag_start_tracking('dogtag-ipa-retrieve-agent-submit', 'ipaCert', None, '/etc/httpd/alias/pwdfile.txt', '/etc/httpd/alias', 'restart_httpd')
++        try:
++            certmonger.dogtag_start_tracking('dogtag-ipa-retrieve-agent-submit', 'ipaCert', None, '/etc/httpd/alias/pwdfile.txt', '/etc/httpd/alias', None, 'restart_httpd')
++        except (ipautil.CalledProcessError, RuntimeError), e:
++            root_logger.error(
++                "certmonger failed to start tracking certificate: %s" % str(e))
+ 
+     def __configure_ra(self):
+         # Create an RA user in the CA LDAP server and add that user to
+@@ -1325,14 +1356,22 @@ class CAInstance(service.Service):
+             fd.write(template)
+ 
+     def track_servercert(self):
++        """
++        Specifically do not tell certmonger to restart the CA. This will be
++        done by the renewal script, renew_ca_cert once all the subsystem
++        certificates are renewed.
++        """
+         try:
+             pin = certmonger.get_pin('internal')
+         except IOError, e:
+             raise RuntimeError('Unable to determine PIN for CA instance: %s' % str(e))
+-        certmonger.dogtag_start_tracking(
+-            'dogtag-ipa-renew-agent', 'Server-Cert cert-pki-ca', pin, None,
+-            self.dogtag_constants.ALIAS_DIR,
+-            'restart_pkicad "Server-Cert cert-pki-ca"')
++        try:
++            certmonger.dogtag_start_tracking(
++                'dogtag-ipa-renew-agent', 'Server-Cert cert-pki-ca', pin, None,
++                self.dogtag_constants.ALIAS_DIR, None, None)
++        except (ipautil.CalledProcessError, RuntimeError), e:
++            root_logger.error(
++                "certmonger failed to start tracking certificate: %s" % str(e))
+ 
+     def configure_renewal(self):
+         cmonger = ipaservices.knownservices.certmonger
+@@ -1349,12 +1388,20 @@ class CAInstance(service.Service):
+         for nickname in ['auditSigningCert cert-pki-ca',
+                          'ocspSigningCert cert-pki-ca',
+                          'subsystemCert cert-pki-ca']:
+-            certmonger.dogtag_start_tracking(
+-                'dogtag-ipa-renew-agent', nickname, pin, None,
+-                self.dogtag_constants.ALIAS_DIR, 'renew_ca_cert "%s"' % nickname)
++            try:
++                certmonger.dogtag_start_tracking(
++                    'dogtag-ipa-renew-agent', nickname, pin, None,
++                    self.dogtag_constants.ALIAS_DIR, 'stop_pkicad', 'renew_ca_cert "%s"' % nickname)
++            except (ipautil.CalledProcessError, RuntimeError), e:
++                root_logger.error(
++                    "certmonger failed to start tracking certificate: %s" % str(e))
+ 
+         # Set up the agent cert for renewal
+-        certmonger.dogtag_start_tracking('dogtag-ipa-renew-agent', 'ipaCert', None, '/etc/httpd/alias/pwdfile.txt', '/etc/httpd/alias', 'renew_ra_cert')
++        try:
++            certmonger.dogtag_start_tracking('dogtag-ipa-renew-agent', 'ipaCert', None, '/etc/httpd/alias/pwdfile.txt', '/etc/httpd/alias', None, 'renew_ra_cert')
++        except (ipautil.CalledProcessError, RuntimeError), e:
++            root_logger.error(
++                "certmonger failed to start tracking certificate: %s" % str(e))
+ 
+     def configure_certmonger_renewal(self):
+         """
+@@ -1395,10 +1442,14 @@ class CAInstance(service.Service):
+         for nickname in ['auditSigningCert cert-pki-ca',
+                          'ocspSigningCert cert-pki-ca',
+                          'subsystemCert cert-pki-ca']:
+-            certmonger.dogtag_start_tracking(
+-                'dogtag-ipa-retrieve-agent-submit', nickname, pin, None,
+-                self.dogtag_constants.ALIAS_DIR,
+-                'restart_pkicad "%s"' % nickname)
++            try:
++                certmonger.dogtag_start_tracking(
++                    'dogtag-ipa-retrieve-agent-submit', nickname, pin, None,
++                    self.dogtag_constants.ALIAS_DIR, 'stop_pkicad',
++                    'restart_pkicad "%s"' % nickname)
++            except (ipautil.CalledProcessError, RuntimeError), e:
++                root_logger.error(
++                    "certmonger failed to start tracking certificate: %s" % str(e))
+ 
+         # The agent renewal is configured in import_ra_cert which is called
+         # after the HTTP instance is created.
+-- 
+1.7.1
+

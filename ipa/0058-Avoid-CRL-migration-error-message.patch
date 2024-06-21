@@ -1,0 +1,54 @@
+From 1fc0d1256bba3358017f4cd8b214a2497489e500 Mon Sep 17 00:00:00 2001
+From: Martin Kosek <mkosek@redhat.com>
+Date: Thu, 10 Jan 2013 14:31:02 +0100
+Subject: [PATCH] Avoid CRL migration error message
+
+When CRL files are being migrated to a new directory, the upgrade
+log may contain an error message raised during MasterCRL.bin symlink
+migration. This is actually being caused by `chown' operation which
+tried to chown a symlinked file that was not migrated yet.
+
+Sort migrated files before the migration process and put symlinks
+at the end of the list. Also do not run chown on the symlinks as
+it is a redundant operation since the symlinked file will be
+chown'ed on its own.
+
+https://fedorahosted.org/freeipa/ticket/3336
+---
+ install/tools/ipa-upgradeconfig | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/install/tools/ipa-upgradeconfig b/install/tools/ipa-upgradeconfig
+index 14d4e0829162ab78665f794c582e704b5901ea41..32a258b1652309f02dc8b756d758243bc35c8db8 100644
+--- a/install/tools/ipa-upgradeconfig
++++ b/install/tools/ipa-upgradeconfig
+@@ -500,8 +500,8 @@ def copy_crl_file(old_path, new_path=None):
+         os.symlink(realpath, new_path)
+     else:
+         shutil.copy2(old_path, new_path)
+-    pent = pwd.getpwnam(cainstance.PKI_USER)
+-    os.chown(new_path, pent.pw_uid, pent.pw_gid)
++        pent = pwd.getpwnam(cainstance.PKI_USER)
++        os.chown(new_path, pent.pw_uid, pent.pw_gid)
+ 
+     services.restore_context(new_path)
+ 
+@@ -542,10 +542,14 @@ def migrate_crl_publish_dir(ca):
+     # Copy all CRLs to new directory
+     root_logger.info('Copy all CRLs to new publish directory')
+     try:
+-        crl_files = cainstance.get_crl_files(old_publish_dir)
++        crl_files_unsorted = cainstance.get_crl_files(old_publish_dir)
+     except OSError, e:
+         root_logger.error('Cannot move CRL files to new directory: %s', e)
+     else:
++        # Move CRL files at the end of the list to make sure that the actual
++        # CRL files are copied first
++        crl_files = sorted(crl_files_unsorted,
++                           key=lambda f: os.path.islink(f))
+         for f in crl_files:
+             try:
+                 copy_crl_file(f)
+-- 
+1.7.11.7
+

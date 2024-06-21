@@ -1,0 +1,366 @@
+From deb4c4afb80208ffe8d8cef44165668bd61ecd26 Mon Sep 17 00:00:00 2001
+From: Tomas Babej <tbabej@redhat.com>
+Date: Thu, 11 Oct 2012 03:32:17 -0400
+Subject: [PATCH] Make service naming in ipa-server-install consistent
+
+Forces more consistency into ipa-server-install output. All
+descriptions of services that are not instances of
+SimpleServiceInstance are now in the following format:
+
+<Description> (<Service Name>)
+
+Furthermore, start_creation method has been modified to support
+custom start and end messages. See documentation for more info.
+
+https://fedorahosted.org/freeipa/ticket/3059
+---
+ ipaserver/install/adtrustinstance.py    |    4 +-
+ ipaserver/install/bindinstance.py       |    9 ++++-
+ ipaserver/install/cainstance.py         |   18 ++++++++--
+ ipaserver/install/dsinstance.py         |   11 +++++--
+ ipaserver/install/httpinstance.py       |    4 +-
+ ipaserver/install/krbinstance.py        |    6 ++--
+ ipaserver/install/ntpinstance.py        |    4 +-
+ ipaserver/install/plugins/baseupdate.py |    3 +-
+ ipaserver/install/service.py            |   51 ++++++++++++++++++++++++++----
+ ipaserver/install/upgradeinstance.py    |    3 +-
+ 10 files changed, 86 insertions(+), 27 deletions(-)
+
+diff --git a/ipaserver/install/adtrustinstance.py b/ipaserver/install/adtrustinstance.py
+index b3602ddce7fa1c184bdf1283e67b50463e49c5fd..c27fac99cf624ca6460ce84e76be52db38f11a5b 100644
+--- a/ipaserver/install/adtrustinstance.py
++++ b/ipaserver/install/adtrustinstance.py
+@@ -132,7 +132,7 @@ class ADTRUSTInstance(service.Service):
+         self.rid_base = None
+         self.secondary_rid_base = None
+ 
+-        service.Service.__init__(self, "smb", dm_password=None, ldapi=True)
++        service.Service.__init__(self, "smb", service_desc="CIFS", dm_password=None, ldapi=True)
+ 
+         if fstore:
+             self.fstore = fstore
+@@ -757,7 +757,7 @@ class ADTRUSTInstance(service.Service):
+             self.step("adding SIDs to existing users and groups",
+                       self.__add_sids)
+ 
+-        self.start_creation("Configuring CIFS:")
++        self.start_creation(show_service_name=False)
+ 
+     def uninstall(self):
+         if self.is_configured():
+diff --git a/ipaserver/install/bindinstance.py b/ipaserver/install/bindinstance.py
+index f43a9ff0f9114388ae072daa82c39aaff716f7b2..39063294d50d45ab1b6eda202fc0f25b116cf50a 100644
+--- a/ipaserver/install/bindinstance.py
++++ b/ipaserver/install/bindinstance.py
+@@ -409,7 +409,12 @@ class DnsBackup(object):
+ 
+ class BindInstance(service.Service):
+     def __init__(self, fstore=None, dm_password=None):
+-        service.Service.__init__(self, "named", dm_password=dm_password, ldapi=False, autobind=service.DISABLED)
++        service.Service.__init__(self, "named",
++            service_desc="DNS",
++            dm_password=dm_password,
++            ldapi=False,
++            autobind=service.DISABLED
++            )
+         self.dns_backup = DnsBackup(self)
+         self.named_user = None
+         self.domain = None
+@@ -505,7 +510,7 @@ class BindInstance(service.Service):
+         self.step("configuring named to start on boot", self.__enable)
+ 
+         self.step("changing resolv.conf to point to ourselves", self.__setup_resolv_conf)
+-        self.start_creation("Configuring named:")
++        self.start_creation()
+ 
+     def __start(self):
+         try:
+diff --git a/ipaserver/install/cainstance.py b/ipaserver/install/cainstance.py
+index f2ac840aef1a52ec78b6232c94029cf6a009c501..5a23e35d1cf618cb4f80feb1e016be4c2006bbaf 100644
+--- a/ipaserver/install/cainstance.py
++++ b/ipaserver/install/cainstance.py
+@@ -233,7 +233,12 @@ def get_crl_files(path=None):
+ 
+ class CADSInstance(service.Service):
+     def __init__(self, host_name=None, realm_name=None, domain_name=None, dm_password=None, dogtag_constants=None):
+-        service.Service.__init__(self, "pkids", dm_password=dm_password, ldapi=False, autobind=service.DISABLED)
++        service.Service.__init__(self, "pkids",
++            service_desc="directory server for the CA",
++            dm_password=dm_password,
++            ldapi=False,
++            autobind=service.DISABLED)
++
+         self.serverid = "PKI-IPA"
+         self.realm_name = realm_name
+         self.sub_dict = None
+@@ -277,7 +282,7 @@ class CADSInstance(service.Service):
+         self.step("creating directory server instance", self.__create_instance)
+         self.step("restarting directory server", self.restart_instance)
+ 
+-        self.start_creation("Configuring directory server for the CA", 30)
++        self.start_creation(runtime=30)
+ 
+     def __setup_sub_dict(self):
+         server_root = dsinstance.find_server_root()
+@@ -459,8 +464,12 @@ class CAInstance(service.Service):
+     def __init__(self, realm, ra_db, dogtag_constants=None):
+         if dogtag_constants is None:
+             dogtag_constants = dogtag.configured_constants()
++
+         service.Service.__init__(self,
+-                '%sd' % dogtag_constants.PKI_INSTANCE_NAME)
++                '%sd' % dogtag_constants.PKI_INSTANCE_NAME,
++                service_desc="certificate server"
++                )
++
+         self.dogtag_constants = dogtag_constants
+         self.realm = realm
+         self.dm_password = None
+@@ -468,6 +477,7 @@ class CAInstance(service.Service):
+         self.fqdn = None
+         self.pkcs12_info = None
+         self.clone = False
++
+         # for external CAs
+         self.external = 0
+         self.csr_file = None
+@@ -576,7 +586,7 @@ class CAInstance(service.Service):
+             self.step("configure Server-Cert certificate renewal", self.track_servercert)
+             self.step("Configure HTTP to proxy connections", self.__http_proxy)
+ 
+-        self.start_creation("Configuring certificate server", 210)
++        self.start_creation(runtime=210)
+ 
+     def __spawn_instance(self):
+         """
+diff --git a/ipaserver/install/dsinstance.py b/ipaserver/install/dsinstance.py
+index b60335785a4b32176ba62b835069651d6fdd433f..b48e7d7681b585a3f348cfe08b35ea8f723c0485 100644
+--- a/ipaserver/install/dsinstance.py
++++ b/ipaserver/install/dsinstance.py
+@@ -160,7 +160,12 @@ info: IPA V2.0
+ 
+ class DsInstance(service.Service):
+     def __init__(self, realm_name=None, domain_name=None, dm_password=None, fstore=None):
+-        service.Service.__init__(self, "dirsrv", dm_password=dm_password, ldapi=False, autobind=service.DISABLED)
++        service.Service.__init__(self, "dirsrv",
++            service_desc="directory server",
++            dm_password=dm_password,
++            ldapi=False,
++            autobind=service.DISABLED
++            )
+         self.realm_name = realm_name
+         self.sub_dict = None
+         self.domain = domain_name
+@@ -256,7 +261,7 @@ class DsInstance(service.Service):
+ 
+         self.__common_post_setup()
+ 
+-        self.start_creation("Configuring directory server", 60)
++        self.start_creation(runtime=60)
+ 
+     def create_replica(self, realm_name, master_fqdn, fqdn,
+                        domain_name, dm_password, pkcs12_info=None):
+@@ -290,7 +295,7 @@ class DsInstance(service.Service):
+ 
+         self.__common_post_setup()
+ 
+-        self.start_creation("Configuring directory server", 60)
++        self.start_creation(runtime=60)
+ 
+ 
+     def __setup_replica(self):
+diff --git a/ipaserver/install/httpinstance.py b/ipaserver/install/httpinstance.py
+index 29077367dc17b6df0618c4740fad445edc43e790..5c35b5cd2728a56e7c81315392b758f69c1375ae 100644
+--- a/ipaserver/install/httpinstance.py
++++ b/ipaserver/install/httpinstance.py
+@@ -52,7 +52,7 @@ class WebGuiInstance(service.SimpleServiceInstance):
+ 
+ class HTTPInstance(service.Service):
+     def __init__(self, fstore = None):
+-        service.Service.__init__(self, "httpd")
++        service.Service.__init__(self, "httpd", service_desc="the web interface")
+         if fstore:
+             self.fstore = fstore
+         else:
+@@ -99,7 +99,7 @@ class HTTPInstance(service.Service):
+         self.step("restarting httpd", self.__start)
+         self.step("configuring httpd to start on boot", self.__enable)
+ 
+-        self.start_creation("Configuring the web interface", 60)
++        self.start_creation(runtime=60)
+ 
+     def __start(self):
+         self.backup_state("running", self.is_running())
+diff --git a/ipaserver/install/krbinstance.py b/ipaserver/install/krbinstance.py
+index 9101e6fcce353eea4ed9457808896dc06da1d966..daacab5d79830beb2b4dd65fde830e2be0898416 100644
+--- a/ipaserver/install/krbinstance.py
++++ b/ipaserver/install/krbinstance.py
+@@ -77,7 +77,7 @@ class KpasswdInstance(service.SimpleServiceInstance):
+ 
+ class KrbInstance(service.Service):
+     def __init__(self, fstore=None):
+-        service.Service.__init__(self, "krb5kdc")
++        service.Service.__init__(self, "krb5kdc", service_desc="Kerberos KDC")
+         self.fqdn = None
+         self.realm = None
+         self.domain = None
+@@ -180,7 +180,7 @@ class KrbInstance(service.Service):
+ 
+         self.__common_post_setup()
+ 
+-        self.start_creation("Configuring Kerberos KDC", 30)
++        self.start_creation(runtime=30)
+ 
+         self.kpasswd = KpasswdInstance()
+         self.kpasswd.create_instance('KPASSWD', self.fqdn, self.admin_password, self.suffix, realm=self.realm)
+@@ -209,7 +209,7 @@ class KrbInstance(service.Service):
+ 
+         self.__common_post_setup()
+ 
+-        self.start_creation("Configuring Kerberos KDC", 30)
++        self.start_creation(runtime=30)
+ 
+         self.kpasswd = KpasswdInstance()
+         self.kpasswd.create_instance('KPASSWD', self.fqdn, self.admin_password, self.suffix)
+diff --git a/ipaserver/install/ntpinstance.py b/ipaserver/install/ntpinstance.py
+index e1b72dda595bf28c3789231423d8293d34d5a9a2..5fbe21df4dcd442358429ffed048e3d9dc77bf69 100644
+--- a/ipaserver/install/ntpinstance.py
++++ b/ipaserver/install/ntpinstance.py
+@@ -26,7 +26,7 @@ from ipapython.ipa_log_manager import *
+ 
+ class NTPInstance(service.Service):
+     def __init__(self, fstore=None):
+-        service.Service.__init__(self, "ntpd")
++        service.Service.__init__(self, "ntpd", service_desc="NTP daemon")
+ 
+         if fstore:
+             self.fstore = fstore
+@@ -155,7 +155,7 @@ class NTPInstance(service.Service):
+         self.step("configuring ntpd to start on boot", self.__enable)
+         self.step("starting ntpd", self.__start)
+ 
+-        self.start_creation("Configuring ntpd")
++        self.start_creation()
+ 
+     def uninstall(self):
+         if self.is_configured():
+diff --git a/ipaserver/install/plugins/baseupdate.py b/ipaserver/install/plugins/baseupdate.py
+index f91cf5dece314f28bcfb5f4fa8de8716400136ae..a0e0884784fd0d5f881de8e2203a5474e8ffc4a6 100644
+--- a/ipaserver/install/plugins/baseupdate.py
++++ b/ipaserver/install/plugins/baseupdate.py
+@@ -45,7 +45,8 @@ class DSRestart(service.Service):
+     def create_instance(self):
+         self.step("stopping directory server", self.stop)
+         self.step("starting directory server", self.start)
+-        self.start_creation("Restarting Directory server to apply updates")
++        self.start_creation(start_message="Restarting Directory server "
++                            "to apply updates", show_service_name=False)
+ 
+ class update(Object):
+     """
+diff --git a/ipaserver/install/service.py b/ipaserver/install/service.py
+index 1d157eba474615307663993d39fcbff41c3197ad..88b47da342fc4bf27defe64a4105221fa1d6b1c1 100644
+--- a/ipaserver/install/service.py
++++ b/ipaserver/install/service.py
+@@ -62,8 +62,9 @@ def print_msg(message, output_fd=sys.stdout):
+ 
+ 
+ class Service(object):
+-    def __init__(self, service_name, sstore=None, dm_password=None, ldapi=True, autobind=AUTO):
++    def __init__(self, service_name, service_desc=None, sstore=None, dm_password=None, ldapi=True, autobind=AUTO):
+         self.service_name = service_name
++        self.service_desc = service_desc
+         self.service = ipaservices.service(service_name)
+         self.steps = []
+         self.output_fd = sys.stdout
+@@ -296,7 +297,43 @@ class Service(object):
+     def step(self, message, method):
+         self.steps.append((message, method))
+ 
+-    def start_creation(self, message, runtime=-1):
++    def start_creation(self, start_message=None, end_message=None,
++        show_service_name=True, runtime=-1):
++        """
++        Starts creation of the service.
++
++        Use start_message and end_message for explicit messages
++        at the beggining / end of the process. Otherwise they are generated
++        using the service description (or service name, if the description has
++        not been provided).
++
++        Use show_service_name to include service name in generated descriptions.
++        """
++
++        if start_message is None:
++            # no other info than mandatory service_name provided, use that
++            if self.service_desc is None:
++                start_message = "Configuring %s" % self.service_name
++
++            # description should be more accurate than service name
++            else:
++                start_message = "Configuring %s" % self.service_desc
++                if show_service_name:
++                    start_message = "%s (%s)" % (start_message, self.service_name)
++
++        if end_message is None:
++            if self.service_desc is None:
++                if show_service_name:
++                    end_message = "Done configuring %s." % self.service_name
++                else:
++                    end_message = "Done."
++            else:
++                if show_service_name:
++                    end_message = "Done configuring %s (%s)." % (
++                        self.service_desc, self.service_name)
++                else:
++                    end_message = "Done configuring %s." % self.service_desc
++
+         if runtime > 0:
+             plural=''
+             est = time.localtime(runtime)
+@@ -304,15 +341,15 @@ class Service(object):
+                 if est.tm_min > 1:
+                     plural = 's'
+                 if est.tm_sec > 0:
+-                    self.print_msg('%s: Estimated time %d minute%s %d seconds' % (message, est.tm_min, plural, est.tm_sec))
++                    self.print_msg('%s: Estimated time %d minute%s %d seconds' % (start_message, est.tm_min, plural, est.tm_sec))
+                 else:
+-                    self.print_msg('%s: Estimated time %d minute%s' % (message, est.tm_min, plural))
++                    self.print_msg('%s: Estimated time %d minute%s' % (start_message, est.tm_min, plural))
+             else:
+                 if est.tm_sec > 1:
+                     plural = 's'
+-                self.print_msg('%s: Estimated time %d second%s' % (message, est.tm_sec, plural))
++                self.print_msg('%s: Estimated time %d second%s' % (start_message, est.tm_sec, plural))
+         else:
+-            self.print_msg(message)
++            self.print_msg(start_message)
+ 
+         step = 0
+         for (message, method) in self.steps:
+@@ -324,7 +361,7 @@ class Service(object):
+             root_logger.debug("  duration: %d seconds" % d.seconds)
+             step += 1
+ 
+-        self.print_msg("done configuring %s." % self.service_name)
++        self.print_msg(end_message)
+ 
+         self.steps = []
+ 
+diff --git a/ipaserver/install/upgradeinstance.py b/ipaserver/install/upgradeinstance.py
+index 3c6bbec5b386768ed951dffc65fcdb34f3014dad..aa4440c71ea04ce1044cb0cd1379039836b1c2ad 100644
+--- a/ipaserver/install/upgradeinstance.py
++++ b/ipaserver/install/upgradeinstance.py
+@@ -80,7 +80,8 @@ class IPAUpgrade(service.Service):
+         self.step("restoring configuration", self.__restore_config)
+         self.step("starting directory server", self.start)
+ 
+-        self.start_creation("Upgrading IPA:")
++        self.start_creation(start_message="Upgrading IPA:",
++                            show_service_name=False)
+ 
+     def __save_config(self):
+         shutil.copy2(self.filename, self.savefilename)
+-- 
+1.6.0.6
+

@@ -1,0 +1,174 @@
+From bf1376c3d2c3e1b7287da65859cd45205fd8f29b Mon Sep 17 00:00:00 2001
+From: Petr Vobornik <pvoborni@redhat.com>
+Date: Wed, 4 Mar 2015 13:52:33 +0100
+Subject: [PATCH] Use NSS protocol range API to set available TLS protocols
+
+Protocols are configured as an inclusive range from SSLv3 through
+TLSv1.2. The allowed values in the range are ssl3, tls1.0,
+tls1.1 and tls1.2.
+
+This is overridable per client by setting tls_version_min and/or
+tls_version_max.
+
+https://fedorahosted.org/freeipa/ticket/4653
+
+Reviewed-By: Jan Cholasta <jcholast@redhat.com>
+---
+ freeipa.spec.in     |  2 +-
+ ipalib/constants.py |  5 +++++
+ ipalib/rpc.py       |  9 +++++++--
+ ipapython/dogtag.py |  4 +++-
+ ipapython/nsslib.py | 24 ++++++++++++++++++++----
+ 5 files changed, 36 insertions(+), 8 deletions(-)
+
+diff --git a/freeipa.spec.in b/freeipa.spec.in
+index ab5bb1a6b3d72234214e751b6ad280fc17a9dd41..e253da1ad4b1c41db9cdccd97d48d90f9f0fe658 100644
+--- a/freeipa.spec.in
++++ b/freeipa.spec.in
+@@ -320,7 +320,7 @@ Requires: python-kerberos >= 1.1-3
+ Requires: gnupg
+ Requires: iproute
+ Requires: pyOpenSSL
+-Requires: python-nss >= 0.11
++Requires: python-nss >= 0.16
+ Requires: python-lxml
+ %if 0%{?fedora} >= 15
+ Requires: python-netaddr >= 0.7.5-3
+diff --git a/ipalib/constants.py b/ipalib/constants.py
+index 2ed81cbba72d8e0ad684a1f0811ba13f5b95c7e7..6999fd8939740e44945aaf2d3b95ec0debf18089 100644
+--- a/ipalib/constants.py
++++ b/ipalib/constants.py
+@@ -114,6 +114,11 @@ DEFAULT_CONFIG = (
+     ('xmlrpc_uri', 'http://localhost:8888/ipa/xml'),
+     ('rpc_json_uri', 'http://localhost:8888/ipa/json'),
+     ('ldap_uri', 'ldap://localhost:389'),
++
++    # Define an inclusive range of SSL/TLS version support
++    ('tls_version_min', 'tls1.0'),
++    ('tls_version_max', 'tls1.2'),
++
+     # Time to wait for a service to start, in seconds
+     ('startup_timeout', 300),
+ 
+diff --git a/ipalib/rpc.py b/ipalib/rpc.py
+index bd9259340569dbaf1673d625b2fe81e5445bc9b0..c9f9e7aa28c31f5a23f596036f526e6195150835 100644
+--- a/ipalib/rpc.py
++++ b/ipalib/rpc.py
+@@ -63,6 +63,7 @@ from urllib2 import urlparse
+ from ipalib.krb_utils import KRB5KDC_ERR_S_PRINCIPAL_UNKNOWN, KRB5KRB_AP_ERR_TKT_EXPIRED, \
+                              KRB5_FCC_PERM, KRB5_FCC_NOFILE, KRB5_CC_FORMAT, KRB5_REALM_CANT_RESOLVE
+ from ipapython.dn import DN
++from ipalib import api
+ 
+ COOKIE_NAME = 'ipa_session'
+ KEYRING_COOKIE_NAME = '%s_cookie:%%s' % COOKIE_NAME
+@@ -322,9 +323,13 @@ class SSLTransport(LanguageAwareTransport):
+         no_init = self.__nss_initialized(dbdir)
+         (major, minor, micro, releaselevel, serial) = sys.version_info
+         if major == 2 and minor < 7:
+-            conn = NSSHTTPS(host, 443, dbdir=dbdir, no_init=no_init)
++            conn = NSSHTTPS(host, 443, dbdir=dbdir, no_init=no_init,
++                            tls_version_min=api.env.tls_version_min,
++                            tls_version_max=api.env.tls_version_max)
+         else:
+-            conn = NSSConnection(host, 443, dbdir=dbdir, no_init=no_init)
++            conn = NSSConnection(host, 443, dbdir=dbdir, no_init=no_init,
++                                 tls_version_min=api.env.tls_version_min,
++                                 tls_version_max=api.env.tls_version_max)
+         self.dbdir=dbdir
+         conn.connect()
+         return conn
+diff --git a/ipapython/dogtag.py b/ipapython/dogtag.py
+index 907cebc613127288554378d516eb456f421455ba..9f13a103901d945e29b53a0a468e6774948f80d5 100644
+--- a/ipapython/dogtag.py
++++ b/ipapython/dogtag.py
+@@ -185,7 +185,9 @@ def https_request(host, port, url, secdir, password, nickname, **kw):
+     request_headers = {"Content-type": "application/x-www-form-urlencoded",
+                        "Accept": "text/plain"}
+     try:
+-        conn = nsslib.NSSConnection(host, port, dbdir=secdir)
++        conn = nsslib.NSSConnection(host, port, dbdir=secdir,
++                                    tls_version_min=api.env.tls_version_min,
++                                    tls_version_max=api.env.tls_version_max)
+         conn.set_debuglevel(0)
+         conn.connect()
+         conn.sock.set_client_auth_data_callback(nsslib.client_auth_data_callback,
+diff --git a/ipapython/nsslib.py b/ipapython/nsslib.py
+index 06bcba64895b0ba7a6b814ed6748eff8bf5ff9b3..282cb2c636171932e648c6015b76324429a217fb 100644
+--- a/ipapython/nsslib.py
++++ b/ipapython/nsslib.py
+@@ -168,7 +168,8 @@ class NSSConnection(httplib.HTTPConnection, NSSAddressFamilyFallback):
+     default_port = httplib.HTTPSConnection.default_port
+ 
+     def __init__(self, host, port=None, strict=None,
+-                 dbdir=None, family=socket.AF_UNSPEC, no_init=False):
++                 dbdir=None, family=socket.AF_UNSPEC, no_init=False,
++                 tls_version_min='tls1.1', tls_version_max='tls1.2'):
+         """
+         :param host: the server to connect to
+         :param port: the port to use (default is set in HTTPConnection)
+@@ -177,6 +178,8 @@ class NSSConnection(httplib.HTTPConnection, NSSAddressFamilyFallback):
+         :param no_init: do not initialize the NSS database. This requires
+                         that the database has already been initialized or
+                         the request will fail.
++        :param tls_min_version: mininum version of SSL/TLS supported
++        :param tls_max_version: maximum version of SSL/TLS supported.
+         """
+         httplib.HTTPConnection.__init__(self, host, port, strict)
+         NSSAddressFamilyFallback.__init__(self, family)
+@@ -196,6 +199,8 @@ class NSSConnection(httplib.HTTPConnection, NSSAddressFamilyFallback):
+         nss.nss_init(dbdir)
+         ssl.set_domestic_policy()
+         nss.set_password_callback(self.password_callback)
++        self.tls_version_min = str(tls_version_min)
++        self.tls_version_max = str(tls_version_max)
+ 
+     def _create_socket(self):
+         # TODO: remove the try block once python-nss is guaranteed to contain
+@@ -214,6 +219,11 @@ class NSSConnection(httplib.HTTPConnection, NSSAddressFamilyFallback):
+         self.sock = ssl.SSLSocket(family=self.family)
+         self.sock.set_ssl_option(ssl.SSL_SECURITY, True)
+         self.sock.set_ssl_option(ssl.SSL_HANDSHAKE_AS_CLIENT, True)
++        try:
++            self.sock.set_ssl_version_range(self.tls_version_min, self.tls_version_max)
++        except NSPRError, e:
++            root_logger.error('Failed to set TLS range to %s, %s' % (self.tls_version_min, self.tls_version_max))
++            raise
+         self.sock.set_ssl_option(ssl_require_safe_negotiation, False)
+         self.sock.set_ssl_option(ssl_enable_renegotiation, ssl_renegotiate_requires_xtn)
+         # Provide a callback which notifies us when the SSL handshake is complete
+@@ -232,8 +242,11 @@ class NSSConnection(httplib.HTTPConnection, NSSAddressFamilyFallback):
+         """
+         Verify callback. If we get here then the certificate is ok.
+         """
++        channel = sock.get_ssl_channel_info()
++        suite = ssl.get_cipher_suite_info(channel.cipher_suite)
+         root_logger.debug("handshake complete, peer = %s", sock.get_peer_name())
+-        pass
++        root_logger.debug('Protocol: %s' % channel.protocol_version_str.upper())
++        root_logger.debug('Cipher: %s' % suite.cipher_suite_name)
+ 
+     def connect(self):
+         self.connect_socket(self.host, self.port)
+@@ -274,13 +287,16 @@ class NSSHTTPS(httplib.HTTP):
+ 
+     _connection_class = NSSConnection
+ 
+-    def __init__(self, host='', port=None, strict=None, dbdir=None, no_init=False):
++    def __init__(self, host='', port=None, strict=None, dbdir=None, no_init=False,
++                 tls_version_min='tls1.1', tls_version_max='tls1.2'):
+         # provide a default host, pass the X509 cert info
+ 
+         # urf. compensate for bad input.
+         if port == 0:
+             port = None
+-        self._setup(self._connection_class(host, port, strict, dbdir=dbdir, no_init=no_init))
++        self._setup(self._connection_class(
++            host, port, strict, dbdir=dbdir, no_init=no_init,
++            tls_version_min=tls_version_min, tls_version_max=tls_version_max))
+ 
+     def getreply(self):
+         """
+-- 
+2.4.3
+

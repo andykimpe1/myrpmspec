@@ -1,0 +1,90 @@
+From 592dd9fccd1696bff5e604c6097b2a8785add295 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Mon, 19 Nov 2012 12:26:04 -0500
+Subject: [PATCH] MS-PAC: Special case NFS services
+
+The current Linux NFS server is severely limited when it comes to handling
+kerberos tickets. Bsically any ticket bigger than 2k will cause it to fail
+authentication due to kernel->userspace upcall interface restrictions.
+
+Until we have additional support in IPA to indivdually mark principals to
+opt out of getting PACs attached we always prevent PACs from being attached
+to TGTs or Tickets where NFS is involved.
+---
+ daemons/ipa-kdb/ipa_kdb_mspac.c | 36 +++++++++++++++++++++++++++++++++++-
+ 1 file changed, 35 insertions(+), 1 deletion(-)
+
+diff --git a/daemons/ipa-kdb/ipa_kdb_mspac.c b/daemons/ipa-kdb/ipa_kdb_mspac.c
+index 881a7a7124b3f6651c44bc393b6899d093f8dfc6..efb4cb9b69b77263b84db4d446adf2dd1c081acf 100644
+--- a/daemons/ipa-kdb/ipa_kdb_mspac.c
++++ b/daemons/ipa-kdb/ipa_kdb_mspac.c
+@@ -637,6 +637,24 @@ static bool is_cross_realm_krbtgt(krb5_const_principal princ)
+     return true;
+ }
+ 
++static bool is_service_of_type(krb5_const_principal princ, const char *type)
++{
++    size_t len;
++
++    if (princ->length < 2) {
++        return false;
++    }
++
++    len = strlen(type);
++
++    if ((princ->data[0].length == len) ||
++        (strncasecmp(princ->data[0].data, type, len) == 0)) {
++        return true;
++    }
++
++    return false;
++}
++
+ static char *gen_sid_string(TALLOC_CTX *memctx, struct dom_sid *dom_sid,
+                             uint32_t rid)
+ {
+@@ -1362,6 +1380,7 @@ krb5_error_code ipadb_sign_authdata(krb5_context context,
+     krb5_error_code kerr;
+     krb5_pac pac = NULL;
+     krb5_data pac_data;
++    bool is_nfs = false;
+ 
+     /* When using s4u2proxy client_princ actually refers to the proxied user
+      * while client->princ to the proxy service asking for the TGS on behalf
+@@ -1372,17 +1391,32 @@ krb5_error_code ipadb_sign_authdata(krb5_context context,
+         ks_client_princ = client->princ;
+     }
+ 
++    /* NFS Server on Linux is limited and will choke on big tickets.
++     * So avoid attachnig the PAC to nfs/ tickets for now.
++     * FIXME: remove this when we have interface to support disabling
++     * PACs on arbitrary services */
++    if (is_service_of_type(ks_client_princ, "nfs") ||
++        is_service_of_type(server->princ, "nfs")) {
++        is_nfs = true;
++    }
++
+     is_as_req = ((flags & KRB5_KDB_FLAG_CLIENT_REFERRALS_ONLY) != 0);
+ 
+     if (is_as_req && (flags & KRB5_KDB_FLAG_INCLUDE_PAC)) {
+ 
++        if (is_nfs) {
++            *signed_auth_data = NULL;
++            kerr = 0;
++            goto done;
++        }
++
+         kerr = ipadb_get_pac(context, client, &pac);
+         if (kerr != 0 && kerr != ENOENT) {
+             goto done;
+         }
+     }
+ 
+-    if (!is_as_req) {
++    if (!is_as_req & !is_nfs) {
+         /* find the existing PAC, if present */
+         kerr = krb5_find_authdata(context, tgt_auth_data, NULL,
+                                   KRB5_AUTHDATA_WIN2K_PAC, &pac_auth_data);
+-- 
+1.7.11.7
+

@@ -1,0 +1,47 @@
+From 03b5f8ebb25be20a23129b8ae6607018d9deab05 Mon Sep 17 00:00:00 2001
+From: Martin Kosek <mkosek@redhat.com>
+Date: Tue, 15 Jan 2013 13:17:53 +0100
+Subject: [PATCH 1/2] Upgrade process should not crash on named restart
+
+When either dirsrv or krb5kdc is down, named service restart in
+ipa-upgradeconfig will fail and cause a crash of the whole upgrade
+process.
+
+Rather only report a failure to restart the service and continue
+with the upgrade as it does not need the named service running. Do
+the same precaution for pki-ca service restart.
+
+https://fedorahosted.org/freeipa/ticket/3350
+---
+ install/tools/ipa-upgradeconfig | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/install/tools/ipa-upgradeconfig b/install/tools/ipa-upgradeconfig
+index 32a258b1652309f02dc8b756d758243bc35c8db8..900985d80113330120ab79490272a11cc862917c 100644
+--- a/install/tools/ipa-upgradeconfig
++++ b/install/tools/ipa-upgradeconfig
+@@ -661,12 +661,19 @@ def main():
+     if changed_psearch or changed_autoincrement:
+         # configuration has changed, restart the name server
+         root_logger.info('Changes to named.conf have been made, restart named')
+-        bindinstance.BindInstance(fstore).restart()
++        bind = bindinstance.BindInstance(fstore)
++        try:
++            bind.restart()
++        except ipautil.CalledProcessError, e:
++            root_logger.error("Failed to restart %s: %s", bind.service_name, e)
+     ca_restart = ca_restart or enable_certificate_renewal(ca) or upgrade_ipa_profile(ca)
+ 
+     if ca_restart:
+         root_logger.info('pki-ca configuration changed, restart pki-ca')
+-        ca.restart(dogtag.configured_constants().PKI_INSTANCE_NAME)
++        try:
++            ca.restart(dogtag.configured_constants().PKI_INSTANCE_NAME)
++        except ipautil.CalledProcessError, e:
++            root_logger.error("Failed to restart %s: %s", ca.service_name, e)
+ 
+ if __name__ == '__main__':
+     installutils.run_script(main, operation_name='ipa-upgradeconfig')
+-- 
+1.7.11.7
+

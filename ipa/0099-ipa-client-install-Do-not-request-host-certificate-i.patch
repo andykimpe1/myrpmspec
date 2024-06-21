@@ -1,0 +1,95 @@
+From a8145b618aecc377a529180ef2fe03cbdd655ad3 Mon Sep 17 00:00:00 2001
+From: Petr Viktorin <pviktori@redhat.com>
+Date: Thu, 28 Mar 2013 17:41:05 +0100
+Subject: [PATCH] ipa-client-install: Do not request host certificate if server
+ is CA-less
+
+https://fedorahosted.org/freeipa/ticket/3536
+---
+ ipa-client/ipa-install/ipa-client-install | 47 ++++++++++++++++++++++++-------
+ 1 file changed, 37 insertions(+), 10 deletions(-)
+
+diff --git a/ipa-client/ipa-install/ipa-client-install b/ipa-client/ipa-install/ipa-client-install
+index a19efb06ac9d1cf861384c6ada221d928bb19388..8e1b86c868289654c7667130a99e7688611f4daf 100755
+--- a/ipa-client/ipa-install/ipa-client-install
++++ b/ipa-client/ipa-install/ipa-client-install
+@@ -663,6 +663,20 @@ def configure_ipa_conf(fstore, cli_basedn, cli_realm, cli_domain, cli_server):
+ 
+     return 0
+ 
++
++def disable_ra():
++    """Set the enable_ra option in /etc/ipa/default.conf to False
++
++    Note that api.env will retain the old value (it is readonly).
++    """
++    parser = RawConfigParser()
++    parser.read('/etc/ipa/default.conf')
++    parser.set('global', 'enable_ra', 'False')
++    fp = open('/etc/ipa/default.conf', 'w')
++    parser.write(fp)
++    fp.close()
++
++
+ def configure_ldap_conf(fstore, cli_basedn, cli_realm, cli_domain, cli_server, dnsok, options, files):
+     ldapconf = ipaclient.ipachangeconf.IPAChangeConf("IPA Installer")
+     ldapconf.setOptionAssignment(" ")
+@@ -864,7 +878,8 @@ def configure_krb5_conf(cli_realm, cli_domain, cli_server, cli_kdc, dnsok,
+ 
+     return 0
+ 
+-def configure_certmonger(fstore, subject_base, cli_realm, hostname, options):
++def configure_certmonger(fstore, subject_base, cli_realm, hostname, options,
++                         remote_env):
+     started = True
+     principal = 'host/%s@%s' % (hostname, cli_realm)
+ 
+@@ -910,14 +925,21 @@ def configure_certmonger(fstore, subject_base, cli_realm, hostname, options):
+             "Automatic certificate management will not be available")
+ 
+     # Request our host cert
+-    if started:
+-        client_nss_nickname = client_nss_nickname_format % hostname
+-        subject = DN(('CN', hostname), subject_base)
+-        try:
+-            run(["ipa-getcert", "request", "-d", "/etc/pki/nssdb", "-n", client_nss_nickname, "-N", str(subject), "-K", principal])
+-        except Exception:
+-            root_logger.error(
+-                "%s request for host certificate failed", cmonger.service_name)
++    if remote_env['enable_ra']:
++        if started:
++            client_nss_nickname = client_nss_nickname_format % hostname
++            subject = DN(('CN', hostname), subject_base)
++            try:
++                run(["ipa-getcert", "request", "-d", "/etc/pki/nssdb",
++                     "-n", client_nss_nickname, "-N", str(subject),
++                     "-K", principal])
++            except Exception:
++                root_logger.error("%s request for host certificate failed",
++                                  cmonger.service_name)
++    else:
++        root_logger.warning(
++            "A RA is not configured on the server. "
++            "Not requesting host certificate.")
+ 
+ def configure_sssd_conf(fstore, cli_realm, cli_domain, cli_server, options, client_domain, client_hostname):
+     try:
+@@ -2127,9 +2149,14 @@ def install(options, env, fstore, statestore):
+             'Cannot connect to the server due to generic error: %s', str(e))
+         return CLIENT_INSTALL_ERROR
+ 
++    remote_env = api.Command['env'](server=True)['result']
++    if not remote_env['enable_ra']:
++        disable_ra()
++
+     if not options.on_master:
+         client_dns(cli_server[0], hostname, options.dns_updates)
+-        configure_certmonger(fstore, subject_base, cli_realm, hostname, options)
++        configure_certmonger(fstore, subject_base, cli_realm, hostname,
++                             options, remote_env)
+ 
+     update_ssh_keys(cli_server[0], hostname, ipaservices.knownservices.sshd.get_config_dir(), options.create_sshfp)
+ 
+-- 
+1.8.3.1
+

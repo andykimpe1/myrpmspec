@@ -1,0 +1,66 @@
+From ea0d30636fdaed7f410f20926a290ff33f879cbd Mon Sep 17 00:00:00 2001
+From: Martin Kosek <mkosek@redhat.com>
+Date: Tue, 4 Feb 2014 11:02:34 +0100
+Subject: [PATCH 112/116] ipa-lockout: do not fail when default realm cannot be
+ read
+
+When ipa-lockout plugin is started during FreeIPA server installation,
+the default realm may not be available and plugin should then not end
+with failure.
+
+Similarly to other plugins, start in degraded mode in this situation.
+Operation is fully restored during the final services restart.
+
+https://fedorahosted.org/freeipa/ticket/4085
+---
+ .../ipa-slapi-plugins/ipa-lockout/ipa_lockout.c    | 34 +++++++++++-----------
+ 1 file changed, 17 insertions(+), 17 deletions(-)
+
+diff --git a/daemons/ipa-slapi-plugins/ipa-lockout/ipa_lockout.c b/daemons/ipa-slapi-plugins/ipa-lockout/ipa_lockout.c
+index f5af36c42cd09a9042f4143c6fa48a2203584b7b..f78311d522ec5fcf8943b654ac5b45571eaffb5b 100644
+--- a/daemons/ipa-slapi-plugins/ipa-lockout/ipa_lockout.c
++++ b/daemons/ipa-slapi-plugins/ipa-lockout/ipa_lockout.c
+@@ -176,23 +176,23 @@ ipalockout_get_global_config(struct ipa_context *ipactx)
+     krberr = krb5_init_context(&krbctx);
+     if (krberr) {
+         LOG_FATAL("krb5_init_context failed (%d)\n", krberr);
+-        ret = LDAP_OPERATIONS_ERROR;
+-        goto done;
+-    }
+-
+-    krberr = krb5_get_default_realm(krbctx, &realm);
+-    if (krberr) {
+-        LOG_FATAL("Failed to get default realm (%d)\n", krberr);
+-        ret = LDAP_OPERATIONS_ERROR;
+-        goto done;
+-    }
+-
+-    ipa_global_policy = slapi_ch_smprintf("cn=global_policy,cn=%s,cn=kerberos,%s",
+-                                          realm, basedn);
+-    if (!ipa_global_policy) {
+-        LOG_OOM();
+-        ret = LDAP_OPERATIONS_ERROR;
+-        goto done;
++        /* Yes, we failed, but it is because /etc/krb5.conf doesn't exist
++         * or is misconfigured. Start up in a degraded mode.
++         */
++    } else {
++        krberr = krb5_get_default_realm(krbctx, &realm);
++        if (krberr) {
++            LOG_FATAL("Failed to get default realm (%d)\n", krberr);
++        } else {
++            ipa_global_policy =
++                slapi_ch_smprintf("cn=global_policy,cn=%s,cn=kerberos,%s",
++                                  realm, basedn);
++            if (!ipa_global_policy) {
++                LOG_OOM();
++                ret = LDAP_OPERATIONS_ERROR;
++                goto done;
++            }
++        }
+     }
+ 
+     ret = asprintf(&dn, "cn=ipaConfig,cn=etc,%s", basedn);
+-- 
+1.9.3
+

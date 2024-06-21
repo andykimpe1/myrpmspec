@@ -1,0 +1,67 @@
+From 2e36806afbedac720d0a3a400058c39a4978dec2 Mon Sep 17 00:00:00 2001
+From: Simo Sorce <simo@redhat.com>
+Date: Thu, 23 May 2013 10:06:22 -0400
+Subject: [PATCH 87/98] CLDAP: Return empty reply on non-fatal errors
+
+Windows DCs return an empty reply when a legal request cannot satisfied.
+If we get EINVAL or ENOENT it means the information requested could not be
+found or input parameters were bogus.
+Always return an empty reply in these cases.
+
+On any other internal error just return, the request may have been legit but we
+can't really handle it right now, pretend we never saw it and hope the next
+attempt will succeed.
+
+Fixes: https://fedorahosted.org/freeipa/ticket/3639
+
+Signed-off-by: Simo Sorce <simo@redhat.com>
+---
+ .../ipa-slapi-plugins/ipa-cldap/ipa_cldap_worker.c | 24 ++++++++++++++++------
+ 1 file changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/daemons/ipa-slapi-plugins/ipa-cldap/ipa_cldap_worker.c b/daemons/ipa-slapi-plugins/ipa-cldap/ipa_cldap_worker.c
+index 307110c123c2d898c910371da9ebeb2edfa0f1b5..468b92bbacd98d6c786dec0aed622489e9a8af23 100644
+--- a/daemons/ipa-slapi-plugins/ipa-cldap/ipa_cldap_worker.c
++++ b/daemons/ipa-slapi-plugins/ipa-cldap/ipa_cldap_worker.c
+@@ -218,12 +218,14 @@ static void ipa_cldap_respond(struct ipa_cldap_ctx *ctx,
+         return;
+     }
+ 
+-    /* result */
+-    ret = ber_printf(be, "{it{s{{s[O]}}}}", req->id,
++    if (nbtblob->bv_len != 0) {
++        /* result */
++        ret = ber_printf(be, "{it{s{{s[O]}}}}", req->id,
+                          LDAP_RES_SEARCH_ENTRY, "", "netlogon", nbtblob);
+-    if (ret == LBER_ERROR) {
+-        LOG("Failed to encode CLDAP reply\n");
+-        goto done;
++        if (ret == LBER_ERROR) {
++            LOG("Failed to encode CLDAP reply\n");
++            goto done;
++        }
+     }
+     /* done */
+     ret = ber_printf(be, "{it{ess}}", req->id,
+@@ -264,7 +266,17 @@ static void ipa_cldap_process(struct ipa_cldap_ctx *ctx,
+     LOG_TRACE("CLDAP Request received");
+ 
+     ret = ipa_cldap_netlogon(ctx, req, &reply);
+-    if (ret) {
++    switch (ret) {
++    case 0:
++        /* all fine */
++        break;
++    case EINVAL:
++    case ENOENT:
++        /* bad request, return empty reply as windows does */
++        memset(&reply, 0, sizeof(struct berval));
++        break;
++    default:
++        /* internal error, just get out */
+         goto done;
+     }
+ 
+-- 
+1.8.3.1
+

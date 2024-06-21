@@ -1,0 +1,165 @@
+From 6c0ffe9f0597d6cc6b135730e4215de78cf38f97 Mon Sep 17 00:00:00 2001
+From: Rob Crittenden <rcritten@redhat.com>
+Date: Tue, 23 Oct 2012 14:07:13 -0400
+Subject: [PATCH] Wait for the directory server to come up when updating the
+ agent certificate.
+
+It is possible that either or both of the LDAP instances are being restarted
+during the renewal process. Make the script retry if this is the case.
+
+It is also safe to re-run this script if it fails. It will take the current
+ipaCert certificate and attempt to update the agent information in LDAP.
+
+https://fedorahosted.org/freeipa/ticket/3179
+---
+ install/restart_scripts/renew_ra_cert | 101 +++++++++++++++++++++++-----------
+ ipaserver/plugins/ldap2.py            |   3 +
+ 2 files changed, 73 insertions(+), 31 deletions(-)
+
+diff --git a/install/restart_scripts/renew_ra_cert b/install/restart_scripts/renew_ra_cert
+index 14cbc114ca9d38697cdb2a24b41ccf2ac2c66389..1f359062b49eed400aaa7b6aeea4742253707b00 100644
+--- a/install/restart_scripts/renew_ra_cert
++++ b/install/restart_scripts/renew_ra_cert
+@@ -23,6 +23,7 @@ import sys
+ import shutil
+ import tempfile
+ import syslog
++import time
+ from ipapython import services as ipaservices
+ from ipapython.certmonger import get_pin
+ from ipapython import ipautil
+@@ -33,6 +34,7 @@ from ipapython.dn import DN
+ from ipalib import x509
+ from ipalib import errors
+ from ipaserver.plugins.ldap2 import ldap2
++import ldap as _ldap
+ 
+ api.bootstrap(context='restart')
+ api.finalize()
+@@ -53,41 +55,78 @@ except IOError, e:
+     syslog.syslog(syslog.LOG_ERR, 'Unable to determine PIN for CA instance: %s' % e)
+     sys.exit(1)
+ 
+-try:
+-    conn = ldap2(shared_instance=False, ldap_uri='ldap://localhost:%d' % DEFAULT_DSPORT)
+-    conn.connect(bind_dn=DN(('cn', 'directory manager')), bind_pw=dm_password)
+-    (entry_dn, entry_attrs) = conn.get_entry(dn, ['usercertificate'], normalize=False)
+-    entry_attrs['usercertificate'].append(cert)
+-    entry_attrs['description'] = '2;%d;%s;%s' % (serial_number, issuer, subject)
+-    conn.update_entry(dn, entry_attrs, normalize=False)
+-    conn.disconnect()
+-except Exception, e:
+-    syslog.syslog(syslog.LOG_ERR, 'Updating agent entry failed: %s' % e)
+-    sys.exit(1)
++attempts = 0
++dogtag_uri='ldap://localhost:%d' % DEFAULT_DSPORT
++updated = False
+ 
+-# Store it in the IPA LDAP server
+-tmpdir = tempfile.mkdtemp(prefix = "tmp-")
+-try:
+-    dn = DN(('cn','ipaCert'), ('cn', 'ca_renewal'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
+-    principal = str('host/%s@%s' % (api.env.host, api.env.realm))
+-    ccache = ipautil.kinit_hostprincipal('/etc/krb5.keytab', tmpdir, principal)
+-    conn = ldap2(shared_instance=False, ldap_uri=api.env.ldap_uri)
+-    conn.connect(ccache=ccache)
++while attempts < 10:
++    conn = None
+     try:
+-        (entry_dn, entry_attrs) = conn.get_entry(dn, ['usercertificate'])
+-        entry_attrs['usercertificate'] = cert
++        conn = ldap2(shared_instance=False, ldap_uri=dogtag_uri)
++        conn.connect(bind_dn=DN(('cn', 'directory manager')), bind_pw=dm_password)
++        (entry_dn, entry_attrs) = conn.get_entry(dn, ['usercertificate'], normalize=False)
++        entry_attrs['usercertificate'].append(cert)
++        entry_attrs['description'] = '2;%d;%s;%s' % (serial_number, issuer, subject)
+         conn.update_entry(dn, entry_attrs, normalize=False)
+-    except errors.NotFound:
+-        entry_attrs = dict(objectclass=['top', 'pkiuser', 'nscontainer'],
+-                                        usercertificate=cert)
+-        conn.add_entry(dn, entry_attrs, normalize=False)
++        updated = True
++        break
++    except errors.NetworkError:
++        syslog.syslog(syslog.LOG_ERR, 'Connection to %s failed, sleeping 30s' % dogtag_uri)
++        time.sleep(30)
++        attempts += 1
+     except errors.EmptyModlist:
+-        pass
+-    conn.disconnect()
+-except Exception, e:
+-    syslog.syslog(syslog.LOG_ERR, 'Updating renewal certificate failed: %s' % e)
+-finally:
+-    shutil.rmtree(tmpdir)
++        updated = True
++        break
++    except Exception, e:
++        syslog.syslog(syslog.LOG_ERR, 'Updating agent entry failed: %s' % e)
++        break
++    finally:
++        if conn.isconnected():
++            conn.disconnect()
++
++if not updated:
++    syslog.syslog(syslog.LOG_ERR, '%s: Giving up. This script may be safely re-executed.' % sys.argv[0])
++    sys.exit(1)
++
++attempts = 0
++updated = False
++
++# Store it in the IPA LDAP server
++while attempts < 10:
++    conn = None
++    tmpdir = None
++    try:
++        tmpdir = tempfile.mkdtemp(prefix="tmp-")
++        dn = DN(('cn','ipaCert'), ('cn', 'ca_renewal'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
++        principal = str('host/%s@%s' % (api.env.host, api.env.realm))
++        ccache = ipautil.kinit_hostprincipal('/etc/krb5.keytab', tmpdir, principal)
++        conn = ldap2(shared_instance=False, ldap_uri=api.env.ldap_uri)
++        conn.connect(ccache=ccache)
++        try:
++            (entry_dn, entry_attrs) = conn.get_entry(dn, ['usercertificate'])
++            entry_attrs['usercertificate'] = cert
++            conn.update_entry(dn, entry_attrs, normalize=False)
++        except errors.NotFound:
++            entry_attrs = dict(objectclass=['top', 'pkiuser', 'nscontainer'],
++                                            usercertificate=cert)
++            conn.add_entry(dn, entry_attrs, normalize=False)
++        except errors.EmptyModlist:
++            pass
++        updated = True
++        break
++    except Exception, e:
++        syslog.syslog(syslog.LOG_ERR, 'Updating renewal certificate failed: %s. Sleeping 30s' % e)
++        time.sleep(30)
++        attempts += 1
++    finally:
++        if conn is not None and conn.isconnected():
++            conn.disconnect()
++        if tmpdir is not None:
++            shutil.rmtree(tmpdir)
++
++if not updated:
++    syslog.syslog(syslog.LOG_ERR, '%s: Giving up. This script may be safely re-executed.' % sys.argv[0])
++    sys.exit(1)
+ 
+ # Now restart Apache so the new certificate is available
+ try:
+diff --git a/ipaserver/plugins/ldap2.py b/ipaserver/plugins/ldap2.py
+index 519f4613ad8eabbc3a51d272092e6b51697e4ca3..bf1a0d3761b90cfa0784363aeaf40686e72c5d49 100644
+--- a/ipaserver/plugins/ldap2.py
++++ b/ipaserver/plugins/ldap2.py
+@@ -724,6 +724,9 @@ class ldap2(CrudBackend):
+             raise errors.BadSearchFilter(info=info)
+         except _ldap.NOT_ALLOWED_ON_NONLEAF:
+             raise errors.NotAllowedOnNonLeaf()
++        except _ldap.SERVER_DOWN:
++            raise NetworkError(uri=self.ldap_uri,
++                               error=u'LDAP Server Down')
+         except _ldap.SUCCESS:
+             pass
+         except _ldap.LDAPError, e:
+-- 
+1.7.11.7
+

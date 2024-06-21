@@ -1,0 +1,157 @@
+From 130c5a6e391e0ce4b74534fa6e8e14c6c50cf578 Mon Sep 17 00:00:00 2001
+From: John Dennis <jdennis@redhat.com>
+Date: Wed, 19 Dec 2012 12:47:46 -0500
+Subject: [PATCH] Cookie Expires date should be locale insensitive
+
+The Expires attribute in a cookie is supposed to follow the RFC 822
+(superseded by RFC 1123) date format. That format includes a weekday
+abbreviation (e.g. Tue) which must be in English according to the
+RFC's.
+
+ipapython/cooke.py has methods to parse and format the Expires
+attribute but they were based on strptime() and strftime() which
+respects the locale. If a non-English locale is in effect the wrong
+date string will be produced and/or it won't be able to parse the date
+string.
+
+The fix is to use the date parsing and formatting functions from
+email.utils which specifically follow the RFC's and are not locale
+sensitive.
+
+This patch also updates the unit test to use email.utils as well.
+
+The patch should be applied to the following branches:
+
+master, 3.0, 3.1
+
+Ticket: https://fedorahosted.org/freeipa/ticket/3313
+---
+ ipapython/cookie.py                 | 42 ++++++++++---------------------------
+ tests/test_ipapython/test_cookie.py | 15 +++++++------
+ 2 files changed, 20 insertions(+), 37 deletions(-)
+
+diff --git a/ipapython/cookie.py b/ipapython/cookie.py
+index b45cb2b11abc2255b0db9c821a4bd468d6f2abe1..bf551b518704918b5de76f4e19422490af613dc6 100644
+--- a/ipapython/cookie.py
++++ b/ipapython/cookie.py
+@@ -20,6 +20,7 @@
+ import re
+ import time
+ import datetime
++import email.utils
+ from urllib2 import urlparse
+ from calendar import timegm
+ from ipapython.ipa_log_manager import log_mgr
+@@ -172,47 +173,26 @@ class Cookie(object):
+         if utcoffset is not None and utcoffset.total_seconds() != 0.0:
+             raise ValueError("timezone is not UTC")
+ 
+-        # At this point we've validated as much as possible the
+-        # timezone is UTC or GMT but we can't use the %Z timezone
+-        # format specifier because the timezone in the string must be
+-        # 'GMT', not something equivalent to GMT, so hardcode the GMT
+-        # timezone string into the format.
++        # Do not use strftime because it respects the locale, instead
++        # use the RFC 1123 formatting function which uses only English
+ 
+-        return datetime.datetime.strftime(dt, '%a, %d %b %Y %H:%M:%S GMT')
++        return email.utils.formatdate(cls.datetime_to_time(dt), usegmt=True)
+ 
+     @classmethod
+     def parse_datetime(cls, s):
+         '''
+-        Parse a RFC 822, RFC 1123 date string, return a datetime aware object in UTC.
+-        Accommodates some non-standard formats found in the wild.
++        Parse a RFC 822, RFC 1123 date string, return a datetime naive object in UTC.
+         '''
+ 
+-        formats = ['%a, %d %b %Y %H:%M:%S',
+-                   '%a, %d-%b-%Y %H:%M:%S',
+-                   '%a, %d-%b-%y %H:%M:%S',
+-                   '%a, %d %b %y %H:%M:%S',
+-                   ]
+         s = s.strip()
+ 
+-        # strptime does not read the time zone and generate a tzinfo
+-        # object to insert in the datetime object so there is little point
+-        # in specifying a %Z format, instead verify GMT is specified and
+-        # generate the datetime object as if it were UTC.
++        # Do not use strptime because it respects the locale, instead
++        # use the RFC 1123 parsing function which uses only English
+ 
+-        if not s.endswith(' GMT'):
+-            raise ValueError("http date string '%s' does not end with GMT time zone" % s)
+-        s = s[:-4]
+-
+-        dt = None
+-        for format in formats:
+-            try:
+-                dt = datetime.datetime(*(time.strptime(s, format)[0:6]))
+-                break
+-            except Exception:
+-                continue
+-
+-        if dt is None:
+-            raise ValueError("unable to parse expires datetime '%s'" % s)
++        try:
++            dt = datetime.datetime(*email.utils.parsedate(s)[0:6])
++        except Exception, e:
++            raise ValueError("unable to parse expires datetime '%s': %s" % (s, e))
+ 
+         return dt
+ 
+diff --git a/tests/test_ipapython/test_cookie.py b/tests/test_ipapython/test_cookie.py
+index f8c5daf4130fc75a6a05a3d4b18a85d50ef13a36..b8a2d36dabaa1265a9878b4be3f1c0cc3d4635b0 100644
+--- a/tests/test_ipapython/test_cookie.py
++++ b/tests/test_ipapython/test_cookie.py
+@@ -20,6 +20,7 @@
+ import unittest
+ import time
+ import datetime
++import email.utils
+ import calendar
+ from ipapython.cookie import Cookie
+ 
+@@ -129,15 +130,16 @@ class TestExpires(unittest.TestCase):
+         # Force microseconds to zero because cookie timestamps only have second resolution
+         self.now = datetime.datetime.utcnow().replace(microsecond=0)
+         self.now_timestamp = calendar.timegm(self.now.utctimetuple())
+-        self.now_string = datetime.datetime.strftime(self.now, '%a, %d %b %Y %H:%M:%S GMT')
++        self.now_string = email.utils.formatdate(self.now_timestamp, usegmt=True)
+ 
+         self.max_age = 3600     # 1 hour
+         self.age_expiration = self.now + datetime.timedelta(seconds=self.max_age)
+-        self.age_string = datetime.datetime.strftime(self.age_expiration, '%a, %d %b %Y %H:%M:%S GMT')
++        self.age_timestamp = calendar.timegm(self.age_expiration.utctimetuple())
++        self.age_string = email.utils.formatdate(self.age_timestamp, usegmt=True)
+ 
+         self.expires = self.now + datetime.timedelta(days=1) # 1 day
+         self.expires_timestamp = calendar.timegm(self.expires.utctimetuple())
+-        self.expires_string = datetime.datetime.strftime(self.expires, '%a, %d %b %Y %H:%M:%S GMT')
++        self.expires_string = email.utils.formatdate(self.expires_timestamp, usegmt=True)
+ 
+     def test_expires(self):
+         # 1 cookie with name/value and no Max-Age and no Expires
+@@ -407,15 +409,16 @@ class TestNormalization(unittest.TestCase):
+         # Force microseconds to zero because cookie timestamps only have second resolution
+         self.now = datetime.datetime.utcnow().replace(microsecond=0)
+         self.now_timestamp = calendar.timegm(self.now.utctimetuple())
+-        self.now_string = datetime.datetime.strftime(self.now, '%a, %d %b %Y %H:%M:%S GMT')
++        self.now_string = email.utils.formatdate(self.now_timestamp, usegmt=True)
+ 
+         self.max_age = 3600     # 1 hour
+         self.age_expiration = self.now + datetime.timedelta(seconds=self.max_age)
+-        self.age_string = datetime.datetime.strftime(self.age_expiration, '%a, %d %b %Y %H:%M:%S GMT')
++        self.age_timestamp = calendar.timegm(self.age_expiration.utctimetuple())
++        self.age_string = email.utils.formatdate(self.age_timestamp, usegmt=True)
+ 
+         self.expires = self.now + datetime.timedelta(days=1) # 1 day
+         self.expires_timestamp = calendar.timegm(self.expires.utctimetuple())
+-        self.expires_string = datetime.datetime.strftime(self.expires, '%a, %d %b %Y %H:%M:%S GMT')
++        self.expires_string = email.utils.formatdate(self.expires_timestamp, usegmt=True)
+ 
+     def test_path_normalization(self):
+         self.assertEqual(Cookie.normalize_url_path(''),          '/')
+-- 
+1.7.11.7
+

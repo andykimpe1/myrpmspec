@@ -1,0 +1,68 @@
+From 8602899a94ac4e01f157e30b6864ea5e55debbf8 Mon Sep 17 00:00:00 2001
+From: Martin Kosek <mkosek@redhat.com>
+Date: Thu, 10 Jan 2013 12:13:39 +0100
+Subject: [PATCH] permission-find no longer crashes with --targetgroup
+
+Target Group parameter was not processed correctly which caused
+permission-find to always crash when this search parameter was used.
+Fix the crash and create a unit test case to avoid future regression.
+
+https://fedorahosted.org/freeipa/ticket/3335
+---
+ ipalib/plugins/aci.py                       |  5 +++--
+ tests/test_xmlrpc/test_permission_plugin.py | 23 +++++++++++++++++++++++
+ 2 files changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/ipalib/plugins/aci.py b/ipalib/plugins/aci.py
+index 702ae010160984636603c75872ddbdddd79bd52c..24be17458c4738b91dba60d7f05a0f544cb1af02 100644
+--- a/ipalib/plugins/aci.py
++++ b/ipalib/plugins/aci.py
+@@ -815,8 +815,9 @@ class aci_find(crud.Search):
+                 found = False
+                 if 'target' in a.target:
+                     target = a.target['target']['expression']
+-                    if api.env.container_group in target:
+-                        targetdn = DN(target.replace('ldap:///',''))
++                    targetdn = DN(target.replace('ldap:///',''))
++                    group_container_dn = DN(api.env.container_group, api.env.basedn)
++                    if targetdn.endswith(group_container_dn):
+                         try:
+                             cn = targetdn[0]['cn']
+                         except (IndexError, KeyError):
+diff --git a/tests/test_xmlrpc/test_permission_plugin.py b/tests/test_xmlrpc/test_permission_plugin.py
+index eda96d0e31d28931b9e0b630ffa69bb9cbad0d1f..dffc230d09292a1db8fffaffdeda1e4450019e75 100644
+--- a/tests/test_xmlrpc/test_permission_plugin.py
++++ b/tests/test_xmlrpc/test_permission_plugin.py
+@@ -697,6 +697,29 @@ class test_permission(Declarative):
+ 
+ 
+         dict(
++            desc='Search using --targetgroup',
++            command=('permission_find', [], {'targetgroup': u'ipausers'}),
++            expected=dict(
++                count=1,
++                truncated=False,
++                summary=u'1 permission matched',
++                result=[
++                    {
++                        'dn': DN(('cn','Add user to default group'),
++                                 api.env.container_permission, api.env.basedn),
++                        'cn': [u'Add user to default group'],
++                        'member_privilege': [u'User Administrators'],
++                        'attrs': [u'member'],
++                        'targetgroup': u'ipausers',
++                        'memberindirect_role': [u'User Administrator'],
++                        'permissions': [u'write']
++                    }
++                ],
++            ),
++        ),
++
++
++        dict(
+             desc='Delete %r' % permission1_renamed_ucase,
+             command=('permission_del', [permission1_renamed_ucase], {}),
+             expected=dict(
+-- 
+1.7.11.7
+

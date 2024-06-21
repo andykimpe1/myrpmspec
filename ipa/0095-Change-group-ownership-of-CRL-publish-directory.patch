@@ -1,0 +1,111 @@
+From 8e1fc03ca3755f8d20b577801384ef443a9f7dcb Mon Sep 17 00:00:00 2001
+From: Tomas Babej <tbabej@redhat.com>
+Date: Fri, 2 Aug 2013 13:45:28 +0200
+Subject: [PATCH] Change group ownership of CRL publish directory
+
+Spec file modified so that /var/lib/ipa/pki-ca/publish/ is no
+longer owned by created with package installation. The directory
+is rather created/removed with the CA instance itself.
+
+This ensures proper creation/removeal, group ownership
+and SELinux context.
+
+https://fedorahosted.org/freeipa/ticket/3727
+---
+ freeipa.spec.in                 |  3 +--
+ install/Makefile.am             |  1 -
+ install/tools/ipa-upgradeconfig |  7 ++++---
+ ipaserver/install/cainstance.py | 13 +++++++++++++
+ 4 files changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/freeipa.spec.in b/freeipa.spec.in
+index 916630029f6dfac8ef32dabb00f338052cbbf08e..ab5bb1a6b3d72234214e751b6ad280fc17a9dd41 100644
+--- a/freeipa.spec.in
++++ b/freeipa.spec.in
+@@ -406,7 +406,6 @@ rm %{buildroot}/%{_libdir}/samba/pdb/ipasam.la
+ mkdir -p %{buildroot}/%{_sysconfdir}/ipa/html
+ mkdir -p %{buildroot}/%{_localstatedir}/cache/ipa/sysrestore
+ mkdir -p %{buildroot}/%{_localstatedir}/cache/ipa/sysupgrade
+-mkdir -p %{buildroot}/%{_localstatedir}/cache/ipa/pki-ca/publish
+ mkdir %{buildroot}%{_usr}/share/ipa/html/
+ ln -s ../../../..%{_sysconfdir}/ipa/html/ffconfig.js \
+     %{buildroot}%{_usr}/share/ipa/html/ffconfig.js
+@@ -724,7 +723,7 @@ fi
+ %attr(700,root,root) %dir %{_localstatedir}/lib/ipa/sysrestore
+ %attr(700,root,root) %dir %{_localstatedir}/lib/ipa/sysupgrade
+ %attr(755,root,root) %dir %{_localstatedir}/lib/ipa/pki-ca
+-%attr(755,root,root) %dir %{_localstatedir}/lib/ipa/pki-ca/publish
++%ghost %{_localstatedir}/lib/ipa/pki-ca/publish
+ %dir %{_localstatedir}/cache/ipa
+ %attr(700,apache,apache) %dir %{_localstatedir}/cache/ipa/sessions
+ %attr(755,root,root) %{_libdir}/krb5/plugins/kdb/ipadb.so
+diff --git a/install/Makefile.am b/install/Makefile.am
+index 3613185265148b6a81540aa77d2229dc51170313..6dbc5efbee990e5e8da2d75b51233883658c0827 100644
+--- a/install/Makefile.am
++++ b/install/Makefile.am
+@@ -27,7 +27,6 @@ install-exec-local:
+ 	chmod 700 $(DESTDIR)$(localstatedir)/cache/ipa/sessions
+ 	mkdir -p $(DESTDIR)$(localstatedir)/lib/ipa/pki-ca/publish
+ 	chmod 755 $(DESTDIR)$(localstatedir)/lib/ipa/pki-ca
+-	chmod 755 $(DESTDIR)$(localstatedir)/lib/ipa/pki-ca/publish
+ 
+ uninstall-local:
+ 	-rmdir $(DESTDIR)$(localstatedir)/lib/ipa/sysrestore
+diff --git a/install/tools/ipa-upgradeconfig b/install/tools/ipa-upgradeconfig
+index 448028a32b52f01a1047f8d9003d3904c9f43ae7..761724e9a9c284dbb7211bb14766b618e842e1f3 100644
+--- a/install/tools/ipa-upgradeconfig
++++ b/install/tools/ipa-upgradeconfig
+@@ -577,15 +577,16 @@ def migrate_crl_publish_dir(ca):
+                 caconfig.CS_CFG_PATH, e)
+         return False
+ 
++    # Prepare target publish dir (creation, permissions, SELinux context)
++    # Run this every update to ensure proper values
++    publishdir = ca.prepare_crl_publish_dir()
++
+     if old_publish_dir == caconfig.CRL_PUBLISH_PATH:
+         # publish dir is already updated
+         root_logger.info('Publish directory already set to new location')
+         sysupgrade.set_upgrade_state('dogtag', 'moved_crl_publish_dir', True)
+         return False
+ 
+-    # Prepare target publish dir (permissions, SELinux context)
+-    publishdir = ca.prepare_crl_publish_dir()
+-
+     # Copy all CRLs to new directory
+     root_logger.info('Copy all CRLs to new publish directory')
+     try:
+diff --git a/ipaserver/install/cainstance.py b/ipaserver/install/cainstance.py
+index 1e629eab18b5738c9af78c350e7a331b6738193b..aea56e835230f6fdd4da8341d891ee936170b50a 100644
+--- a/ipaserver/install/cainstance.py
++++ b/ipaserver/install/cainstance.py
+@@ -1227,6 +1227,10 @@ class CAInstance(service.Service):
+         Returns a path to the CRL publishing directory
+         """
+         publishdir = self.dogtag_constants.CRL_PUBLISH_PATH
++
++        if not os.path.exists(publishdir):
++            os.mkdir(publishdir)
++
+         os.chmod(publishdir, 0775)
+         pent = pwd.getpwnam(PKI_USER)
+         os.chown(publishdir, 0, pent.pw_gid)
+@@ -1336,6 +1340,15 @@ class CAInstance(service.Service):
+             root_logger.debug("Remove %s", f)
+             installutils.remove_file(f)
+ 
++        # remove CRL directory
++        root_logger.info("Remove CRL directory")
++        if os.path.exists(self.dogtag_constants.CRL_PUBLISH_PATH):
++            try:
++                shutil.rmtree(self.dogtag_constants.CRL_PUBLISH_PATH)
++            except OSError, e:
++                root_logger.warning("Error while removing CRL publish "
++                                    "directory: %s" % e)
++
+     def publish_ca_cert(self, location):
+         args = ["-L", "-n", self.canickname, "-a"]
+         (cert, err, returncode) = self.__run_certutil(args)
+-- 
+2.4.3
+
