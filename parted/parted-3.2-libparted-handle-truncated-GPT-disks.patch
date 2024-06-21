@@ -1,0 +1,101 @@
+From 428f30cfb8ac72c0dc8ceeb6f984201c99db6251 Mon Sep 17 00:00:00 2001
+From: "Brian C. Lane" <bcl@redhat.com>
+Date: Fri, 20 Feb 2015 16:42:07 -0800
+Subject: [PATCH 1/2] libparted: handle truncated GPT disks (#1180683)
+
+Upstream patch from Phillip Susi <psusi@ubuntu.com>
+
+If a disk had been truncated, or for some other reason the GPT
+indicated it was larger than it appeared to be, parted silently
+failed to read the partition table.  This patch fixes two errors:
+First, gpt_read_headers() would attempt to read beyond the end of
+the disk since the primary GPT header claims that is where the
+backup lies.  It will now truncate the backup location to the end
+of the disk.  Second, _parse_header() now throws a proper exception
+indicating the nature of the problem and giving the user the chance
+to fix or ignore it.
+
+Resolves: rhbz#1180683
+---
+ libparted/labels/gpt.c | 44 +++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 35 insertions(+), 9 deletions(-)
+
+diff --git a/libparted/labels/gpt.c b/libparted/labels/gpt.c
+index 6e33dc3..ec3e3c4 100644
+--- a/libparted/labels/gpt.c
++++ b/libparted/labels/gpt.c
+@@ -718,6 +718,7 @@ _parse_header (PedDisk *disk, const GuidPartitionTableHeader_t *gpt,
+   PedSector first_usable;
+   PedSector last_usable;
+   PedSector last_usable_if_grown;
++  PedSector gpt_disk_length;
+   static int asked_already;
+ 
+ #ifndef DISCOVER_ONLY
+@@ -747,11 +748,36 @@ _parse_header (PedDisk *disk, const GuidPartitionTableHeader_t *gpt,
+ 
+   last_usable_if_grown = disk->dev->length - 2 - _ptes_sectors(disk, gpt);
+ 
+-  PED_ASSERT (last_usable > first_usable, return 0);
+-  PED_ASSERT (last_usable <= disk->dev->length, return 0);
+-
+-  PED_ASSERT (last_usable_if_grown > first_usable, return 0);
+-  PED_ASSERT (last_usable_if_grown <= disk->dev->length, return 0);
++  if (last_usable <= first_usable)
++    {
++      ped_exception_throw (PED_EXCEPTION_ERROR,
++                           PED_EXCEPTION_CANCEL,
++                           _("The GPT on %s claims LastUsableLBA is <= "
++                             "FirstUsableLBA, which is invalid"),
++                           disk->dev->path);
++      return 0;
++    }
++  gpt_disk_length = last_usable + 2 + _ptes_sectors (disk,gpt);
++  if (disk->dev->length < gpt_disk_length)
++    {
++      PedExceptionOption q;
++      q = ped_exception_throw (PED_EXCEPTION_ERROR,
++                               PED_EXCEPTION_FIX | PED_EXCEPTION_IGNORE,
++                               _("The GPT claims that %s is %llu blocks "
++                                 "long, but it is only %llu blocks long. "
++                                 "Fix the GPT to show the correct size?"),
++                               disk->dev->path,
++                               gpt_disk_length,
++                               disk->dev->length);
++      if (q == PED_EXCEPTION_FIX)
++        {
++          last_usable = last_usable_if_grown;
++          gpt_disk_data->AlternateLBA = disk->dev->length - 1;
++          *update_needed = 1;
++        }
++      if (q == PED_EXCEPTION_UNHANDLED)
++        return 0;
++    }
+ 
+   if (!asked_already && last_usable < last_usable_if_grown)
+     {
+@@ -769,6 +795,7 @@ _parse_header (PedDisk *disk, const GuidPartitionTableHeader_t *gpt,
+ 
+       if (q == PED_EXCEPTION_FIX)
+         {
++          last_usable = last_usable_if_grown;
+           /* clear the old backup gpt header */
+           ptt_clear_sectors (disk->dev,
+                              gpt_disk_data->AlternateLBA, 1);
+@@ -886,10 +913,9 @@ gpt_read_headers (PedDisk const *disk,
+   else
+     pth_free (pri);
+ 
+-  gpt_disk_data->AlternateLBA =
+-    (valid_primary
+-     ? PED_LE64_TO_CPU (pri->AlternateLBA)
+-     : dev->length - 1);
++  gpt_disk_data->AlternateLBA = PED_LE64_TO_CPU (pri->AlternateLBA);
++  if( !valid_primary || gpt_disk_data->AlternateLBA > dev->length - 1 )
++    gpt_disk_data->AlternateLBA = dev->length - 1;
+ 
+   void *s_bak;
+   if (!ptt_read_sector (dev, gpt_disk_data->AlternateLBA, &s_bak))
+-- 
+2.1.0
+

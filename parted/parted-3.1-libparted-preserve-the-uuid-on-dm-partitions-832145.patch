@@ -1,0 +1,68 @@
+From d3f237fdddf82549c00e74781cf6e3d4ba6d597b Mon Sep 17 00:00:00 2001
+From: Fedora Ninjas <parted-owner@fedoraproject.org>
+Date: Fri, 3 Aug 2012 17:03:50 -0700
+Subject: [PATCH 5/6] libparted: preserve the uuid on dm partitions (#832145)
+
+* libparted/arch/linux.c (_dm_add_partition): Set the uuid if there was
+  one.
+
+Resolves: rhbz#832145
+---
+ libparted/arch/linux.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/libparted/arch/linux.c b/libparted/arch/linux.c
+index ed14f50..d735712 100644
+--- a/libparted/arch/linux.c
++++ b/libparted/arch/linux.c
+@@ -2446,6 +2446,8 @@ _dm_add_partition (PedDisk* disk, PedPartition* part)
+ {
+         char*           vol_name = NULL;
+         const char*     dev_name = NULL;
++        char*           vol_uuid = NULL;
++        const char*     dev_uuid = NULL;
+         char*           params = NULL;
+         LinuxSpecific*  arch_specific = LINUX_SPECIFIC (disk->dev);
+         uint32_t        cookie = 0;
+@@ -2466,9 +2468,13 @@ _dm_add_partition (PedDisk* disk, PedPartition* part)
+                 goto err;
+ 
+         dev_name = dm_task_get_name (task);
++        dev_uuid = dm_task_get_uuid (task);
+ 
+         if (asprintf (&vol_name, "%sp%d", dev_name, part->num) == -1)
+                 goto err;
++        if (dev_uuid && (strlen(dev_uuid) > 0) \
++             && !asprintf (&vol_uuid, "part%d-%s", part->num, dev_uuid))
++                goto err;
+ 
+         /* Caution: dm_task_destroy frees dev_name.  */
+         dm_task_destroy (task);
+@@ -2483,6 +2489,8 @@ _dm_add_partition (PedDisk* disk, PedPartition* part)
+                 goto err;
+ 
+         dm_task_set_name (task, vol_name);
++        if (vol_uuid)
++                dm_task_set_uuid (task, vol_uuid);
+         dm_task_add_target (task, 0, part->geom.length,
+                 "linear", params);
+         if (!dm_task_set_cookie(task, &cookie, 0))
+@@ -2493,6 +2501,7 @@ _dm_add_partition (PedDisk* disk, PedPartition* part)
+                 dm_task_update_nodes();
+                 dm_task_destroy(task);
+                 free(params);
++                free(vol_uuid);
+                 free(vol_name);
+                 return 1;
+         } else {
+@@ -2504,6 +2513,7 @@ err:
+         if (task)
+                 dm_task_destroy (task);
+         free (params);
++        free (vol_uuid);
+         free (vol_name);
+         return 0;
+ }
+-- 
+1.7.11.4
+

@@ -1,0 +1,115 @@
+From c749046a54d983f74f8156c0aea71b0995b9477d Mon Sep 17 00:00:00 2001
+From: Brian C. Lane <bcl@redhat.com>
+Date: Fri, 10 Dec 2010 11:26:53 -0800
+Subject: [PATCH] default to 1MiB alignment when possible
+
+Change the linux_get_optimum_alignment() function to prefer
+aligning partitions to PED_DEFAULT_ALIGNMENT (1MiB), if possible.
+This helps tools like anaconda better support 4k sector drives.
+
+* include/parted/parted.h (PED_DEFAULT_ALIGNMENT): Define.
+* libparted/arch/linux.c (linux_get_optimum_alignment): Adjust.
+See comments for details.
+* libparted/device.c (ped_device_get_optimum_alignment): Use
+PED_DEFAULT_ALIGNMENT rather than hard-coded 1048576.
+* tests/t9020-alignment.sh: Adjust expectations to match new behavior.
+See http://bugzilla.redhat.com/618255 for details.
+---
+ include/parted/parted.h  |    2 ++
+ libparted/arch/linux.c   |   30 +++++++++++++++++++++++-------
+ libparted/device.c       |    5 +++--
+ tests/t9020-alignment.sh |    2 +-
+ 4 files changed, 29 insertions(+), 10 deletions(-)
+
+diff --git a/include/parted/parted.h b/include/parted/parted.h
+index b2bd2e0..a56d6a5 100644
+--- a/include/parted/parted.h
++++ b/include/parted/parted.h
+@@ -20,6 +20,8 @@
+ #ifndef PARTED_H_INCLUDED
+ #define PARTED_H_INCLUDED
+ 
++#define PED_DEFAULT_ALIGNMENT (1024 * 1024)
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+diff --git a/libparted/arch/linux.c b/libparted/arch/linux.c
+index 4e61bfe..0288a15 100644
+--- a/libparted/arch/linux.c
++++ b/libparted/arch/linux.c
+@@ -2865,13 +2865,29 @@ linux_get_optimum_alignment(const PedDevice *dev)
+         if (!tp)
+                 return NULL;
+ 
+-        /* If optimal_io_size is 0 _and_ alignment_offset is 0 _and_
+-           minimum_io_size is a power of 2 then go with the device.c default */
+-        unsigned long minimum_io_size = blkid_topology_get_minimum_io_size(tp);
+-        if (blkid_topology_get_optimal_io_size(tp) == 0 &&
+-            blkid_topology_get_alignment_offset(tp) == 0 &&
+-            (minimum_io_size & (minimum_io_size - 1)) == 0)
+-                return NULL;
++        /* When PED_DEFAULT_ALIGNMENT is divisible by the *_io_size or
++	   there are no *_io_size values, use the PED_DEFAULT_ALIGNMENT
++           If one or the other will not divide evenly, fall through to
++           previous logic. */
++        unsigned long optimal_io = blkid_topology_get_optimal_io_size(tp);
++        unsigned long minimum_io = blkid_topology_get_minimum_io_size(tp);
++        if (
++            (!optimal_io && !minimum_io)
++	    || (optimal_io && PED_DEFAULT_ALIGNMENT % optimal_io == 0
++		&& minimum_io && PED_DEFAULT_ALIGNMENT % minimum_io == 0)
++	    || (!minimum_io && optimal_io
++		&& PED_DEFAULT_ALIGNMENT % optimal_io == 0)
++	    || (!optimal_io && minimum_io
++		&& PED_DEFAULT_ALIGNMENT % minimum_io == 0)
++           ) {
++            /* DASD needs to use minimum alignment */
++            if (dev->type == PED_DEVICE_DASD)
++                return linux_get_minimum_alignment(dev);
++
++            return ped_alignment_new(
++                    blkid_topology_get_alignment_offset(tp) / dev->sector_size,
++                    PED_DEFAULT_ALIGNMENT / dev->sector_size);
++        }
+ 
+         /* If optimal_io_size is 0 and we don't meet the other criteria
+            for using the device.c default, return the minimum alignment. */
+diff --git a/libparted/device.c b/libparted/device.c
+index 4c43e09..6cbfaaf 100644
+--- a/libparted/device.c
++++ b/libparted/device.c
+@@ -1,6 +1,6 @@
+ /*
+     libparted - a library for manipulating disk partitions
+-    Copyright (C) 1999 - 2001, 2005, 2007-2009 Free Software Foundation, Inc.
++    Copyright (C) 1999 - 2001, 2005, 2007-2010 Free Software Foundation, Inc.
+ 
+     This program is free software; you can redistribute it and/or modify
+     it under the terms of the GNU General Public License as published by
+@@ -554,7 +554,8 @@ ped_device_get_optimum_alignment(const PedDevice *dev)
+                 default:
+                         /* Align to a grain of 1MiB (like vista / win7) */
+                         align = ped_alignment_new(0,
+-                                                  1048576 / dev->sector_size);
++                                                  (PED_DEFAULT_ALIGNMENT
++						   / dev->sector_size));
+                 }
+         }
+ 
+diff --git a/tests/t9020-alignment.sh b/tests/t9020-alignment.sh
+index 0d9a6c4..a16d052 100755
+--- a/tests/t9020-alignment.sh
++++ b/tests/t9020-alignment.sh
+@@ -26,7 +26,7 @@ grep '^#define USE_BLKID 1' "$CONFIG_HEADER" > /dev/null ||
+ 
+ cat <<EOF > exp || framework_failure
+ minimum: 7 8
+-optimal: 7 64
++optimal: 7 2048
+ partition alignment: 0 1
+ EOF
+ 
+-- 
+1.7.3.3
+

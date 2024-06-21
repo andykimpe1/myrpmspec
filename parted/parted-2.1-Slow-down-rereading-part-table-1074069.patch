@@ -1,0 +1,54 @@
+From 8b2887c0b966477b9fd21474e159952efaaa039d Mon Sep 17 00:00:00 2001
+From: "Brian C. Lane" <bcl@redhat.com>
+Date: Thu, 1 May 2014 13:56:26 -0700
+Subject: [PATCH] Slow down rereading part table (#1074069)
+
+When running parted repeatedly it can sometimes fail to reread the part
+table even though it was retrying 5 times. This increases the retry
+count to 100 and sleeps for 10mS between each try instead of retrying as
+fast as possible.
+
+Resolves: rhbz#1074069
+---
+ libparted/arch/linux.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/libparted/arch/linux.c b/libparted/arch/linux.c
+index 5a17d3b..44072c4 100644
+--- a/libparted/arch/linux.c
++++ b/libparted/arch/linux.c
+@@ -43,6 +43,7 @@
+ #ifdef ENABLE_DEVICE_MAPPER
+ #include <libdevmapper.h>
+ #endif
++#include <time.h>
+ 
+ #include "blkpg.h"
+ #include "../architecture.h"
+@@ -2547,12 +2548,12 @@ static int
+ _kernel_reread_part_table (PedDevice* dev)
+ {
+         LinuxSpecific*  arch_specific = LINUX_SPECIFIC (dev);
+-        int             retry_count = 5;
++        int             retry_count = 100;
++        struct timespec req = {0, 100000};
+ 
+         sync();
+         while (ioctl (arch_specific->fd, BLKRRPART)) {
+                 retry_count--;
+-                sync();
+                 if (!retry_count) {
+                         ped_exception_throw (
+                                 PED_EXCEPTION_WARNING,
+@@ -2563,6 +2564,8 @@ _kernel_reread_part_table (PedDevice* dev)
+                                 dev->path, strerror (errno));
+                         return 0;
+                 }
++                sync();
++                nanosleep(&req, NULL);
+         }
+ 
+         return 1;
+-- 
+1.9.0
+

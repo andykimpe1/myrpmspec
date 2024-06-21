@@ -1,0 +1,204 @@
+From db20944f8352f900d0d7eb6d78b367a7049151dd Mon Sep 17 00:00:00 2001
+From: Stephen Powell <zlinuxman@wowway.com>
+Date: Thu, 28 Oct 2010 18:13:07 +0200
+Subject: [PATCH] s390: make DIAG driver work for FBA DASD with block size >
+ 512
+
+In order to make the DIAG driver work for FBA DASD with a block
+size greater than 512, I had to make a rather awkward patch to
+C function vtoc_read_volume_label in libparted/labels/vtoc.c.
+The "right" logic would be "If this is an FBA DASD device
+using the DIAG driver, and the effective block size used by the
+DIAG driver is greater than 512, then do it this way.  Else,
+do it the normal way."  (Note that when using the FBA driver,
+the effective block size is always 512, regardless of the CMS
+logical block size stored in the volume label.  The DIAG driver,
+on the other hand, honors the CMS logical block size.)
+
+The problem is that the information needed to make that decision
+has not been provided to the routine (via the parameter list).
+So what I ended up doing is assuming the normal way, then if
+I don't find a recognized volume label header (VOL1, LNX1,
+or CMS1, in EBCDIC), then I assumed that it must be the special
+case.  So in the special case I end up doing an unnecessary
+read.  It's a kludge, but it works.
+---
+ libparted/labels/dasd.c  | 40 +++++++++++++++++++++----------------
+ libparted/labels/fdasd.c |  5 -----
+ libparted/labels/vtoc.c  | 52 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 75 insertions(+), 22 deletions(-)
+
+diff --git a/libparted/labels/dasd.c b/libparted/labels/dasd.c
+index d88816a..0b1493a 100644
+--- a/libparted/labels/dasd.c
++++ b/libparted/labels/dasd.c
+@@ -301,29 +301,39 @@ dasd_read (PedDisk* disk)
+ 		union vollabel *cms_ptr1 = (union vollabel *) anchor.vlabel;
+ 		cms_volume_label_t *cms_ptr = &cms_ptr1->cms;
+ 		ldl_volume_label_t *ldl_ptr = &cms_ptr1->ldl;
++		int partition_start_block;
+ 
+ 		disk_specific->format_type = 1;
+-		if (is_ldl || cms_ptr->disk_offset == 0)
+-			start = (long long) arch_specific->real_sector_size
+-				/ (long long)disk->dev->sector_size * 3;
++
++		if (is_cms && cms_ptr->usable_count >= cms_ptr->block_count)
++			partition_start_block = 2;   /* FBA DASD */
+ 		else
++			partition_start_block = 3;   /* CKD DASD */
++
++		if (is_ldl)
+ 			start = (long long) arch_specific->real_sector_size
+ 				/ (long long) disk->dev->sector_size
++				* (long long) partition_start_block;
++		else if (cms_ptr->disk_offset == 0)
++			start = (long long) cms_ptr->block_size
++				/ (long long) disk->dev->sector_size
++				* (long long) partition_start_block;
++		else
++			start = (long long) cms_ptr->block_size
++				/ (long long) disk->dev->sector_size
+ 				* (long long) cms_ptr->disk_offset;
++
+ 		if (is_ldl)
+-		   if (ldl_ptr->ldl_version >= 0xf2)
++		   if (strncmp(ldl_ptr->ldl_version,
++			       vtoc_ebcdic_enc("2", str, 1), 1) >= 0)
+ 		      end = (long long) arch_specific->real_sector_size
+ 			    / (long long) disk->dev->sector_size
+ 			    * (long long) ldl_ptr->formatted_blocks - 1;
+ 		   else
+-		      end = (long long) arch_specific->real_sector_size
+-			    / (long long) disk->dev->sector_size
+-			    * (long long) anchor.geo.cylinders
+-			    * (long long) anchor.geo.heads
+-			    * (long long) disk->dev->hw_geom.sectors - 1;
++		      end = disk->dev->length - 1;
+ 		else
+ 		   if (cms_ptr->disk_offset == 0)
+-		      end = (long long) arch_specific->real_sector_size
++		      end = (long long) cms_ptr->block_size
+ 			    / (long long) disk->dev->sector_size
+ 			    * (long long) cms_ptr->block_count - 1;
+ 		   else
+@@ -334,7 +344,7 @@ dasd_read (PedDisk* disk)
+ 			 Linux kernel.  See fs/partitions/ibm.c in the
+ 			 Linux kernel source code.
+ 		      */
+-		      end = (long long) arch_specific->real_sector_size
++		      end = (long long) cms_ptr->block_size
+ 			    / (long long) disk->dev->sector_size
+ 			    * (long long) (cms_ptr->block_count - 1) - 1;
+ 
+@@ -574,7 +584,7 @@ dasd_write (const PedDisk* disk)
+ 
+ 	PDEBUG;
+ 
+-	/* If formated in LDL, don't write anything. */
++	/* If not formated in CDL, don't write anything. */
+ 	if (disk_specific->format_type == 1)
+ 		return 1;
+ 
+@@ -946,11 +956,7 @@ dasd_alloc_metadata (PedDisk* disk)
+ 	   trailing_meta_start = part->geom.end + 1;
+ 	   fdasd_initialize_anchor(&anchor);
+ 	   fdasd_get_geometry(disk->dev, &anchor, arch_specific->fd);
+-	   trailing_meta_end = (long long) arch_specific->real_sector_size
+-		/ (long long) disk->dev->sector_size
+-		* (long long) anchor.geo.cylinders
+-		* (long long) anchor.geo.heads
+-		* (long long) disk->dev->hw_geom.sectors - 1;
++	   trailing_meta_end = (long long) disk->dev->length - 1;
+ 	   fdasd_cleanup(&anchor);
+ 	   if (trailing_meta_end >= trailing_meta_start) {
+ 		new_part2 = ped_partition_new (disk,PED_PARTITION_METADATA,
+diff --git a/libparted/labels/fdasd.c b/libparted/labels/fdasd.c
+index 62baa52..8da7b1f 100644
+--- a/libparted/labels/fdasd.c
++++ b/libparted/labels/fdasd.c
+@@ -814,11 +814,6 @@ fdasd_get_geometry (const PedDevice *dev, fdasd_anchor_t *anc, int f)
+ 				    _("Could not retrieve disk information."));
+ 	}
+ 
+-	if (strncmp(dasd_info.type, "ECKD", 4) != 0)
+-		fdasd_error(anc, wrong_disk_type,
+-			    _("This is not an ECKD disk!  " \
+-			      "This disk type is not supported!"));
+-
+ 	anc->dev_type   = dasd_info.dev_type;
+ 	anc->blksize    = blksize;
+ 	anc->label_pos  = dasd_info.label_block * blksize;
+diff --git a/libparted/labels/vtoc.c b/libparted/labels/vtoc.c
+index 3114d3f..dab5181 100644
+--- a/libparted/labels/vtoc.c
++++ b/libparted/labels/vtoc.c
+@@ -269,6 +269,29 @@ int
+ vtoc_read_volume_label (int f, unsigned long vlabel_start,
+                         volume_label_t *vlabel)
+ {
++
++	char str[5];
++	unsigned long block_zero;
++	typedef struct bogus_label bogus_label_t;
++	typedef union vollabel vollabel_t;
++
++	union __attribute__((packed)) vollabel {
++		volume_label_t cdl;
++		ldl_volume_label_t ldl;
++		cms_volume_label_t cms;
++	};
++
++	struct  __attribute__((packed)) bogus_label {
++	   char overhead[512];
++	   vollabel_t actual_label;
++	};
++
++	bogus_label_t mybogus;
++	bogus_label_t *bogus_ptr = &mybogus;
++	vollabel_t *union_ptr = &bogus_ptr->actual_label;
++	volume_label_t *cdl_ptr = &union_ptr->cdl;
++	cms_volume_label_t *cms_ptr = &union_ptr->cms;
++
+ 	PDEBUG
+ 	int rc;
+ 
+@@ -287,6 +310,35 @@ vtoc_read_volume_label (int f, unsigned long vlabel_start,
+ 		return 1;
+ 	}
+ 
++	if (strncmp(vlabel->volkey, vtoc_ebcdic_enc("VOL1", str, 4), 4) == 0
++	 || strncmp(vlabel->volkey, vtoc_ebcdic_enc("LNX1", str, 4), 4) == 0
++         || strncmp(vlabel->volkey, vtoc_ebcdic_enc("CMS1", str, 4), 4) == 0)
++	return 0;
++
++	/*
++	   If we didn't find a valid volume label, there is a special case
++           we must try before we give up.  For a CMS-formatted disk on FBA
++	   DASD using the DIAG driver and a block size greater than 512, we
++	   must read the block at offset 0, then look for a label within
++	   that block at offset 512.
++	*/
++
++	block_zero = 0;
++
++	if (lseek(f, block_zero, SEEK_SET) == -1) {
++		vtoc_error(unable_to_seek, "vtoc_read_volume_label",
++			   _("Could not read volume label."));
++		return 1;
++	}
++
++	rc = read(f, bogus_ptr, sizeof(bogus_label_t));
++	if (rc != sizeof(bogus_label_t)) {
++		vtoc_error(unable_to_read, "vtoc_read_volume_label",
++			   _("Could not read volume label."));
++		return 1;
++	}
++
++	memcpy(vlabel, cdl_ptr, sizeof *vlabel);
+ 	return 0;
+ }
+ 
+-- 
+1.7.11.4
+

@@ -1,0 +1,58 @@
+commit eb08f90f6d923353c3361848de16acf6f5a6a17d
+Author: Brian C. Lane <bcl@redhat.com>
+Date:   Tue Sep 27 13:21:06 2011 -0700
+
+    fix scsi_debug race
+
+diff --git a/tests/t-local.sh b/tests/t-local.sh
+index 096e67c..68effec 100644
+--- a/tests/t-local.sh
++++ b/tests/t-local.sh
+@@ -48,7 +48,11 @@ scsi_debug_acquire_lock_()
+   lockfile -1 -r $retries -l $lock_timeout_seconds $scsi_debug_lock_file_
+ }
+ 
+-print_sd_names_() { (cd /sys/block && printf '%s\n' sd*); }
++new_sdX_()
++{
++  ls -1dt stamp /sys/block/sd* \
++    | awk '/^stamp/ {exit 1}; /^[/]sys[/]block[/]sd[a-z]/ {print $0; exit 0}'
++}
+ 
+ # Create a device using the scsi_debug module with the options passed to
+ # this function as arguments.  Upon success, print the name of the new device.
+@@ -58,8 +62,8 @@ scsi_debug_setup_()
+ 
+   # It is not trivial to determine the name of the device we're creating.
+   # Record the names of all /sys/block/sd* devices *before* probing:
+-  print_sd_names_ > before
+-  modprobe scsi_debug "$@" || { rm -f before; return 1; }
++  touch stamp
++  modprobe scsi_debug "$@" || { rm -f stamp; return 1; }
+   scsi_debug_modprobe_succeeded_=1
+ 
+   # Wait up to 2s (via .1s increments) for the list of devices to change.
+@@ -68,18 +72,16 @@ scsi_debug_setup_()
+   # FIXME-portability: using "cmp - ..." probably requires GNU cmp.
+   local incr=1
+   local i=0
+-  while print_sd_names_ | cmp -s - before; do
++  local new_dev
++  while :; do
++    new_dev=$(new_sdX_) && break
+     sleep .1 2>/dev/null || { sleep 1; incr=10; }
+     i=$(expr $i + $incr); test $i = 20 && break
+   done
+ 
+-  # Record the names of all /sys/block/sd* devices *after* probe+wait.
+-  print_sd_names_ > after
++  # Remove any /sys/block/ prefix:
++  new_dev=${new_dev#/sys/block/}
+ 
+-  # Determine which device names (if any) are new.
+-  # There could be more than one new device, and there have been a removal.
+-  local new_dev=$(comm -13 before after)
+-  rm -f before after
+   case $new_dev in
+     sd[a-z]) ;;
+     sd[a-z][a-z]) ;;

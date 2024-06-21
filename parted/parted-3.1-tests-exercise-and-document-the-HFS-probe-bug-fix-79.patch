@@ -1,0 +1,98 @@
+From d2f5a48605a1d79bb069902ebc69982e9d791b3e Mon Sep 17 00:00:00 2001
+From: Jim Meyering <meyering@redhat.com>
+Date: Sat, 5 Nov 2011 20:49:18 +0100
+Subject: [PATCH] tests: exercise and document the HFS-probe bug fix (#797979)
+
+Simply zeroing out the total_blocks and block_size members of the
+on-disk _HfsMasterDirectoryBlock would provoke a failed assertion
+any time parted tried to probe that partition.
+* tests/t2500-probe-corrupt-hfs.sh: New script.
+* tests/Makefile.am (TESTS): Add it.
+* NEWS (Bug fixes): Mention this.
+
+Resolves: rhbz#797979
+---
+ NEWS                             |  3 +++
+ tests/Makefile.am                |  1 +
+ tests/t2500-probe-corrupt-hfs.sh | 43 ++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 47 insertions(+)
+ create mode 100755 tests/t2500-probe-corrupt-hfs.sh
+
+diff --git a/NEWS b/NEWS
+index b180d80..67c559a 100644
+--- a/NEWS
++++ b/NEWS
+@@ -80,6 +80,9 @@ GNU parted NEWS                                    -*- outline -*-
+ 
+   when printing tables, parted no longer truncates flag names
+ 
++  libparted no longer gets a failed assertion when probing a partition
++  with an HFS or HFS+ signature, but with invalid ->total_blocks and/or
++  ->block_size values.
+ 
+ * Noteworthy changes in release 2.0 (2009-10-06) [beta]
+ 
+diff --git a/tests/Makefile.am b/tests/Makefile.am
+index 6ee247b..faad89a 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -20,6 +20,7 @@ TESTS = \
+   t2100-mkswap.sh \
+   t2200-dos-label-recog.sh \
+   t2300-dos-label-extended-bootcode.sh \
++  t2500-probe-corrupt-hfs.sh \
+   t3000-resize-fs.sh \
+   t4000-sun-raid-type.sh \
+   t4100-msdos-partition-limits.sh \
+diff --git a/tests/t2500-probe-corrupt-hfs.sh b/tests/t2500-probe-corrupt-hfs.sh
+new file mode 100755
+index 0000000..9960d0f
+--- /dev/null
++++ b/tests/t2500-probe-corrupt-hfs.sh
+@@ -0,0 +1,43 @@
++#!/bin/sh
++# Do not misbehave when probing a corrupt HFS partition.
++
++# Copyright (C) 2011 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++: ${srcdir=.}
++. $srcdir/t-lib.sh
++
++ss=$sector_size_
++
++N=3M
++dev=loop-file
++# create a file large enough to hold a GPT partition table
++dd if=/dev/null of=$dev bs=1 seek=$N || framework_failure
++
++parted -s "$dev" mklabel gpt mkpart p1 1MiB 2MiB > out 2>&1 || fail=1
++compare out /dev/null || fail=1
++
++parted -s "$dev" u s p || fail=1
++
++# Poke an HFS+ signature into place
++printf '\x48\x2b' | dd of=$dev seek=$((2048+2)) conv=notrunc || fail=1
++
++# Or, if starting from a valid HFS/HFS+ file system, poke these:
++# offset 18 total_blocks=0(16b)
++# offset 20 vh->block_size=0(32b)
++
++parted -s "$dev" u s p || fail=1
++
++Exit $fail
+-- 
+1.7.11.4
+

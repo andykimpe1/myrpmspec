@@ -1,0 +1,345 @@
+From 2e9383d725482188e47f35df368604a813ea16f8 Mon Sep 17 00:00:00 2001
+From: Stephen Powell <zlinuxman@wowway.com>
+Date: Sat, 8 May 2010 09:39:24 +0200
+Subject: [PATCH] s390: improve/correct DASD support
+
+The long title would be "corrections to partition size and location
+calculations for type 1 partitions for s390 dasd".
+
+This could be treated as two separate fixes, one to make corrections
+for LDL formatted disks and one to add support for CMS formatted
+disks.  I see CMS formatted disks as a variant of LDL formatted
+disks, with the additional twist that CMS formatted disks can
+be reserved or recomped, which LDL formatted disks cannot be.
+This affects the size and location of the partition.
+
+With these patches, parted matches the behavior of the Linux kernel
+in recognizing partitions on CMS- and LDL-formatted disks, as documented
+in the Linux kernel source code in routine fs/partitions/ibm.c.
+Calculation of the metadata has also been changed so that parted will
+show no free space on such a disk.  In some cases there are now two
+non-contiguous metadata extents: one at the beginning of the disk and
+one at the end.
+
+As before, parted only supports CKD DASD using the ECKD driver.
+FBA DASD and CKD DASD using the DIAG driver are still not supported.
+
+In my regression testing I have discovered some problems in the area
+of recognizing file system options.  However, since I can duplicate
+these errors on a version of parted which does not contain my changes,
+I have concluded that my changes did not cause this and therefore
+this is an unrelated bug.
+---
+ include/parted/vtoc.h    |  56 ++++++++++++++++++++++++-
+ libparted/labels/dasd.c  | 106 +++++++++++++++++++++++++++++++++++++++++------
+ libparted/labels/fdasd.c |  15 +++----
+ libparted/labels/vtoc.c  |  14 ++++---
+ 4 files changed, 166 insertions(+), 25 deletions(-)
+
+diff --git a/include/parted/vtoc.h b/include/parted/vtoc.h
+index 6b41584..d79ce39 100644
+--- a/include/parted/vtoc.h
++++ b/include/parted/vtoc.h
+@@ -49,6 +49,8 @@ typedef struct cchhb            cchhb_t;
+ typedef struct cchh             cchh_t;
+ typedef struct labeldate        labeldate_t;
+ typedef struct volume_label     volume_label_t;
++typedef struct cms_volume_label cms_volume_label_t;
++typedef struct ldl_volume_label ldl_volume_label_t;
+ typedef struct extent           extent_t;
+ typedef struct dev_const        dev_const_t;
+ typedef struct format1_label    format1_label_t;
+@@ -81,7 +83,7 @@ struct __attribute__ ((packed)) labeldate {
+ 
+ struct __attribute__ ((packed)) volume_label {
+ 	char volkey[4];         /* volume key = volume label                 */
+-	char vollbl[4];	        /* volume label                              */
++	char vollbl[4];	        /* volume label ("VOL1" in EBCDIC)           */
+ 	char volid[6];	        /* volume identifier                         */
+ 	u_int8_t security;	/* security byte                             */
+ 	cchhb_t vtoc;           /* VTOC address                              */
+@@ -93,6 +95,58 @@ struct __attribute__ ((packed)) volume_label {
+ 	char res2[4];	        /* reserved                                  */
+ 	char lvtoc[14];	        /* owner code for LVTOC                      */
+ 	char res3[29];	        /* reserved                                  */
++        char fudge[4];          /* filler to match length of ldl label       */
++};
++
++struct __attribute__ ((packed)) ldl_volume_label {
++	char vollbl[4];         /* Label identifier ("LNX1" in EBCDIC)       */
++        char volid[6];          /* Volume identifier                         */
++        char res3[69];          /* Reserved field                            */
++        char ldl_version[1];    /* Version number, valid for ldl format      */
++        u_int64_t formatted_blocks;  /* valid when ldl_version >= "2" (in
++                                        EBCDIC)                              */
++};
++
++/*
++ * See:
++ *	z/VM V5R2.0 CMS Planning and Administration
++ *	SC24-6078-01
++ *	What CMS Does / Disk and File Management / Disk File Format
++ * http://publib.boulder.ibm.com/infocenter/zvm/v5r4/topic/com.ibm.zvm.v54.dmsd1/hcsg2b1018.htm
++ */
++struct __attribute__ ((packed)) cms_volume_label {
++	char label_id[4];       /* Label identifier ("CMS1" in EBCDIC)       */
++	char vol_id[6];         /* Volume identifier                         */
++	char version_id[2];     /* Version identifier ("\0\0")               */
++	u_int32_t block_size;   /* Disk block size (512, 1024, 2048 or 4096) */
++	u_int32_t origin_ptr;   /* Disk origin pointer (4 or 5)              */
++	u_int32_t usable_count; /* Number of usable cylinders/blocks         */
++	u_int32_t formatted_count; /* Max # of formatted cylinders/blocks    */
++	u_int32_t block_count;  /* Disk size in CMS blocks                   */
++	u_int32_t used_count;   /* Number of CMS blocks in use               */
++	u_int32_t fst_size;     /* File Status Table (FST) size (64)         */
++	u_int32_t fst_count;    /* Number of FSTs per CMS block              */
++	char format_date[6];    /* Disk FORMAT date (YYMMDDhhmmss)           */
++	char reserved1[2];      /* Reserved fields.
++	                           The low-order bit of the first byte is a
++	                           century flag.  0 = 1900s, 1 = 2000s.
++	                           It is used in conjunction with
++	                           "format_date" to determine the
++	                           four-digit year.                          */
++	u_int32_t disk_offset;  /* Offset in blocks to the start of the
++	                           reserved file when the disk is reserved.
++	                           This is the number of blocks to skip
++	                           before the partition starts.              */
++	u_int32_t map_block;    /* Allocation map block with next hole       */
++	u_int32_t hblk_disp;    /* Displacement in HBLK data of next hole    */
++	u_int32_t user_disp;    /* Disp into user part of allocation map     */
++	u_int32_t open_files;   /* Count of SFS open files for this ADT.
++	                           open_files is not really part of the
++	                           volume label.  It is not used for
++	                           minidisks.                                */
++	char segment_name[8];   /* Name of the shared segment.
++	                           segment_name is not really part of the
++	                           volume label.  It is not stored on disk.  */
+ };
+ 
+ struct __attribute__ ((packed)) extent {
+diff --git a/libparted/labels/dasd.c b/libparted/labels/dasd.c
+index 53c9c90..d88816a 100644
+--- a/libparted/labels/dasd.c
++++ b/libparted/labels/dasd.c
+@@ -286,18 +286,58 @@ dasd_read (PedDisk* disk)
+ 
+ 	ped_disk_delete_all (disk);
+ 
+-	if (strncmp(anchor.vlabel->volkey,
+-				vtoc_ebcdic_enc ("LNX1", str, 4), 4) == 0) {
++	bool is_ldl = strncmp(anchor.vlabel->volkey,
++			 vtoc_ebcdic_enc("LNX1", str, 4), 4) == 0;
++	bool is_cms = strncmp(anchor.vlabel->volkey,
++			 vtoc_ebcdic_enc("CMS1", str, 4), 4) == 0;
++	if (is_ldl || is_cms) {
+ 		DasdPartitionData* dasd_data;
+ 
+-		/* LDL format, old one */
++		union vollabel {
++			volume_label_t unused;
++			ldl_volume_label_t ldl;
++			cms_volume_label_t cms;
++		};
++		union vollabel *cms_ptr1 = (union vollabel *) anchor.vlabel;
++		cms_volume_label_t *cms_ptr = &cms_ptr1->cms;
++		ldl_volume_label_t *ldl_ptr = &cms_ptr1->ldl;
++
+ 		disk_specific->format_type = 1;
+-		start = 24;
+-		end = (long long)(long long) anchor.geo.cylinders
+-		      * (long long)anchor.geo.heads
+-		      * (long long)disk->dev->hw_geom.sectors
+-		      * (long long)arch_specific->real_sector_size
+-		      / (long long)disk->dev->sector_size - 1;
++		if (is_ldl || cms_ptr->disk_offset == 0)
++			start = (long long) arch_specific->real_sector_size
++				/ (long long)disk->dev->sector_size * 3;
++		else
++			start = (long long) arch_specific->real_sector_size
++				/ (long long) disk->dev->sector_size
++				* (long long) cms_ptr->disk_offset;
++		if (is_ldl)
++		   if (ldl_ptr->ldl_version >= 0xf2)
++		      end = (long long) arch_specific->real_sector_size
++			    / (long long) disk->dev->sector_size
++			    * (long long) ldl_ptr->formatted_blocks - 1;
++		   else
++		      end = (long long) arch_specific->real_sector_size
++			    / (long long) disk->dev->sector_size
++			    * (long long) anchor.geo.cylinders
++			    * (long long) anchor.geo.heads
++			    * (long long) disk->dev->hw_geom.sectors - 1;
++		else
++		   if (cms_ptr->disk_offset == 0)
++		      end = (long long) arch_specific->real_sector_size
++			    / (long long) disk->dev->sector_size
++			    * (long long) cms_ptr->block_count - 1;
++		   else
++		      /*
++			 Frankly, I do not understand why the last block
++			 of the CMS reserved file is not included in the
++			 partition; but this is the algorithm used by the
++			 Linux kernel.  See fs/partitions/ibm.c in the
++			 Linux kernel source code.
++		      */
++		      end = (long long) arch_specific->real_sector_size
++			    / (long long) disk->dev->sector_size
++			    * (long long) (cms_ptr->block_count - 1) - 1;
++
+ 		part = ped_partition_new (disk, PED_PARTITION_PROTECTED, NULL, start, end);
+ 		if (!part)
+ 			goto error_close_dev;
+@@ -856,6 +896,10 @@ dasd_alloc_metadata (PedDisk* disk)
+ 	PedSector vtoc_end;
+ 	LinuxSpecific* arch_specific;
+ 	DasdDiskSpecific* disk_specific;
++	PedPartition* part;
++	PedPartition* new_part2;
++	PedSector trailing_meta_start, trailing_meta_end;
++	struct fdasd_anchor anchor;
+ 
+ 	PED_ASSERT (disk != NULL, goto error);
+ 	PED_ASSERT (disk->dev != NULL, goto error);
+@@ -865,9 +909,12 @@ dasd_alloc_metadata (PedDisk* disk)
+ 
+ 	constraint_any = ped_constraint_any (disk->dev);
+ 
+-	/* If formated in LDL, the real partition starts at sector 24. */
+-	if (disk_specific->format_type == 1)
+-		vtoc_end = 23;
++	/* For LDL or CMS, the leading metadata ends at the sector before
++	   the start of the first partition */
++	if (disk_specific->format_type == 1) {
++	        part = ped_disk_get_partition(disk, 1);
++		vtoc_end = part->geom.start - 1;
++	}
+ 	else {
+                 if (disk->dev->type == PED_DEVICE_FILE)
+                         arch_specific->real_sector_size = disk->dev->sector_size;
+@@ -886,6 +933,41 @@ dasd_alloc_metadata (PedDisk* disk)
+ 		goto error;
+ 	}
+ 
++	if (disk_specific->format_type == 1) {
++	   /*
++	      For LDL or CMS there may be trailing metadata as well.
++	      For example: the last block of a CMS reserved file,
++	      the "recomp" area of a CMS minidisk that has been
++	      formatted and then formatted again with the RECOMP
++	      option specifying fewer than the maximum number of
++	      cylinders, a disk that was formatted at one size,
++	      backed up, then restored to a larger size disk, etc.
++	   */
++	   trailing_meta_start = part->geom.end + 1;
++	   fdasd_initialize_anchor(&anchor);
++	   fdasd_get_geometry(disk->dev, &anchor, arch_specific->fd);
++	   trailing_meta_end = (long long) arch_specific->real_sector_size
++		/ (long long) disk->dev->sector_size
++		* (long long) anchor.geo.cylinders
++		* (long long) anchor.geo.heads
++		* (long long) disk->dev->hw_geom.sectors - 1;
++	   fdasd_cleanup(&anchor);
++	   if (trailing_meta_end >= trailing_meta_start) {
++		new_part2 = ped_partition_new (disk,PED_PARTITION_METADATA,
++		   NULL, trailing_meta_start, trailing_meta_end);
++		if (!new_part2) {
++		   ped_partition_destroy (new_part);
++		   goto error;
++		}
++		if (!ped_disk_add_partition (disk, new_part2,
++		   constraint_any)) {
++		   ped_partition_destroy (new_part2);
++		   ped_partition_destroy (new_part);
++		   goto error;
++		}
++	   }
++	}
++
+ 	ped_constraint_destroy (constraint_any);
+ 	return 1;
+ 
+diff --git a/libparted/labels/fdasd.c b/libparted/labels/fdasd.c
+index 6397f27..62baa52 100644
+--- a/libparted/labels/fdasd.c
++++ b/libparted/labels/fdasd.c
+@@ -698,15 +698,15 @@ fdasd_valid_vtoc_pointer(fdasd_anchor_t *anc, unsigned long b, int fd)
+ 	/* VOL1 label contains valid VTOC pointer */
+ 	vtoc_read_label (fd, b, NULL, anc->f4, NULL, NULL);
+ 
+-	if (anc->f4->DS4IDFMT != 0xf4) {
+-		if (strncmp(anc->vlabel->volkey,vtoc_ebcdic_enc("LNX1",str,4),4) == 0)
+-			return 0;
+-		fdasd_error(anc, wrong_disk_format, _("Invalid VTOC."));
+-	} else {
++	if (anc->f4->DS4IDFMT == 0xf4) {
+ 		fdasd_process_valid_vtoc (anc, b, fd);
++		return 0;
+ 	}
++	if (strncmp(anc->vlabel->volkey, vtoc_ebcdic_enc("LNX1",str,4),4) == 0 ||
++	    strncmp(anc->vlabel->volkey, vtoc_ebcdic_enc("CMS1",str,4),4) == 0)
++		return 0;
+ 
+-	return 0;
++	fdasd_error(anc, wrong_disk_format, _("Invalid VTOC."));
+ }
+ 
+ /*
+@@ -737,7 +737,8 @@ fdasd_check_volume (fdasd_anchor_t *anc, int fd)
+ 		} else {
+ 			return 1;
+ 		}
+-	} else if (strncmp (v->volkey, vtoc_ebcdic_enc ("LNX1", str, 4), 4) == 0) {
++	} else if (strncmp (v->volkey, vtoc_ebcdic_enc ("LNX1", str, 4), 4) == 0 ||
++	           strncmp (v->volkey, vtoc_ebcdic_enc ("CMS1", str, 4), 4) == 0) {
+ 		return 0;
+ 	}
+ 
+diff --git a/libparted/labels/vtoc.c b/libparted/labels/vtoc.c
+index 3742160..3114d3f 100644
+--- a/libparted/labels/vtoc.c
++++ b/libparted/labels/vtoc.c
+@@ -150,7 +150,7 @@ enum failure {
+ 	unable_to_read
+ };
+ 
+-static char buffer[85];
++static char buffer[89];
+ 
+ static void
+ vtoc_error (enum failure why, char const *s1, char const *s2)
+@@ -257,7 +257,7 @@ void
+ vtoc_volume_label_init (volume_label_t *vlabel)
+ {
+ 	PDEBUG
+-	sprintf(buffer, "%84s", " ");
++	sprintf(buffer, "%88s", " ");
+ 	vtoc_ebcdic_enc(buffer, buffer, sizeof *vlabel);
+ 	memcpy(vlabel, buffer, sizeof *vlabel);
+ }
+@@ -279,7 +279,9 @@ vtoc_read_volume_label (int f, unsigned long vlabel_start,
+ 	}
+ 
+ 	rc = read(f, vlabel, sizeof(volume_label_t));
+-	if (rc != sizeof(volume_label_t)) {
++	if (rc != sizeof(volume_label_t) &&
++	/* For CDL we ask to read 88 bytes, but only get 84 */
++            rc != sizeof(volume_label_t) - 4) {
+ 		vtoc_error(unable_to_read, "vtoc_read_volume_label",
+ 			   _("Could not read volume label."));
+ 		return 1;
+@@ -302,8 +304,10 @@ vtoc_write_volume_label (int f, unsigned long vlabel_start,
+ 		vtoc_error(unable_to_seek, "vtoc_write_volume_label",
+ 			   _("Could not write volume label."));
+ 
+-	rc = write(f, vlabel, sizeof(volume_label_t));
+-	if (rc != sizeof(volume_label_t))
++	rc = write(f, vlabel, sizeof(volume_label_t) - 4);
++	/* Subtract 4 to leave off the "fudge" variable when writing.
++           We only write CDL volume labels, never LDL or CMS.  */
++	if (rc != sizeof(volume_label_t) - 4)
+ 		vtoc_error(unable_to_write, "vtoc_write_volume_label",
+ 			   _("Could not write volume label."));
+ 
+-- 
+1.7.11.4
+

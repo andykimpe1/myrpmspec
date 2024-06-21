@@ -1,0 +1,74 @@
+From db52898c214310dab4ed84e6cb2f9ffc8c3aa502 Mon Sep 17 00:00:00 2001
+From: Phillip Susi <psusi@cfl.rr.com>
+Date: Tue, 10 May 2011 12:00:10 +0200
+Subject: [PATCH] linux: also detect "in-use" dmraid and scsi-Nth (N>=16)
+ partitions
+
+Prior to this change, Parted would fail to detect any in-use
+partition on a dmraid disk, as well as any in-use partition
+numbered 16 or greater on a regular scsi disk.
+This was because assumptions were being made about the device node
+major/minor numbers and how they relate to the partition number.
+These assumptions are invalid for dmraid devices, and for normal
+disks with >= 16 partitions.
+* libparted/arch/linux.c (_partition_get_part_dev): Remove function.
+(_partition_is_mounted): Rewrite to use _partition_is_mounted_by_path
+instead of _by_dev.
+---
+ libparted/arch/linux.c | 30 ++++++++++--------------------
+ 1 file changed, 10 insertions(+), 20 deletions(-)
+
+diff --git a/libparted/arch/linux.c b/libparted/arch/linux.c
+index c108f5a..b56ce2b 100644
+--- a/libparted/arch/linux.c
++++ b/libparted/arch/linux.c
+@@ -2238,19 +2238,6 @@ linux_partition_get_path (const PedPartition* part)
+         return _device_get_part_path (part->disk->dev, part->num);
+ }
+ 
+-static dev_t
+-_partition_get_part_dev (const PedPartition* part)
+-{
+-        struct stat dev_stat;
+-        int dev_major, dev_minor;
+-
+-        if (stat (part->disk->dev->path, &dev_stat))
+-                return (dev_t)0;
+-        dev_major = major (dev_stat.st_rdev);
+-        dev_minor = minor (dev_stat.st_rdev);
+-        return (dev_t)makedev (dev_major, dev_minor + part->num);
+-}
+-
+ static int
+ _mount_table_search (const char* file_name, dev_t dev)
+ {
+@@ -2294,16 +2281,19 @@ _partition_is_mounted_by_path (const char *path)
+         return _partition_is_mounted_by_dev (part_stat.st_rdev);
+ }
+ 
++/* If partition PART is mounted, or if we encounter an out-of-memory error
++   while trying to determine its status, return 1.  Otherwise, return 0.  */
+ static int
+ _partition_is_mounted (const PedPartition *part)
+ {
+-        dev_t dev;
+-        if (!ped_partition_is_active (part))
+-                return 0;
+-        dev = _partition_get_part_dev (part);
+-        if (!dev)
+-                return 0;
+-        return _partition_is_mounted_by_dev (dev);
++	if (!ped_partition_is_active (part))
++		return 0;
++	char *part_name = _device_get_part_path (part->disk->dev, part->num);
++	if (!part_name)
++		return 1;
++	int status = _partition_is_mounted_by_path (part_name);
++	free (part_name);
++	return !!status;
+ }
+ 
+ static int
+-- 
+1.9.0
+

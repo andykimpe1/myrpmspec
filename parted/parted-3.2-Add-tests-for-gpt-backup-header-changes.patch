@@ -1,0 +1,442 @@
+From 61bd8b07eecb1f842341dac986ed8630178bbcf7 Mon Sep 17 00:00:00 2001
+From: "Brian C. Lane" <bcl@redhat.com>
+Date: Fri, 20 Feb 2015 17:14:44 -0800
+Subject: [PATCH] Add tests for gpt backup header changes (#1180683)
+
+Test short devices with valid primary partition, growing the device
+larger than what the header says (backup not at the end, but valid), and
+moving the backup header to the wrong place.
+
+Related: rhbz#1180683
+---
+ tests/Makefile.am                                 |   6 +-
+ tests/gpt-header-move                             |  41 ++++++++
+ tests/t-lib.sh                                    |   8 ++
+ tests/t0203-gpt-shortened-device-primary-valid.sh |  92 ++++++++++++++++++
+ tests/t0281-gpt-grow.sh                           | 105 ++++++++++++++++++++
+ tests/t0282-gpt-move-backup.sh                    | 111 ++++++++++++++++++++++
+ 6 files changed, 362 insertions(+), 1 deletion(-)
+ create mode 100755 tests/gpt-header-move
+ create mode 100755 tests/t0203-gpt-shortened-device-primary-valid.sh
+ create mode 100644 tests/t0281-gpt-grow.sh
+ create mode 100644 tests/t0282-gpt-move-backup.sh
+
+diff --git a/tests/Makefile.am b/tests/Makefile.am
+index 49032f4..7873fd3 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -9,6 +9,9 @@ TESTS = \
+   t0200-gpt.sh \
+   t0201-gpt.sh \
+   t0202-gpt-pmbr.sh \
++  t0203-gpt-shortened-device-primary-valid.sh \
++  t0281-gpt-grow.sh \
++  t0282-gpt-move-backup.sh \
+   t0220-gpt-msftres.sh \
+   t0250-gpt.sh \
+   t0280-gpt-corrupt.sh \
+@@ -40,7 +43,8 @@ TESTS = \
+   t9030-align-check.sh
+ 
+ EXTRA_DIST = \
+-  $(TESTS) test-lib.sh t-lib.sh lvm-utils.sh t-local.sh t-lvm.sh
++  $(TESTS) test-lib.sh t-lib.sh lvm-utils.sh t-local.sh t-lvm.sh \
++  gpt-header-move
+ 
+ check_PROGRAMS = print-align print-max duplicate
+ LDADD = \
+diff --git a/tests/gpt-header-move b/tests/gpt-header-move
+new file mode 100755
+index 0000000..05cdc65
+--- /dev/null
++++ b/tests/gpt-header-move
+@@ -0,0 +1,41 @@
++#!/usr/bin/python
++
++# open img file, subtract 33 from altlba address, and move the last 33 sectors
++# back by 33 sectors
++
++from struct import *
++from zipfile import crc32
++import array
++import sys
++file = open(sys.argv[1],'rb+')
++file.seek(512)
++gptheader = file.read(512)
++altlba = unpack_from('<q', gptheader,offset=32)[0]
++gptheader = array.array('c',gptheader)
++pack_into('<Q', gptheader, 32, altlba-33)
++#zero header crc
++pack_into('<L', gptheader, 16, 0)
++#compute new crc
++newcrc = ((crc32(buffer(gptheader,0,92))) & 0xFFFFFFFF)
++pack_into('<L', gptheader, 16, newcrc)
++file.seek(512)
++file.write(gptheader)
++file.seek(512*altlba)
++gptheader = file.read(512)
++file.seek(512*(altlba-32))
++backup = file.read(512*32)
++altlba -= 33
++gptheader = array.array('c',gptheader)
++#update mylba
++pack_into('<Q', gptheader, 24, altlba)
++#update table lba
++pack_into('<Q', gptheader, 72, altlba-32)
++#zero header crc
++pack_into('<L', gptheader, 16, 0)
++#compute new crc
++newcrc = ((crc32(buffer(gptheader,0,92))) & 0xFFFFFFFF)
++pack_into('<L', gptheader, 16, newcrc)
++file.seek(512*(altlba-32))
++file.write(backup)
++file.write(gptheader)
++file.write("\0" * (512 * 33))
+diff --git a/tests/t-lib.sh b/tests/t-lib.sh
+index dfa5ef7..d4411b5 100644
+--- a/tests/t-lib.sh
++++ b/tests/t-lib.sh
+@@ -44,6 +44,14 @@ getlimits_()
+     error_ "Error running getlimits"
+ }
+ 
++# Copied from test-lib.sh
++emit_superuser_warning()
++{
++  uid=`id -u` || uid=1
++  test "$uid" != 0 &&
++    echo 'WARNING: You are not superuser.  Watch out for permissions.' || :
++}
++
+ require_acl_()
+ {
+   getfacl --version < /dev/null > /dev/null 2>&1 \
+diff --git a/tests/t0203-gpt-shortened-device-primary-valid.sh b/tests/t0203-gpt-shortened-device-primary-valid.sh
+new file mode 100755
+index 0000000..8357899
+--- /dev/null
++++ b/tests/t0203-gpt-shortened-device-primary-valid.sh
+@@ -0,0 +1,92 @@
++#!/bin/sh
++# Demonstrate that placing a valid gpt-labeled image on a shorter device
++# does not invalidate the primary GPT header.
++
++# Copyright (C) 2012-2014 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++if test "$VERBOSE" = yes; then
++  set -x
++  parted --version
++fi
++
++test_description='Make sure that gpt handles short devices correctly.'
++: ${srcdir=.}
++. $srcdir/t-lib.sh
++
++ss=$sector_size_
++
++dev=dev-file
++dd if=/dev/null of=$dev bs=$ss seek=100 || fail=1
++parted -s -- $dev mklabel gpt || fail=1
++
++# Chop off the last two sectors.
++dd if=/dev/null of=$dev bs=$ss seek=98 || fail=1
++printf 'ok\nignore\n' > in
++parted -m ---pretend-input-tty $dev u s p < in > out || fail=1
++
++# When run as root, there are just curses-related control chars. Remove them.
++sed 's/^.\{1,12\}$//;s,   *,,;/^$/d' out > k && mv k out || fail=1
++# Remove abs name of $dev_file.
++sed "s,/.*/$dev,$dev," out > k && mv k out || fail=1
++
++emit_superuser_warning > out.exp || fail=1
++cat <<EOF >> out.exp || fail=1
++Error: The backup GPT table is corrupt, but the primary appears OK, so that will be used.
++OK/Cancel? ok
++Error: The GPT claims that dev-file is 100 blocks long, but it is only 98 blocks long. Fix the GPT to show the correct size?
++Fix/Ignore? ignore
++EOF
++echo "$dev:98s:file:$ss:$ss:gpt:;" >> out.exp || fail=1
++
++compare out.exp out || fail=1
++
++# Repeat, only fix it this time
++
++printf 'ok\nfix\n' > in
++parted -m ---pretend-input-tty $dev u s p < in > out || fail=1
++
++# When run as root, there are just curses-related control chars. Remove them.
++sed 's/^.\{1,12\}$//;s,   *,,;/^$/d' out > k && mv k out || fail=1
++sed "s,/.*/$dev,$dev," out > k && mv k out || fail=1
++
++emit_superuser_warning > out.exp || fail=1
++cat <<EOF >> out.exp || fail=1
++Error: The backup GPT table is corrupt, but the primary appears OK, so that will be used.
++OK/Cancel? ok
++Error: The GPT claims that dev-file is 100 blocks long, but it is only 98 blocks long. Fix the GPT to show the correct size?
++Fix/Ignore? fix
++EOF
++echo "$dev:98s:file:$ss:$ss:gpt:;" >> out.exp || fail=1
++
++compare out.exp out || fail=1
++
++# Make sure it was fixed
++
++cat <<EOF > out.exp
++Model:  (file)
++Disk DEVICE: SIZEkB
++Sector size (logical/physical): SSB/SSB
++Partition Table: gpt
++
++Number  Start  End  Size  File system  Name  Flags
++
++EOF
++parted -s $dev p > out 2>&1 || fail=1
++# clean up sector size and file name differences
++sed -e "s,/.*/$dev,DEVICE,;s/${ss}B/SSB/g;s/[0-9.]*kB/SIZEkB/" out > out.fixed
++compare out.exp out.fixed || fail=1
++
++Exit $fail
+diff --git a/tests/t0281-gpt-grow.sh b/tests/t0281-gpt-grow.sh
+new file mode 100644
+index 0000000..f3d1496
+--- /dev/null
++++ b/tests/t0281-gpt-grow.sh
+@@ -0,0 +1,105 @@
++#!/bin/sh
++# grow a gpt disk, ensure that parted offers to update the gpt size
++
++# Copyright (C) 2009-2012, 2014 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++if test "$VERBOSE" = yes; then
++  set -x
++  parted --version
++fi
++
++: ${srcdir=.}
++. $srcdir/t-lib.sh
++
++require_512_byte_sector_size_
++dev=loop-file
++
++ss=$sector_size_
++n_sectors=5000
++
++dd if=/dev/null of=$dev bs=$ss seek=$n_sectors || fail=1
++
++# create gpt label
++parted -s $dev mklabel gpt > empty 2>&1 || fail=1
++compare /dev/null empty || fail=1
++
++# print the empty table
++parted -m -s $dev unit s print > t 2>&1 || fail=1
++sed "s,.*/$dev:,$dev:," t > out || fail=1
++
++# check for expected output
++printf "BYT;\n$dev:${n_sectors}s:file:$sector_size_:$sector_size_:gpt:;\n" \
++  > exp || fail=1
++compare exp out || fail=1
++
++# grow disk
++n_sectors=5500
++dd if=/dev/null of=$dev bs=$ss seek=$n_sectors || fail=1
++
++# printing must warn, but not fix in script mode
++parted -s $dev print > out 2>&1 || fail=1
++
++# Transform the actual output, to avoid spurious differences when
++# $PWD contains a symlink-to-dir.  Also, remove the ^M      ...^M bogosity.
++# normalize the actual output
++mv out o2 && sed -e "s,/.*/$dev,DEVICE,;s,   *,,g;s, $,," \
++                      -e "s,^.*/lt-parted: ,parted: ," o2 > out
++
++# check for expected diagnostic
++cat <<EOF > exp || fail=1
++Warning: Not all of the space available to DEVICE appears to be used, you can fix the GPT to use all of the space (an extra 500 blocks) or continue with the current setting?
++Model:  (file)
++Disk DEVICE: 2816kB
++Sector size (logical/physical): 512B/512B
++Partition Table: gpt
++
++Number  Start  End  Size  File system  Name  Flags
++
++EOF
++compare exp out || fail=1
++
++# now we fix
++printf 'f\n' | parted ---pretend-input-tty $dev print > out 2>&1 || fail=1
++
++# Transform the actual output, to avoid spurious differences when
++# $PWD contains a symlink-to-dir.  Also, remove the ^M      ...^M bogosity.
++# normalize the actual output
++mv out o2 && sed -e "s,/.*/$dev,DEVICE,;s,   *,,g;s, $,," \
++                      -e "s,^.*/lt-parted: ,parted: ," o2 > out
++
++# check for expected diagnostic
++emit_superuser_warning > exp || fail=1
++cat <<EOF >> exp || fail=1
++Warning: Not all of the space available to DEVICE appears to be used, you can fix the GPT to use all of the space (an extra 500 blocks) or continue with the current setting?
++Fix/Ignore? f
++Model:  (file)
++Disk DEVICE: 2816kB
++Sector size (logical/physical): 512B/512B
++Partition Table: gpt
++
++Number  Start  End  Size  File system  Name  Flags
++
++EOF
++compare exp out || fail=1
++
++
++# Now should not warn
++
++parted -s $dev print > err 2>&1 || fail=1
++grep Warning: err > k ; mv k err
++compare /dev/null err || fail=1
++
++Exit $fail
+diff --git a/tests/t0282-gpt-move-backup.sh b/tests/t0282-gpt-move-backup.sh
+new file mode 100644
+index 0000000..c945820
+--- /dev/null
++++ b/tests/t0282-gpt-move-backup.sh
+@@ -0,0 +1,111 @@
++#!/bin/sh
++# put backup copy gpt in the wrong place, ensure that
++# parted offers to fix
++
++# Copyright (C) 2009-2012, 2014 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++if test "$VERBOSE" = yes; then
++  set -x
++  parted --version
++fi
++
++: ${srcdir=.}
++. $srcdir/t-lib.sh
++
++PATH="..:$PATH"
++export PATH
++
++require_512_byte_sector_size_
++dev=loop-file
++
++ss=$sector_size_
++n_sectors=5000
++
++dd if=/dev/null of=$dev bs=$ss seek=$n_sectors || fail=1
++
++# create gpt label
++parted -s $dev mklabel gpt > empty 2>&1 || fail=1
++compare /dev/null empty || fail=1
++
++# print the empty table
++parted -m -s $dev unit s print > t 2>&1 || fail=1
++sed "s,.*/$dev:,$dev:," t > out || fail=1
++
++# check for expected output
++printf "BYT;\n$dev:${n_sectors}s:file:$sector_size_:$sector_size_:gpt:;\n" \
++  > exp || fail=1
++compare exp out || fail=1
++
++# Make sure the helper is executable
++chmod u+x ../gpt-header-move
++
++# move the backup
++gpt-header-move $dev || fail=1
++
++# printing must warn, but not fix in script mode
++parted -s $dev print > out 2>&1 || fail=1
++
++# Transform the actual output, to avoid spurious differences when
++# $PWD contains a symlink-to-dir.  Also, remove the ^M      ...^M bogosity.
++# normalize the actual output
++mv out o2 && sed -e "s,/.*/$dev,DEVICE,;s,   *,,g;s, $,," \
++                      -e "s,^.*/lt-parted: ,parted: ," o2 > out
++
++# check for expected diagnostic
++cat <<EOF > exp || fail=1
++Error: The backup GPT table is not at the end of the disk, as it should be.  Fix, by moving the backup to the end (and removing the old backup)?
++Model:  (file)
++Disk DEVICE: 2560kB
++Sector size (logical/physical): 512B/512B
++Partition Table: gpt
++
++Number  Start  End  Size  File system  Name  Flags
++
++EOF
++compare exp out || fail=1
++
++# now we fix
++printf 'f\n' | parted ---pretend-input-tty $dev print > out 2>&1 || fail=1
++
++# Transform the actual output, to avoid spurious differences when
++# $PWD contains a symlink-to-dir.  Also, remove the ^M      ...^M bogosity.
++# normalize the actual output
++mv out o2 && sed -e "s,/.*/$dev,DEVICE,;s,   *,,g;s, $,," \
++                      -e "s,^.*/lt-parted: ,parted: ," o2 > out
++
++# check for expected diagnostic
++emit_superuser_warning > exp || fail=1
++cat <<EOF >> exp || fail=1
++Error: The backup GPT table is not at the end of the disk, as it should be.  Fix, by moving the backup to the end (and removing the old backup)?
++Fix/Ignore? f
++Model:  (file)
++Disk DEVICE: 2560kB
++Sector size (logical/physical): 512B/512B
++Partition Table: gpt
++
++Number  Start  End  Size  File system  Name  Flags
++
++EOF
++compare exp out || fail=1
++
++
++# Now should not warn
++
++parted -s $dev print > err 2>&1 || fail=1
++grep Error: err > k ; mv k err
++compare /dev/null err || fail=1
++
++Exit $fail
+-- 
+2.1.0
+
