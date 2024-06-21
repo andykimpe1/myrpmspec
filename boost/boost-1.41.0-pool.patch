@@ -1,0 +1,102 @@
+diff -up boost-1.41.0.cmake0/boost/pool/pool.hpp\~ boost-1.41.0.cmake0/boost/pool/pool.hpp
+--- boost-1.41.0.cmake0/boost/pool/pool.hpp~	2009-11-18 17:44:37.000000000 +0100
++++ boost-1.41.0.cmake0/boost/pool/pool.hpp	2012-06-07 02:13:56.232161348 +0200
+@@ -26,6 +26,10 @@
+ 
+ #include <boost/pool/poolfwd.hpp>
+ 
++// std::numeric_limits
++#include <boost/limits.hpp>
++// boost::math::static_lcm
++#include <boost/math/common_factor.hpp>
+ // boost::details::pool::ct_lcm
+ #include <boost/pool/detail/ct_gcd_lcm.hpp>
+ // boost::details::pool::lcm
+@@ -184,6 +188,15 @@ class pool: protected simple_segregated_
+       return details::pool::lcm<size_type>(requested_size, min_size);
+     }
+ 
++    size_type max_chunks() const
++    { //! Calculated maximum number of memory chunks that can be allocated in a single call by this Pool.
++      size_type partition_size = alloc_size();
++      size_type POD_size = math::static_lcm<sizeof(size_type), sizeof(void *)>::value + sizeof(size_type);
++      size_type max_chunks = (std::numeric_limits<size_type>::max() - POD_size) / alloc_size();
++    
++      return max_chunks;
++    }
++
+     // for the sake of code readability :)
+     static void * & nextof(void * const ptr)
+     { return *(static_cast<void **>(ptr)); }
+@@ -194,7 +207,9 @@ class pool: protected simple_segregated_
+     explicit pool(const size_type nrequested_size,
+         const size_type nnext_size = 32)
+     :list(0, 0), requested_size(nrequested_size), next_size(nnext_size), start_size(nnext_size)
+-    { }
++    {
++      set_next_size(nnext_size);
++    }
+ 
+     ~pool() { purge_memory(); }
+ 
+@@ -209,7 +224,11 @@ class pool: protected simple_segregated_
+ 
+     // These functions are extensions!
+     size_type get_next_size() const { return next_size; }
+-    void set_next_size(const size_type nnext_size) { next_size = start_size = nnext_size; }
++    void set_next_size(const size_type nnext_size)
++    {
++      BOOST_USING_STD_MIN();
++      next_size = start_size = min BOOST_PREVENT_MACRO_SUBSTITUTION(nnext_size, max_chunks());
++    }
+     size_type get_requested_size() const { return requested_size; }
+ 
+     // Both malloc and ordered_malloc do a quick inlined check first for any
+@@ -438,7 +457,7 @@ void * pool<UserAllocator>::malloc_need_
+   if (ptr == 0)
+     return 0;
+   const details::PODptr<size_type> node(ptr, POD_size);
+-  next_size <<= 1;
++  set_next_size(next_size << 1);
+ 
+   //  initialize it,
+   store().add_block(node.begin(), node.element_size(), partition_size);
+@@ -462,7 +481,7 @@ void * pool<UserAllocator>::ordered_mall
+   if (ptr == 0)
+     return 0;
+   const details::PODptr<size_type> node(ptr, POD_size);
+-  next_size <<= 1;
++  set_next_size(next_size << 1);
+ 
+   //  initialize it,
+   //  (we can use "add_block" here because we know that
+@@ -503,6 +522,9 @@ void * pool<UserAllocator>::ordered_mall
+ template <typename UserAllocator>
+ void * pool<UserAllocator>::ordered_malloc(const size_type n)
+ {
++  if (n > max_chunks())
++    return 0;
++
+   const size_type partition_size = alloc_size();
+   const size_type total_req_size = n * requested_size;
+   const size_type num_chunks = total_req_size / partition_size +
+@@ -515,7 +537,7 @@ void * pool<UserAllocator>::ordered_mall
+ 
+   // Not enougn memory in our storages; make a new storage,
+   BOOST_USING_STD_MAX();
+-  next_size = max BOOST_PREVENT_MACRO_SUBSTITUTION(next_size, num_chunks);
++  set_next_size(max BOOST_PREVENT_MACRO_SUBSTITUTION(next_size, num_chunks));
+   const size_type POD_size = next_size * partition_size +
+       details::pool::ct_lcm<sizeof(size_type), sizeof(void *)>::value + sizeof(size_type);
+   char * const ptr = UserAllocator::malloc(POD_size);
+@@ -531,7 +553,7 @@ void * pool<UserAllocator>::ordered_mall
+     store().add_block(node.begin() + num_chunks * partition_size,
+         node.element_size() - num_chunks * partition_size, partition_size);
+ 
+-  next_size <<= 1;
++  set_next_size(next_size << 1);
+ 
+   //  insert it into the list,
+   //   handle border case
+
+Diff finished.  Thu Jun  7 02:14:06 2012

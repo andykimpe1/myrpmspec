@@ -1,0 +1,185 @@
+diff -urp boost-1.41.0.cmake0/boost/archive/shared_ptr_helper.hpp boost-1.41.0.cmake0.pm/boost/archive/shared_ptr_helper.hpp
+--- boost-1.41.0.cmake0/boost/archive/shared_ptr_helper.hpp	2013-12-13 13:01:21.219200086 +0100
++++ boost-1.41.0.cmake0.pm/boost/archive/shared_ptr_helper.hpp	2013-12-13 12:50:18.772182683 +0100
+@@ -71,6 +71,16 @@ class shared_ptr_helper {
+         void operator()(void const *) const {}
+     };
+ 
++    struct void_deleter {
++        const boost::serialization::extended_type_info * m_eti;
++        void_deleter(const boost::serialization::extended_type_info *eti) :
++            m_eti(eti)
++        {}
++        void operator()(void *vp) const {
++            m_eti->destroy(vp);
++        }
++    };
++
+ #ifdef BOOST_NO_MEMBER_TEMPLATE_FRIENDS
+ public:
+ #else
+diff -urp boost-1.41.0.cmake0/boost/serialization/extended_type_info_no_rtti.hpp boost-1.41.0.cmake0.pm/boost/serialization/extended_type_info_no_rtti.hpp
+--- boost-1.41.0.cmake0/boost/serialization/extended_type_info_no_rtti.hpp	2009-11-18 17:44:37.000000000 +0100
++++ boost-1.41.0.cmake0.pm/boost/serialization/extended_type_info_no_rtti.hpp	2013-12-13 13:00:49.424011953 +0100
+@@ -31,6 +31,9 @@
+ #include <boost/serialization/factory.hpp>
+ #include <boost/serialization/throw_exception.hpp>
+ 
++// hijack serialization access
++#include <boost/serialization/access.hpp>
++
+ #include <boost/config/abi_prefix.hpp> // must be the last header
+ #ifdef BOOST_MSVC
+ #  pragma warning(push)
+@@ -141,7 +144,10 @@ public:
+         }
+     }
+     virtual void destroy(void const * const p) const{
+-        delete static_cast<T const *>(p) ;
++        boost::serialization::access::destroy(
++            static_cast<T const * const>(p)
++        );
++        //delete static_cast<T const * const>(p) ;
+     }
+ };
+ 
+diff -urp boost-1.41.0.cmake0/boost/serialization/extended_type_info_typeid.hpp boost-1.41.0.cmake0.pm/boost/serialization/extended_type_info_typeid.hpp
+--- boost-1.41.0.cmake0/boost/serialization/extended_type_info_typeid.hpp	2009-11-18 17:44:37.000000000 +0100
++++ boost-1.41.0.cmake0.pm/boost/serialization/extended_type_info_typeid.hpp	2013-12-13 13:00:49.425011958 +0100
+@@ -32,6 +32,9 @@
+ #include <boost/serialization/extended_type_info.hpp>
+ #include <boost/serialization/factory.hpp>
+ 
++// hijack serialization access
++#include <boost/serialization/access.hpp>
++
+ #include <boost/mpl/if.hpp>
+ 
+ #include <boost/config/abi_prefix.hpp> // must be the last header
+@@ -124,15 +127,11 @@ public:
+             return NULL;
+         }
+     }
+-    virtual void destroy(void const * const /* p */) const {
+-        // the only current usage of extended type info is in the
+-        // serialization library.  The statement below requires
+-        // that destructor of type T be public and this creates
+-        // a problem for some users.  So, for now, comment this
+-        // out 
+-        //delete static_cast<T const *>(p);
+-        // and trap any attempt to invoke this function
+-        assert(false);
++    virtual void destroy(void const * const p) const {
++        boost::serialization::access::destroy(
++            static_cast<T const * const>(p)
++        );
++        //delete static_cast<T const * const>(p);
+     }
+ };
+ 
+Только в boost-1.41.0.cmake0.pm/boost/serialization: extended_type_info_typeid.hpp.orig
+diff -urp boost-1.41.0.cmake0/boost/serialization/weak_ptr.hpp boost-1.41.0.cmake0.pm/boost/serialization/weak_ptr.hpp
+--- boost-1.41.0.cmake0/boost/serialization/weak_ptr.hpp	2009-11-18 17:44:37.000000000 +0100
++++ boost-1.41.0.cmake0.pm/boost/serialization/weak_ptr.hpp	2013-12-13 13:00:49.448012092 +0100
+@@ -29,7 +29,7 @@ inline void save(
+     const unsigned int /* file_version */
+ ){
+     const boost::shared_ptr<T> sp = t.lock();
+-        ar << boost::serialization::make_nvp("shared_ptr", sp);
++    ar << boost::serialization::make_nvp("weak_ptr", sp);
+ }
+ 
+ template<class Archive, class T>
+@@ -39,7 +39,7 @@ inline void load(
+     const unsigned int /* file_version */
+ ){
+     boost::shared_ptr<T> sp;
+-        ar >> boost::serialization::make_nvp("shared_ptr", sp);
++    ar >> boost::serialization::make_nvp("weak_ptr", sp);
+     t = sp;
+ }
+ 
+diff -urp boost-1.41.0.cmake0/libs/serialization/src/extended_type_info.cpp boost-1.41.0.cmake0.pm/libs/serialization/src/extended_type_info.cpp
+--- boost-1.41.0.cmake0/libs/serialization/src/extended_type_info.cpp	2009-11-18 17:44:37.000000000 +0100
++++ boost-1.41.0.cmake0.pm/libs/serialization/src/extended_type_info.cpp	2013-12-13 12:50:30.068347163 +0100
+@@ -78,6 +78,13 @@ class extended_type_info_arg : public ex
+     virtual const char * get_debug_info() const {
+         return get_key();
+     }
++    virtual void * construct(unsigned int /*count*/, ...) const{
++        assert(false);
++        return NULL;
++    }
++    virtual void destroy(void const * const /*p*/) const {
++        assert(false);
++    }
+ public:
+     extended_type_info_arg(const char * key) :
+         extended_type_info(0, key)
+Только в boost-1.41.0.cmake0.pm/libs/serialization/src: extended_type_info.cpp.orig
+diff -urp boost-1.41.0.cmake0/libs/serialization/src/extended_type_info_typeid.cpp boost-1.41.0.cmake0.pm/libs/serialization/src/extended_type_info_typeid.cpp
+--- boost-1.41.0.cmake0/libs/serialization/src/extended_type_info_typeid.cpp	2009-11-18 17:44:37.000000000 +0100
++++ boost-1.41.0.cmake0.pm/libs/serialization/src/extended_type_info_typeid.cpp	2013-12-13 12:50:40.613409575 +0100
+@@ -60,9 +60,6 @@ BOOST_SERIALIZATION_DECL(bool) 
+ extended_type_info_typeid_0::is_equal(
+     const boost::serialization::extended_type_info & rhs
+ ) const {
+-    // shortcut for common case
+-    if(this == & rhs)
+-        return true;
+     return static_cast<bool>(
+         * m_ti 
+         == *(static_cast<const extended_type_info_typeid_0 &>(rhs).m_ti)
+@@ -113,6 +110,13 @@ extended_type_info_typeid_0::type_unregi
+ class extended_type_info_typeid_arg : 
+     public extended_type_info_typeid_0
+ {
++    virtual void * construct(unsigned int /*count*/, ...) const{
++        assert(false);
++        return NULL;
++    }
++    virtual void destroy(void const * const /*p*/) const {
++        assert(false);
++    }
+ public:
+     extended_type_info_typeid_arg(const std::type_info & ti) :
+         extended_type_info_typeid_0(NULL)
+Только в boost-1.41.0.cmake0.pm/libs/serialization/src: extended_type_info_typeid.cpp.orig
+diff -urp boost-1.41.0.cmake0/libs/serialization/src/shared_ptr_helper.cpp boost-1.41.0.cmake0.pm/libs/serialization/src/shared_ptr_helper.cpp
+--- boost-1.41.0.cmake0/libs/serialization/src/shared_ptr_helper.cpp	2009-11-18 17:44:37.000000000 +0100
++++ boost-1.41.0.cmake0.pm/libs/serialization/src/shared_ptr_helper.cpp	2013-12-13 13:02:44.418692383 +0100
+@@ -61,15 +61,19 @@ shared_ptr_helper::get_od(
+     if(NULL == m_pointers)
+         m_pointers = new collection_type;
+ 
+-    shared_ptr<const void> sp(od, null_deleter()); 
+-    std::pair<collection_type::iterator, bool> result =
+-        m_pointers->insert(
+-            collection_type::value_type(od, sp)
+-        );
++    collection_type::iterator i = m_pointers->find(od);
++    if(i == m_pointers->end()){
++        shared_ptr<const void> sp(od, void_deleter(true_type));
++	std::pair<collection_type::iterator, bool> result =
++	    m_pointers->insert(collection_type::value_type(od, sp));
++        assert(result.second);
++        i = result.first;
++    }
++
+     od = void_upcast(
+         *true_type, 
+         *this_type,
+-        result.first->first
++        i->first
+     );
+     if(NULL == od)
+         boost::serialization::throw_exception(
+@@ -83,7 +83,7 @@ shared_ptr_helper::get_od(
+                 this_type->get_debug_info()
+             )
+         );
+-    return result_type(result.first, od);
++    return result_type(i, od);
+ }
+ 
+ //  #ifdef BOOST_SERIALIZATION_SHARED_PTR_132_HPP
