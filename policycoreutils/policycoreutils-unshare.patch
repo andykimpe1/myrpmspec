@@ -1,0 +1,244 @@
+diff -up policycoreutils-2.0.83/sandbox/sandbox.8.unshare policycoreutils-2.0.83/sandbox/sandbox.8
+--- policycoreutils-2.0.83/sandbox/sandbox.8.unshare	2012-01-25 17:07:00.491466038 -0500
++++ policycoreutils-2.0.83/sandbox/sandbox.8	2012-01-25 17:12:03.192762933 -0500
+@@ -3,11 +3,11 @@
+ sandbox \- Run cmd under an SELinux sandbox
+ .SH SYNOPSIS
+ .B sandbox
+-[-C] [-c] [-l level ] [[-M | -X]  -H homedir -T tempdir ] [-I includefile ] [ -W windowmanager ] [ -w windowsize ] [[-i file ]...] [ -t type ] cmd
++[-C] [-c] [ -d DPI ] [-l level ] [[-M | -X]  -H homedir -T tempdir ] [-I includefile ] [ -W windowmanager ] [ -w windowsize ] [[-i file ]...] [ -t type ] cmd
+ 
+ .br
+ .B sandbox
+-[-C] [-c] [-l level ] [[-M | -X]  -H homedir -T tempdir ] [-I includefile ] [ -W windowmanager ] [ -w windowsize ] [[-i file ]...] [ -t type ] -S
++[-C] [-c] [ -d DPI ] [-l level ] [[-M | -X]  -H homedir -T tempdir ] [-I includefile ] [ -W windowmanager ] [ -w windowsize ] [[-i file ]...] [ -t type ] -S
+ .br
+ .SH DESCRIPTION
+ .PP
+@@ -60,6 +60,9 @@ Default to /usr/bin/matchbox-window-mana
+ Create an X based Sandbox for gui apps, temporary files for
+ $HOME and /tmp, secondary Xserver, defaults to sandbox_x_t
+ .TP
++\fB\-d\fR
++Set the DPI value for the sanbox X Server. Defaults to the current X Sever DPI.
++.TP
+ \fB\-c\fR
+ Use control groups to control this copy of sandbox.  Specify parameters in /etc/sysconfig/sandbox.  Max memory usage and cpu usage are to be specified in percent.  You can specify which CPUs to use by numbering them 0,1,2... etc.
+ .TP
+diff -up policycoreutils-2.0.83/sandbox/sandbox.unshare policycoreutils-2.0.83/sandbox/sandbox
+--- policycoreutils-2.0.83/sandbox/sandbox.unshare	2012-01-25 17:07:00.494466043 -0500
++++ policycoreutils-2.0.83/sandbox/sandbox	2012-01-25 17:11:45.094745120 -0500
+@@ -118,10 +118,30 @@ def reserve(level):
+     sock.bind("\0%s" % level)
+     fcntl.fcntl(sock.fileno(), fcntl.F_SETFD, fcntl.FD_CLOEXEC)
+ 
++def get_range():
++       try:
++              level =selinux.getcon_raw()[1].split(":")[4]
++              lowc,highc = level.split(".")
++              low = int(lowc[1:])
++              high = int(highc[1:])+1
++              if high - low == 0:
++                     raise IndexError
++
++              return low,high
++       except IndexError:
++              raise ValueError(_("User account must be setup with an MCS Range"))
++
+ def gen_mcs():
+-       while True:
+-              i1 = random.randrange(0, 1024)
+-              i2 = random.randrange(0, 1024)
++       low, high = get_range()
++
++       level = None
++       ctr = 0
++       total = high-low
++       total = (total * (total - 1))/2
++       while ctr < total:
++              ctr += 1
++              i1 = random.randrange(low, high)
++              i2 = random.randrange(low, high)
+               if i1 == i2:
+                      continue
+               if i1 > i2:
+@@ -134,7 +154,10 @@ def gen_mcs():
+               except socket.error:
+                      continue
+               break
+-       return level
++       if level:
++              return level
++       raise ValueError(_("Failed to find any unused category sets.  Consider a larger MCS range for this user."))
++
+ 
+ def fullpath(cmd):
+        for i in [ "/", "./", "../" ]:
+@@ -278,6 +301,10 @@ sandbox [-h] [-c] [-l level ] [-[X|M] [-
+                           action="callback", callback=self.__mount_callback, 
+                           help=_("mount new home and/or tmp directory"))
+ 
++        parser.add_option("-d", "--dpi",
++                          dest="dpi", action="store",
++                          help=_("dots per inch for X display"))
++
+         parser.add_option("-S", "--session", action="store_true",  dest="session", 
+                           default=False,  help=_("run complete desktop session within sandbox"))
+ 
+@@ -322,7 +349,7 @@ sandbox [-h] [-c] [-l level ] [-[X|M] [-
+ 
+         if self.__options.X_ind:
+                self.setype = DEFAULT_X_TYPE
+-               self.dpi=commands.getoutput("xrdb -query | grep dpi  | /bin/cut -f 2")
++
+         if self.__options.setype:
+                self.setype = self.__options.setype
+ 
+@@ -401,6 +428,12 @@ sandbox [-h] [-c] [-l level ] [-[X|M] [-
+                          cmds +=  [ "-t", self.__tmpdir, "-h", self.__homedir ]
+ 
+                          if self.__options.X_ind:
++                                if self.__options.dpi:
++                                       dpi = self.__options.dpi
++                                else:
++                                       import gtk
++                                       dpi = str(gtk.settings_get_default().props.gtk_xft_dpi/1024)
++
+                                 xmodmapfile = self.__homedir + "/.xmodmap"
+                                 xd = open(xmodmapfile,"w")
+                                 subprocess.Popen(["/usr/bin/xmodmap","-pke"],stdout=xd).wait()
+@@ -408,7 +441,7 @@ sandbox [-h] [-c] [-l level ] [-[X|M] [-
+ 
+                                 self.__setup_sandboxrc(self.__options.wm)
+ 
+-                                cmds += [ "--", SANDBOXSH, self.__options.windowsize, self.dpi ]
++                                cmds += [ "--", SANDBOXSH, self.__options.windowsize, dpi ]
+                          else:
+                                 cmds += [ "--" ] + self.__paths
+                          return subprocess.Popen(cmds).wait()
+diff -up policycoreutils-2.0.83/sandbox/seunshare.c.unshare policycoreutils-2.0.83/sandbox/seunshare.c
+--- policycoreutils-2.0.83/sandbox/seunshare.c.unshare	2012-01-25 17:07:00.498466047 -0500
++++ policycoreutils-2.0.83/sandbox/seunshare.c	2012-01-25 17:10:13.707655055 -0500
+@@ -5,8 +5,9 @@
+ 
+ #define _GNU_SOURCE
+ #include <signal.h>
+-#include <sys/types.h>
++#include <sys/fsuid.h>
+ #include <sys/stat.h>
++#include <sys/types.h>
+ #include <sys/wait.h>
+ #include <syslog.h>
+ #include <sys/mount.h>
+@@ -18,7 +19,6 @@
+ #include <stdio.h>
+ #include <regex.h>
+ #include <unistd.h>
+-#include <sys/fsuid.h>
+ #include <stdlib.h>
+ #include <cap-ng.h>
+ #include <getopt.h>		/* for getopt_long() form of getopt() */
+@@ -43,8 +43,8 @@
+ #define MS_REC 1<<14
+ #endif
+ 
+-#ifndef MS_PRIVATE
+-#define MS_PRIVATE 1<<18
++#ifndef MS_SLAVE
++#define MS_SLAVE 1<<19
+ #endif
+ 
+ #ifndef PACKAGE
+@@ -255,7 +255,7 @@ static int verify_shell(const char *shel
+  */
+ static int seunshare_mount(const char *src, const char *dst, struct stat *src_st)
+ {
+-	int flags = MS_REC;
++	int flags = 0;
+ 	int is_tmp = 0;
+ 
+ 	if (verbose)
+@@ -267,14 +267,6 @@ static int seunshare_mount(const char *s
+ 	}
+ 
+ 	/* mount directory */
+-	if (mount(dst, dst,  NULL, MS_BIND | flags, NULL) < 0) {
+-		fprintf(stderr, _("Failed to mount %s on %s: %s\n"), dst, dst, strerror(errno));
+-		return -1;
+-	}
+-	if (mount(dst, dst, NULL, MS_PRIVATE | flags, NULL) < 0) {
+-		fprintf(stderr, _("Failed to make %s private: %s\n"), dst, strerror(errno));
+-		return -1;
+-	}
+ 	if (mount(src, dst, NULL, MS_BIND | flags, NULL) < 0) {
+ 		fprintf(stderr, _("Failed to mount %s on %s: %s\n"), src, dst, strerror(errno));
+ 		return -1;
+@@ -288,14 +280,6 @@ static int seunshare_mount(const char *s
+ 		if (verbose)
+ 			printf(_("Mounting /tmp on /var/tmp\n"));
+ 
+-		if (mount("/var/tmp", "/var/tmp",  NULL, MS_BIND | flags, NULL) < 0) {
+-			fprintf(stderr, _("Failed to mount /var/tmp on /var/tmp: %s\n"), strerror(errno));
+-			return -1;
+-		}
+-		if (mount("/var/tmp", "/var/tmp", NULL, MS_PRIVATE | flags, NULL) < 0) {
+-			fprintf(stderr, _("Failed to make /var/tmp private: %s\n"), strerror(errno));
+-			return -1;
+-		}
+ 		if (mount("/tmp", "/var/tmp",  NULL, MS_BIND | flags, NULL) < 0) {
+ 			fprintf(stderr, _("Failed to mount /tmp on /var/tmp: %s\n"), strerror(errno));
+ 			return -1;
+@@ -959,6 +943,7 @@ int main(int argc, char **argv) {
+ 
+ 	if (child == 0) {
+ 		char *display = NULL;
++		char *LANG = NULL;
+ 		int rc = -1;
+ 
+ 		if (unshare(CLONE_NEWNS) < 0) {
+@@ -966,6 +951,13 @@ int main(int argc, char **argv) {
+ 			goto childerr;
+ 		}
+ 
++		/* Remount / as SLAVE so that nothing mounted in the namespace 
++		   shows up in the parent */
++		if (mount("none", "/", NULL, MS_SLAVE | MS_REC , NULL) < 0) {
++			perror(_("Failed to make / a SLAVE mountpoint\n"));
++			goto childerr;
++		}
++
+ 		/* assume fsuid==ruid after this point */
+ 		setfsuid(uid);
+ 
+@@ -984,12 +976,23 @@ int main(int argc, char **argv) {
+ 				goto childerr;
+ 			}
+ 		}
++		
++		/* construct a new environment */
++		if ((LANG = getenv("LANG")) != NULL) {
++			if ((LANG = strdup(LANG)) == NULL) {
++				perror(_("Out of memory"));
++				goto childerr;
++			}
++		}
++		
+ 		if ((rc = clearenv()) != 0) {
+ 			perror(_("Failed to clear environment"));
+ 			goto childerr;
+ 		}
+ 		if (display)
+ 			rc |= setenv("DISPLAY", display, 1);
++		if (LANG) 
++			rc |= setenv("LANG", LANG, 1);
+ 		rc |= setenv("HOME", pwd->pw_dir, 1);
+ 		rc |= setenv("SHELL", pwd->pw_shell, 1);
+ 		rc |= setenv("USER", pwd->pw_name, 1);
+@@ -1015,6 +1018,7 @@ int main(int argc, char **argv) {
+ 		fprintf(stderr, _("Failed to execute command %s: %s\n"), argv[optind], strerror(errno));
+ childerr:
+ 		free(display);
++		free(LANG);
+ 		exit(-1);
+ 	}
+ 

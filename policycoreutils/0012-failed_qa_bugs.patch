@@ -1,0 +1,294 @@
+diff --git a/policycoreutils/gui/polgen.py b/policycoreutils/gui/polgen.py
+index 212c4b1..8a08fb5 100644
+--- a/policycoreutils/gui/polgen.py
++++ b/policycoreutils/gui/polgen.py
+@@ -313,7 +313,7 @@ class policy:
+ ( self.generate_sandbox_types, self.generate_sandbox_rules))
+ 		if name == "":
+ 			raise ValueError(_("You must enter a name for your confined process/user"))
+-                if not re.match(r"^[a-zA-Z0-9-_]+$", name)::
++                if not re.match(r"^[a-zA-Z0-9-_]+$", name):
+                     raise ValueError(_("Name must be alpha numberic with no spaces. Consider using option \"-n MODULENAME\""))
+ 
+ 		if type == CGI:
+diff --git a/policycoreutils/sandbox/sandbox.8 b/policycoreutils/sandbox/sandbox.8
+index 7277a1e..a3eaf12 100644
+--- a/policycoreutils/sandbox/sandbox.8
++++ b/policycoreutils/sandbox/sandbox.8
+@@ -3,11 +3,11 @@
+ sandbox \- Run cmd under an SELinux sandbox
+ .SH SYNOPSIS
+ .B sandbox
+-[-C] [-c] [ -d DPI ] [-l level ] [[-M | -X]  -H homedir -T tempdir ] [-I includefile ] [ -W windowmanager ] [ -w windowsize ] [[-i file ]...] [ -t type ] cmd
++[-C] [ -d DPI ] [-l level ] [[-M | -X]  -H homedir -T tempdir ] [-I includefile ] [ -W windowmanager ] [ -w windowsize ] [[-i file ]...] [ -t type ] cmd
+ 
+ .br
+ .B sandbox
+-[-C] [-c] [ -d DPI ] [-l level ] [[-M | -X]  -H homedir -T tempdir ] [-I includefile ] [ -W windowmanager ] [ -w windowsize ] [[-i file ]...] [ -t type ] -S
++[-C] [ -d DPI ] [-l level ] [[-M | -X]  -H homedir -T tempdir ] [-I includefile ] [ -W windowmanager ] [ -w windowsize ] [[-i file ]...] [ -t type ] -S
+ .br
+ .SH DESCRIPTION
+ .PP
+@@ -63,9 +63,6 @@ $HOME and /tmp, secondary Xserver, defaults to sandbox_x_t
+ \fB\-d, --dpi\fR
+ Set the DPI value for the sanbox X Server. Defaults to the current X Sever DPI.
+ .TP
+-\fB\-c, --cgroups\fR
+-Use control groups to control this copy of sandbox.  Specify parameters in /etc/sysconfig/sandbox.  Max memory usage and cpu usage are to be specified in percent.  You can specify which CPUs to use by numbering them 0,1,2... etc.
+-.TP
+ \fB\-C, --capabilities\fR
+ Use capabilities within the sandbox.  By default applications executed within the sandbox will not be allowed to use capabilities (setuid apps), with the -C flag, you can use programs requiring capabilities.
+ .PP
+diff --git a/policycoreutils/semanage/semanage b/policycoreutils/semanage/semanage
+index 1b89574..41525f5 100644
+--- a/policycoreutils/semanage/semanage
++++ b/policycoreutils/semanage/semanage
+@@ -41,6 +41,7 @@ except IOError:
+ 
+ if __name__ == '__main__':
+         action  = False
++        noreload  = True
+         manageditems=[ "boolean", "login", "user", "port", "interface", "node", "fcontext"]
+         def set_action(option):
+                global action
+@@ -187,6 +188,7 @@ Object-specific Options (see above):
+ 
+         def process_args(argv):
+                 global action
++                global noreload
+                 action = False
+ 		serange = ""
+ 		port = ""
+@@ -355,32 +357,34 @@ Object-specific Options (see above):
+ 
+ 		if object == "login":
+ 			OBJECT = seobject.loginRecords(store)
+-
++			OBJECT.set_reload(noreload)
+ 		if object == "user":
+ 			OBJECT = seobject.seluserRecords(store)
+-
++			OBJECT.set_reload(noreload)
+ 		if object == "port":
+ 			OBJECT = seobject.portRecords(store)
+-		
++			OBJECT.set_reload(noreload)
+ 		if object == "interface":
+ 			OBJECT = seobject.interfaceRecords(store)
+-
++			OBJECT.set_reload(noreload)
+ 		if object == "node":
+ 			OBJECT = seobject.nodeRecords(store)
+-
++			OBJECT.set_reload(noreload)
+ 		if object == "fcontext":
+ 			OBJECT = seobject.fcontextRecords(store)
+-		
++			OBJECT.set_reload(noreload)
+ 		if object == "boolean":
+ 			OBJECT = seobject.booleanRecords(store)
++			OBJECT.set_reload(noreload)
+                         if use_file:
+                                modify=True
+ 
+ 		if object == "module":
+ 			OBJECT = seobject.moduleRecords(store)
+-		
++			OBJECT.set_reload(noreload)
+ 		if object == "permissive":
+ 			OBJECT = seobject.permissiveRecords(store)
++			OBJECT.set_reload(noreload)
+ 		
+ 		if list:
+ 			if object == "boolean":
+@@ -405,10 +409,10 @@ Object-specific Options (see above):
+ 
+ 		if object == "dontaudit":
+                        OBJECT = seobject.dontauditClass(store)
++                       OBJECT.set_reload(noreload)
+                        OBJECT.toggle(target)
+                        return
+                               
+-		OBJECT.set_reload(noreload)
+ 		if add:
+ 			if object == "login":
+ 				OBJECT.add(target, seuser, serange)
+@@ -568,6 +572,7 @@ Object-specific Options (see above):
+                       trans.start()
+                       for l in fd.readlines():
+                              process_args(mkargv(l))
++                      trans.set_reload(noreload)
+                       trans.finish()
+                else:
+                       process_args(sys.argv[1:])
+diff --git a/policycoreutils/semanage/semanage.8 b/policycoreutils/semanage/semanage.8
+index f64ea4a..d546633 100644
+--- a/policycoreutils/semanage/semanage.8
++++ b/policycoreutils/semanage/semanage.8
+@@ -14,49 +14,49 @@ Input local customizations
+ Manage booleans.  Booleans allow the administrator to modify the confinement of 
+ processes based on his configuration.
+ .br
+-.B semanage boolean [\-S store] \-{d|m|l|n|D} \-[\-on|\-off|\1|0] -F boolean | boolean_file
++.B semanage boolean [\-S store] \-{d|m|l|n|D} [\-N] \-[\-on|\-off|\1|0] -F boolean | boolean_file
+ 
+ Manage SELinux confined users (Roles and levels for an SELinux user)
+ .br
+-.B semanage user [\-S store] \-{a|d|m|l|n|D} [\-LrRP] selinux_name
++.B semanage user [\-S store] \-{a|d|m|l|n|D} [\-LrRPN] selinux_name
+ 
+ Manage login mappings between linux users and SELinux confined users.
+ .br
+-.B semanage login [\-S store] \-{a|d|m|l|n|D} [\-sr] login_name | %groupname
++.B semanage login [\-S store] \-{a|d|m|l|n|D} [\-srN] login_name | %groupname
+ 
+ Manage policy modules.
+ .br
+-.B semanage module [\-S store] \-{a|d|l} [-m [--enable | --disable] ] module_name
++.B semanage module [\-S store] \-{a|d|l} [\-N] [-m [--enable | --disable] ] module_name
+ 
+ Manage network port type definitions
+ .br
+-.B semanage port [\-S store] \-{a|d|m|l|n|D} [\-tr] [\-p proto] port | port_range
++.B semanage port [\-S store] \-{a|d|m|l|n|D} [\-trN] [\-p proto] port | port_range
+ .br
+ 
+ Manage network interface type definitions
+ .br
+-.B semanage interface [\-S store] \-{a|d|m|l|n|D} [\-tr] interface_spec
++.B semanage interface [\-S store] \-{a|d|m|l|n|D} [\-trN] interface_spec
+ 
+ Manage network node type definitions
+ .br
+-.B semanage node [\-S store] -{a|d|m|l|n|D} [-tr] [ -p protocol ] [-M netmask] address
++.B semanage node [\-S store] -{a|d|m|l|n|D} [-trN] [ -p protocol ] [-M netmask] address
+ .br
+ 
+ Manage file context mapping definitions
+ .br
+-.B semanage fcontext [\-S store] \-{a|d|m|l|n|D} [\-frst] file_spec
++.B semanage fcontext [\-S store] \-{a|d|m|l|n|D} [\-frstN] file_spec
+ .br
+ .B semanage fcontext [\-S store] \-{a|d|m|l|n|D} \-e replacement target
+ .br
+ 
+ Manage processes type enforcement mode
+ .br
+-.B semanage permissive [\-S store] \-{a|d|l|n|D} type
++.B semanage permissive [\-S store] [\-N] \-{a|d|l|n|D} type
+ .br
+ 
+ Disable/Enable dontaudit rules in policy
+ .br
+-.B semanage dontaudit [\-S store] [ on | off ]
++.B semanage dontaudit [\-S store] [\-N] [ on | off ]
+ .P
+ 
+ Execute multiple commands within a single transaction.
+@@ -142,6 +142,9 @@ Network Mask
+ .I                \-n, \-\-noheading  
+ Do not print heading when listing OBJECTS.
+ .TP
++.I               \-N, \-\-noreload
++Do not reload policy after commit
++.TP
+ .I                \-o, \-\-output		
+ Output current customizations as semanage commands
+ .TP
+diff --git a/policycoreutils/semanage/seobject.py b/policycoreutils/semanage/seobject.py
+index 2273500..5481182 100644
+--- a/policycoreutils/semanage/seobject.py
++++ b/policycoreutils/semanage/seobject.py
+@@ -203,7 +203,14 @@ def get_all_types():
+         all_types = map(lambda x: x['name'], setools.seinfo(setools.TYPE))
+     return all_types
+ 
++all_domains = None
+ def get_all_domains():
++    global all_domains
++    if not all_domains:
++        all_domains = setools.seinfo(setools.ATTRIBUTE,"domain")[0]["types"]
++    return all_domains
++
++def get_all_entrypoint_domains():
+     all_domains = []
+     types=get_all_types()
+     types.sort()
+@@ -1843,7 +1850,7 @@ class fcontextRecords(semanageRecords):
+ 
+ 		if selinux.is_selinux_enabled():
+ 	 		if setype and setype not in self.valid_types:
+-				raise ValueError(_("Type %s is invalid, must be a port type") % setype)
++				raise ValueError(_("Type %s is invalid, must be a file or device type") % setype)
+ 
+ 		(rc, k) = semanage_fcontext_key_create(self.sh, target, file_types[ftype])
+ 		if rc < 0:
+diff --git a/policycoreutils/setfiles/setfiles.8 b/policycoreutils/setfiles/setfiles.8
+index 24026ee..1fd050f 100644
+--- a/policycoreutils/setfiles/setfiles.8
++++ b/policycoreutils/setfiles/setfiles.8
+@@ -4,7 +4,12 @@ setfiles \- set file SELinux security contexts.
+ 
+ .SH "SYNOPSIS"
+ .B setfiles
+-.I [\-c policy ] [\-d] [\-l] [\-n] [\-e directory ] [\-o filename ] [\-q] [\-s] [\-v] [\-vv] [\-W] [\-F] spec_file pathname...
++
++.I [\-dnpqvW] [\-o filename] [\-r alt_root_path ] spec_file pathname...
++
++.I \-c policyfile spec_file
++
++.I \-s [\-dnpqvW] [\-o filename ] spec_file
+ .SH "DESCRIPTION"
+ This manual page describes the
+ .BR setfiles
+diff --git a/policycoreutils/setfiles/setfiles.c b/policycoreutils/setfiles/setfiles.c
+index 433cf19..ddf7348 100644
+--- a/policycoreutils/setfiles/setfiles.c
++++ b/policycoreutils/setfiles/setfiles.c
+@@ -277,7 +277,7 @@ int main(int argc, char **argv)
+ 		case 'd':
+ 			if (r_opts.quiet) {
+ 				fprintf(stderr,"-q and -d options mutually exclusive.\n");
+-				exit(1);
++				usage(argv[0]);
+ 			}
+ 			r_opts.debug = 1;
+ 			break;
+@@ -311,7 +311,7 @@ int main(int argc, char **argv)
+ 		case 'q':
+ 			if (r_opts.debug) {
+ 				fprintf(stderr,"-q and -d options mutually exclusive.\n");
+-				exit(1);
++				usage(argv[0]);
+ 			}
+ 			r_opts.quiet = 1;
+ 			break;
+@@ -324,15 +324,16 @@ int main(int argc, char **argv)
+ 			if (optind + 1 >= argc) {
+ 				fprintf(stderr, "usage:  %s -r rootpath\n",
+ 					argv[0]);
+-				exit(1);
++				usage(argv[0]);
+ 			}
++
+ 			if (NULL != r_opts.rootpath) {
+ 				fprintf(stderr,
+ 					"%s: only one -r can be specified\n",
+ 					argv[0]);
+-				exit(1);
++				usage(argv[0]);
+ 			}
+-			set_rootpath(argv[optind]);
++			set_rootpath(optarg);
+ 			break;
+ 		case 's':
+ 			use_input_file = 1;
+@@ -343,7 +344,7 @@ int main(int argc, char **argv)
+ 			if (r_opts.progress) {
+ 				fprintf(stderr,
+ 					"Progress and Verbose mutually exclusive\n");
+-				exit(1);
++				usage(argv[0]);
+ 			}
+ 			r_opts.verbose++;
+ 			break;

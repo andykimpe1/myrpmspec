@@ -1,0 +1,320 @@
+diff -up policycoreutils-2.0.83/restorecond/restorecond.c.terminal policycoreutils-2.0.83/restorecond/restorecond.c
+--- policycoreutils-2.0.83/restorecond/restorecond.c.terminal	2012-01-25 17:13:30.255848516 -0500
++++ policycoreutils-2.0.83/restorecond/restorecond.c	2012-01-25 17:16:45.652039973 -0500
+@@ -33,7 +33,7 @@
+  * restorecond [-d] [-u] [-v] [-f restorecond_file ]
+  * 
+  * -d   Run in debug mode
+- * -f   Use alternative restorecond_file 
++ * -f   Use alternative restorecond_file
+  * -u   Run in user mode
+  * -v   Run in verbose mode (Report missing files)
+  *
+@@ -208,7 +208,7 @@ int main(int argc, char **argv)
+ 	if (uid != 0) {
+ 		if (run_as_user)
+ 			return server(master_fd, user_watch_file);
+-		if (start() != 0) 
++		if (start() != 0)
+ 			return server(master_fd, user_watch_file);
+ 		return 0;
+ 	}
+diff -up policycoreutils-2.0.83/restorecond/user.c.terminal policycoreutils-2.0.83/restorecond/user.c
+--- policycoreutils-2.0.83/restorecond/user.c.terminal	2012-01-25 17:17:04.865058754 -0500
++++ policycoreutils-2.0.83/restorecond/user.c	2012-01-25 17:17:09.001062798 -0500
+@@ -1,25 +1,25 @@
+ /*
+  * restorecond
+  *
+- * Copyright (C) 2006-2009 Red Hat 
++ * Copyright (C) 2006-2009 Red Hat
+  * see file 'COPYING' for use and warranty information
+  *
+  * This program is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU General Public License as
+  * published by the Free Software Foundation; either version 2 of
+  * the License, or (at your option) any later version.
+- * 
++ *
+  * This program is distributed in the hope that it will be useful,
+  * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  * GNU General Public License for more details.
+-.* 
++.*
+  * You should have received a copy of the GNU General Public License
+  * along with this program; if not, write to the Free Software
+- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA     
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA
+  * 02111-1307  USA
+  *
+- * Authors:  
++ * Authors:
+  *   Dan Walsh <dwalsh@redhat.com>
+  *
+ */
+@@ -62,9 +62,9 @@ signal_filter (DBusConnection *connectio
+   GMainLoop *loop = user_data;
+ 
+   /* A signal from the bus saying we are about to be disconnected */
+-  if (dbus_message_is_signal 
++  if (dbus_message_is_signal
+         (message, INTERFACE, "Stop")) {
+-	  
++
+       /* Tell the main loop to quit */
+       g_main_loop_quit (loop);
+       /* We have handled this message, don't pass it on */
+@@ -87,12 +87,12 @@ static int dbus_server(GMainLoop *loop)
+     bus = dbus_bus_get (DBUS_BUS_SESSION, &error);
+     if (bus) {
+ 	dbus_connection_setup_with_g_main (bus, NULL);
+-	
++
+ 	/* listening to messages from all objects as no path is specified */
+ 	dbus_bus_add_match (bus, RULE, &error); // see signals from the given interfacey
+ 	dbus_connection_add_filter (bus, signal_filter, loop, NULL);
+ 	return 0;
+-    } 
++    }
+     return -1;
+ }
+ 
+@@ -123,6 +123,11 @@ io_channel_callback
+        sizeof (buffer),
+        &bytes_read);
+ 
++    if (! bytes_read) {
++	    /* Sesssion/Terminal Ended */
++	    exit(0);
++    }
++
+     while (i < bytes_read) {
+ 	    struct inotify_event *event;
+ 	    event = (struct inotify_event *)&buffer[i];
+@@ -132,7 +137,7 @@ io_channel_callback
+ 			   event->cookie, event->len);
+ 	    if (event->len)
+ 		    watch_list_find(event->wd, event->name);
+-	    
++
+ 	    i += EVENT_SIZE + event->len;
+     }
+   }
+@@ -148,6 +153,7 @@ io_channel_callback
+ 
+   if (condition & G_IO_HUP) {
+     g_io_channel_close (source);
++    exit(0);
+     return FALSE;
+   }
+ 
+@@ -163,7 +169,7 @@ int start() {
+ 	DBusConnection *bus;
+ 	DBusError error;
+ 	DBusMessage *message;
+-	
++
+ 	/* Get a connection to the session bus */
+ 	dbus_error_init (&error);
+ 	bus = dbus_bus_get (DBUS_BUS_SESSION, &error);
+@@ -173,7 +179,7 @@ int start() {
+ 		dbus_error_free (&error);
+ 		return 1;
+ 	}
+-	
++
+ 
+ 	/* Create a new signal "Start" on the interface,
+ 	 * from the object  */
+@@ -190,11 +196,15 @@ int start() {
+ static int local_server() {
+ 	// ! dbus, run as local service
+ 	char *ptr=NULL;
+-	asprintf(&ptr, "%s/.restorecond", homedir);
++	if (asprintf(&ptr, "%s/.restorecond", homedir) < 0) {
++		if (debug_mode)
++			perror("asprintf");
++		return -1;
++	}
+ 	int fd = open(ptr, O_CREAT | O_WRONLY | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+ 	if (debug_mode)
+ 		g_warning ("Lock file: %s", ptr);
+-	
++
+ 	free(ptr);
+ 	if (fd < 0) {
+ 		if (debug_mode)
+@@ -206,6 +216,13 @@ static int local_server() {
+ 			perror("flock");
+ 		return -1;
+ 	}
++	/* watch for stdin/terminal going away */
++	GIOChannel *in = g_io_channel_unix_new(0);
++	g_io_add_watch_full( in,
++			     G_PRIORITY_HIGH,
++			     G_IO_IN|G_IO_ERR|G_IO_HUP,
++			     io_channel_callback, NULL, NULL);
++
+ 	return 0;
+ }
+ 
+@@ -213,27 +230,30 @@ int server(int master_fd, const char *wa
+     GMainLoop *loop;
+ 
+     loop = g_main_loop_new (NULL, FALSE);
+-    
++
+ #ifdef HAVE_DBUS
+-    if (dbus_server(loop) != 0) 
++    if (dbus_server(loop) != 0)
+ #endif /* HAVE_DBUS */
+-	    if (local_server(loop) != 0) 
+-		    return 0;
++	    if (local_server())
++		    goto end;
+ 
+     read_config(master_fd, watch_file);
+-    
+-    if (watch_list_isempty()) return 0;
++
++    if (watch_list_isempty()) goto end;
+ 
+     set_matchpathcon_flags(MATCHPATHCON_NOTRANS);
+-    
++
+     GIOChannel *c = g_io_channel_unix_new(master_fd);
+-    
++
+     g_io_add_watch_full( c,
+ 			 G_PRIORITY_HIGH,
+ 			 G_IO_IN|G_IO_ERR|G_IO_HUP,
+ 			 io_channel_callback, NULL, NULL);
+-    
++
+     g_main_loop_run (loop);
++
++end:
++    g_main_loop_unref (loop);
+     return 0;
+ }
+ 
+diff -up policycoreutils-2.0.83/restorecond/watch.c.terminal policycoreutils-2.0.83/restorecond/watch.c
+--- policycoreutils-2.0.83/restorecond/watch.c.terminal	2012-01-25 17:17:25.478078898 -0500
++++ policycoreutils-2.0.83/restorecond/watch.c	2012-01-25 17:17:29.128082462 -0500
+@@ -50,10 +50,10 @@ void watch_list_add(int fd, const char *
+ 	char *dir = dirname(x);
+ 	ptr = firstDir;
+ 
+-	if (exclude(path)) return;
++	if (exclude(path)) goto end;
+ 
+ 	globbuf.gl_offs = 1;
+-	if (glob(path, 
++	if (glob(path,
+ 		 GLOB_TILDE | GLOB_PERIOD,
+ 		 NULL,
+ 		 &globbuf) >= 0) {
+@@ -70,8 +70,7 @@ void watch_list_add(int fd, const char *
+ 	while (ptr != NULL) {
+ 		if (strcmp(dir, ptr->dir) == 0) {
+ 			strings_list_add(&ptr->files, file);
+-			free(x);
+-			return;
++			goto end;
+ 		}
+ 		prev = ptr;
+ 		ptr = ptr->next;
+@@ -83,11 +82,10 @@ void watch_list_add(int fd, const char *
+ 	ptr->wd = inotify_add_watch(fd, dir, IN_CREATE | IN_MOVED_TO);
+ 	if (ptr->wd == -1) {
+ 		free(ptr);
+-		free(x);
+-		if (! run_as_user) 
++		if (! run_as_user)
+ 			syslog(LOG_ERR, "Unable to watch (%s) %s\n",
+ 			       path, strerror(errno));
+-		return;
++		goto end;
+ 	}
+ 
+ 	ptr->dir = strdup(dir);
+@@ -103,11 +101,13 @@ void watch_list_add(int fd, const char *
+ 	if (debug_mode)
+ 		printf("%d: Dir=%s, File=%s\n", ptr->wd, ptr->dir, file);
+ 
++end:
+ 	free(x);
++	return;
+ }
+ 
+-/* 
+-   A file was in a direcroty has been created. This function checks to 
++/*
++   A file was in a direcroty has been created. This function checks to
+    see if it is one that we are watching.
+ */
+ 
+@@ -125,7 +125,7 @@ int watch_list_find(int wd, const char *
+ 				if (asprintf(&path, "%s/%s", ptr->dir, file) <
+ 				    0)
+ 					exitApp("Error allocating memory.");
+-				
++
+ 				process_one_realpath(path, 0);
+ 				free(path);
+ 				return 0;
+@@ -159,8 +159,8 @@ void watch_list_free(int fd)
+ 	firstDir = NULL;
+ }
+ 
+-/* 
+-   Inotify watch loop 
++/*
++   Inotify watch loop
+ */
+ int watch(int fd, const char *watch_file)
+ {
+@@ -189,8 +189,18 @@ int watch(int fd, const char *watch_file
+ 		if (event->wd == master_wd)
+ 			read_config(fd, watch_file);
+ 		else {
+-			if (event->len)
+-				watch_list_find(event->wd, event->name);
++			switch (utmpwatcher_handle(fd, event->wd)) {
++			case -1:	/* Message was not for utmpwatcher */
++				if (event->len)
++					watch_list_find(event->wd, event->name);
++				break;
++			case 1:	/* utmp has changed need to reload */
++				read_config(fd, watch_file);
++				break;
++
++			default:	/* No users logged in or out */
++				break;
++			}
+ 		}
+ 
+ 		i += EVENT_SIZE + event->len;
+@@ -216,7 +226,9 @@ static void process_config(int fd, FILE
+ 		if (buffer[0] == '~') {
+ 			if (run_as_user) {
+ 				char *ptr=NULL;
+-				asprintf(&ptr, "%s%s", homedir, &buffer[1]);
++				if (asprintf(&ptr, "%s%s", homedir, &buffer[1]) < 0)
++					exitApp("Error allocating memory.");
++
+ 				watch_list_add(fd, ptr);
+ 				free(ptr);
+ 			} else {
+@@ -229,8 +241,8 @@ static void process_config(int fd, FILE
+ 	free(line_buf);
+ }
+ 
+-/* 
+-   Read config file ignoring Comment lines 
++/*
++   Read config file ignoring Comment lines
+    Files specified one per line.  Files with "~" will be expanded to the logged in users
+    homedirs.
+ */

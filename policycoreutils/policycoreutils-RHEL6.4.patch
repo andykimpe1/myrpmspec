@@ -1,0 +1,327 @@
+diff -Nur nsapolicycoreutils/gui/lockdown.glade policycoreutils-2.0.83/gui/lockdown.glade
+--- nsapolicycoreutils/gui/lockdown.glade	2012-10-01 16:02:03.801430744 +0200
++++ policycoreutils-2.0.83/gui/lockdown.glade	2013-01-07 10:09:45.682549382 +0100
+@@ -646,7 +646,7 @@
+ 			  <property name="visible">True</property>
+ 			  <property name="can_default">True</property>
+ 			  <property name="can_focus">True</property>
+-			  <property name="label">gtk-media-forward</property>
++			  <property name="label">gtk-go-forwar</property>
+ 			  <property name="use_stock">True</property>
+ 			  <property name="relief">GTK_RELIEF_NORMAL</property>
+ 			  <property name="focus_on_click">True</property>
+diff -Nur nsapolicycoreutils/gui/polgen.glade policycoreutils-2.0.83/gui/polgen.glade
+--- nsapolicycoreutils/gui/polgen.glade	2012-10-01 16:02:03.810430800 +0200
++++ policycoreutils-2.0.83/gui/polgen.glade	2013-01-07 10:09:21.907531904 +0100
+@@ -3231,7 +3231,7 @@
+ 	      <property name="visible">True</property>
+ 	      <property name="can_default">True</property>
+ 	      <property name="can_focus">True</property>
+-	      <property name="label">gtk-media-forward</property>
++	      <property name="label">gtk-go-forward</property>
+ 	      <property name="use_stock">True</property>
+ 	      <property name="relief">GTK_RELIEF_NORMAL</property>
+ 	      <property name="focus_on_click">True</property>
+diff -Nur nsapolicycoreutils/gui/templates/etc_rw.py policycoreutils-2.0.83/gui/templates/etc_rw.py
+--- nsapolicycoreutils/gui/templates/etc_rw.py	2012-10-01 16:02:03.823430879 +0200
++++ policycoreutils-2.0.83/gui/templates/etc_rw.py	2012-12-05 09:42:36.020033719 +0100
+@@ -32,6 +32,11 @@
+ files_etc_filetrans(TEMPLATETYPE_t, TEMPLATETYPE_etc_rw_t, { dir file })
+ """
+ 
++te_stream_rules="""
++manage_sock_files_pattern(TEMPLATETYPE_t, TEMPLATETYPE_etc_rw_t, TEMPLATETYPE_etc_rw_t)
++files_etc_filetrans(TEMPLATETYPE_t, TEMPLATETYPE_etc_rw_t, sock_file)
++"""
++
+ ########################### Interface File #############################
+ if_rules="""
+ ########################################
+@@ -94,6 +99,27 @@
+ 
+ """
+ 
++if_stream_rules="""\
++########################################
++## <summary>
++##  Connect to TEMPLATETYPE over a unix stream socket.
++## </summary>
++## <param name="domain">
++##  <summary>
++##  Domain allowed access.
++##  </summary>
++## </param>
++#
++interface(`TEMPLATETYPE_stream_connect',`
++    gen_require(`
++        type TEMPLATETYPE_t, TEMPLATETYPE_etc_rw_t;
++    ')
++
++    files_search_etc($1)
++    stream_connect_pattern($1, TEMPLATETYPE_etc_rw_t, TEMPLATETYPE_etc_rw_t, TEMPLATETYPE_t)
++')
++"""
++
+ if_admin_types="""
+ 	type TEMPLATETYPE_etc_rw_t;"""
+ 
+@@ -110,3 +136,7 @@
+ fc_dir="""\
+ FILENAME(/.*)?		gen_context(system_u:object_r:TEMPLATETYPE_etc_rw_t,s0)
+ """
++
++fc_sock_file="""\
++FILENAME        -s  gen_context(system_u:object_r:TEMPLATETYPE_etc_rw_t,s0)
++"""
+diff -Nur nsapolicycoreutils/restorecond/restorecond.init policycoreutils-2.0.83/restorecond/restorecond.init
+--- nsapolicycoreutils/restorecond/restorecond.init	2012-10-01 16:02:03.486428798 +0200
++++ policycoreutils-2.0.83/restorecond/restorecond.init	2013-01-16 11:57:28.248071742 +0100
+@@ -82,7 +82,7 @@
+ 	[ -e /var/lock/subsys/restorecond ] && restart || :
+ 	;;
+   *)
+-        echo $"Usage: $0 {start|stop|restart|force-reload|status|condrestart}"
++        echo $"Usage: $0 {start|stop|restart|reload|force-reload|status|condrestart}"
+         RETVAL=3
+ esac
+ 
+diff -Nur nsapolicycoreutils/semanage/seobject.py policycoreutils-2.0.83/semanage/seobject.py
+--- nsapolicycoreutils/semanage/seobject.py	2012-10-01 16:02:03.955431696 +0200
++++ policycoreutils-2.0.83/semanage/seobject.py	2013-01-16 11:04:38.180883450 +0100
+@@ -35,6 +35,7 @@
+ _=translation.ugettext
+ 
+ import syslog
++import setools
+ 
+ file_types = {}
+ file_types[""] = SEMANAGE_FCONTEXT_ALL;
+@@ -195,6 +196,13 @@
+ 	else:
+ 		return raw
+ 
++def get_valid_types(selinux_class_type):
++    valid_types = []
++    if selinux.is_selinux_enabled():
++        valid_types =  setools.seinfo(setools.ATTRIBUTE,selinux_class_type)[0]["types"]
++
++    return valid_types
++
+ class semanageRecords:
+         transaction = False
+         handle = None
+@@ -949,6 +957,8 @@
+ 				print "%-15s %s" % (k, ddict[k][3])
+ 
+ class portRecords(semanageRecords):
++	valid_types = get_valid_types("port_type")
++
+ 	def __init__(self, store = ""):
+ 		semanageRecords.__init__(self, store)
+ 
+@@ -988,6 +998,10 @@
+ 		if type == "":
+ 			raise ValueError(_("Type is required"))
+ 
++		if selinux.is_selinux_enabled():
++	 		if type not in self.valid_types:
++				raise ValueError(_("Type %s is invalid, must be a port type") % type)
++
+ 		( k, proto_d, low, high ) = self.__genkey(port, proto)			
+ 
+ 		(rc, exists) = semanage_port_exists(self.sh, k)
+@@ -1047,6 +1061,10 @@
+ 			else:
+ 				raise ValueError(_("Requires setype"))
+ 
++			if selinux.is_selinux_enabled():
++				if setype and setype not in self.valid_types:
++					raise ValueError(_("Type %s is invalid, must be a port type") % setype)
++
+ 		( k, proto_d, low, high ) = self.__genkey(port, proto)
+ 
+ 		(rc, exists) = semanage_port_exists(self.sh, k)
+@@ -1204,6 +1222,8 @@
+ 			print rec
+ 
+ class nodeRecords(semanageRecords):
++       valid_types = get_valid_types("node_type")
++
+        def __init__(self, store = ""):
+                semanageRecords.__init__(self,store)
+                self.protocol = ["ipv4", "ipv6"]
+@@ -1227,7 +1247,12 @@
+                                serange = untranslate(serange)
+ 
+                if ctype == "":
+-                       raise ValueError(_("SELinux Type is required"))
++                       raise ValueError(_("SELinux node type is required"))
++
++               if selinux.is_selinux_enabled():            
++                   if ctype not in self.valid_types:
++                           raise ValueError(_("Type %s is invalid, must be a node type") % ctype)
++
+ 
+                (rc, k) = semanage_node_key_create(self.sh, addr, mask, proto)
+                if rc < 0:
+@@ -1301,7 +1326,11 @@
+ 
+                if serange == "" and setype == "":
+                        raise ValueError(_("Requires setype or serange"))
+-
++               
++               if selinux.is_selinux_enabled():
++                   if setype and setype not in self.valid_types:
++                           raise ValueError(_("Type %s is invalid, must be a node type") % setype)
++  
+                (rc, k) = semanage_node_key_create(self.sh, addr, mask, proto)
+                if rc < 0:
+                        raise ValueError(_("Could not create key for %s") % addr)
+@@ -1618,6 +1647,9 @@
+ 				print "%-30s %s:%s:%s " % (k,ddict[k][0], ddict[k][1],ddict[k][2])
+ 			
+ class fcontextRecords(semanageRecords):
++	valid_types = get_valid_types("file_type")
++	valid_types +=	get_valid_types("device_node")
++
+ 	def __init__(self, store = ""):
+ 		semanageRecords.__init__(self, store)
+                 self.equiv = {}
+@@ -1714,6 +1746,10 @@
+ 		if type == "":
+ 			raise ValueError(_("SELinux Type is required"))
+ 
++		if selinux.is_selinux_enabled():
++			if type not in self.valid_types:
++				raise ValueError(_("Type %s is invalid, must be a file or device type") % type)
++
+ 		(rc, k) = semanage_fcontext_key_create(self.sh, target, file_types[ftype])
+ 		if rc < 0:
+ 			raise ValueError(_("Could not create key for %s") % target)
+@@ -1772,6 +1808,10 @@
+ 			raise ValueError(_("Requires setype, serange or seuser"))
+                 self.validate(target)
+ 
++		if selinux.is_selinux_enabled():
++	 		if setype and setype not in self.valid_types:
++				raise ValueError(_("Type %s is invalid, must be a port type") % setype)
++
+ 		(rc, k) = semanage_fcontext_key_create(self.sh, target, file_types[ftype])
+ 		if rc < 0:
+ 			raise ValueError(_("Could not create a key for %s") % target)
+diff -Nur nsapolicycoreutils/sepolgen-1.0.23/src/sepolgen/audit.py policycoreutils-2.0.83/sepolgen-1.0.23/src/sepolgen/audit.py
+--- nsapolicycoreutils/sepolgen-1.0.23/src/sepolgen/audit.py	2012-10-01 16:02:03.839430979 +0200
++++ policycoreutils-2.0.83/sepolgen-1.0.23/src/sepolgen/audit.py	2012-10-02 12:17:02.085891588 +0200
+@@ -482,7 +482,6 @@
+         for cs in self.compute_sid_msgs:
+             if not role_filter or role_filter.filter(cs):
+                 role_types.add(cs.invalid_context.role, cs.invalid_context.type)
+-        
+         return role_types
+ 
+     def to_access(self, avc_filter=None, only_denials=True):
+diff -Nur nsapolicycoreutils/sepolgen-1.0.23/src/sepolgen/policygen.py policycoreutils-2.0.83/sepolgen-1.0.23/src/sepolgen/policygen.py
+--- nsapolicycoreutils/sepolgen-1.0.23/src/sepolgen/policygen.py	2012-10-01 16:02:03.842430997 +0200
++++ policycoreutils-2.0.83/sepolgen-1.0.23/src/sepolgen/policygen.py	2012-12-05 10:41:51.491676798 +0100
+@@ -158,18 +158,18 @@
+             if self.explain:
+                 rule.comment = str(refpolicy.Comment(explain_access(av, verbosity=self.explain)))
+             if av.type == audit2why.ALLOW:
+-                rule.comment += "#!!!! This avc is allowed in the current policy\n" 
++                rule.comment += "\n#!!!! This avc is allowed in the current policy" 
+             if av.type == audit2why.DONTAUDIT:
+-                rule.comment += "#!!!! This avc has a dontaudit rule in the current policy\n" 
++                rule.comment += "\n#!!!! This avc has a dontaudit rule in the current policy" 
+ 
+             if av.type == audit2why.BOOLEAN:
+                 if len(av.bools) > 1:
+-                    rule.comment += "#!!!! This avc can be allowed using one of the these booleans:\n#     %s\n" % ", ".join(map(lambda x: x[0], av.bools))
++                    rule.comment += "\n#!!!! This avc can be allowed using one of the these booleans:\n#     %s" % ", ".join(map(lambda x: x[0], av.bools))
+                 else:
+-                    rule.comment += "#!!!! This avc can be allowed using the boolean '%s'\n" % av.bools[0][0]
++                    rule.comment += "\n#!!!! This avc can be allowed using the boolean '%s'" % av.bools[0][0]
+ 
+             if av.type == audit2why.CONSTRAINT:
+-                rule.comment += "#!!!! This avc is a constraint violation.  You will need to add an attribute to either the source or target type to make it work.\n" 
++                rule.comment += "\n#!!!! This avc is a constraint violation.  You will need to add an attribute to either the source or target type to make it work.\n" 
+                 rule.comment += "#Contraint rule: "
+ 
+             if av.type == audit2why.TERULE:
+diff -Nur nsapolicycoreutils/sepolgen-1.0.23/src/sepolgen/refpolicy.py policycoreutils-2.0.83/sepolgen-1.0.23/src/sepolgen/refpolicy.py
+--- nsapolicycoreutils/sepolgen-1.0.23/src/sepolgen/refpolicy.py	2010-03-24 20:57:20.000000000 +0100
++++ policycoreutils-2.0.83/sepolgen-1.0.23/src/sepolgen/refpolicy.py	2012-10-02 12:16:24.994619956 +0200
+@@ -511,7 +511,10 @@
+         self.types = IdSet()
+ 
+     def to_string(self):
+-        return "role %s types %s;" % (self.role, self.types.to_comma_str())
++        s = ""
++        for t in self.types:
++                s += "role %s types %s;\n" % (self.role, t)
++        return s
+ 
+ class ModuleDeclaration(Leaf):
+     def __init__(self, parent=None):
+diff -Nur nsapolicycoreutils/setfiles/restore.c policycoreutils-2.0.83/setfiles/restore.c
+--- nsapolicycoreutils/setfiles/restore.c	2012-10-01 16:02:03.869431165 +0200
++++ policycoreutils-2.0.83/setfiles/restore.c	2012-11-16 09:08:34.038546451 +0100
+@@ -101,15 +101,18 @@
+ 	else
+ 		return selabel_lookup_raw(r_opts->hnd, con, name, sb->st_mode);
+ }
+-static int restore(FTSENT *ftsent)
++static int restore(FTSENT *ftsent, int recurse)
+ {
+ 	char *my_file = strdupa(ftsent->fts_path);
+ 	int ret;
+ 	security_context_t curcon = NULL, newcon = NULL;
+ 
+-	if (match(my_file, ftsent->fts_statp, &newcon) < 0)
++	if (match(my_file, ftsent->fts_statp, &newcon) < 0) {
++		if ((errno == ENOENT) && (!recurse))
++			fprintf(stderr, "%s:  Warning no default label for %s\n", r_opts->progname, my_file);
+ 		/* Check for no matching specification. */
+ 		return (errno == ENOENT) ? 0 : -1;
++	}
+ 
+ 	if (r_opts->progress) {
+ 		r_opts->count++;
+@@ -269,7 +272,7 @@
+  * This function is called by fts on each file during
+  * the directory traversal.
+  */
+-static int apply_spec(FTSENT *ftsent)
++static int apply_spec(FTSENT *ftsent, int recurse)
+ {
+ 	if (ftsent->fts_info == FTS_DNR) {
+ 		fprintf(stderr, "%s:  unable to read directory %s\n",
+@@ -277,7 +280,7 @@
+ 		return SKIP;
+ 	}
+ 	
+-	int rc = restore(ftsent);
++	int rc = restore(ftsent, recurse);
+ 	if (rc == ERR) {
+ 		if (!r_opts->abort_on_error)
+ 			return SKIP;
+@@ -374,7 +377,7 @@
+ 				continue;
+ 			}
+ 		}
+-		rc = apply_spec(ftsent);
++		rc = apply_spec(ftsent, recurse_this_path);
+ 		if (rc == SKIP)
+ 			fts_set(fts_handle, ftsent, FTS_SKIP);
+ 		if (rc == ERR)
+@@ -403,10 +406,7 @@
+ 	size_t i = 0;
+ 	int errors;
+ 	memset(&globbuf, 0, sizeof(globbuf));
+-	errors = glob(name, GLOB_TILDE | GLOB_PERIOD, NULL, &globbuf);
+-	if (errors == GLOB_NOMATCH)
+-		return 0;
+-
++	errors = glob(name, GLOB_TILDE | GLOB_PERIOD | GLOB_NOCHECK, NULL, &globbuf);
+ 	if (errors) 
+ 		return errors;
+ 

@@ -1,0 +1,58 @@
+From a678d940d0e32a56657dd0966361ccbb2ab789cc Mon Sep 17 00:00:00 2001
+From: Miroslav Grepl <mgrepl@redhat.com>
+Date: Mon, 23 Jun 2014 09:40:43 +0200
+Subject: [PATCH] Allow use sandbox to follow homedirs symlinks.
+
+---
+ policycoreutils/sandbox/seunshare.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/policycoreutils/sandbox/seunshare.c b/policycoreutils/sandbox/seunshare.c
+index a084e0e..5e03b07 100644
+--- a/policycoreutils/sandbox/seunshare.c
++++ b/policycoreutils/sandbox/seunshare.c
+@@ -818,6 +818,7 @@ int main(int argc, char **argv) {
+ 	char *tmpdir_s = NULL;	/* tmpdir spec'd by user in argv[] */
+ 	char *tmpdir_r = NULL;	/* tmpdir created by seunshare */
+ 
++    struct stat st_curhomedir;
+ 	struct stat st_homedir;
+ 	struct stat st_tmpdir_s;
+ 	struct stat st_tmpdir_r;
+@@ -945,6 +946,7 @@ int main(int argc, char **argv) {
+ 		char *display = NULL;
+ 		char *LANG = NULL;
+ 		int rc = -1;
++        char *resolved_path = NULL;
+ 
+ 		if (unshare(CLONE_NEWNS) < 0) {
+ 			perror(_("Failed to unshare"));
+@@ -961,8 +963,16 @@ int main(int argc, char **argv) {
+ 		/* assume fsuid==ruid after this point */
+ 		setfsuid(uid);
+ 
++        resolved_path = realpath(pwd->pw_dir,NULL);
++        if (! resolved_path) goto childerr;
++
++        if (verify_directory(resolved_path, NULL, &st_curhomedir) < 0)
++            goto childerr;
++        if (check_owner_uid(uid, resolved_path, &st_curhomedir) < 0)
++            goto childerr;
++
+ 		/* mount homedir and tmpdir, in this order */
+-		if (homedir_s && seunshare_mount(homedir_s, pwd->pw_dir,
++		if (homedir_s && seunshare_mount(homedir_s, resolved_path,
+ 			&st_homedir) != 0) goto childerr;
+ 		if (tmpdir_s &&	seunshare_mount(tmpdir_r, "/tmp",
+ 			&st_tmpdir_r) != 0) goto childerr;
+@@ -1017,6 +1027,7 @@ int main(int argc, char **argv) {
+ 		execv(argv[optind], argv + optind);
+ 		fprintf(stderr, _("Failed to execute command %s: %s\n"), argv[optind], strerror(errno));
+ childerr:
++        free(resolved_path);
+ 		free(display);
+ 		free(LANG);
+ 		exit(-1);
+-- 
+2.0.0
+

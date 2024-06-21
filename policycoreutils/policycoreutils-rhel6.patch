@@ -1,0 +1,2560 @@
+diff -up policycoreutils-2.0.83/audit2allow/audit2allow.rhel6 policycoreutils-2.0.83/audit2allow/audit2allow
+--- policycoreutils-2.0.83/audit2allow/audit2allow.rhel6	2011-08-30 12:15:26.000000000 -0400
++++ policycoreutils-2.0.83/audit2allow/audit2allow	2011-08-30 12:16:16.000000000 -0400
+@@ -104,7 +104,7 @@ class AuditToPolicy:
+         if name:
+             options.requires = True
+             if not module.is_valid_name(name):
+-                sys.stderr.write("only letters and numbers allowed in module names\n")
++                sys.stderr.write('error: module names must begin with a letter, optionally followed by letters, numbers, "-", "_", "."\n')
+                 sys.exit(2)
+ 
+         # Make -M and -o conflict
+diff -up policycoreutils-2.0.83/restorecond/restorecond.c.rhel6 policycoreutils-2.0.83/restorecond/restorecond.c
+--- policycoreutils-2.0.83/restorecond/restorecond.c.rhel6	2011-08-30 12:08:45.000000000 -0400
++++ policycoreutils-2.0.83/restorecond/restorecond.c	2011-09-06 14:18:25.000000000 -0400
+@@ -201,6 +201,9 @@ int main(int argc, char **argv)
+ 
+ 	uid_t uid = getuid();
+ 	struct passwd *pwd = getpwuid(uid);
++	if (!pwd)
++		exitApp("getpwuid");
++
+ 	homedir = pwd->pw_dir;
+ 	if (uid != 0) {
+ 		if (run_as_user)
+diff -up policycoreutils-2.0.83/restorecond/restorecond_user.conf.rhel6 policycoreutils-2.0.83/restorecond/restorecond_user.conf
+--- policycoreutils-2.0.83/restorecond/restorecond_user.conf.rhel6	2011-09-13 14:09:12.758239386 -0400
++++ policycoreutils-2.0.83/restorecond/restorecond_user.conf	2011-09-13 14:09:26.546215657 -0400
+@@ -1,2 +1,7 @@
+ ~/*
+ ~/public_html/*
++~/.gnome2/*
++~/local/*
++~/.fonts/*
++~/.cache/*
++~/.config/*
+diff -up policycoreutils-2.0.83/sandbox/Makefile.rhel6 policycoreutils-2.0.83/sandbox/Makefile
+--- policycoreutils-2.0.83/sandbox/Makefile.rhel6	2011-08-30 12:08:45.000000000 -0400
++++ policycoreutils-2.0.83/sandbox/Makefile	2011-08-30 12:13:23.000000000 -0400
+@@ -8,9 +8,9 @@ MANDIR ?= $(PREFIX)/share/man
+ LOCALEDIR ?= /usr/share/locale
+ SHAREDIR ?= $(PREFIX)/share/sandbox
+ override CFLAGS += $(LDFLAGS) -I$(PREFIX)/include -DPACKAGE="\"policycoreutils\"" -Wall -Werror -Wextra
+-LDLIBS += -lcgroup -lselinux -lcap-ng 
++LDLIBS += -lcgroup -lselinux -lcap-ng
+ 
+-all: sandbox seunshare sandboxX.sh 
++all: sandbox seunshare sandboxX.sh start
+ 
+ seunshare: seunshare.o $(EXTRA_OBJS)
+ 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+@@ -22,11 +22,12 @@ install: all
+ 	install -m 644 sandbox.8 $(MANDIR)/man8/
+ 	install -m 644 seunshare.8 $(MANDIR)/man8/
+ 	-mkdir -p $(MANDIR)/man5
+-	install -m 644 sandbox.conf.5 $(MANDIR)/man5/
++	install -m 644 sandbox.conf.5 $(MANDIR)/man5/sandbox.5
+ 	-mkdir -p $(SBINDIR)
+ 	install -m 4755 seunshare $(SBINDIR)/
+ 	-mkdir -p $(SHAREDIR)
+ 	install -m 755 sandboxX.sh $(SHAREDIR)
++	install -m 755 start $(SHAREDIR)
+ 	-mkdir -p $(INITDIR)
+ 	install -m 755 sandbox.init $(INITDIR)/sandbox
+ 	-mkdir -p $(SYSCONFDIR)
+diff -up policycoreutils-2.0.83/sandbox/sandbox.8.rhel6 policycoreutils-2.0.83/sandbox/sandbox.8
+--- policycoreutils-2.0.83/sandbox/sandbox.8.rhel6	2011-08-30 12:08:45.000000000 -0400
++++ policycoreutils-2.0.83/sandbox/sandbox.8	2011-08-30 12:13:00.000000000 -0400
+@@ -3,11 +3,11 @@
+ sandbox \- Run cmd under an SELinux sandbox
+ .SH SYNOPSIS
+ .B sandbox
+-[-l level ] [[-M | -X]  -H homedir -T tempdir ] [-I includefile ] [ -W windowmanager ] [[-i file ]...] [ -t type ] cmd
++[-C] [-c] [-l level ] [[-M | -X]  -H homedir -T tempdir ] [-I includefile ] [ -W windowmanager ] [ -w windowsize ] [[-i file ]...] [ -t type ] cmd
+ 
+ .br
+ .B sandbox
+-[-l level ] [[-M | -X]  -H homedir -T tempdir ] [-I includefile ] [ -W windowmanager ] [[-i file ]...] [ -t type ] -S
++[-C] [-c] [-l level ] [[-M | -X]  -H homedir -T tempdir ] [-I includefile ] [ -W windowmanager ] [ -w windowsize ] [[-i file ]...] [ -t type ] -S
+ .br
+ .SH DESCRIPTION
+ .PP
+@@ -48,6 +48,9 @@ Use alternate tempory directory to mount
+ \fB\-S
+ Run a full desktop session, Requires level, and home and tmpdir.
+ .TP
++\fB\-w windowsize\fR
++Specifies the windowsize when creating an X based Sandbox. The default windowsize is 1000x700.
++.TP
+ \fB\-W windowmanager\fR
+ Select alternative window manager to run within 
+ .B sandbox -X.
+@@ -57,8 +60,11 @@ Default to /usr/bin/matchbox-window-mana
+ Create an X based Sandbox for gui apps, temporary files for
+ $HOME and /tmp, secondary Xserver, defaults to sandbox_x_t
+ .TP
+-\fB\-C\fR
++\fB\-c\fR
+ Use control groups to control this copy of sandbox.  Specify parameters in /etc/sysconfig/sandbox.  Max memory usage and cpu usage are to be specified in percent.  You can specify which CPUs to use by numbering them 0,1,2... etc.
++.TP
++\fB\-C\fR
++Use capabilities within the sandbox.  By default applications executed within the sandbox will not be allowed to use capabilities (setuid apps), with the -C flag, you can use programs requiring capabilities.
+ .PP
+ .SH "SEE ALSO"
+ .TP
+@@ -66,7 +72,7 @@ runcon(1), seunshare(8), selinux(8)
+ .PP
+ 
+ .SH AUTHOR
+-This manual page was written by 
++This manual page was written by
+ .I Dan Walsh <dwalsh@redhat.com>
+ and
+ .I Thomas Liu <tliu@fedoraproject.org>
+diff -up policycoreutils-2.0.83/sandbox/sandbox.conf.5.rhel6 policycoreutils-2.0.83/sandbox/sandbox.conf.5
+--- policycoreutils-2.0.83/sandbox/sandbox.conf.5.rhel6	2011-08-30 12:10:52.000000000 -0400
++++ policycoreutils-2.0.83/sandbox/sandbox.conf.5	2011-08-30 12:11:00.000000000 -0400
+@@ -1,6 +1,6 @@
+ .TH sandbox.conf "5" "June 2010" "sandbox.conf" "Linux System Administration"
+ .SH NAME
+-sandbox.conf \- user config file for the SELinux sandbox 
++sandbox.conf \- user config file for the SELinux sandbox
+ .SH DESCRIPTION
+ .PP
+ When running sandbox with the -C argument, it will be confined using control groups and a system administrator can specify how the sandbox is confined.
+@@ -36,5 +36,5 @@ sandbox(8)
+ .PP
+ 
+ .SH AUTHOR
+-This manual page was written by 
++This manual page was written by
+ .I Thomas Liu <tliu@fedoraproject.org>
+diff -up policycoreutils-2.0.83/sandbox/sandbox.rhel6 policycoreutils-2.0.83/sandbox/sandbox
+--- policycoreutils-2.0.83/sandbox/sandbox.rhel6	2011-08-30 12:08:45.000000000 -0400
++++ policycoreutils-2.0.83/sandbox/sandbox	2011-08-30 12:13:44.000000000 -0400
+@@ -25,10 +25,10 @@ import selinux
+ import signal
+ from tempfile import mkdtemp
+ import pwd
+-import commands 
++import commands
++import setools
+ 
+ PROGNAME = "policycoreutils"
+-HOMEDIR=pwd.getpwuid(os.getuid()).pw_dir
+ SEUNSHARE = "/usr/sbin/seunshare"
+ SANDBOXSH = "/usr/share/sandbox/sandboxX.sh"
+ import gettext
+@@ -44,6 +44,7 @@ except IOError:
+        import __builtin__
+        __builtin__.__dict__['_'] = unicode
+ 
++DEFAULT_WINDOWSIZE = "1000x700"
+ DEFAULT_TYPE = "sandbox_t"
+ DEFAULT_X_TYPE = "sandbox_x_t"
+ SAVE_FILES = {}
+@@ -84,9 +85,10 @@ def copyfile(file, srcdir, dest):
+                             shutil.copytree(file, dest)
+                      else:
+                             shutil.copy2(file, dest)
++
+               except shutil.Error, elist:
+-                     for e in elist:
+-                            sys.stderr.write(str(e[1]))
++                     for e in elist.message:
++                            sys.stderr.write(e[2])
+                      
+               SAVE_FILES[file] = (dest, os.path.getmtime(dest))
+ 
+@@ -166,7 +168,7 @@ class Sandbox:
+ 
+            if not os.path.exists(SEUNSHARE):
+                   raise ValueError(_("""
+-%s is required for the action you want to perform.  
++%s is required for the action you want to perform.
+ """) % SEUNSHARE)
+ 
+     def __mount_callback(self, option, opt, value, parser):
+@@ -177,12 +179,12 @@ class Sandbox:
+            setattr(parser.values, option.dest, True)
+            if not os.path.exists(SEUNSHARE):
+                   raise ValueError(_("""
+-%s is required for the action you want to perform.  
++%s is required for the action you want to perform.
+ """) % SEUNSHARE)
+ 
+            if not os.path.exists(SANDBOXSH):
+                   raise ValueError(_("""
+-%s is required for the action you want to perform.  
++%s is required for the action you want to perform.
+ """) % SANDBOXSH)
+ 
+     def __validdir(self, option, opt, value, parser):
+@@ -206,6 +208,8 @@ class Sandbox:
+                          self.__include(option, opt, i[:-1], parser)
+                   except IOError, e:
+                          sys.stderr.write(str(e))
++                  except TypeError, e:
++                         sys.stderr.write(str(e))
+            fd.close()
+ 
+     def __copyfiles(self):
+@@ -224,13 +228,15 @@ class Sandbox:
+ /etc/gdm/Xsession
+ """)
+            else:
+-                  command = " ".join(self.__paths)
++                  command = self.__paths[0] + " "
++                  for p in self.__paths[1:]:
++                         command += "'%s' " % p
+                   fd.write("""#! /bin/sh
+ #TITLE: %s
+ /usr/bin/test -r ~/.xmodmap && /usr/bin/xmodmap ~/.xmodmap
+ %s &
+ WM_PID=$!
+-dbus-launch %s
++dbus-launch --exit-with-session %s
+ kill -TERM $WM_PID  2> /dev/null
+ """ % (command, wm, command))
+            fd.close()
+@@ -241,12 +247,22 @@ kill -TERM $WM_PID  2> /dev/null
+ 
+     def __parse_options(self):
+         from optparse import OptionParser
++        types = ""
++        try:
++               types = _("""
++Policy defines the following types for use with the -t:
++\t%s
++""") % "\n\t".join(setools.seinfo(setools.ATTRIBUTE, "sandbox_type")[0]['types'])
++        except RuntimeError:
++               pass
++
+         usage = _("""
+-sandbox [-h] [-l level ] [-[X|M] [-H homedir] [-T tempdir]] [-I includefile ] [-W windowmanager ] [[-i file ] ...] [ -t type ] command
++sandbox [-h] [-c] [-l level ] [-[X|M] [-H homedir] [-T tempdir]] [-I includefile ] [-W windowmanager ] [ -w windowsize ] [[-i file ] ...] [ -t type ] command
++
++sandbox [-h] [-c] [-l level ] [-[X|M] [-H homedir] [-T tempdir]] [-I includefile ] [-W windowmanager ] [ -w windowsize ] [[-i file ] ...] [ -t type ] -S
++%s
++""") % types
+ 
+-sandbox [-h] [-l level ] [-[X|M] [-H homedir] [-T tempdir]] [-I includefile ] [-W windowmanager ] [[-i file ] ...] [ -t type ] -S
+-""")
+-        
+         parser = OptionParser(version=self.VERSION, usage=usage)
+         parser.disable_interspersed_args()
+         parser.add_option("-i", "--include", 
+@@ -272,14 +288,18 @@ sandbox [-h] [-l level ] [-[X|M] [-H hom
+         parser.add_option("-H", "--homedir", 
+                           action="callback", callback=self.__validdir,
+                           type="string",
+-                          dest="homedir",  
++                          dest="homedir",
+                           help=_("alternate home directory to use for mounting"))
+ 
+-        parser.add_option("-T", "--tmpdir", dest="tmpdir",  
++        parser.add_option("-T", "--tmpdir", dest="tmpdir",
+                           type="string",
+                           action="callback", callback=self.__validdir,
+                           help=_("alternate /tmp directory to use for mounting"))
+ 
++        parser.add_option("-w", "--windowsize", dest="windowsize",
++                          type="string", default=DEFAULT_WINDOWSIZE,
++                          help="size of the sandbox window")
++
+         parser.add_option("-W", "--windowmanager", dest="wm",  
+                           type="string",
+                           default="/usr/bin/matchbox-window-manager -use_titlebar no",
+@@ -288,9 +308,13 @@ sandbox [-h] [-l level ] [-[X|M] [-H hom
+         parser.add_option("-l", "--level", dest="level", 
+                           help=_("MCS/MLS level for the sandbox"))
+ 
+-        parser.add_option("-C", "--cgroups",
+-                         action="store_true", dest="usecgroup", default=False,
+-                         help="Use cgroups to limit this sandbox.")
++        parser.add_option("-c", "--cgroups",
++                          action="store_true", dest="usecgroup", default=False,
++                          help=_("Use cgroups to limit this sandbox."))
++
++        parser.add_option("-C", "--capabilities",
++                         action="store_true", dest="usecaps", default=False,
++                         help="Allow apps requiring capabilities to run within the sandbox.")
+ 
+         self.__parser=parser
+ 
+@@ -298,7 +322,7 @@ sandbox [-h] [-l level ] [-[X|M] [-H hom
+ 
+         if self.__options.X_ind:
+                self.setype = DEFAULT_X_TYPE
+-        
++               self.dpi=commands.getoutput("xrdb -query | grep dpi  | /bin/cut -f 2")
+         if self.__options.setype:
+                self.setype = self.__options.setype
+ 
+@@ -316,6 +340,10 @@ sandbox [-h] [-l level ] [-[X|M] [-H hom
+                self.__homedir = self.__options.homedir
+                self.__tmpdir = self.__options.tmpdir
+         else:
++               if self.__options.level:
++                      self.__homedir = self.__options.homedir
++                      self.__tmpdir = self.__options.tmpdir
++
+                if len(cmds) == 0:
+                       self.usage(_("Command required"))
+                cmds[0] = fullpath(cmds[0])
+@@ -339,37 +367,36 @@ sandbox [-h] [-l level ] [-[X|M] [-H hom
+ 
+            con = selinux.getcon()[1].split(":")
+            self.__execcon = "%s:%s:%s:%s" % (con[0], con[1], self.setype, level)
+-           self.__filecon = "%s:%s:%s:%s" % (con[0], "object_r", 
+-                                             "%s_file_t" % self.setype[:-2], 
++           self.__filecon = "%s:%s:%s:%s" % (con[0], "object_r",
++                                             "%s_file_t" % self.setype[:-2],
+                                              level)
+     def __setup_dir(self):
+            if self.__options.level or self.__options.session:
+                   return
+-           sandboxdir = HOMEDIR + "/.sandbox"
+-           if not os.path.exists(sandboxdir):
+-                  os.mkdir(sandboxdir)
+ 
+            if self.__options.homedir:
+                   selinux.chcon(self.__options.homedir, self.__filecon, recursive=True)
+                   self.__homedir = self.__options.homedir
+            else:
+                   selinux.setfscreatecon(self.__filecon)
+-                  self.__homedir = mkdtemp(dir=sandboxdir, prefix=".sandbox")
++                  self.__homedir = mkdtemp(dir="/tmp", prefix=".sandbox_home_")
+ 
+            if self.__options.tmpdir:
+                   selinux.chcon(self.__options.tmpdir, self.__filecon, recursive=True)
+                   self.__tmpdir = self.__options.tmpdir
+            else:
+                   selinux.setfscreatecon(self.__filecon)
+-                  self.__tmpdir = mkdtemp(dir="/tmp", prefix=".sandbox")
++                  self.__tmpdir = mkdtemp(dir="/tmp", prefix=".sandbox_tmp_")
+            selinux.setfscreatecon(None)
+            self.__copyfiles()
+ 
+     def __execute(self):
+            try:
+                   cmds = [ SEUNSHARE,  "-Z", self.__execcon ]
+-                  if self.__options.usecgroup == True:
++                  if self.__options.usecgroup:
+                          cmds.append('-c')
++                  if self.__options.usecaps:
++                         cmds.append('-C')
+                   if self.__mount:
+                          cmds +=  [ "-t", self.__tmpdir, "-h", self.__homedir ]
+ 
+@@ -381,7 +408,7 @@ sandbox [-h] [-l level ] [-[X|M] [-H hom
+ 
+                                 self.__setup_sandboxrc(self.__options.wm)
+ 
+-                                cmds += [ "--", SANDBOXSH ]
++                                cmds += [ "--", SANDBOXSH, self.__options.windowsize, self.dpi ]
+                          else:
+                                 cmds += [ "--" ] + self.__paths
+                          return subprocess.Popen(cmds).wait()
+@@ -422,7 +449,7 @@ if __name__ == '__main__':
+            sandbox = Sandbox()
+            rc = sandbox.main()
+     except OSError, error:
+-           error_exit(error.args[1])
++           error_exit(error)
+     except ValueError, error:
+            error_exit(error.args[0])
+     except KeyError, error:
+diff -up policycoreutils-2.0.83/sandbox/sandboxX.sh.rhel6 policycoreutils-2.0.83/sandbox/sandboxX.sh
+--- policycoreutils-2.0.83/sandbox/sandboxX.sh.rhel6	2010-06-16 08:04:12.000000000 -0400
++++ policycoreutils-2.0.83/sandbox/sandboxX.sh	2011-08-30 12:12:25.000000000 -0400
+@@ -1,15 +1,21 @@
+-#!/bin/bash 
++#!/bin/bash
++trap "" TERM
+ context=`id -Z | secon -t -l -P`
+ export TITLE="Sandbox $context -- `grep ^#TITLE: ~/.sandboxrc | /usr/bin/cut -b8-80`"
+-export SCREENSIZE="1000x700"
+-#export SCREENSIZE=`xdpyinfo | awk  '/dimensions/ {  print $2 }'`
++[ -z $1 ] && export SCREENSIZE="1000x700" || export SCREENSIZE="$1"
++[ -z $2 ] && export DPI="96" || export DPI="$2"
+ trap "exit 0" HUP
+ 
+-(/usr/bin/Xephyr -title "$TITLE" -terminate -screen $SCREENSIZE -displayfd 5 5>&1 2>/dev/null) | while read D; do 
++(/usr/bin/Xephyr -title "$TITLE" -terminate -screen $SCREENSIZE -dpi $DPI -displayfd 5 5>&1 2>/dev/null) | while read D; do
+     export DISPLAY=:$D
+-    python -c 'import gtk, os, commands; commands.getstatusoutput("%s/.sandboxrc" % os.environ["HOME"])'
++    cat > ~/seremote << __EOF
++#!/bin/sh
++DISPLAY=$DISPLAY "\$@"
++__EOF
++    chmod +x ~/seremote
++    /usr/share/sandbox/start $HOME/.sandboxrc
+     export EXITCODE=$?
+-    kill -HUP 0
++    kill -TERM 0
+     break
+ done
+ exit 0
+diff -up policycoreutils-2.0.83/sandbox/seunshare.8.rhel6 policycoreutils-2.0.83/sandbox/seunshare.8
+--- policycoreutils-2.0.83/sandbox/seunshare.8.rhel6	2011-08-30 12:08:45.000000000 -0400
++++ policycoreutils-2.0.83/sandbox/seunshare.8	2011-08-30 12:11:54.000000000 -0400
+@@ -3,11 +3,11 @@
+ seunshare \- Run cmd with alternate homedir, tmpdir and/or SELinux context
+ .SH SYNOPSIS
+ .B seunshare
+-[ -v ] [ -t tmpdir ] [ -h homedir ] [ -Z context ] -- executable [args]
++[ -v ] [ -c ] [ -C ] [ -k ] [ -t tmpdir ] [ -h homedir ] [ -Z context ] -- executable [args]
+ .br
+ .SH DESCRIPTION
+ .PP
+-Run the 
++Run the
+ .I executable
+ within the specified context, using the alternate home directory and /tmp directory.  The seunshare command unshares from the default namespace, then mounts the specified homedir and tmpdir over the default homedir and /tmp. Finally it tells the kernel to execute the application under the specified SELinux context.
+ 
+@@ -18,9 +18,15 @@ Alternate homedir to be used by the appl
+ \fB\-t\ tmpdir
+ Use alternate tempory directory to mount on /tmp.  tmpdir must be owned by the user.
+ .TP
+-\fB\-c cgroups\fR
++\fB\-c --cgroups\fR
+ Use cgroups to control this copy of seunshare.  Specify parameters in /etc/sysconfig/sandbox.  Max memory usage and cpu usage are to be specified in percent.  You can specify which CPUs to use by numbering them 0,1,2... etc.
+ .TP
++\fB\-C --capabilities\fR
++Allow apps executed within the namespace to use capabilities.  Default is no capabilities.
++.TP
++\fB\-k --kill\fR
++Kill all processes with matching MCS level.
++.TP
+ \fB\-Z\ context
+ Use alternate SELinux context while runing the executable.
+ .TP
+@@ -28,10 +34,10 @@ Use alternate SELinux context while runi
+ Verbose output
+ .SH "SEE ALSO"
+ .TP
+-runcon(1), sandbox(8), selinux(8)	
++runcon(1), sandbox(8), selinux(8)
+ .PP
+ .SH AUTHOR
+-This manual page was written by 
++This manual page was written by
+ .I Dan Walsh <dwalsh@redhat.com>
+ and
+ .I Thomas Liu <tliu@fedoraproject.org>
+diff -up policycoreutils-2.0.83/sandbox/seunshare.c.rhel6 policycoreutils-2.0.83/sandbox/seunshare.c
+--- policycoreutils-2.0.83/sandbox/seunshare.c.rhel6	2011-08-30 12:08:45.000000000 -0400
++++ policycoreutils-2.0.83/sandbox/seunshare.c	2011-08-30 12:11:31.000000000 -0400
+@@ -6,9 +6,11 @@
+ #define _GNU_SOURCE
+ #include <signal.h>
+ #include <sys/types.h>
++#include <sys/stat.h>
+ #include <sys/wait.h>
+ #include <syslog.h>
+ #include <sys/mount.h>
++#include <glob.h>
+ #include <pwd.h>
+ #include <sched.h>
+ #include <libcgroup.h>
+@@ -16,18 +18,18 @@
+ #include <stdio.h>
+ #include <regex.h>
+ #include <unistd.h>
++#include <sys/fsuid.h>
+ #include <stdlib.h>
+ #include <cap-ng.h>
+ #include <getopt.h>		/* for getopt_long() form of getopt() */
+ #include <limits.h>
+ #include <stdlib.h>
+ #include <errno.h>
++#include <fcntl.h>
+ 
+ #include <selinux/selinux.h>
+ #include <selinux/context.h>	/* for context-mangling functions */
+-
+-#include <sys/types.h>
+-#include <sys/stat.h>
++#include <dirent.h>
+ 
+ #ifdef USE_NLS
+ #include <locale.h>		/* for setlocale() */
+@@ -50,30 +52,50 @@
+ #endif
+ 
+ #define BUF_SIZE 1024
++#define DEFAULT_PATH "/usr/bin:/bin"
++#define USAGE_STRING _("USAGE: seunshare [ -v ] [ -C ] [ -c ] [ -k ] [ -t tmpdir ] [ -h homedir ] [ -Z CONTEXT ] -- executable [args] ")
++
++static int verbose = 0;
++static int child = 0;
++
++static capng_select_t cap_set = CAPNG_SELECT_BOTH;
+ 
+ /**
+- * This function will drop all capabilities 
+- * Returns zero on success, non-zero otherwise
++ * This function will drop all capabilities.
+  */
+-static int drop_capabilities(uid_t uid)
++static int drop_caps()
+ {
+-	capng_clear(CAPNG_SELECT_BOTH);
+-
+-	if (capng_lock() < 0) 
++	if (capng_have_capabilities(cap_set) == CAPNG_NONE)
++		return 0;
++	capng_clear(cap_set);
++	if (capng_lock() == -1 || capng_apply(cap_set) == -1) {
++		fprintf(stderr, _("Failed to drop all capabilities\n"));
+ 		return -1;
+-	/* Change uid */
+-	if (setresuid(uid, uid, uid)) {
+-		fprintf(stderr, _("Error changing uid, aborting.\n"));
++	}
++	return 0;
++}
++
++/**
++ * This function will drop all privileges.
++ */
++static int drop_privs(uid_t uid)
++{
++	if (drop_caps() == -1 || setresuid(uid, uid, uid) == -1) {
++		fprintf(stderr, _("Failed to drop privileges\n"));
+ 		return -1;
+ 	}
+-	return capng_apply(CAPNG_SELECT_BOTH);
++	return 0;
+ }
+ 
+-#define DEFAULT_PATH "/usr/bin:/bin"
+-static	int verbose = 0;
++/**
++ * If the user sends a siginto to seunshare, kill the child's session
++ */
++void handler(int sig) {
++	if (child > 0) kill(-child,sig);
++}
+ 
+ /**
+- * Take care of any signal setup
++ * Take care of any signal setup.
+  */
+ static int set_signal_handles(void)
+ {
+@@ -87,32 +109,117 @@ static int set_signal_handles(void)
+ 
+ 	(void)sigprocmask(SIG_SETMASK, &empty, NULL);
+ 
+-	/* Terminate on SIGHUP. */
++	/* Terminate on SIGHUP */
+ 	if (signal(SIGHUP, SIG_DFL) == SIG_ERR) {
+ 		perror("Unable to set SIGHUP handler");
+ 		return -1;
+ 	}
+ 
++	if (signal(SIGINT, handler) == SIG_ERR) {
++		perror("Unable to set SIGINT handler");
++		return -1;
++	}
++
++	return 0;
++}
++
++#define status_to_retval(status,retval) do { \
++	if ((status) == -1) \
++		retval = -1; \
++	else if (WIFEXITED((status))) \
++		retval = WEXITSTATUS((status)); \
++	else if (WIFSIGNALED((status))) \
++		retval = 128 + WTERMSIG((status)); \
++	else \
++		retval = -1; \
++	} while(0)
++
++/**
++ * Spawn external command using system() with dropped privileges.
++ * TODO: avoid system() and use exec*() instead
++ */
++static int spawn_command(const char *cmd, uid_t uid){
++	int child;
++	int status = -1;
++
++	if (verbose > 1)
++		printf("spawn_command: %s\n", cmd);
++
++	child = fork();
++	if (child == -1) {
++		perror(_("Unable to fork"));
++		return status;
++	}
++
++	if (child == 0) {
++		if (drop_privs(uid) != 0) exit(-1);
++
++		status = system(cmd);
++		status_to_retval(status, status);
++		exit(status);
++	}
++
++	waitpid(child, &status, 0);
++	status_to_retval(status, status);
++	return status;
++}
++
++/**
++ * Check file/directory ownership, struct stat * must be passed to the
++ * functions.
++ */
++static int check_owner_uid(uid_t uid, const char *file, struct stat *st) {
++	if (S_ISLNK(st->st_mode)) {
++		fprintf(stderr, _("Error: %s must not be a symbolic link\n"), file);
++		return -1;
++	}
++	if (st->st_uid != uid) {
++		fprintf(stderr, _("Error: %s not owned by UID %d\n"), file, uid);
++		return -1;
++	}
++	return 0;
++}
++
++static int check_owner_gid(gid_t gid, const char *file, struct stat *st) {
++	if (S_ISLNK(st->st_mode)) {
++		fprintf(stderr, _("Error: %s must not be a symbolic link\n"), file);
++		return -1;
++	}
++	if (st->st_gid != gid) {
++		fprintf(stderr, _("Error: %s not owned by GID %d\n"), file, gid);
++		return -1;
++	}
+ 	return 0;
+ }
+ 
++#define equal_stats(one,two) \
++	((one)->st_dev == (two)->st_dev && (one)->st_ino == (two)->st_ino && \
++	 (one)->st_uid == (two)->st_uid && (one)->st_gid == (two)->st_gid && \
++	 (one)->st_mode == (two)->st_mode)
++
+ /**
+- * This function makes sure the mounted directory is owned by the user executing
+- * seunshare.
+- * If so, it returns 0. If it can not figure this out or they are different, it returns -1.
++ * Sanity check specified directory.  Store stat info for future comparison, or
++ * compare with previously saved info to detect replaced directories.
++ * Note: This function does not perform owner checks.
+  */
+-static int verify_mount(const char *mntdir, struct passwd *pwd) {
++static int verify_directory(const char *dir, struct stat *st_in, struct stat *st_out) {
+ 	struct stat sb;
+-	if (stat(mntdir, &sb) == -1) {
+-		fprintf(stderr, _("Invalid mount point %s: %s\n"), mntdir, strerror(errno));
++
++	if (st_out == NULL) st_out = &sb;
++
++	if (lstat(dir, st_out) == -1) {
++		fprintf(stderr, _("Failed to stat %s: %s\n"), dir, strerror(errno));
+ 		return -1;
+ 	}
+-	if (sb.st_uid != pwd->pw_uid) {
+-		errno = EPERM;
+-		syslog(LOG_AUTHPRIV | LOG_ALERT, "%s attempted to mount an invalid directory, %s", pwd->pw_name, mntdir);
+-		perror(_("Invalid mount point, reporting to administrator"));
++	if (! S_ISDIR(st_out->st_mode)) {
++		fprintf(stderr, _("Error: %s is not a directory: %s\n"), dir, strerror(errno));
+ 		return -1;
+ 	}
++	if (st_in && !equal_stats(st_in, st_out)) {
++		fprintf(stderr, _("Error: %s was replaced by a different directory\n"), dir);
++		return -1;
++	}
++
+ 	return 0;
+ }
+ 
+@@ -135,7 +242,7 @@ static int verify_shell(const char *shel
+ 
+ 		/* check the shell skipping newline char */
+ 		if (!strcmp(shell_name, buf)) {
+-			rc = 1;
++			rc = 0;
+ 			break;
+ 		}
+ 	}
+@@ -143,86 +250,612 @@ static int verify_shell(const char *shel
+ 	return rc;
+ }
+ 
+-static int seunshare_mount(const char *src, const char *dst, struct passwd *pwd) {
++/**
++ * Mount directory and check that we mounted the right directory.
++ */
++static int seunshare_mount(const char *src, const char *dst, struct stat *src_st)
++{
++	int flags = MS_REC;
++	int is_tmp = 0;
++
+ 	if (verbose)
+-		printf("Mount %s on %s\n", src, dst);
+-	if (mount(dst, dst,  NULL, MS_BIND | MS_REC, NULL) < 0) {
++		printf(_("Mounting %s on %s\n"), src, dst);
++
++	if (strcmp("/tmp", dst) == 0) {
++		flags = flags | MS_NODEV | MS_NOSUID | MS_NOEXEC;
++		is_tmp = 1;
++	}
++
++	/* mount directory */
++	if (mount(dst, dst,  NULL, MS_BIND | flags, NULL) < 0) {
+ 		fprintf(stderr, _("Failed to mount %s on %s: %s\n"), dst, dst, strerror(errno));
+ 		return -1;
+ 	}
+-
+-	if (mount(dst, dst, NULL, MS_PRIVATE | MS_REC, NULL) < 0) {
++	if (mount(dst, dst, NULL, MS_PRIVATE | flags, NULL) < 0) {
+ 		fprintf(stderr, _("Failed to make %s private: %s\n"), dst, strerror(errno));
+ 		return -1;
+ 	}
+-
+-	if (mount(src, dst, NULL, MS_BIND | MS_REC, NULL) < 0) {
++	if (mount(src, dst, NULL, MS_BIND | flags, NULL) < 0) {
+ 		fprintf(stderr, _("Failed to mount %s on %s: %s\n"), src, dst, strerror(errno));
+ 		return -1;
+ 	}
+ 
+-	if (verify_mount(dst, pwd) < 0) 
+-		return -1;
++	/* verify whether we mounted what we expected to mount */
++	if (verify_directory(dst, src_st, NULL) < 0) return -1;
++
++	/* bind mount /tmp on /var/tmp too */
++	if (is_tmp) {
++		if (verbose)
++			printf(_("Mounting /tmp on /var/tmp\n"));
++
++		if (mount("/var/tmp", "/var/tmp",  NULL, MS_BIND | flags, NULL) < 0) {
++			fprintf(stderr, _("Failed to mount /var/tmp on /var/tmp: %s\n"), strerror(errno));
++			return -1;
++		}
++		if (mount("/var/tmp", "/var/tmp", NULL, MS_PRIVATE | flags, NULL) < 0) {
++			fprintf(stderr, _("Failed to make /var/tmp private: %s\n"), strerror(errno));
++			return -1;
++		}
++		if (mount("/tmp", "/var/tmp",  NULL, MS_BIND | flags, NULL) < 0) {
++			fprintf(stderr, _("Failed to mount /tmp on /var/tmp: %s\n"), strerror(errno));
++			return -1;
++		}
++	}
+ 
+ 	return 0;
+-}
+ 
+-#define USAGE_STRING _("USAGE: seunshare [ -v ] [ -t tmpdir ] [ -h homedir ] [-Z CONTEXT] --  executable [args] ")
++}
+ 
+-int sandbox_error(const char *string) {
++/**
++ * Error logging used by cgroups code.
++ */
++static int sandbox_error(const char *string)
++{
+ 	fprintf(stderr, string);
+ 	syslog(LOG_AUTHPRIV | LOG_ALERT, string);
+ 	exit(-1);
+-
+ }
+ 
+-
+-int match(const char *string, char *pattern) {
++/**
++ * Regular expression match.
++ */
++static int match(const char *string, char *pattern)
++{
+ 	int status;
+-	regex_t re; 
++	regex_t re;
+ 	if (regcomp(&re, pattern, REG_EXTENDED|REG_NOSUB) != 0) {
+ 		return 0;
+ 	}
+ 	status = regexec(&re, string, (size_t)0, NULL, 0);
+-	regfree(&re);	
++	regfree(&re);
+ 	if (status != 0) {
+ 		return 0;
+ 	}
+ 	return 1;
+ }
+ 
+-void config_error() {
+-	fprintf(stderr, "Error parsing config file.");
+-	exit(-1);
++/**
++ * Apply cgroups settings from the /etc/sysconfig/sandbox config file.
++ */
++static int setup_cgroups()
++{
++	char *cpus = NULL;	/* which CPUs to use */
++	char *cgroupname = NULL;/* name for the cgroup */
++	char *mem = NULL;	/* string for memory amount to pass to cgroup */
++	int64_t memusage = 0;	/* amount of memory to use max (percent) */
++	int cpupercentage = 0;  /* what percentage of cpu to allow usage */
++	FILE* fp;
++	char buf[BUF_SIZE];
++	char *tok = NULL;
++	int rc = -1;
++	char *str = NULL;
++	const char* fname = "/etc/sysconfig/sandbox";
++
++	if ((fp = fopen(fname, "rt")) == NULL) {
++		fprintf(stderr, "Error opening sandbox config file.");
++		return rc;
++	}
++	while(fgets(buf, BUF_SIZE, fp) != NULL) {
++		/* Skip comments */
++		if (buf[0] == '#') continue;
++
++		/* Copy the string, ignoring whitespace */
++		int len = strlen(buf);
++		free(str);
++		str = malloc((len + 1) * sizeof(char));
++		if (!str)
++			goto err;
++
++		int ind = 0;
++		int i;
++		for (i = 0; i < len; i++) {
++			char cur = buf[i];
++			if (cur != ' ' && cur != '\t') {
++				str[ind] = cur;
++				ind++;
++			}
++		}
++		str[ind] = '\0';
++
++		tok = strtok(str, "=\n");
++		if (tok != NULL) {
++			if (!strcmp(tok, "CPUAFFINITY")) {
++				tok = strtok(NULL, "=\n");
++				cpus = strdup(tok);
++				if (!strcmp(cpus, "ALL")) {
++					free(cpus);
++					cpus = NULL;
++				}
++			} else if (!strcmp(tok, "MEMUSAGE")) {
++				tok = strtok(NULL, "=\n");
++				if (match(tok, "^[0-9]+[kKmMgG%]")) {
++					char *ind = strchr(tok, '%');
++					if (ind != NULL) {
++						*ind = '\0';;
++						memusage = atoi(tok);
++					} else {
++						mem = strdup(tok);
++					}
++				} else {
++					fprintf(stderr, "Error parsing config file.");
++					goto err;
++				}
++
++			} else if (!strcmp(tok, "CPUUSAGE")) {
++				tok = strtok(NULL, "=\n");
++				if (match(tok, "^[0-9]+\%")) {
++					char* ind = strchr(tok, '%');
++					*ind = '\0';
++					cpupercentage = atoi(tok);
++				} else {
++					fprintf(stderr, "Error parsing config file.");
++					goto err;
++				}
++			} else if (!strcmp(tok, "NAME")) {
++				tok = strtok(NULL, "=\n");
++				cgroupname = strdup(tok);
++			} else {
++				continue;
++			}
++		}
++
++	}
++	if (mem == NULL) {
++		long phypz = sysconf(_SC_PHYS_PAGES);
++		long psize = sysconf(_SC_PAGE_SIZE);
++		memusage = phypz * psize * (float) memusage / 100.0;
++	}
++
++	cgroup_init();
++
++	int64_t current_runtime = 0;
++	int64_t current_period = 0 ;
++	int64_t current_mem = 0;
++	char *curr_cpu_path = NULL;
++	char *curr_mem_path = NULL;
++	int ret  = cgroup_get_current_controller_path(getpid(), "cpu", &curr_cpu_path);
++	if (ret) {
++		sandbox_error("Error while trying to get current controller path.\n");
++	} else {
++		struct cgroup *curr = cgroup_new_cgroup(curr_cpu_path);
++		cgroup_get_cgroup(curr);
++		cgroup_get_value_int64(cgroup_get_controller(curr, "cpu"), "cpu.rt_runtime_us", &current_runtime);
++		cgroup_get_value_int64(cgroup_get_controller(curr, "cpu"), "cpu.rt_period_us", &current_period);
++	}
++
++	ret  = cgroup_get_current_controller_path(getpid(), "memory", &curr_mem_path);
++	if (ret) {
++		sandbox_error("Error while trying to get current controller path.\n");
++	} else {
++		struct cgroup *curr = cgroup_new_cgroup(curr_mem_path);
++		cgroup_get_cgroup(curr);
++		cgroup_get_value_int64(cgroup_get_controller(curr, "memory"), "memory.limit_in_bytes", &current_mem);
++	}
++
++	if (((float) cpupercentage)  / 100.0> (float)current_runtime / (float) current_period) {
++		sandbox_error("CPU usage restricted!\n");
++		goto err;
++	}
++
++	if (mem == NULL) {
++		if (memusage > current_mem) {
++			sandbox_error("Attempting to use more memory than allowed!");
++			goto err;
++		}
++	}
++
++	long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
++
++	struct sched_param sp;
++	sp.sched_priority = sched_get_priority_min(SCHED_FIFO);
++	sched_setscheduler(getpid(), SCHED_FIFO, &sp);
++	struct cgroup *sandbox_group = cgroup_new_cgroup(cgroupname);
++	cgroup_add_controller(sandbox_group, "memory");
++	cgroup_add_controller(sandbox_group, "cpu");
++
++	if (mem == NULL) {
++		if (memusage > 0) {
++			cgroup_set_value_uint64(cgroup_get_controller(sandbox_group, "memory"), "memory.limit_in_bytes", memusage);
++		}
++	} else {
++		cgroup_set_value_string(cgroup_get_controller(sandbox_group, "memory"), "memory.limit_in_bytes", mem);
++	}
++	if (cpupercentage > 0) {
++		cgroup_set_value_uint64(cgroup_get_controller(sandbox_group, "cpu"), "cpu.rt_runtime_us",
++					(float) cpupercentage / 100.0 * 60000);
++		cgroup_set_value_uint64(cgroup_get_controller(sandbox_group, "cpu"), "cpu.rt_period_us",60000 * nprocs);
++	}
++	if (cpus != NULL) {
++		cgroup_set_value_string(cgroup_get_controller(sandbox_group, "cpu"), "cgroup.procs",cpus);
++	}
++
++	uint64_t allocated_mem;
++	if (cgroup_get_value_uint64(cgroup_get_controller(sandbox_group, "memory"), "memory.limit_in_bytes", &allocated_mem) > current_mem) {
++		sandbox_error("Attempting to use more memory than allowed!\n");
++		goto err;
++	}
++
++	rc = cgroup_create_cgroup(sandbox_group, 1);
++	if (rc != 0) {
++		sandbox_error("Failed to create group.  Ensure that cgconfig service is running. \n");
++		goto err;
++	}
++
++	cgroup_attach_task(sandbox_group);
++
++	rc = 0;
++err:
++	fclose(fp);
++	free(str);
++	free(mem);
++	free(cgroupname);
++	free(cpus);
++	return rc;
++}
++
++/*
++   If path is empy or ends with  "/." or "/.. return -1 else return 0;
++ */
++static int bad_path(const char *path) {
++	const char *ptr;
++	ptr = path;
++	while (*ptr) ptr++;
++	if (ptr == path) return -1; // ptr null
++	ptr--;
++	if (ptr != path && *ptr  == '.') {
++		ptr--;
++		if (*ptr  == '/') return -1; // path ends in /.
++		if (*ptr  == '.') {
++			if (ptr != path) {
++				ptr--;
++				if (*ptr  == '/') return -1; // path ends in /..
++			}
++		}
++	}
++	return 0;
++}
++
++static int rsynccmd(const char * src, const char *dst, char **cmdbuf)
++{
++	char *buf = NULL;
++	char *newbuf = NULL;
++	glob_t fglob;
++	fglob.gl_offs = 0;
++	int flags = GLOB_PERIOD;
++	unsigned int i = 0;
++	int rc = -1;
++
++	/* match glob for all files in src dir */
++	if (asprintf(&buf, "%s/*", src) == -1) {
++		fprintf(stderr, "Out of memory\n");
++		return -1;
++	}
++
++	if (glob(buf, flags, NULL, &fglob) != 0) {
++		free(buf); buf = NULL;
++		return -1;
++	}
++
++	free(buf); buf = NULL;
++
++	for ( i=0; i < fglob.gl_pathc; i++) {
++		const char *path = fglob.gl_pathv[i];
++
++		if (bad_path(path)) continue;
++
++		if (!buf) {
++			if (asprintf(&newbuf, "\'%s\'", path) == -1) {
++				fprintf(stderr, "Out of memory\n");
++				goto err;
++			}
++		} else {
++			if (asprintf(&newbuf, "%s  \'%s\'", buf, path) == -1) {
++				fprintf(stderr, "Out of memory\n");
++				goto err;
++			}
++		}
++
++		free(buf); buf = newbuf;
++		newbuf = NULL;
++	}
++
++	if (buf) {
++		if (asprintf(&newbuf, "/usr/bin/rsync -trlHDq %s '%s'", buf, dst) == -1) {
++			fprintf(stderr, "Out of memory\n");
++			goto err;
++		}
++		*cmdbuf=newbuf;
++	}
++	else {
++		*cmdbuf=NULL;
++	}
++	rc = 0;
++
++err:
++	free(buf); buf = NULL;
++	globfree(&fglob);
++	return rc;
++}
++
++/**
++ * Clean up runtime temporary directory.  Returns 0 if no problem was detected,
++ * >0 if some error was detected, but errors here are treated as non-fatal and
++ * left to tmpwatch to finish incomplete cleanup.
++ */
++static int cleanup_tmpdir(const char *tmpdir, const char *src,
++	struct passwd *pwd, int copy_content)
++{
++	char *cmdbuf = NULL;
++	int rc = 0;
++
++	/* rsync files back */
++	if (copy_content) {
++		if (asprintf(&cmdbuf, "/usr/bin/rsync --exclude=.X11-unix -utrlHDq --delete '%s/' '%s/'", tmpdir, src) == -1) {
++			fprintf(stderr, _("Out of memory\n"));
++			cmdbuf = NULL;
++			rc++;
++		}
++		if (cmdbuf && spawn_command(cmdbuf, pwd->pw_uid) != 0) {
++			fprintf(stderr, _("Failed to copy files from the runtime temporary directory\n"));
++			rc++;
++		}
++		free(cmdbuf); cmdbuf = NULL;
++	}
++
++	/* remove files from the runtime temporary directory */
++	if (asprintf(&cmdbuf, "/bin/rm -r '%s/' 2>/dev/null", tmpdir) == -1) {
++		fprintf(stderr, _("Out of memory\n"));
++		cmdbuf = NULL;
++		rc++;
++	}
++	/* this may fail if there's root-owned file left in the runtime tmpdir */
++	if (cmdbuf && spawn_command(cmdbuf, pwd->pw_uid) != 0) rc++;
++	free(cmdbuf); cmdbuf = NULL;
++
++	/* remove runtime temporary directory */
++	setfsuid(0);
++	if (rmdir(tmpdir) == -1)
++		fprintf(stderr, _("Failed to remove directory %s: %s\n"), tmpdir, strerror(errno));
++	setfsuid(pwd->pw_uid);
++
++	return 0;
++}
++
++/**
++ * seunshare will create a tmpdir in /tmp, with root ownership.  The parent
++ * process waits for it child to exit to attempt to remove the directory.  If
++ * it fails to remove the directory, we will need to rely on tmpreaper/tmpwatch
++ * to clean it up.
++ */
++static char *create_tmpdir(const char *src, struct stat *src_st,
++	struct stat *out_st, struct passwd *pwd, security_context_t execcon)
++{
++	char *tmpdir = NULL;
++	char *cmdbuf = NULL;
++	int fd_t = -1, fd_s = -1;
++	struct stat tmp_st;
++	security_context_t con = NULL;
++
++	/* get selinux context */
++	if (execcon) {
++		setfsuid(pwd->pw_uid);
++		if ((fd_s = open(src, O_RDONLY)) < 0) {
++			fprintf(stderr, _("Failed to open directory %s: %s\n"), src, strerror(errno));
++			goto err;
++		}
++		if (fstat(fd_s, &tmp_st) == -1) {
++			fprintf(stderr, _("Failed to stat directory %s: %s\n"), src, strerror(errno));
++			goto err;
++		}
++		if (!equal_stats(src_st, &tmp_st)) {
++			fprintf(stderr, _("Error: %s was replaced by a different directory\n"), src);
++			goto err;
++		}
++		if (fgetfilecon(fd_s, &con) == -1) {
++			fprintf(stderr, _("Failed to get context of the directory %s: %s\n"), src, strerror(errno));
++			goto err;
++		}
++
++		/* ok to not reach this if there is an error */
++		setfsuid(0);
++	}
++
++	if (asprintf(&tmpdir, "/tmp/.sandbox-%s-XXXXXX", pwd->pw_name) == -1) {
++		fprintf(stderr, _("Out of memory\n"));
++		tmpdir = NULL;
++		goto err;
++	}
++	if (mkdtemp(tmpdir) == NULL) {
++		fprintf(stderr, _("Failed to create temporary directory: %s\n"), strerror(errno));
++		goto err;
++	}
++
++	/* temporary directory must be owned by root:user */
++	if (verify_directory(tmpdir, NULL, out_st) < 0) {
++		goto err;
++	}
++
++	if (check_owner_uid(0, tmpdir, out_st) < 0)
++		goto err;
++
++	if (check_owner_gid(getgid(), tmpdir, out_st) < 0)
++		goto err;
++
++	/* change permissions of the temporary directory */
++	if ((fd_t = open(tmpdir, O_RDONLY)) < 0) {
++		fprintf(stderr, _("Failed to open directory %s: %s\n"), tmpdir, strerror(errno));
++		goto err;
++	}
++	if (fstat(fd_t, &tmp_st) == -1) {
++		fprintf(stderr, _("Failed to stat directory %s: %s\n"), tmpdir, strerror(errno));
++		goto err;
++	}
++	if (!equal_stats(out_st, &tmp_st)) {
++		fprintf(stderr, _("Error: %s was replaced by a different directory\n"), tmpdir);
++		goto err;
++	}
++	if (fchmod(fd_t, 01770) == -1) {
++		fprintf(stderr, _("Unable to change mode on %s: %s\n"), tmpdir, strerror(errno));
++		goto err;
++	}
++	/* re-stat again to pick change mode */
++	if (fstat(fd_t, out_st) == -1) {
++		fprintf(stderr, _("Failed to stat directory %s: %s\n"), tmpdir, strerror(errno));
++		goto err;
++	}
++
++	/* copy selinux context */
++	if (execcon) {
++		if (fsetfilecon(fd_t, con) == -1) {
++			fprintf(stderr, _("Failed to set context of the directory %s: %s\n"), tmpdir, strerror(errno));
++			goto err;
++		}
++	}
++
++	setfsuid(pwd->pw_uid);
++
++	if (rsynccmd(src, tmpdir, &cmdbuf) < 0) {
++		goto err;
++	}
++
++	/* ok to not reach this if there is an error */
++	setfsuid(0);
++
++	if (cmdbuf && spawn_command(cmdbuf, pwd->pw_uid) != 0) {
++		fprintf(stderr, _("Failed to populate runtime temporary directory\n"));
++		cleanup_tmpdir(tmpdir, src, pwd, 0);
++		goto err;
++	}
++
++	goto good;
++err:
++	free(tmpdir); tmpdir = NULL;
++good:
++	free(cmdbuf); cmdbuf = NULL;
++	freecon(con); con = NULL;
++	if (fd_t >= 0) close(fd_t);
++	if (fd_s >= 0) close(fd_s);
++	return tmpdir;
++}
++
++#define PROC_BASE "/proc"
++
++static int
++killall (security_context_t execcon)
++{
++	DIR *dir;
++	security_context_t scon;
++	struct dirent *de;
++	pid_t *pid_table, pid, self;
++	int i;
++	int pids, max_pids;
++	int running = 0;
++	self = getpid();
++	if (!(dir = opendir(PROC_BASE))) {
++		return -1;
++	}
++	max_pids = 256;
++	pid_table = malloc(max_pids * sizeof (pid_t));
++	if (!pid_table) {
++		(void)closedir(dir);
++		return -1;
++	}
++	pids = 0;
++	context_t con;
++	con = context_new(execcon);
++	const char *mcs = context_range_get(con);
++	printf("mcs=%s\n", mcs);
++	while ((de = readdir (dir)) != NULL) {
++		if (!(pid = (pid_t)atoi(de->d_name)) || pid == self)
++			continue;
++
++		if (pids == max_pids) {
++			if (!(pid_table = realloc(pid_table, 2*pids*sizeof(pid_t)))) {
++				(void)closedir(dir);
++				return -1;
++			}
++			max_pids *= 2;
++		}
++		pid_table[pids++] = pid;
++	}
++
++	(void)closedir(dir);
++
++	for (i = 0; i < pids; i++) {
++		pid_t id = pid_table[i];
++
++		if (getpidcon(id, &scon) == 0) {
++
++			context_t pidcon = context_new(scon);
++			/* Attempt to kill remaining processes */
++			if (strcmp(context_range_get(pidcon), mcs) == 0)
++				kill(id, SIGKILL);
++
++			context_free(pidcon);
++			freecon(scon);
++		}
++		running++;
++	}
++
++	context_free(con);
++	free(pid_table);
++	return running;
+ }
+ 
+ int main(int argc, char **argv) {
+-	int rc;
+ 	int status = -1;
++	security_context_t execcon = NULL;
+ 
+-	security_context_t scontext = NULL;
+-
+-	int flag_index;		/* flag index in argv[] */
+ 	int clflag;		/* holds codes for command line flags */
+-	char *tmpdir_s = NULL;	/* tmpdir spec'd by user in argv[] */
+-	char *homedir_s = NULL;	/* homedir spec'd by user in argv[] */
+ 	int usecgroups = 0;
++	int kill_all = 0;
++
++	char *homedir_s = NULL;	/* homedir spec'd by user in argv[] */
++	char *tmpdir_s = NULL;	/* tmpdir spec'd by user in argv[] */
++	char *tmpdir_r = NULL;	/* tmpdir created by seunshare */
++
++	struct stat st_homedir;
++	struct stat st_tmpdir_s;
++	struct stat st_tmpdir_r;
+ 
+ 	const struct option long_options[] = {
+ 		{"homedir", 1, 0, 'h'},
+ 		{"tmpdir", 1, 0, 't'},
++		{"kill", 1, 0, 'k'},
+ 		{"verbose", 1, 0, 'v'},
+ 		{"cgroups", 1, 0, 'c'},
+ 		{"context", 1, 0, 'Z'},
++		{"capabilities", 1, 0, 'C'},
+ 		{NULL, 0, 0, 0}
+ 	};
+ 
+ 	uid_t uid = getuid();
+-
++/*
+ 	if (!uid) {
+ 		fprintf(stderr, _("Must not be root"));
+ 		return -1;
+ 	}
++*/
+ 
+ #ifdef USE_NLS
+ 	setlocale(LC_ALL, "");
+@@ -237,34 +870,36 @@ int main(int argc, char **argv) {
+ 	}
+ 
+ 	if (verify_shell(pwd->pw_shell) < 0) {
+-		fprintf(stderr, _("Error!  Shell is not valid.\n"));
++		fprintf(stderr, _("Error: User shell is not valid\n"));
+ 		return -1;
+ 	}
+ 
+ 	while (1) {
+-		clflag = getopt_long(argc, argv, "cvh:t:c:m:p:Z:", long_options,
+-				     &flag_index);
++		clflag = getopt_long(argc, argv, "Ccvh:t:Z:", long_options, NULL);
+ 		if (clflag == -1)
+ 			break;
+ 
+ 		switch (clflag) {
+ 		case 't':
+ 			tmpdir_s = optarg;
+-			if (verify_mount(tmpdir_s, pwd) < 0) return -1;
++			break;
++		case 'k':
++			kill_all = 1;
+ 			break;
+ 		case 'h':
+ 			homedir_s = optarg;
+-			if (verify_mount(homedir_s, pwd) < 0) return -1;
+-			if (verify_mount(pwd->pw_dir, pwd) < 0) return -1;
+ 			break;
+ 		case 'v':
+-			verbose = 1;
++			verbose++;
+ 			break;
+ 		case 'c':
+ 			usecgroups = 1;
+ 			break;
++		case 'C':
++			cap_set = CAPNG_SELECT_CAPS;
++			break;
+ 		case 'Z':
+-			scontext = strdup(optarg);
++			execcon = optarg;
+ 			break;
+ 		default:
+ 			fprintf(stderr, "%s\n", USAGE_STRING);
+@@ -273,257 +908,131 @@ int main(int argc, char **argv) {
+ 	}
+ 
+ 	if (! homedir_s && ! tmpdir_s) {
+-		fprintf(stderr, _("Error: tmpdir and/or homedir required \n %s\n"),USAGE_STRING);
++		fprintf(stderr, _("Error: tmpdir and/or homedir required\n %s\n"), USAGE_STRING);
+ 		return -1;
+ 	}
+ 
+ 	if (argc - optind < 1) {
+-		fprintf(stderr, _("Error: executable required \n %s \n"), USAGE_STRING);
++		fprintf(stderr, _("Error: executable required\n %s\n"), USAGE_STRING);
+ 		return -1;
+ 	}
+ 
+-	
+-	if (set_signal_handles())
++	if (execcon && is_selinux_enabled() != 1) {
++		fprintf(stderr, _("Error: execution context specified, but SELinux is not enabled\n"));
+ 		return -1;
+-	if (usecgroups) {
+-		char *cpus = NULL;	/* which CPUs to use */
+-		char *cgroupname = NULL;/* name for the cgroup */
+-		char *mem = NULL;	/* string for memory amount to pass to cgroup */
+-		int64_t memusage = 0;	/* amount of memory to use max (percent) */
+-		int cpupercentage = 0;  /* what percentage of cpu to allow usage */
+-		FILE* fp;
+-		char buf[BUF_SIZE];
+-		char *tok = NULL;
+-		const char* fname = "/etc/sysconfig/sandbox";	
+-
+-		if ((fp = fopen(fname, "rt")) == NULL) {
+-			fprintf(stderr, "Error opening sandbox config file.");
+-			exit(-1);
+-		}
+-		while(fgets(buf, BUF_SIZE, fp) != NULL) {
+-			/* Skip comments */
+-			if (buf[0] == '#') continue;
+-			
+-			/* Copy the string, ignoring whitespace */
+-			int len = strlen(buf);
+-			char *str = malloc((len + 1) * sizeof(char));
+-
+-			int ind = 0;	
+-			int i;
+-			for (i = 0; i < len; i++) {
+-				char cur = buf[i];
+-				if (cur != ' ' && cur != '\t') {
+-					str[ind] = cur;
+-					ind++;
+-				}
+-			}
+-			str[ind] = '\0';
+-
+-			tok = strtok(str, "=\n");
+-			if (tok != NULL) {
+-				if (!strcmp(tok, "CPUAFFINITY")) {
+-					tok = strtok(NULL, "=\n");
+-					cpus = strdup(tok);
+-					if (!strcmp(cpus, "ALL")) {
+-						cpus = NULL;
+-					}
+-				} else if (!strcmp(tok, "MEMUSAGE")) {
+-					tok = strtok(NULL, "=\n");
+-					if (match(tok, "^[0-9]+[kKmMgG%]")) {
+-						char *ind = strchr(tok, '%');
+-						if (ind != NULL) {
+-							*ind = '\0';;
+-							memusage = atoi(tok);
+-						} else {
+-							mem = strdup(tok);
+-						}
+-					} else {
+-						config_error();
+-					}
+-
+-				} else if (!strcmp(tok, "CPUUSAGE")) {
+-					tok = strtok(NULL, "=\n");
+-					if (match(tok, "^[0-9]+\%")) {
+-						char* ind = strchr(tok, '%');
+-						*ind = '\0';
+-						cpupercentage = atoi(tok);
+-					} else {
+-						config_error();
+-					}
+-				} else if (!strcmp(tok, "NAME")) {
+-					tok = strtok(NULL, "=\n");
+-					cgroupname = strdup(tok);
+-				} else {
+-					continue;
+-				}
+-			}
+-
+-
+-		}
+-		if (mem == NULL) {
+-			long phypz = sysconf(_SC_PHYS_PAGES);
+-			long psize = sysconf(_SC_PAGE_SIZE);
+-			memusage = phypz * psize * (float) memusage / 100.0;
+-		}
+-
+-		cgroup_init();
+-
+-		int64_t current_runtime = 0;
+-		int64_t current_period = 0 ;
+-		int64_t current_mem = 0;
+-		char *curr_cpu_path = NULL;
+-		char *curr_mem_path = NULL;
+-		int ret  = cgroup_get_current_controller_path(getpid(), "cpu", &curr_cpu_path);
+-		if (ret) {
+-			sandbox_error("Error while trying to get current controller path.\n");
+-		} else {
+-			struct cgroup *curr = cgroup_new_cgroup(curr_cpu_path);
+-			cgroup_get_cgroup(curr);
+-			cgroup_get_value_int64(cgroup_get_controller(curr, "cpu"), "cpu.rt_runtime_us", &current_runtime);
+-			cgroup_get_value_int64(cgroup_get_controller(curr, "cpu"), "cpu.rt_period_us", &current_period);
+-		}   
+-
+-		ret  = cgroup_get_current_controller_path(getpid(), "memory", &curr_mem_path);
+-		if (ret) {
+-			sandbox_error("Error while trying to get current controller path.\n");
+-		} else {
+-			struct cgroup *curr = cgroup_new_cgroup(curr_mem_path);
+-			cgroup_get_cgroup(curr);
+-			cgroup_get_value_int64(cgroup_get_controller(curr, "memory"), "memory.limit_in_bytes", &current_mem);
+-		}   
+-
+-		if (((float) cpupercentage)  / 100.0> (float)current_runtime / (float) current_period) {
+-			sandbox_error("CPU usage restricted!\n");
+-			exit(-1);
+-		}   
+-
+-		if (mem == NULL) {	
+-			if (memusage > current_mem) {
+-				sandbox_error("Attempting to use more memory than allowed!");
+-				exit(-1);
+-			}
+-		}
+-	    
+-		long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
+-
+-		struct sched_param sp; 
+-		sp.sched_priority = sched_get_priority_min(SCHED_FIFO);
+-		sched_setscheduler(getpid(), SCHED_FIFO, &sp);
+-		struct cgroup *sandbox_group = cgroup_new_cgroup(cgroupname);
+-		cgroup_add_controller(sandbox_group, "memory");
+-		cgroup_add_controller(sandbox_group, "cpu");
+-
+-		if (mem == NULL) {
+-			if (memusage > 0) {
+-				cgroup_set_value_uint64(cgroup_get_controller(sandbox_group, "memory"), "memory.limit_in_bytes", memusage);
+-			}	
+-		} else {
+-			cgroup_set_value_string(cgroup_get_controller(sandbox_group, "memory"), "memory.limit_in_bytes", mem);
+-		}
+-		if (cpupercentage > 0) {
+-			cgroup_set_value_uint64(cgroup_get_controller(sandbox_group, "cpu"), "cpu.rt_runtime_us",
+-						(float) cpupercentage / 100.0 * 60000);
+-			cgroup_set_value_uint64(cgroup_get_controller(sandbox_group, "cpu"), "cpu.rt_period_us",60000 * nprocs);
+-		}
+-		if (cpus != NULL) {
+-			cgroup_set_value_string(cgroup_get_controller(sandbox_group, "cpu"), "cgroup.procs",cpus);
+-		}
+-
+-		uint64_t allocated_mem;
+-		if (cgroup_get_value_uint64(cgroup_get_controller(sandbox_group, "memory"), "memory.limit_in_bytes", &allocated_mem) > current_mem) {
+-			sandbox_error("Attempting to use more memory than allowed!\n");
+-			exit(-1);
+-		}
+-
+-
+-		int r = cgroup_create_cgroup(sandbox_group, 1);
+-		if (r != 0) {
+-			sandbox_error("Failed to create group.  Ensure that cgconfig service is running. \n");
+-			exit(-1);
+-		}
+-
+-
+-		cgroup_attach_task(sandbox_group);
+-
+ 	}
+ 
+-        if (unshare(CLONE_NEWNS) < 0) {
+-		perror(_("Failed to unshare"));
++	if (set_signal_handles())
+ 		return -1;
+-	}
+ 
+-	if (homedir_s && tmpdir_s && (strncmp(pwd->pw_dir, tmpdir_s, strlen(pwd->pw_dir)) == 0)) {
+-	    if (seunshare_mount(tmpdir_s, "/tmp", pwd) < 0)
+-		    return -1;
+-	    if (seunshare_mount(homedir_s, pwd->pw_dir, pwd) < 0)
+-		    return -1;
+-	} else {			
+-		if (homedir_s && seunshare_mount(homedir_s, pwd->pw_dir, pwd) < 0)
+-				return -1;
+-				
+-		if (tmpdir_s && seunshare_mount(tmpdir_s, "/tmp", pwd) < 0)
+-				return -1;
+-	}
++	if (usecgroups && setup_cgroups() < 0)
++		return  -1;
+ 
+-	if (drop_capabilities(uid)) {
+-		perror(_("Failed to drop all capabilities"));
++	/* set fsuid to ruid */
++	/* Changing fsuid is usually required when user-specified directory is
++	 * on an NFS mount.  It's also desired to avoid leaking info about
++	 * existence of the files not accessible to the user. */
++	setfsuid(uid);
++
++	/* verify homedir and tmpdir */
++	if (homedir_s && (
++		verify_directory(homedir_s, NULL, &st_homedir) < 0 ||
++		check_owner_uid(uid, homedir_s, &st_homedir))) return -1;
++	if (tmpdir_s && (
++		verify_directory(tmpdir_s, NULL, &st_tmpdir_s) < 0 ||
++		check_owner_uid(uid, tmpdir_s, &st_tmpdir_s))) return -1;
++	setfsuid(0);
++
++	/* create runtime tmpdir */
++	if (tmpdir_s && (tmpdir_r = create_tmpdir(tmpdir_s, &st_tmpdir_s,
++						  &st_tmpdir_r, pwd, execcon)) == NULL) {
++		fprintf(stderr, _("Failed to create runtime temporary directory\n"));
+ 		return -1;
+ 	}
+ 
+-	int child = fork();
++	/* spawn child process */
++	child = fork();
+ 	if (child == -1) {
+ 		perror(_("Unable to fork"));
+-		return -1;
++		goto err;
+ 	}
+ 
+-	if (!child) {
+-		char *display=NULL;
+-		/* Construct a new environment */
+-		char *d = getenv("DISPLAY");
+-		if (d) {
+-			display =  strdup(d);
+-			if (!display) {
+-				perror(_("Out of memory"));
+-				exit(-1);
+-			}
++	if (child == 0) {
++		char *display = NULL;
++		int rc = -1;
++
++		if (unshare(CLONE_NEWNS) < 0) {
++			perror(_("Failed to unshare"));
++			goto childerr;
+ 		}
+ 
+-		if ((rc = clearenv())) {
+-			perror(_("Unable to clear environment"));
+-			free(display);
+-			exit(-1);
+-		}
+-		
+-		if (scontext) {
+-			if (setexeccon(scontext)) {
+-				fprintf(stderr, _("Could not set exec context to %s.\n"),
+-					scontext);
+-				free(display);
+-				exit(-1);
++		/* assume fsuid==ruid after this point */
++		setfsuid(uid);
++
++		/* mount homedir and tmpdir, in this order */
++		if (homedir_s && seunshare_mount(homedir_s, pwd->pw_dir,
++			&st_homedir) != 0) goto childerr;
++		if (tmpdir_s &&	seunshare_mount(tmpdir_r, "/tmp",
++			&st_tmpdir_r) != 0) goto childerr;
++
++		if (drop_privs(uid) != 0) goto childerr;
++
++		/* construct a new environment */
++		if ((display = getenv("DISPLAY")) != NULL) {
++			if ((display = strdup(display)) == NULL) {
++				perror(_("Out of memory"));
++				goto childerr;
+ 			}
+ 		}
+-
+-		if (display) 
++		if ((rc = clearenv()) != 0) {
++			perror(_("Failed to clear environment"));
++			goto childerr;
++		}
++		if (display)
+ 			rc |= setenv("DISPLAY", display, 1);
+ 		rc |= setenv("HOME", pwd->pw_dir, 1);
+ 		rc |= setenv("SHELL", pwd->pw_shell, 1);
+ 		rc |= setenv("USER", pwd->pw_name, 1);
+ 		rc |= setenv("LOGNAME", pwd->pw_name, 1);
+ 		rc |= setenv("PATH", DEFAULT_PATH, 1);
+-		
++		if (rc != 0) {
++			fprintf(stderr, _("Failed to construct environment\n"));
++			goto childerr;
++		}
++
++		/* selinux context */
++		if (execcon && setexeccon(execcon) != 0) {
++			fprintf(stderr, _("Could not set exec context to %s.\n"), execcon);
++			goto childerr;
++		}
++
+ 		if (chdir(pwd->pw_dir)) {
+ 			perror(_("Failed to change dir to homedir"));
+-			exit(-1);
++			goto childerr;
+ 		}
+ 		setsid();
+ 		execv(argv[optind], argv + optind);
++		fprintf(stderr, _("Failed to execute command %s: %s\n"), argv[optind], strerror(errno));
++childerr:
+ 		free(display);
+-		freecon(scontext);
+-		perror("execv");
+ 		exit(-1);
+-	} else {
+-		waitpid(child, &status, 0);
+ 	}
+ 
++	drop_caps();
++
++	/* parent waits for child exit to do the cleanup */
++	waitpid(child, &status, 0);
++	status_to_retval(status, status);
++
++	/* Make sure all child processes exit */
++	kill(-child,SIGTERM);
++
++	if (execcon && kill_all)
++		killall(execcon);
++
++	if (tmpdir_r) cleanup_tmpdir(tmpdir_r, tmpdir_s, pwd, 1);
++
++err:
++	free(tmpdir_r);
+ 	return status;
+ }
+diff -up policycoreutils-2.0.83/sandbox/start.rhel6 policycoreutils-2.0.83/sandbox/start
+--- policycoreutils-2.0.83/sandbox/start.rhel6	2011-08-30 12:08:46.000000000 -0400
++++ policycoreutils-2.0.83/sandbox/start	2011-08-30 12:08:46.000000000 -0400
+@@ -0,0 +1,9 @@
++#! /usr/bin/python -Es
++import gtk, commands, sys
++rc = [-1,'']
++try:
++    rc=commands.getstatusoutput(sys.argv[1])
++except:
++    pass
++if rc[0] == 0:
++    print rc[1]
+diff -up policycoreutils-2.0.83/semanage/semanage.8.rhel6 policycoreutils-2.0.83/semanage/semanage.8
+--- policycoreutils-2.0.83/semanage/semanage.8.rhel6	2011-08-30 12:08:45.000000000 -0400
++++ policycoreutils-2.0.83/semanage/semanage.8	2011-08-30 12:08:46.000000000 -0400
+@@ -24,6 +24,10 @@ Manage login mappings between linux user
+ .br
+ .B semanage login [\-S store] \-{a|d|m|l|n|D} [\-sr] login_name | %groupname
+ 
++Manage policy modules.
++.br
++.B semanage module [\-S store] \-{a|d|l} [-m [--enable | --disable] ] module_name
++
+ Manage network port type definitions
+ .br
+ .B semanage port [\-S store] \-{a|d|m|l|n|D} [\-tr] [\-p proto] port | port_range
+@@ -88,6 +92,16 @@ Delete a OBJECT record NAME
+ .I                \-D, \-\-deleteall
+ Remove all OBJECTS local customizations
+ .TP
++.I                \-\-disable
++Disable a policy module, requires -m option
++
++Currently modules only.
++.TP
++.I                \-\-enable
++Enable a disabled policy module, requires -m option
++
++Currently modules only.
++.TP
+ .I                \-e, \-\-equal
+ Substitute target path with sourcepath when generating default label.  This is used with
+ fcontext. Requires source and target path arguments.  The context
+@@ -102,6 +116,7 @@ Requires a file type as shown in the mod
+ Set multiple records from the input file.  When used with the \-l \-\-list, it will output the current settings to stdout in the proper format.
+ 
+ Currently booleans only.
++
+ .TP
+ .I                \-h, \-\-help       
+ display this message
+@@ -118,6 +133,9 @@ Default SELinux Level for SELinux use, s
+ .I                \-m, \-\-modify     
+ Modify a OBJECT record NAME
+ .TP
++.I                \-M, \-\-mask
++Network Mask
++.TP
+ .I                \-n, \-\-noheading  
+ Do not print heading when listing OBJECTS.
+ .TP
+@@ -142,7 +160,7 @@ Select and alternate SELinux store to ma
+ .I                \-t, \-\-type       
+ SELinux Type for the object
+ .TP
+-.I                \-i
++.I                \-i, \-\-input
+ Take a set of commands from a specified file and load them in a single
+ transaction.
+ 
+diff -up policycoreutils-2.0.83/semanage/semanage.rhel6 policycoreutils-2.0.83/semanage/semanage
+--- policycoreutils-2.0.83/semanage/semanage.rhel6	2011-08-30 12:08:45.000000000 -0400
++++ policycoreutils-2.0.83/semanage/semanage	2011-09-06 14:06:46.000000000 -0400
+@@ -53,16 +53,15 @@ if __name__ == '__main__':
+ semanage [ -S store ] -i [ input_file | - ]
+ semanage [ -S store ] -o [ output_file | - ]
+ 
+-semanage {boolean|login|user|port|interface|module|node|fcontext} -{l|D|E} [-n]
+-semanage login -{a|d|m} [-sr] login_name | %groupname
+-semanage user -{a|d|m} [-LrRP] selinux_name
+-semanage port -{a|d|m} [-tr] [ -p proto ] port | port_range
+-semanage interface -{a|d|m} [-tr] interface_spec
++semanage login -{a|d|m|l|D|E} [-nrs] login_name | %groupname
++semanage user -{a|d|m|l|D|E} [-LnrRP] selinux_name
++semanage port -{a|d|m|l|D|E} [-nrt] [ -p proto ] port | port_range
++semanage interface -{a|d|m|l|D|E} [-nrt] interface_spec
+ semanage module -{a|d|m} [--enable|--disable] module
+-semanage node -{a|d|m} [-tr] [ -p protocol ] [-M netmask] addr
+-semanage fcontext -{a|d|m} [-efrst] file_spec
++semanage node -{a|d|m|l|D|E} [-nrt] [ -p protocol ] [-M netmask] addr
++semanage fcontext -{a|d|m|l|D|E} [-efnrst] file_spec
+ semanage boolean -{d|m} [--on|--off|-1|-0] -F boolean | boolean_file
+-semanage permissive -{d|a|l} type 
++semanage permissive -{d|a|l} [-n] type 
+ semanage dontaudit [ on | off ]
+ 
+ Primary Options:
+@@ -116,24 +115,25 @@ Object-specific Options (see above):
+ 
+ 	def get_options():
+ 		valid_option={}
+-		valid_everyone=[ '-a', '--add', '-d', '--delete', '-E', '--extract', '-m', '--modify', '-l', '--list', '-h', '--help', '-n', '--noheading', '-C', '--locallist', '-D', '--deleteall', '-S', '--store' ]
++		valid_everyone=[ '-a', '--add', '-d', '--delete', '-m', '--modify', '-l', '--list', '-h', '--help', '-n', '--noheading', '-S', '--store' ]
++		valid_local=[ '-E', '--extract', '-C', '--locallist', '-D', '--deleteall']
+ 		valid_option["login"] = []
+-		valid_option["login"] += valid_everyone + [ '-s', '--seuser', '-r', '--range']
++		valid_option["login"] += valid_everyone + valid_local + [ '-s', '--seuser', '-r', '--range']
+ 		valid_option["user"] = []
+-		valid_option["user"] += valid_everyone + [ '-L', '--level', '-r', '--range', '-R', '--roles', '-P', '--prefix' ] 
++		valid_option["user"] += valid_everyone + valid_local + [ '-L', '--level', '-r', '--range', '-R', '--roles', '-P', '--prefix' ] 
+ 		valid_option["port"] = []
+-		valid_option["port"] += valid_everyone + [ '-t', '--type', '-r', '--range', '-p', '--proto' ]
++		valid_option["port"] += valid_everyone + valid_local + [ '-t', '--type', '-r', '--range', '-p', '--proto' ]
+ 		valid_option["interface"] = []
+-		valid_option["interface"] += valid_everyone + [ '-t', '--type', '-r', '--range']
++		valid_option["interface"] += valid_everyone + valid_local + [ '-t', '--type', '-r', '--range']
+ 		valid_option["node"] = []
+-		valid_option["node"] += valid_everyone + [ '-M', '--mask', '-t', '--type', '-r', '--range', '-p', '--protocol']
++		valid_option["node"] += valid_everyone + valid_local + [ '-M', '--mask', '-t', '--type', '-r', '--range', '-p', '--protocol']
+ 		valid_option["module"] = []
+ 		valid_option["module"] += valid_everyone + [ '--enable', '--disable']
+ 		valid_option["fcontext"] = []
+-		valid_option["fcontext"] += valid_everyone + [ '-e', '--equal', '-f', '--ftype', '-s', '--seuser',  '-t', '--type', '-r', '--range'] 
++		valid_option["fcontext"] += valid_everyone + valid_local + [ '-e', '--equal', '-f', '--ftype', '-s', '--seuser',  '-t', '--type', '-r', '--range'] 
+ 		valid_option["dontaudit"] = [ '-S', '--store' ]
+ 		valid_option["boolean"] = []
+-		valid_option["boolean"] += valid_everyone + [ '--on', "--off", "-1", "-0", "-F", "--file"] 
++		valid_option["boolean"] += valid_everyone + valid_local + [ '--on', "--off", "-1", "-0", "-F", "--file"] 
+ 		valid_option["permissive"] = []
+ 		valid_option["permissive"] += [ '-a', '--add', '-d', '--delete', '-l', '--list', '-h', '--help', '-n', '--noheading', '-D', '--deleteall' ]
+ 		return valid_option
+@@ -221,36 +221,40 @@ Object-specific Options (see above):
+ 			
+ 		args = argv[1:]
+ 
+-		gopts, cmds = getopt.getopt(args,
+-					    '01adEe:f:i:lhmnp:s:FCDR:L:r:t:P:S:M:',
+-					    ['add',
+-					     'delete',
+-					     'deleteall',
+-					     'equal=',
+-					     'enable',
+-					     'extract',
+-					     'disable',
+-					     'ftype=',
+-					     'file',
+-					     'help',
+-                                             'input=',
+-					     'list', 
+-					     'modify',
+-					     'noheading',
+-					     'localist',
+-                                             'off', 
+-                                             'on', 
+-					     'proto=',
+-					     'seuser=',
+-					     'store=',
+-					     'range=',
+-					     'locallist=',
+-					     'level=',
+-					     'roles=',
+-					     'type=',
+-					     'prefix=',
+-                                             'mask='
+-					     ])
++                try:
++                       gopts, cmds = getopt.getopt(args,
++                                                   '01adEe:f:i:lhmnp:s:FCDR:L:r:t:P:S:M:',
++                                                   ['add',
++                                                    'delete',
++                                                    'deleteall',
++                                                    'equal=',
++                                                    'enable',
++                                                    'extract',
++                                                    'disable',
++                                                    'ftype=',
++                                                    'file',
++                                                    'help',
++                                                    'input=',
++                                                    'list', 
++                                                    'modify',
++                                                    'noheading',
++                                                    'localist',
++                                                    'off', 
++                                                    'on', 
++                                                    'proto=',
++                                                    'seuser=',
++                                                    'store=',
++                                                    'range=',
++                                                    'locallist=',
++                                                    'level=',
++                                                    'roles=',
++                                                    'type=',
++                                                    'prefix=',
++                                                    'mask='
++                                                    ])
++                except getopt.error, error:
++                       usage(_("Options Error %s ") % error.msg)
++
+ 		for o, a in gopts:
+ 			if o not in option_dict[object]:
+ 				sys.stderr.write(_("%s not valid for %s objects\n") % ( o, object) );
+@@ -500,32 +504,36 @@ Object-specific Options (see above):
+                if len(sys.argv) < 3:
+                       usage(_("Requires 2 or more arguments"))
+                 
+-               gopts, cmds = getopt.getopt(sys.argv[1:],
+-                                           '01adf:i:lhmno:p:s:FCDR:L:r:t:T:P:S:',
+-                                           ['add',
+-                                            'delete',
+-                                            'deleteall',
+-                                            'ftype=',
+-                                            'file',
+-                                            'help',
+-                                            'input=',
+-                                            'list', 
+-                                            'modify',
+-                                            'noheading',
+-                                            'localist',
+-                                            'off', 
+-                                            'on', 
+-                                            'output=',
+-                                            'proto=',
+-                                            'seuser=',
+-                                            'store=',
+-                                            'range=',
+-                                            'level=',
+-                                            'roles=',
+-                                            'type=',
+-                                            'trans=',
+-                                            'prefix='
+-                                            ])
++               try:
++                      gopts, cmds = getopt.getopt(sys.argv[1:],
++                                                  '01adf:i:lhmno:p:s:FCDR:L:r:t:T:P:S:',
++                                                  ['add',
++                                                   'delete',
++                                                   'deleteall',
++                                                   'ftype=',
++                                                   'file',
++                                                   'help',
++                                                   'input=',
++                                                   'list', 
++                                                   'modify',
++                                                   'noheading',
++                                                   'localist',
++                                                   'off', 
++                                                   'on', 
++                                                   'output=',
++                                                   'proto=',
++                                                   'seuser=',
++                                                   'store=',
++                                                   'range=',
++                                                   'level=',
++                                                   'roles=',
++                                                   'type=',
++                                                   'trans=',
++                                                   'prefix='
++                                                   ])
++               except getopt.error, error:
++                      usage(_("Options Error %s ") % error.msg)
++
+                for o, a in gopts:
+                       if o == "-S" or o == '--store':
+                              store = a
+@@ -555,8 +563,6 @@ Object-specific Options (see above):
+                else:
+                       process_args(sys.argv[1:])
+ 			
+-	except getopt.error, error:
+-		usage(_("Options Error %s ") % error.msg)
+ 	except ValueError, error:
+ 		errorExit(error.args[0])
+ 	except KeyError, error:
+@@ -565,3 +571,5 @@ Object-specific Options (see above):
+ 		errorExit(error.args[1])
+ 	except OSError, error:
+ 		errorExit(error.args[1])
++	except RuntimeError, error:
++		errorExit(error.args[0])
+diff -up policycoreutils-2.0.83/sepolgen-1.0.23/src/sepolgen/module.py.rhel6 policycoreutils-2.0.83/sepolgen-1.0.23/src/sepolgen/module.py
+--- policycoreutils-2.0.83/sepolgen-1.0.23/src/sepolgen/module.py.rhel6	2011-08-30 12:17:11.000000000 -0400
++++ policycoreutils-2.0.83/sepolgen-1.0.23/src/sepolgen/module.py	2011-08-30 12:17:16.000000000 -0400
+@@ -37,8 +37,8 @@ import shutil
+ def is_valid_name(modname):
+     """Check that a module name is valid.
+     """
+-    m = re.findall("[^a-zA-Z0-9]", modname)
+-    if len(m) == 0:
++    m = re.findall("[^a-zA-Z0-9_\-\.]", modname)
++    if len(m) == 0 and modname[0].isalpha():
+         return True
+     else:
+         return False
+diff -up policycoreutils-2.0.83/sepolgen-ifgen/sepolgen-ifgen-attr-helper.c.rhel6 policycoreutils-2.0.83/sepolgen-ifgen/sepolgen-ifgen-attr-helper.c
+--- policycoreutils-2.0.83/sepolgen-ifgen/sepolgen-ifgen-attr-helper.c.rhel6	2011-09-06 14:19:51.000000000 -0400
++++ policycoreutils-2.0.83/sepolgen-ifgen/sepolgen-ifgen-attr-helper.c	2011-09-06 14:19:57.000000000 -0400
+@@ -2,7 +2,7 @@
+  *   and Karl MacMillan <kmacmillan@tresys.com>
+  *
+  * Copyright (C) 2003,2010 Tresys Technology, LLC
+- * 
++ *
+  *	This program is free software; you can redistribute it and/or
+  *  	modify it under the terms of the GNU General Public License as
+  *  	published by the Free Software Foundation, version 2.
+@@ -168,6 +168,7 @@ static policydb_t *load_policy(const cha
+ 
+ 	if (policydb_init(policydb)) {
+ 		fprintf(stderr, "Out of memory!\n");
++		free(policydb);
+ 		return NULL;
+ 	}
+ 
+@@ -175,11 +176,12 @@ static policydb_t *load_policy(const cha
+ 	if (ret) {
+ 		fprintf(stderr,
+ 			"error(s) encountered while parsing configuration\n");
++		free(policydb);
+ 		return NULL;
+ 	}
+ 
+ 	fclose(fp);
+-	
++
+ 	return policydb;
+ 
+ }
+@@ -197,14 +199,13 @@ int main(int argc, char **argv)
+ 
+ 	if (argc != 3) {
+ 		usage(argv[0]);
+-		exit(1);
++		return -1;
+ 	}
+ 
+ 	/* Open the policy. */
+ 	p = load_policy(argv[1]);
+-	if (p == NULL) {
+-		exit(1);
+-	}
++	if (p == NULL)
++		return -1;
+ 
+ 	/* Open the output policy. */
+ 	fp = fopen(argv[2], "w");
+@@ -212,6 +213,7 @@ int main(int argc, char **argv)
+ 		fprintf(stderr, "error opening output file\n");
+ 		policydb_destroy(p);
+ 		free(p);
++		return -1;
+ 	}
+ 
+ 	/* Find all of the attributes and output their access. */
+diff -up policycoreutils-2.0.83/sestatus/sestatus.c.rhel6 policycoreutils-2.0.83/sestatus/sestatus.c
+--- policycoreutils-2.0.83/sestatus/sestatus.c.rhel6	2010-06-16 08:04:11.000000000 -0400
++++ policycoreutils-2.0.83/sestatus/sestatus.c	2011-08-30 12:08:46.000000000 -0400
+@@ -212,6 +212,9 @@ int main(int argc, char **argv)
+ 			printf("\nUsage: %s [OPTION]\n\n", basename(argv[0]));
+ 			printf
+ 			    ("  -v  Verbose check of process and file contexts.\n");
++			printf
++			    ("  -b   Display the current state of booleans.\n");
++
+ 			printf("\nWithout options, show SELinux status.\n");
+ 			return -1;
+ 		}
+diff -up policycoreutils-2.0.83/setfiles/restorecon.8.rhel6 policycoreutils-2.0.83/setfiles/restorecon.8
+--- policycoreutils-2.0.83/setfiles/restorecon.8.rhel6	2011-09-13 14:06:13.731525808 -0400
++++ policycoreutils-2.0.83/setfiles/restorecon.8	2011-09-13 14:08:00.760365382 -0400
+@@ -14,12 +14,17 @@ This manual page describes the
+ .BR restorecon
+ program.
+ .P
+-This program is primarily used to set the security context
++This program is primarily used to reset the security context (type)
+ (extended attributes) on one or more files. 
+ .P
+ It can be run at any time to correct errors, to add support for
+ new policy, or with the \-n option it can just check whether the file
+ contexts are all as you expect.
++.P 
++If a file object does not have a context, restorecon will write the default 
++context to the file object's extended attributes. If a file object has a 
++context, restorecon will only modify the type portion of the security context. 
++The -F option will force a replacement of the entire context.
+ 
+ .SH "OPTIONS"
+ .TP 
+@@ -47,11 +52,8 @@ show progress by printing * every 1000 f
+ .B \-v
+ show changes in file labels.
+ .TP 
+-.B \-vv
+-show changes in file labels, if type, role, or user are changing.
+-.TP 
+ .B \-F
+-Force reset of context to match file_context for customizable files, or the user section, if it has changed. 
++Force reset of context to match file_context for customizable files, and the default file context, changing the user, role, range portion as well as the type.
+ .TP 
+ .SH "ARGUMENTS"
+ .B pathname...
+diff -up policycoreutils-2.0.83/setfiles/restore.c.rhel6 policycoreutils-2.0.83/setfiles/restore.c
+--- policycoreutils-2.0.83/setfiles/restore.c.rhel6	2011-09-13 13:57:05.074398526 -0400
++++ policycoreutils-2.0.83/setfiles/restore.c	2011-09-23 11:48:59.141228005 -0400
+@@ -1,5 +1,6 @@
+ #include "restore.h"
+ #include <glob.h>
++#include <selinux/context.h>
+ 
+ #define SKIP -2
+ #define ERR -1
+@@ -33,7 +34,6 @@ struct edir {
+ 
+ static file_spec_t *fl_head;
+ static int filespec_add(ino_t ino, const security_context_t con, const char *file);
+-static int only_changed_user(const char *a, const char *b);
+ struct restore_opts *r_opts = NULL;
+ static void filespec_destroy(void);
+ static void filespec_eval(void);
+@@ -60,9 +60,10 @@ void restore_init(struct restore_opts *o
+ 	r_opts = opts;
+ 	struct selinux_opt selinux_opts[] = {
+ 		{ SELABEL_OPT_VALIDATE, r_opts->selabel_opt_validate },
+-		{ SELABEL_OPT_PATH, r_opts->selabel_opt_path }
++		{ SELABEL_OPT_PATH, r_opts->selabel_opt_path },
++		{ SELABEL_OPT_SUBSET, r_opts->selabel_opt_subset }
+ 	};
+-	r_opts->hnd = selabel_open(SELABEL_CTX_FILE, selinux_opts, 2);
++	r_opts->hnd = selabel_open(SELABEL_CTX_FILE, selinux_opts, 3);
+ 	if (!r_opts->hnd) {
+ 		perror(r_opts->selabel_opt_path);
+ 		exit(1);
+@@ -104,8 +105,7 @@ static int restore(FTSENT *ftsent)
+ {
+ 	char *my_file = strdupa(ftsent->fts_path);
+ 	int ret;
+-	char *context, *newcon;
+-	int user_only_changed = 0;
++	security_context_t curcon = NULL, newcon = NULL;
+ 
+ 	if (match(my_file, ftsent->fts_statp, &newcon) < 0)
+ 		/* Check for no matching specification. */
+@@ -143,74 +143,105 @@ static int restore(FTSENT *ftsent)
+ 		printf("%s:  %s matched by %s\n", r_opts->progname, my_file, newcon);
+ 	}
+ 
++	/* 
++	 * Do not relabel if their is no default specification for this file 
++	 */
++
++	if (strcmp(newcon, "<<none>>") == 0) {
++		goto out;
++	}
++
+ 	/* Get the current context of the file. */
+-	ret = lgetfilecon_raw(ftsent->fts_accpath, &context);
++	ret = lgetfilecon_raw(ftsent->fts_accpath, &curcon);
+ 	if (ret < 0) {
+ 		if (errno == ENODATA) {
+-			context = NULL;
++			curcon = NULL;
+ 		} else {
+ 			fprintf(stderr, "%s get context on %s failed: '%s'\n",
+ 				r_opts->progname, my_file, strerror(errno));
+ 			goto err;
+ 		}
+-		user_only_changed = 0;
+-	} else
+-		user_only_changed = only_changed_user(context, newcon);
++	}
++
+ 	/* lgetfilecon returns number of characters and ret needs to be reset
+ 	 * to 0.
+ 	 */
+ 	ret = 0;
+ 
+ 	/*
+-	 * Do not relabel the file if the matching specification is 
+-	 * <<none>> or the file is already labeled according to the 
+-	 * specification.
++	 * Do not relabel the file if the file is already labeled according to 
++	 * the specification.
+ 	 */
+-	if ((strcmp(newcon, "<<none>>") == 0) ||
+-	    (context && (strcmp(context, newcon) == 0))) {
+-		freecon(context);
++	if (curcon && (strcmp(curcon, newcon) == 0)) {
+ 		goto out;
+ 	}
+ 
+-	if (!r_opts->force && context && (is_context_customizable(context) > 0)) {
++	if (!r_opts->force && curcon && (is_context_customizable(curcon) > 0)) {
+ 		if (r_opts->verbose > 1) {
+ 			fprintf(stderr,
+ 				"%s: %s not reset customized by admin to %s\n",
+-				r_opts->progname, my_file, context);
++				r_opts->progname, my_file, curcon);
+ 		}
+-		freecon(context);
+ 		goto out;
+ 	}
+ 
+-	if (r_opts->verbose) {
+-		/* If we're just doing "-v", trim out any relabels where
+-		 * the user has r_opts->changed but the role and type are the
+-		 * same.  For "-vv", emit everything. */
+-		if (r_opts->verbose > 1 || !user_only_changed) {
+-			printf("%s reset %s context %s->%s\n",
+-			       r_opts->progname, my_file, context ?: "", newcon);
++	/* 
++	 *  Do not change label unless this is a force or the type is different 
++	 */
++	if (!r_opts->force && curcon) {
++		int types_differ = 0;
++		context_t cona;
++		context_t conb;
++		int err = 0;
++		cona = context_new(curcon);
++		if (! cona) {
++			goto out;
+ 		}
++		conb = context_new(newcon);
++		if (! conb) {
++			context_free(cona);
++			goto out;
++		}
++
++		types_differ = strcmp(context_type_get(cona), context_type_get(conb));
++		if (types_differ) {
++			err |= context_user_set(conb, context_user_get(cona));
++			err |= context_role_set(conb, context_role_get(cona));
++			err |= context_range_set(conb, context_range_get(cona));
++			if (!err) {
++				freecon(newcon);
++				newcon = strdup(context_str(conb));
++			}
++		}
++		context_free(cona);
++		context_free(conb);
++		
++		if (!types_differ || err) {
++			goto out;
++		}
++	}
++
++	if (r_opts->verbose) {
++		printf("%s reset %s context %s->%s\n",
++		       r_opts->progname, my_file, curcon ?: "", newcon);
+ 	}
+ 
+-	if (r_opts->logging && !user_only_changed) {
+-		if (context)
++	if (r_opts->logging) {
++		if (curcon)
+ 			syslog(LOG_INFO, "relabeling %s from %s to %s\n",
+-			       my_file, context, newcon);
++			       my_file, curcon, newcon);
+ 		else
+ 			syslog(LOG_INFO, "labeling %s to %s\n",
+ 			       my_file, newcon);
+ 	}
+ 
+-	if (r_opts->outfile && !user_only_changed)
++	if (r_opts->outfile)
+ 		fprintf(r_opts->outfile, "%s\n", my_file);
+ 
+-	if (context)
+-		freecon(context);
+-
+ 	/*
+ 	 * Do not relabel the file if -n was used.
+ 	 */
+-	if (!r_opts->change || user_only_changed)
++	if (!r_opts->change)
+ 		goto out;
+ 
+ 	/*
+@@ -222,7 +253,7 @@ static int restore(FTSENT *ftsent)
+ 			r_opts->progname, my_file, newcon, strerror(errno));
+ 		goto skip;
+ 	}
+-	ret = 1;
++	ret = 0;
+ out:
+ 	freecon(newcon);
+ 	return ret;
+@@ -318,11 +349,16 @@ static int process_one(char *name, int r
+ 
+ 
+ 	ftsent = fts_read(fts_handle);
+-	if (ftsent != NULL) {
+-		/* Keep the inode of the first one. */
+-		dev_num = ftsent->fts_statp->st_dev;
++	if (ftsent == NULL) {
++		fprintf(stderr,
++			"%s: error while labeling %s:  %s\n",
++			r_opts->progname, namelist[0], strerror(errno));
++		goto err;
+ 	}
+ 
++	/* Keep the inode of the first one. */
++	dev_num = ftsent->fts_statp->st_dev;
++
+ 	do {
+ 		rc = 0;
+ 		/* Skip the post order nodes. */
+@@ -365,23 +401,24 @@ err:
+ int process_glob(char *name, int recurse) {
+ 	glob_t globbuf;
+ 	size_t i = 0;
+-	int errors = 0;
++	int errors;
+ 	memset(&globbuf, 0, sizeof(globbuf));
+-	globbuf.gl_offs = 0;
+-	if (glob(name,
+-		 GLOB_TILDE | GLOB_PERIOD,
+-		 NULL,
+-		 &globbuf) >= 0) {
+-		for (i = 0; i < globbuf.gl_pathc; i++) {
+-			int len = strlen(globbuf.gl_pathv[i]) -2;
+-			if (len > 0 && strcmp(&globbuf.gl_pathv[i][len--], "/.") == 0) continue;
+-			if (len > 0 && strcmp(&globbuf.gl_pathv[i][len], "/..") == 0) continue;
+-			errors |= process_one_realpath(globbuf.gl_pathv[i], recurse) < 0;
+-		}
+-		globfree(&globbuf);
++	errors = glob(name, GLOB_TILDE | GLOB_PERIOD, NULL, &globbuf);
++	if (errors == GLOB_NOMATCH)
++		return 0;
++
++	if (errors) 
++		return errors;
++
++	for (i = 0; i < globbuf.gl_pathc; i++) {
++		int len = strlen(globbuf.gl_pathv[i]) -2;
++		if (len > 0 && strcmp(&globbuf.gl_pathv[i][len--], "/.") == 0)
++			continue;
++		if (len > 0 && strcmp(&globbuf.gl_pathv[i][len], "/..") == 0)
++			continue;
++		errors |= process_one_realpath(globbuf.gl_pathv[i], recurse);
+ 	}
+-	else
+-		errors |= process_one_realpath(name, recurse) < 0;
++	globfree(&globbuf);
+ 	return errors;
+ }
+ 
+@@ -402,7 +439,8 @@ int process_one_realpath(char *name, int
+ 	} else {
+ 		rc = lstat64(name, &sb);
+ 		if (rc < 0) {
+-			if (r_opts->ignore_enoent && errno == ENOENT) return 0;
++			if (r_opts->ignore_enoent && errno == ENOENT)
++				return 0;
+ 			fprintf(stderr, "%s:  lstat(%s) failed:  %s\n",
+ 				r_opts->progname, name,	strerror(errno));
+ 			return -1;
+@@ -484,22 +522,6 @@ int add_exclude(const char *directory)
+ 	return 0;
+ }
+ 
+-/* Compare two contexts to see if their differences are "significant",
+- * or whether the only difference is in the user. */
+-static int only_changed_user(const char *a, const char *b)
+-{
+-	char *rest_a, *rest_b;	/* Rest of the context after the user */
+-	if (r_opts->force)
+-		return 0;
+-	if (!a || !b)
+-		return 0;
+-	rest_a = strchr(a, ':');
+-	rest_b = strchr(b, ':');
+-	if (!rest_a || !rest_b)
+-		return 0;
+-	return (strcmp(rest_a, rest_b) == 0);
+-}
+-
+ /*
+  * Evaluate the association hash table distribution.
+  */
+diff -up policycoreutils-2.0.83/setfiles/restore.h.rhel6 policycoreutils-2.0.83/setfiles/restore.h
+--- policycoreutils-2.0.83/setfiles/restore.h.rhel6	2011-09-13 13:55:36.701590284 -0400
++++ policycoreutils-2.0.83/setfiles/restore.h	2011-09-13 13:56:58.308412043 -0400
+@@ -40,6 +40,7 @@ struct restore_opts {
+ 	int fts_flags; /* Flags to fts, e.g. follow links, follow mounts */
+ 	const char *selabel_opt_validate;
+ 	const char *selabel_opt_path;
++	char *selabel_opt_subset;
+ };
+ 
+ void restore_init(struct restore_opts *opts);
+@@ -49,6 +50,6 @@ int exclude(const char *path);
+ void remove_exclude(const char *directory);
+ int process_one_realpath(char *name, int recurse);
+ int process_glob(char *name, int recurse);
+-
+ void exclude_non_seclabel_mounts();
++
+ #endif
+diff -up policycoreutils-2.0.83/setfiles/setfiles.8.rhel6 policycoreutils-2.0.83/setfiles/setfiles.8
+--- policycoreutils-2.0.83/setfiles/setfiles.8.rhel6	2011-09-13 14:03:34.743749432 -0400
++++ policycoreutils-2.0.83/setfiles/setfiles.8	2011-09-13 14:05:57.616547976 -0400
+@@ -10,13 +10,18 @@ This manual page describes the
+ .BR setfiles
+ program.
+ .P
+-This program is primarily used to initialise the security context
++This program is primarily used to initialize the security context
+ database (extended attributes) on one or more filesystems.  This
+ program is initially run as part of the SE Linux installation process.
+ .P
+ It can also be run at any time to correct errors, to add support for
+ new policy, or with the \-n option it can just check whether the file
+ contexts are all as you expect.
++.P 
++If a file object does not have a context, setfiles will write the default 
++context to the file object's extended attributes. If a file object has a 
++context, setfiles will only modify the type portion of the security context. 
++The -F option will force a replacement of the entire context.
+ 
+ .SH "OPTIONS"
+ .TP 
+@@ -45,7 +50,7 @@ use an alternate root path
+ directory to exclude (repeat option for more than one directory.)
+ .TP 
+ .B \-F
+-Force reset of context to match file_context for customizable files
++Force reset of context to match file_context for customizable files, and the default file context, changing the user, role, range portion as well as the type.
+ .TP 
+ .B \-o filename
+ save list of files with incorrect context in filename.
+@@ -55,10 +60,7 @@ take a list of files from standard input
+ command line.
+ .TP
+ .B \-v
+-show changes in file labels, if type or role are changing.
+-.TP 
+-.B \-vv
+-show changes in file labels, if type, role, or user are changing.
++show changes in file labels.
+ .TP 
+ .B \-W
+ display warnings about entries that had no matching files.
+diff -up policycoreutils-2.0.83/setfiles/setfiles.c.rhel6 policycoreutils-2.0.83/setfiles/setfiles.c
+--- policycoreutils-2.0.83/setfiles/setfiles.c.rhel6	2011-09-13 13:57:43.961321823 -0400
++++ policycoreutils-2.0.83/setfiles/setfiles.c	2011-09-13 14:02:44.656822914 -0400
+@@ -14,8 +14,6 @@
+ #define AUDIT_FS_RELABEL 2309
+ #endif
+ #endif
+-static int mass_relabel;
+-static int mass_relabel_errs;
+ 
+ 
+ /* cmdline opts*/
+@@ -23,7 +21,6 @@ static int mass_relabel_errs;
+ static char *policyfile = NULL;
+ static int warn_no_match = 0;
+ static int null_terminated = 0;
+-static int errors;
+ static struct restore_opts r_opts;
+ 
+ #define STAT_BLOCK_SIZE 1
+@@ -107,10 +104,11 @@ int canoncon(char **contextp)
+ }
+ 
+ #ifndef USE_AUDIT
+-static void maybe_audit_mass_relabel(void)
++static void maybe_audit_mass_relabel(int mass_relabel __attribute__((unused)),
++				     int mass_relabel_errs __attribute__((unused)))
+ {
+ #else
+-static void maybe_audit_mass_relabel(void)
++static void maybe_audit_mass_relabel(int mass_relabel, int mass_relabel_errs)
+ {
+ 	int audit_fd = -1;
+ 	int rc = 0;
+@@ -146,6 +144,7 @@ int main(int argc, char **argv)
+ 	size_t buf_len;
+ 	int recurse; /* Recursive descent. */
+ 	char *base;
++	int mass_relabel = 0, errors = 0;
+ 	
+ 	memset(&r_opts, 0, sizeof(r_opts));
+ 
+@@ -161,6 +160,7 @@ int main(int argc, char **argv)
+ 	r_opts.outfile = NULL;
+ 	r_opts.force = 0;
+ 	r_opts.hard_links = 1;
++	r_opts.selabel_opt_subset = 0;
+ 
+ 	altpath = NULL;
+ 
+@@ -410,7 +410,7 @@ int main(int argc, char **argv)
+ 			buf[len - 1] = 0;
+ 			if (!strcmp(buf, "/"))
+ 				mass_relabel = 1;
+-			errors |= process_glob(buf, recurse) < 0;
++			errors |= process_glob(buf, recurse);
+ 		}
+ 		if (strcmp(input_filename, "-") != 0)
+ 			fclose(f);
+@@ -419,13 +419,11 @@ int main(int argc, char **argv)
+ 			if (!strcmp(argv[i], "/"))
+ 				mass_relabel = 1;
+ 
+-			errors |= process_glob(argv[i], recurse) < 0;
++			errors |= process_glob(argv[i], recurse);
+ 		}
+ 	}
+ 	
+-	if (mass_relabel)
+-		mass_relabel_errs = errors;
+-	maybe_audit_mass_relabel();
++	maybe_audit_mass_relabel(mass_relabel, errors);
+ 
+ 	if (warn_no_match)
+ 		selabel_stats(r_opts.hnd);
+@@ -436,7 +434,11 @@ int main(int argc, char **argv)
+ 	if (r_opts.outfile)
+ 		fclose(r_opts.outfile);
+ 
+-       if (r_opts.progress && r_opts.count >= STAR_COUNT)
+-               printf("\n");
++	if (r_opts.progress && r_opts.count >= STAR_COUNT)
++		printf("\n");
++
++	free(r_opts.progname);
++	free(r_opts.selabel_opt_subset);
++	free(r_opts.rootpath);
+ 	exit(errors);
+ }
+diff -up policycoreutils-2.0.83/po/Makefile~ policycoreutils-2.0.83/po/Makefile
+--- policycoreutils-2.0.83/po/Makefile~	2012-03-08 16:17:47.657013440 -0500
++++ policycoreutils-2.0.83/po/Makefile	2012-03-08 16:18:02.585042871 -0500
+@@ -7,7 +7,7 @@ TOP	 = ../..
+ # What is this package?
+ NLSPACKAGE	= policycoreutils
+ POTFILE		= $(NLSPACKAGE).pot
+-INSTALL		= /usr/bin/install -c
++INSTALL		= /usr/bin/install -c -p
+ INSTALL_DATA	= $(INSTALL) -m 644
+ INSTALL_DIR	= /usr/bin/install -d
+ 
