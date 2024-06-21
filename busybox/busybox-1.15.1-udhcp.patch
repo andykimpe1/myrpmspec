@@ -1,0 +1,149 @@
+diff -urpN busybox-1.15.1/networking/udhcp/files.c busybox-1.15.1-udhcp/networking/udhcp/files.c
+--- busybox-1.15.1/networking/udhcp/files.c	2009-09-12 17:55:36.000000000 +0200
++++ busybox-1.15.1-udhcp/networking/udhcp/files.c	2012-02-29 15:35:26.720802372 +0100
+@@ -198,6 +198,7 @@ static int FAST_FUNC read_opt(const char
+ 				retval = read_nip(val, buffer + 4);
+ 			break;
+ 		case OPTION_STRING:
++		case OPTION_STRING_HOST:
+ #if ENABLE_FEATURE_UDHCP_RFC3397
+ 		case OPTION_STR1035:
+ #endif
+diff -urpN busybox-1.15.1/networking/udhcp/options.c busybox-1.15.1-udhcp/networking/udhcp/options.c
+--- busybox-1.15.1/networking/udhcp/options.c	2009-09-12 17:55:58.000000000 +0200
++++ busybox-1.15.1-udhcp/networking/udhcp/options.c	2012-02-29 15:37:33.567002117 +0100
+@@ -23,15 +23,15 @@ const struct dhcp_option dhcp_options[]
+ 	{ OPTION_IP | OPTION_LIST                 , 0x07 }, /* DHCP_LOG_SERVER    */
+ 	{ OPTION_IP | OPTION_LIST                 , 0x08 }, /* DHCP_COOKIE_SERVER */
+ 	{ OPTION_IP | OPTION_LIST                 , 0x09 }, /* DHCP_LPR_SERVER    */
+-	{ OPTION_STRING               | OPTION_REQ, 0x0c }, /* DHCP_HOST_NAME     */
++	{ OPTION_STRING_HOST          | OPTION_REQ, 0x0c }, /* DHCP_HOST_NAME     */
+ 	{ OPTION_U16                              , 0x0d }, /* DHCP_BOOT_SIZE     */
+-	{ OPTION_STRING | OPTION_LIST | OPTION_REQ, 0x0f }, /* DHCP_DOMAIN_NAME   */
++	{ OPTION_STRING_HOST | OPTION_LIST | OPTION_REQ, 0x0f }, /* DHCP_DOMAIN_NAME   */
+ 	{ OPTION_IP                               , 0x10 }, /* DHCP_SWAP_SERVER   */
+ 	{ OPTION_STRING                           , 0x11 }, /* DHCP_ROOT_PATH     */
+ 	{ OPTION_U8                               , 0x17 }, /* DHCP_IP_TTL        */
+ 	{ OPTION_U16                              , 0x1a }, /* DHCP_MTU           */
+ 	{ OPTION_IP                   | OPTION_REQ, 0x1c }, /* DHCP_BROADCAST     */
+-	{ OPTION_STRING                           , 0x28 }, /* nisdomain          */
++	{ OPTION_STRING_HOST                      , 0x28 }, /* nisdomain          */
+ 	{ OPTION_IP | OPTION_LIST                 , 0x29 }, /* nissrv             */
+ 	{ OPTION_IP | OPTION_LIST     | OPTION_REQ, 0x2a }, /* DHCP_NTP_SERVER    */
+ 	{ OPTION_IP | OPTION_LIST                 , 0x2c }, /* DHCP_WINS_SERVER   */
+@@ -42,7 +42,7 @@ const struct dhcp_option dhcp_options[]
+ 	{ OPTION_STRING                           , 0x38 }, /* DHCP_MESSAGE       */
+ 	{ OPTION_STRING                           , 0x3C }, /* DHCP_VENDOR        */
+ 	{ OPTION_STRING                           , 0x3D }, /* DHCP_CLIENT_ID     */
+-	{ OPTION_STRING                           , 0x42 }, /* tftp               */
++	{ OPTION_STRING_HOST                      , 0x42 }, /* tftp               */
+ 	{ OPTION_STRING                           , 0x43 }, /* bootfile           */
+ 	{ OPTION_STRING                           , 0x4D }, /* userclass          */
+ #if ENABLE_FEATURE_UDHCP_RFC3397
+@@ -110,6 +110,7 @@ const uint8_t dhcp_option_lengths[] ALIG
+ 	[OPTION_IP_PAIR] = 8,
+ 	[OPTION_BOOLEAN] = 1,
+ 	[OPTION_STRING] =  1,
++	[OPTION_STRING_HOST] = 1,
+ #if ENABLE_FEATURE_UDHCP_RFC3397
+ 	[OPTION_STR1035] = 1,
+ #endif
+diff -urpN busybox-1.15.1/networking/udhcp/options.h busybox-1.15.1-udhcp/networking/udhcp/options.h
+--- busybox-1.15.1/networking/udhcp/options.h	2009-09-12 17:55:36.000000000 +0200
++++ busybox-1.15.1-udhcp/networking/udhcp/options.h	2012-02-29 15:38:07.644783463 +0100
+@@ -11,6 +11,9 @@ enum {
+ 	OPTION_IP = 1,
+ 	OPTION_IP_PAIR,
+ 	OPTION_STRING,
++	/* Opts of STRING_HOST type will be sanitized before they are passed
++	 * to udhcpc script's environment: */
++	OPTION_STRING_HOST,
+ #if ENABLE_FEATURE_UDHCP_RFC3397
+ 	OPTION_STR1035,	/* RFC1035 compressed domain name list */
+ #endif
+diff -urpN busybox-1.15.1/networking/udhcp/script.c busybox-1.15.1-udhcp/networking/udhcp/script.c
+--- busybox-1.15.1/networking/udhcp/script.c	2009-09-12 17:55:36.000000000 +0200
++++ busybox-1.15.1-udhcp/networking/udhcp/script.c	2012-02-29 15:40:09.773000906 +0100
+@@ -19,6 +19,7 @@ static const uint8_t len_of_option_as_st
+ 	[OPTION_IP_PAIR] =	sizeof("255.255.255.255 ") * 2,
+  	[OPTION_STATIC_ROUTES]= sizeof("255.255.255.255/32 255.255.255.255 "),
+ 	[OPTION_STRING] =	1,
++	[OPTION_STRING_HOST] =	1,
+ #if ENABLE_FEATURE_UDHCP_RFC3397
+ 	[OPTION_STR1035] =	1,
+ #endif
+@@ -50,6 +51,62 @@ static int mton(uint32_t mask)
+ 	return i;
+ }
+ 
++/* Check if a given label represents a valid DNS label
++ * Return pointer to the first character after the label upon success,
++ * NULL otherwise.
++ * See RFC1035, 2.3.1
++ */
++/* We don't need to be particularly anal. For example, allowing _, hyphen
++ * at the end, or leading and trailing dots would be ok, since it
++ * can't be used for attacks. (Leading hyphen can be, if someone uses
++ * cmd "$hostname"
++ * in the script: then hostname may be treated as an option)
++ */
++static const char *valid_domain_label(const char *label)
++{
++	unsigned char ch;
++	unsigned pos = 0;
++
++	for (;;) {
++		ch = *label;
++		if ((ch|0x20) < 'a' || (ch|0x20) > 'z') {
++			if (pos == 0) {
++				/* label must begin with letter */
++				return NULL;
++			}
++			if (ch < '0' || ch > '9') {
++				if (ch == '\0' || ch == '.')
++					return label;
++				/* DNS allows only '-', but we are more permissive */
++				if (ch != '-' && ch != '_')
++					return NULL;
++			}
++		}
++		label++;
++		pos++;
++		//Do we want this?
++		//if (pos > 63) /* NS_MAXLABEL; labels must be 63 chars or less */
++		//	return NULL;
++	}
++}
++
++/* Check if a given name represents a valid DNS name */
++/* See RFC1035, 2.3.1 */
++static int good_hostname(const char *name)
++{
++	//const char *start = name;
++
++	for (;;) {
++		name = valid_domain_label(name);
++		if (!name)
++			return 0;
++		if (!name[0])
++			return 1;
++			//Do we want this?
++			//return ((name - start) < 1025); /* NS_MAXDNAME */
++		name++;
++	}
++}
+ 
+ /* Create "opt_name=opt_value" string */
+ static NOINLINE char *xmalloc_optname_optval(uint8_t *option, const struct dhcp_option *type_p, const char *opt_name)
+@@ -104,8 +161,11 @@ static NOINLINE char *xmalloc_optname_op
+ 			dest += sprintf(dest, "%ld", (long) ntohl(val_s32));
+ 			break;
+ 		case OPTION_STRING:
++		case OPTION_STRING_HOST:
+ 			memcpy(dest, option, len);
+ 			dest[len] = '\0';
++			if (type == OPTION_STRING_HOST && !good_hostname(dest))
++				safe_strncpy(dest, "bad", len);
+ 			return ret;	 /* Short circuit this case */
+ 		case OPTION_STATIC_ROUTES: {
+ 			/* Option binary format:

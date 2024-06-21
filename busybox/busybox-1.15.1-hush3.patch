@@ -1,0 +1,374 @@
+diff -urpN busybox-1.15.1/shell/hush.c busybox-1.15.1.hush/shell/hush.c
+--- busybox-1.15.1/shell/hush.c	2012-01-17 12:58:12.467516880 +0100
++++ busybox-1.15.1.hush/shell/hush.c	2012-01-17 13:02:04.145216651 +0100
+@@ -325,6 +325,7 @@ struct command {
+ # define CMD_FUNCDEF 3
+ #endif
+ 
++	smalluint cmd_exitcode;
+ 	/* if non-NULL, this "command" is { list }, ( list ), or a compound statement */
+ 	struct pipe *group;
+ #if !BB_MMU
+@@ -455,6 +456,55 @@ struct function {
+ #endif
+ 
+ 
++#define ENABLE_HUSH_MODE_X 1
++#define IF_HUSH_MODE_X(...) __VA_ARGS__
++/* set -/+o OPT support. (TODO: make it optional)
++ * bash supports the following opts:
++ * allexport       off
++ * braceexpand     on
++ * emacs           on
++ * errexit         off
++ * errtrace        off
++ * functrace       off
++ * hashall         on
++ * histexpand      off
++ * history         on
++ * ignoreeof       off
++ * interactive-comments    on
++ * keyword         off
++ * monitor         on
++ * noclobber       off
++ * noexec          off
++ * noglob          off
++ * nolog           off
++ * notify          off
++ * nounset         off
++ * onecmd          off
++ * physical        off
++ * pipefail        off
++ * posix           off
++ * privileged      off
++ * verbose         off
++ * vi              off
++ * xtrace          off
++ */
++static const char o_opt_strings[] ALIGN1 =
++	"pipefail\0"
++	"noexec\0"
++#if ENABLE_HUSH_MODE_X
++	"xtrace\0"
++#endif
++	;
++enum {
++	OPT_O_PIPEFAIL,
++	OPT_O_NOEXEC,
++#if ENABLE_HUSH_MODE_X
++	OPT_O_XTRACE,
++#endif
++	NUM_OPT_O
++};
++
++
+ /* "Globals" within this file */
+ /* Sorted roughly by size (smaller offsets == smaller code) */
+ struct globals {
+@@ -493,6 +543,12 @@ struct globals {
+ #else
+ # define G_saved_tty_pgrp 0
+ #endif
++	char o_opt[NUM_OPT_O];
++#if ENABLE_HUSH_MODE_X
++# define G_x_mode (G.o_opt[OPT_O_XTRACE])
++#else
++# define G_x_mode 0
++#endif
+ 	smallint flag_SIGINT;
+ #if ENABLE_HUSH_LOOPS
+ 	smallint flag_break_continue;
+@@ -504,8 +560,6 @@ struct globals {
+ 	 */
+ 	smallint flag_return_in_progress;
+ #endif
+-	smallint fake_mode;
+-	smallint x_mode;
+ 	smallint exiting; /* used to prevent EXIT trap recursion */
+ 	/* These four support $?, $#, and $1 */
+ 	smalluint last_exitcode;
+@@ -3291,7 +3345,7 @@ static void exec_builtin(char ***to_free
+ 
+ static void dump_cmd_in_x_mode(char **argv)
+ {
+-	if (G.x_mode && argv) {
++	if (G_x_mode && argv) {
+ 		/* We want to output the line in one write op */
+ 		char *buf, *p;
+ 		int len;
+@@ -3650,46 +3704,57 @@ static int checkjobs(struct pipe* fg_pip
+ #endif
+ 		/* Were we asked to wait for fg pipe? */
+ 		if (fg_pipe) {
+-			for (i = 0; i < fg_pipe->num_cmds; i++) {
++			i = fg_pipe->num_cmds;
++			while (--i >= 0) {
+ 				debug_printf_jobs("check pid %d\n", fg_pipe->cmds[i].pid);
+ 				if (fg_pipe->cmds[i].pid != childpid)
+ 					continue;
+ 				if (dead) {
++					int ex;
+ 					fg_pipe->cmds[i].pid = 0;
+ 					fg_pipe->alive_cmds--;
+-					if (i == fg_pipe->num_cmds - 1) {
+-						/* last process gives overall exitstatus */
+-						/* Note: is WIFSIGNALED, WEXITSTATUS = sig + 128 */
+-						rcode = WEXITSTATUS(status);
+-						IF_HAS_KEYWORDS(if (fg_pipe->pi_inverted) rcode = !rcode;)
+-						/* bash prints killing signal's name for *last*
+-						 * process in pipe (prints just newline for SIGINT).
+-						 * Mimic this. Example: "sleep 5" + ^\
+-						 */
+-						if (WIFSIGNALED(status)) {
+-							int sig = WTERMSIG(status);
++					ex = WEXITSTATUS(status);
++					/* bash prints killer signal's name for *last*
++					 * process in pipe (prints just newline for SIGINT).
++					 * Mimic this. Example: "sleep 5" + (^\ or kill -QUIT)
++					 */
++					if (WIFSIGNALED(status)) {
++						int sig = WTERMSIG(status);
++						if (i == fg_pipe->num_cmds-1)
+ 							printf("%s\n", sig == SIGINT ? "" : get_signame(sig));
+-						}
++						/* TODO: MIPS has 128 sigs (1..128), what if sig==128 here?
++						 * Maybe we need to use sig | 128? */
++						ex = sig + 128;
+ 					}
++					fg_pipe->cmds[i].cmd_exitcode = ex;
+ 				} else {
+ 					fg_pipe->cmds[i].is_stopped = 1;
+ 					fg_pipe->stopped_cmds++;
+ 				}
+ 				debug_printf_jobs("fg_pipe: alive_cmds %d stopped_cmds %d\n",
+ 						fg_pipe->alive_cmds, fg_pipe->stopped_cmds);
+-				if (fg_pipe->alive_cmds - fg_pipe->stopped_cmds <= 0) {
++				if (fg_pipe->alive_cmds == fg_pipe->stopped_cmds) {
+ 					/* All processes in fg pipe have exited or stopped */
++					i = fg_pipe->num_cmds;
++					while (--i >= 0) {
++						rcode = fg_pipe->cmds[i].cmd_exitcode;
++						/* usually last process gives overall exitstatus,
++						 * but with "set -o pipefail", last *failed* process does */
++						if (G.o_opt[OPT_O_PIPEFAIL] == 0 || rcode != 0)
++							break;
++					}
++					IF_HAS_KEYWORDS(if (fg_pipe->pi_inverted) rcode = !rcode;)
+ /* Note: *non-interactive* bash does not continue if all processes in fg pipe
+  * are stopped. Testcase: "cat | cat" in a script (not on command line!)
+  * and "killall -STOP cat" */
+ 					if (G_interactive_fd) {
+ #if ENABLE_HUSH_JOB
+-						if (fg_pipe->alive_cmds)
++						if (fg_pipe->alive_cmds != 0)
+ 							insert_bg_job(fg_pipe);
+ #endif
+ 						return rcode;
+ 					}
+-					if (!fg_pipe->alive_cmds)
++					if (fg_pipe->alive_cmds == 0)
+ 						return rcode;
+ 				}
+ 				/* There are still running processes in the fg pipe */
+@@ -3862,18 +3927,18 @@ static int run_pipe(struct pipe *pi)
+ 			rcode = setup_redirects(command, squirrel);
+ 			restore_redirects(squirrel);
+ 			/* Set shell variables */
+-			if (G.x_mode)
++			if (G_x_mode)
+ 				fputc('+', stderr);
+ 			while (*argv) {
+ 				p = expand_string_to_string(*argv);
+-				if (G.x_mode)
++				if (G_x_mode)
+ 					fprintf(stderr, " %s", p);
+ 				debug_printf_exec("set shell var:'%s'->'%s'\n",
+ 						*argv, p);
+ 				set_local_var(p, /*exp:*/ 0, /*lvl:*/ 0, /*ro:*/ 0);
+ 				argv++;
+ 			}
+-			if (G.x_mode)
++			if (G_x_mode)
+ 				fputc('\n', stderr);
+ 			/* Do we need to flag set_local_var() errors?
+ 			 * "assignment to readonly var" and "putenv error"
+@@ -4522,7 +4587,7 @@ static int run_and_free_list(struct pipe
+ {
+ 	int rcode = 0;
+ 	debug_printf_exec("run_and_free_list entered\n");
+-	if (!G.fake_mode) {
++	if (!G.o_opt[OPT_O_NOEXEC]) {
+ 		debug_printf_exec(": run_list: 1st pipe with %d cmds\n", pi->num_cmds);
+ 		rcode = run_list(pi);
+ 	}
+@@ -6436,13 +6501,41 @@ static void set_fatal_handlers(void)
+ }
+ #endif
+ 
+-static int set_mode(const char cstate, const char mode)
++static int set_mode(int state, char mode, const char *o_opt)
+ {
+-	int state = (cstate == '-' ? 1 : 0);
++	int idx;
+ 	switch (mode) {
+-		case 'n': G.fake_mode = state; break;
+-		case 'x': G.x_mode = state; break;
+-		default:  return EXIT_FAILURE;
++	case 'n':
++		G.o_opt[OPT_O_NOEXEC] = state;
++		break;
++	case 'x':
++		IF_HUSH_MODE_X(G_x_mode = state;)
++		break;
++	case 'o':
++		if (!o_opt) {
++			/* "set -+o" without parameter.
++			 * in bash, set -o produces this output:
++			 *  pipefail        off
++			 * and set +o:
++			 *  set +o pipefail
++			 * We always use the second form.
++			 */
++			const char *p = o_opt_strings;
++			idx = 0;
++			while (*p) {
++				printf("set %co %s\n", (G.o_opt[idx] ? '-' : '+'), p);
++				idx++;
++				p += strlen(p) + 1;
++			}
++			break;
++		}
++		idx = index_in_strings(o_opt_strings, o_opt);
++		if (idx >= 0) {
++			G.o_opt[idx] = state;
++			break;
++		}
++	default:
++		return EXIT_FAILURE;
+ 	}
+ 	return EXIT_SUCCESS;
+ }
+@@ -6651,7 +6744,7 @@ int hush_main(int argc, char **argv)
+ #endif
+ 		case 'n':
+ 		case 'x':
+-			if (!set_mode('-', opt))
++			if (set_mode(1, opt, NULL) == 0) /* no error */
+ 				break;
+ 		default:
+ #ifndef BB_VER
+@@ -7402,15 +7495,18 @@ static int FAST_FUNC builtin_set(char **
+ 	}
+ 
+ 	do {
+-		if (!strcmp(arg, "--")) {
++		if (strcmp(arg, "--") == 0) {
+ 			++argv;
+ 			goto set_argv;
+ 		}
+ 		if (arg[0] != '+' && arg[0] != '-')
+ 			break;
+-		for (n = 1; arg[n]; ++n)
+-			if (set_mode(arg[0], arg[n]))
++		for (n = 1; arg[n]; ++n) {
++			if (set_mode((arg[0] == '-'), arg[n], argv[1]))
+ 				goto error;
++			if (arg[n] == 'o' && argv[1])
++				argv++;
++		}
+ 	} while ((arg = *++argv) != NULL);
+ 	/* Now argv[0] is 1st argument */
+ 
+diff -urpN busybox-1.15.1/shell/hush_test/hush-misc/pipefail.right busybox-1.15.1.hush/shell/hush_test/hush-misc/pipefail.right
+--- busybox-1.15.1/shell/hush_test/hush-misc/pipefail.right	1970-01-01 01:00:00.000000000 +0100
++++ busybox-1.15.1.hush/shell/hush_test/hush-misc/pipefail.right	2012-01-17 11:56:45.587194491 +0100
+@@ -0,0 +1,40 @@
++Default:
++true | true:
++0
++1
++true | false:
++1
++0
++false | true:
++0
++1
++exit 2 | exit 3 | exit 4:
++4
++0
++Pipefail on:
++true | true:
++0
++1
++true | false:
++1
++0
++false | true:
++1
++0
++exit 2 | exit 3 | exit 4:
++4
++0
++Pipefail off:
++true | true:
++0
++1
++true | false:
++1
++0
++false | true:
++0
++1
++exit 2 | exit 3 | exit 4:
++4
++0
++Done
+diff -urpN busybox-1.15.1/shell/hush_test/hush-misc/pipefail.tests busybox-1.15.1.hush/shell/hush_test/hush-misc/pipefail.tests
+--- busybox-1.15.1/shell/hush_test/hush-misc/pipefail.tests	1970-01-01 01:00:00.000000000 +0100
++++ busybox-1.15.1.hush/shell/hush_test/hush-misc/pipefail.tests	2012-01-17 11:56:45.588194482 +0100
+@@ -0,0 +1,45 @@
++echo Default:
++echo "true | true:"
++  true | true; echo $?
++! true | true; echo $?
++echo "true | false:"
++  true | false; echo $?
++! true | false; echo $?
++echo "false | true:"
++  false | true; echo $?
++! false | true; echo $?
++echo "exit 2 | exit 3 | exit 4:"
++  exit 2 | exit 3 | exit 4; echo $?
++! exit 2 | exit 3 | exit 4; echo $?
++
++echo Pipefail on:
++set -o pipefail
++echo "true | true:"
++  true | true; echo $?
++! true | true; echo $?
++echo "true | false:"
++  true | false; echo $?
++! true | false; echo $?
++echo "false | true:"
++  false | true; echo $?
++! false | true; echo $?
++echo "exit 2 | exit 3 | exit 4:"
++  exit 2 | exit 3 | exit 4; echo $?
++! exit 2 | exit 3 | exit 4; echo $?
++
++echo Pipefail off:
++set +o pipefail
++echo "true | true:"
++  true | true; echo $?
++! true | true; echo $?
++echo "true | false:"
++  true | false; echo $?
++! true | false; echo $?
++echo "false | true:"
++  false | true; echo $?
++! false | true; echo $?
++echo "exit 2 | exit 3 | exit 4:"
++  exit 2 | exit 3 | exit 4; echo $?
++! exit 2 | exit 3 | exit 4; echo $?
++
++echo Done
