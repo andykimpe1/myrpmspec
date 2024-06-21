@@ -1,0 +1,503 @@
+Index: iproute2-2.6.31/ip/ipaddress.c
+===================================================================
+--- iproute2-2.6.31.orig/ip/ipaddress.c
++++ iproute2-2.6.31/ip/ipaddress.c
+@@ -14,6 +14,7 @@
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <syslog.h>
++#include <inttypes.h>
+ #include <fcntl.h>
+ #include <sys/ioctl.h>
+ #include <sys/socket.h>
+@@ -235,6 +236,233 @@ static void print_vfinfo(FILE *fp, struc
+ 	}
+ }
+ 
++static void print_num(FILE *fp, unsigned width, uint64_t count)
++{
++	const char *prefix = "kMGTPE";
++	const unsigned int base = use_iec ? 1024 : 1000;
++	uint64_t powi = 1;
++	uint16_t powj = 1;
++	uint8_t precision = 2;
++	char buf[64];
++
++	if (!human_readable || count < base) {
++		fprintf(fp, "%-*"PRIu64" ", width, count);
++		return;
++	}
++
++	/* increase value by a factor of 1000/1024 and print
++	 * if result is something a human can read */
++	for(;;) {
++		powi *= base;
++		if (count / base < powi)
++			break;
++
++		if (!prefix[1])
++			break;
++		++prefix;
++	}
++
++	/* try to guess a good number of digits for precision */
++	for (; precision > 0; precision--) {
++		powj *= 10;
++		if (count / powi < powj)
++			break;
++	}
++
++	snprintf(buf, sizeof(buf), "%.*f%c%s", precision,
++		(double) count / powi, *prefix, use_iec ? "i" : "");
++
++	fprintf(fp, "%-*s ", width, buf);
++}
++
++static void print_link_stats64(FILE *fp, const struct rtnl_link_stats64 *s,
++                               const struct rtattr *carrier_changes)
++{
++	/* RX stats */
++	fprintf(fp, "    RX: bytes  packets  errors  dropped overrun mcast   %s%s",
++		s->rx_compressed ? "compressed" : "", _SL_);
++
++	fprintf(fp, "    ");
++	print_num(fp, 10, s->rx_bytes);
++	print_num(fp, 8, s->rx_packets);
++	print_num(fp, 7, s->rx_errors);
++	print_num(fp, 7, s->rx_dropped);
++	print_num(fp, 7, s->rx_over_errors);
++	print_num(fp, 7, s->multicast);
++	if (s->rx_compressed)
++		print_num(fp, 7, s->rx_compressed);
++
++	/* RX error stats */
++	if (show_stats > 1) {
++		fprintf(fp, "%s", _SL_);
++		fprintf(fp, "    RX errors: length   crc     frame   fifo    missed%s", _SL_);
++
++		fprintf(fp, "               ");
++		print_num(fp, 8, s->rx_length_errors);
++		print_num(fp, 7, s->rx_crc_errors);
++		print_num(fp, 7, s->rx_frame_errors);
++		print_num(fp, 7, s->rx_fifo_errors);
++		print_num(fp, 7, s->rx_missed_errors);
++	}
++	fprintf(fp, "%s", _SL_);
++
++	/* TX stats */
++	fprintf(fp, "    TX: bytes  packets  errors  dropped carrier collsns %s%s",
++		s->tx_compressed ? "compressed" : "", _SL_);
++
++
++	fprintf(fp, "    ");
++	print_num(fp, 10, s->tx_bytes);
++	print_num(fp, 8, s->tx_packets);
++	print_num(fp, 7, s->tx_errors);
++	print_num(fp, 7, s->tx_dropped);
++	print_num(fp, 7, s->tx_carrier_errors);
++	print_num(fp, 7, s->collisions);
++	if (s->tx_compressed)
++		print_num(fp, 7, s->tx_compressed);
++
++	/* TX error stats */
++	if (show_stats > 1) {
++		fprintf(fp, "%s", _SL_);
++		fprintf(fp, "    TX errors: aborted  fifo   window heartbeat");
++                if (carrier_changes)
++			fprintf(fp, " transns");
++		fprintf(fp, "%s", _SL_);
++
++		fprintf(fp, "               ");
++		print_num(fp, 8, s->tx_aborted_errors);
++		print_num(fp, 7, s->tx_fifo_errors);
++		print_num(fp, 7, s->tx_window_errors);
++		print_num(fp, 7, s->tx_heartbeat_errors);
++		if (carrier_changes)
++			print_num(fp, 7, *(uint32_t*)RTA_DATA(carrier_changes));
++	}
++}
++
++static void print_link_stats32(FILE *fp, const struct rtnl_link_stats *s,
++			       const struct rtattr *carrier_changes)
++{
++	/* RX stats */
++	fprintf(fp, "    RX: bytes  packets  errors  dropped overrun mcast   %s%s",
++		s->rx_compressed ? "compressed" : "", _SL_);
++
++
++	fprintf(fp, "    ");
++	print_num(fp, 10, s->rx_bytes);
++	print_num(fp, 8, s->rx_packets);
++	print_num(fp, 7, s->rx_errors);
++	print_num(fp, 7, s->rx_dropped);
++	print_num(fp, 7, s->rx_over_errors);
++	print_num(fp, 7, s->multicast);
++	if (s->rx_compressed)
++		print_num(fp, 7, s->rx_compressed);
++
++	/* RX error stats */
++	if (show_stats > 1) {
++		fprintf(fp, "%s", _SL_);
++		fprintf(fp, "    RX errors: length   crc     frame   fifo    missed%s", _SL_);
++		fprintf(fp, "               ");
++		print_num(fp, 8, s->rx_length_errors);
++		print_num(fp, 7, s->rx_crc_errors);
++		print_num(fp, 7, s->rx_frame_errors);
++		print_num(fp, 7, s->rx_fifo_errors);
++		print_num(fp, 7, s->rx_missed_errors);
++	}
++	fprintf(fp, "%s", _SL_);
++
++	/* TX stats */
++	fprintf(fp, "    TX: bytes  packets  errors  dropped carrier collsns %s%s",
++		s->tx_compressed ? "compressed" : "", _SL_);
++
++	fprintf(fp, "    ");
++	print_num(fp, 10, s->tx_bytes);
++	print_num(fp, 8, s->tx_packets);
++	print_num(fp, 7, s->tx_errors);
++	print_num(fp, 7, s->tx_dropped);
++	print_num(fp, 7, s->tx_carrier_errors);
++	print_num(fp, 7, s->collisions);
++	if (s->tx_compressed)
++		print_num(fp, 7, s->tx_compressed);
++
++	/* TX error stats */
++	if (show_stats > 1) {
++		fprintf(fp, "%s", _SL_);
++		fprintf(fp, "    TX errors: aborted  fifo   window heartbeat");
++                if (carrier_changes)
++			fprintf(fp, " transns");
++		fprintf(fp, "%s", _SL_);
++
++		fprintf(fp, "               ");
++		print_num(fp, 8, s->tx_aborted_errors);
++		print_num(fp, 7, s->tx_fifo_errors);
++		print_num(fp, 7, s->tx_window_errors);
++		print_num(fp, 7, s->tx_heartbeat_errors);
++		if (carrier_changes)
++			print_num(fp, 7, *(uint32_t*)RTA_DATA(carrier_changes));
++	}
++/*
++	{
++		if (tb[IFLA_STATS])
++
++		struct rtnl_link_stats slocal;
++		struct rtnl_link_stats *s = RTA_DATA(tb[IFLA_STATS]);
++		if (((unsigned long)s) & (sizeof(unsigned long)-1)) {
++			memcpy(&slocal, s, sizeof(slocal));
++			s = &slocal;
++		}
++		fprintf(fp, "    RX: bytes  packets  errors  dropped overrun mcast   %s%s",
++			s->rx_compressed ? "compressed" : "", _SL_);
++		fprintf(fp, "    %-10u %-8u %-7u %-7u %-7u %-7u",
++			s->rx_bytes, s->rx_packets, s->rx_errors,
++			s->rx_dropped, s->rx_over_errors,
++			s->multicast
++			);
++		if (s->rx_compressed)
++			fprintf(fp, " %-7u", s->rx_compressed);
++		if (show_stats > 1) {
++			fprintf(fp, "%s", _SL_);
++			fprintf(fp, "    RX errors: length  crc     frame   fifo    missed%s", _SL_);
++			fprintf(fp, "               %-7u  %-7u %-7u %-7u %-7u",
++				s->rx_length_errors,
++				s->rx_crc_errors,
++				s->rx_frame_errors,
++				s->rx_fifo_errors,
++				s->rx_missed_errors
++				);
++		}
++		fprintf(fp, "%s", _SL_);
++		fprintf(fp, "    TX: bytes  packets  errors  dropped carrier collsns %s%s",
++			s->tx_compressed ? "compressed" : "", _SL_);
++		fprintf(fp, "    %-10u %-8u %-7u %-7u %-7u %-7u",
++			s->tx_bytes, s->tx_packets, s->tx_errors,
++			s->tx_dropped, s->tx_carrier_errors, s->collisions);
++		if (s->tx_compressed)
++			fprintf(fp, " %-7u", s->tx_compressed);
++		if (show_stats > 1) {
++			fprintf(fp, "%s", _SL_);
++			fprintf(fp, "    TX errors: aborted fifo    window  heartbeat%s", _SL_);
++			fprintf(fp, "               %-7u  %-7u %-7u %-7u",
++				s->tx_aborted_errors,
++				s->tx_fifo_errors,
++				s->tx_window_errors,
++				s->tx_heartbeat_errors
++				);
++		}
++	}
++*/
++}
++
++static void __print_link_stats(FILE *fp, struct rtattr **tb)
++{
++	if (tb[IFLA_STATS64])
++		print_link_stats64(fp, RTA_DATA(tb[IFLA_STATS64]),
++					tb[IFLA_CARRIER_CHANGES]);
++	else if (tb[IFLA_STATS])
++		print_link_stats32(fp, RTA_DATA(tb[IFLA_STATS]),
++					tb[IFLA_CARRIER_CHANGES]);
++}
++
++
+ int print_linkinfo(const struct sockaddr_nl *who,
+ 		   struct nlmsghdr *n, void *arg)
+ {
+@@ -332,52 +560,9 @@ int print_linkinfo(const struct sockaddr
+ 		fprintf(fp,"\n    alias %s", 
+ 			(const char *) RTA_DATA(tb[IFLA_IFALIAS]));
+ 
+-	if (do_link && tb[IFLA_STATS] && show_stats) {
+-		struct rtnl_link_stats slocal;
+-		struct rtnl_link_stats *s = RTA_DATA(tb[IFLA_STATS]);
+-		if (((unsigned long)s) & (sizeof(unsigned long)-1)) {
+-			memcpy(&slocal, s, sizeof(slocal));
+-			s = &slocal;
+-		}
+-		fprintf(fp, "%s", _SL_);
+-		fprintf(fp, "    RX: bytes  packets  errors  dropped overrun mcast   %s%s",
+-			s->rx_compressed ? "compressed" : "", _SL_);
+-		fprintf(fp, "    %-10u %-8u %-7u %-7u %-7u %-7u",
+-			s->rx_bytes, s->rx_packets, s->rx_errors,
+-			s->rx_dropped, s->rx_over_errors,
+-			s->multicast
+-			);
+-		if (s->rx_compressed)
+-			fprintf(fp, " %-7u", s->rx_compressed);
+-		if (show_stats > 1) {
+-			fprintf(fp, "%s", _SL_);
+-			fprintf(fp, "    RX errors: length  crc     frame   fifo    missed%s", _SL_);
+-			fprintf(fp, "               %-7u  %-7u %-7u %-7u %-7u",
+-				s->rx_length_errors,
+-				s->rx_crc_errors,
+-				s->rx_frame_errors,
+-				s->rx_fifo_errors,
+-				s->rx_missed_errors
+-				);
+-		}
++	if (do_link && show_stats) {
+ 		fprintf(fp, "%s", _SL_);
+-		fprintf(fp, "    TX: bytes  packets  errors  dropped carrier collsns %s%s",
+-			s->tx_compressed ? "compressed" : "", _SL_);
+-		fprintf(fp, "    %-10u %-8u %-7u %-7u %-7u %-7u",
+-			s->tx_bytes, s->tx_packets, s->tx_errors,
+-			s->tx_dropped, s->tx_carrier_errors, s->collisions);
+-		if (s->tx_compressed)
+-			fprintf(fp, " %-7u", s->tx_compressed);
+-		if (show_stats > 1) {
+-			fprintf(fp, "%s", _SL_);
+-			fprintf(fp, "    TX errors: aborted fifo    window  heartbeat%s", _SL_);
+-			fprintf(fp, "               %-7u  %-7u %-7u %-7u",
+-				s->tx_aborted_errors,
+-				s->tx_fifo_errors,
+-				s->tx_window_errors,
+-				s->tx_heartbeat_errors
+-				);
+-		}
++		__print_link_stats(fp, tb);
+ 	}
+ 	if (do_link && tb[IFLA_VFINFO_LIST] && tb[IFLA_NUM_VF]) {
+ 		struct rtattr *i, *vflist = tb[IFLA_VFINFO_LIST];
+Index: iproute2-2.6.31/include/linux/if_link.h
+===================================================================
+--- iproute2-2.6.31.orig/include/linux/if_link.h
++++ iproute2-2.6.31/include/linux/if_link.h
+@@ -4,7 +4,7 @@
+ #include <linux/types.h>
+ #include <linux/netlink.h>
+ 
+-/* The struct should be in sync with struct net_device_stats */
++/* This struct should be in sync with struct rtnl_link_stats64 */
+ struct rtnl_link_stats {
+ 	__u32	rx_packets;		/* total packets received	*/
+ 	__u32	tx_packets;		/* total packets transmitted	*/
+@@ -37,6 +37,39 @@ struct rtnl_link_stats {
+ 	__u32	tx_compressed;
+ };
+ 
++/* The main device statistics structure */
++struct rtnl_link_stats64 {
++	__u64	rx_packets;		/* total packets received	*/
++	__u64	tx_packets;		/* total packets transmitted	*/
++	__u64	rx_bytes;		/* total bytes received 	*/
++	__u64	tx_bytes;		/* total bytes transmitted	*/
++	__u64	rx_errors;		/* bad packets received		*/
++	__u64	tx_errors;		/* packet transmit problems	*/
++	__u64	rx_dropped;		/* no space in linux buffers	*/
++	__u64	tx_dropped;		/* no space available in linux	*/
++	__u64	multicast;		/* multicast packets received	*/
++	__u64	collisions;
++
++	/* detailed rx_errors: */
++	__u64	rx_length_errors;
++	__u64	rx_over_errors;		/* receiver ring buff overflow	*/
++	__u64	rx_crc_errors;		/* recved pkt with crc error	*/
++	__u64	rx_frame_errors;	/* recv'd frame alignment error */
++	__u64	rx_fifo_errors;		/* recv'r fifo overrun		*/
++	__u64	rx_missed_errors;	/* receiver missed packet	*/
++
++	/* detailed tx_errors */
++	__u64	tx_aborted_errors;
++	__u64	tx_carrier_errors;
++	__u64	tx_fifo_errors;
++	__u64	tx_heartbeat_errors;
++	__u64	tx_window_errors;
++
++	/* for cslip etc */
++	__u64	rx_compressed;
++	__u64	tx_compressed;
++};
++
+ /* The struct should be in sync with struct ifmap */
+ struct rtnl_link_ifmap {
+ 	__u64	mem_start;
+@@ -92,6 +125,8 @@ enum {
+ 	IFLA_NUM_TX_QUEUES,
+ 	IFLA_NUM_RX_QUEUES,
+ 	IFLA_CARRIER,
++	IFLA_PHYS_PORT_ID,
++	IFLA_CARRIER_CHANGES,
+ 	__IFLA_MAX
+ };
+ 
+Index: iproute2-2.6.31/include/linux/types.h
+===================================================================
+--- iproute2-2.6.31.orig/include/linux/types.h
++++ iproute2-2.6.31/include/linux/types.h
+@@ -7,7 +7,6 @@
+ 
+ #include <linux/posix_types.h>
+ 
+-
+ /*
+  * Below are truly Linux-specific types that should never collide with
+  * any application/library that wants linux/types.h.
+@@ -34,5 +33,7 @@ typedef __u64 __bitwise __be64;
+ typedef __u16 __bitwise __sum16;
+ typedef __u32 __bitwise __wsum;
+ 
++#define __aligned_u64 __u64 __attribute__((aligned(8)))
++
+ #endif /*  __ASSEMBLY__ */
+ #endif /* _LINUX_TYPES_H */
+Index: iproute2-2.6.31/include/utils.h
+===================================================================
+--- iproute2-2.6.31.orig/include/utils.h
++++ iproute2-2.6.31/include/utils.h
+@@ -10,6 +10,8 @@
+ #include "rtm_map.h"
+ 
+ extern int preferred_family;
++extern int human_readable;
++extern int use_iec;
+ extern int show_stats;
+ extern int show_details;
+ extern int show_raw;
+Index: iproute2-2.6.31/ip/ip.c
+===================================================================
+--- iproute2-2.6.31.orig/ip/ip.c
++++ iproute2-2.6.31/ip/ip.c
+@@ -24,6 +24,8 @@
+ #include "ip_common.h"
+ 
+ int preferred_family = AF_UNSPEC;
++int human_readable = 0;
++int use_iec = 0;
+ int show_stats = 0;
+ int show_details = 0;
+ int resolve_hosts = 0;
+@@ -44,6 +46,7 @@ static void usage(void)
+ "where  OBJECT := { link | addr | addrlabel | route | rule | neigh | ntable |\n"
+ "                   tunnel | maddr | mroute | mrule | monitor | xfrm | token }\n"
+ "       OPTIONS := { -V[ersion] | -s[tatistics] | -d[etails] | -r[esolve] |\n"
++"                    -h[uman-readable] | -iec |\n"
+ "                    -f[amily] { inet | inet6 | ipx | dnet | link } |\n"
+ "                    -o[neline] | -t[imestamp] | -b[atch] [filename] |\n"
+ "                    -rc[vbuf] [size]}\n");
+@@ -185,6 +188,11 @@ int main(int argc, char **argv)
+ 			preferred_family = AF_IPX;
+ 		} else if (strcmp(opt, "-D") == 0) {
+ 			preferred_family = AF_DECnet;
++		} else if (matches(opt, "-human") == 0 ||
++			   matches(opt, "-human-readable") == 0) {
++			++human_readable;
++		} else if (matches(opt, "-iec") == 0) {
++			++use_iec;
+ 		} else if (matches(opt, "-stats") == 0 ||
+ 			   matches(opt, "-statistics") == 0) {
+ 			++show_stats;
+Index: iproute2-2.6.31/include/libnetlink.h
+===================================================================
+--- iproute2-2.6.31.orig/include/libnetlink.h
++++ iproute2-2.6.31/include/libnetlink.h
+@@ -1,6 +1,7 @@
+ #ifndef __LIBNETLINK_H__
+ #define __LIBNETLINK_H__ 1
+ 
++#include <string.h>
+ #include <asm/types.h>
+ #include <linux/netlink.h>
+ #include <linux/rtnetlink.h>
+Index: iproute2-2.6.31/50ec665
+===================================================================
+--- /dev/null
++++ iproute2-2.6.31/50ec665
+@@ -0,0 +1,37 @@
++commit 50ec66507b5e8f58540a87360ace72b0c88a2a36
++Author: Christian Hesse <mail@eworm.de>
++Date:   Tue Nov 4 22:17:15 2014 +0100
++
++    ip-link: in human readable output use dynamic precision length
++
++diff --git a/ip/ipaddress.c b/ip/ipaddress.c
++index e240bb5..db39437 100644
++--- a/ip/ipaddress.c
+++++ b/ip/ipaddress.c
++@@ -324,6 +324,8 @@ static void print_num(FILE *fp, unsigned width, uint64_t count)
++ 	const char *prefix = "kMGTPE";
++ 	const unsigned int base = use_iec ? 1024 : 1000;
++ 	uint64_t powi = 1;
+++	uint16_t powj = 1;
+++	uint8_t precision = 2;
++ 	char buf[64];
++ 
++ 	if (!human_readable || count < base) {
++@@ -343,8 +345,15 @@ static void print_num(FILE *fp, unsigned width, uint64_t count)
++ 		++prefix;
++ 	}
++ 
++-	snprintf(buf, sizeof(buf), "%.1f%c%s", (double) count / powi, 
++-		 *prefix, use_iec ? "i" : "");
+++	/* try to guess a good number of digits for precision */
+++	for (; precision > 0; precision--) {
+++		powj *= 10;
+++		if (count / powi < powj)
+++			break;
+++	}
+++
+++	snprintf(buf, sizeof(buf), "%.*f%c%s", precision,
+++		(double) count / powi, *prefix, use_iec ? "i" : "");
++ 
++ 	fprintf(fp, "%-*s ", width, buf);
++ }
+Index: iproute2-2.6.31/man/man8/ip.8
+===================================================================
+--- iproute2-2.6.31.orig/man/man8/ip.8
++++ iproute2-2.6.31/man/man8/ip.8
+@@ -725,6 +725,15 @@ appears twice or more, the amount of inf
+ As a rule, the information is statistics or some time values.
+ 
+ .TP
++.BR "\-h", " \-human", " \-human-readable"
++output statistics with human readable values number followed by suffix
++
++.TP
++.BR "\-iec"
++print human readable rates in IEC units (ie. 1K = 1024).
++.RE
++
++.TP
+ .BR "\-f" , " \-family"
+ followed by protocol family identifier:
+ .BR "inet" , " inet6"

@@ -1,0 +1,203 @@
+From 39abd2fc5fbf354b7f817c7ff594455635d73081 Mon Sep 17 00:00:00 2001
+From: Phil Sutter <psutter@redhat.com>
+Date: Thu, 1 Oct 2015 11:48:39 +0200
+Subject: [PATCH] add bridge master device support
+
+Bugzilla: https://bugzilla.redhat.com/show_bug.cgi?id=1269814
+Conflicts: Some kernel header changes manually applied as proper backporting
+           was not easily possible.
+
+commit 28d84b429e4e20e63f6e4746285ccfdb72eac92f
+Author: Jiri Pirko <jiri@resnulli.us>
+Date:   Sun Sep 28 16:33:29 2014 -0700
+
+    add bridge master device support
+
+    Signed-off-by: Jiri Pirko <jiri@resnulli.us>
+
+Signed-off-by: Phil Sutter <psutter@redhat.com>
+---
+ include/linux/if_link.h | 12 +++++++
+ include/linux/netlink.h |  4 +--
+ include/linux/socket.h  |  4 ++-
+ ip/Makefile             |  2 +-
+ ip/iplink_bridge.c      | 93 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 111 insertions(+), 4 deletions(-)
+ create mode 100644 ip/iplink_bridge.c
+
+diff --git a/include/linux/if_link.h b/include/linux/if_link.h
+index 71a618a..c188df5 100644
+--- a/include/linux/if_link.h
++++ b/include/linux/if_link.h
+@@ -189,6 +189,18 @@ enum {
+ 
+ #define IFLA_INET6_MAX	(__IFLA_INET6_MAX - 1)
+ 
++/* Bridge section */
++
++enum {
++	IFLA_BR_UNSPEC,
++	IFLA_BR_FORWARD_DELAY,
++	IFLA_BR_HELLO_TIME,
++	IFLA_BR_MAX_AGE,
++	__IFLA_BR_MAX,
++};
++
++#define IFLA_BR_MAX	(__IFLA_BR_MAX - 1)
++
+ enum {
+ 	BRIDGE_MODE_UNSPEC,
+ 	BRIDGE_MODE_HAIRPIN,
+diff --git a/include/linux/netlink.h b/include/linux/netlink.h
+index 958b7f8..e10b712 100644
+--- a/include/linux/netlink.h
++++ b/include/linux/netlink.h
+@@ -1,7 +1,7 @@
+ #ifndef __LINUX_NETLINK_H
+ #define __LINUX_NETLINK_H
+ 
+-#include <linux/socket.h> /* for sa_family_t */
++#include <linux/socket.h> /* for __kernel_sa_family_t */
+ #include <linux/types.h>
+ 
+ #define NETLINK_ROUTE		0	/* Routing/device hook				*/
+@@ -30,7 +30,7 @@
+ struct net;
+ 
+ struct sockaddr_nl {
+-	sa_family_t	nl_family;	/* AF_NETLINK	*/
++	__kernel_sa_family_t	nl_family;	/* AF_NETLINK	*/
+ 	unsigned short	nl_pad;		/* zero		*/
+ 	__u32		nl_pid;		/* port ID	*/
+        	__u32		nl_groups;	/* multicast groups mask */
+diff --git a/include/linux/socket.h b/include/linux/socket.h
+index 1057869..8c1e501 100644
+--- a/include/linux/socket.h
++++ b/include/linux/socket.h
+@@ -8,8 +8,10 @@
+ #define _K_SS_ALIGNSIZE	(__alignof__ (struct sockaddr *))
+ 				/* Implementation specific desired alignment */
+ 
++typedef unsigned short __kernel_sa_family_t;
++
+ struct __kernel_sockaddr_storage {
+-	unsigned short	ss_family;		/* address family */
++	__kernel_sa_family_t	ss_family;		/* address family */
+ 	/* Following field(s) are implementation specific */
+ 	char		__data[_K_SS_MAXSIZE - sizeof(unsigned short)];
+ 				/* space to achieve desired size, */
+diff --git a/ip/Makefile b/ip/Makefile
+index 48efbe4..51e878b 100644
+--- a/ip/Makefile
++++ b/ip/Makefile
+@@ -3,7 +3,7 @@ IPOBJ=ip.o ipaddress.o ipaddrlabel.o iproute.o iprule.o \
+     ipmaddr.o ipmonitor.o ipmroute.o ipprefix.o iptoken.o \
+     ipxfrm.o xfrm_state.o xfrm_policy.o xfrm_monitor.o \
+     iplink_vlan.o link_veth.o link_gre.o iplink_can.o \
+-    iplink_macvlan.o iplink_macvtap.o iplink_vxlan.o
++    iplink_macvlan.o iplink_macvtap.o iplink_vxlan.o iplink_bridge.o
+ 
+ RTMONOBJ=rtmon.o
+ 
+diff --git a/ip/iplink_bridge.c b/ip/iplink_bridge.c
+new file mode 100644
+index 0000000..0cea7d1
+--- /dev/null
++++ b/ip/iplink_bridge.c
+@@ -0,0 +1,93 @@
++/*
++ * iplink_bridge.c	Bridge device support
++ *
++ *              This program is free software; you can redistribute it and/or
++ *              modify it under the terms of the GNU General Public License
++ *              as published by the Free Software Foundation; either version
++ *              2 of the License, or (at your option) any later version.
++ *
++ * Authors:     Jiri Pirko <jiri@resnulli.us>
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <linux/if_link.h>
++
++#include "utils.h"
++#include "ip_common.h"
++
++static void explain(void)
++{
++	fprintf(stderr,
++		"Usage: ... bridge [ forward_delay FORWARD_DELAY ]\n"
++		"                  [ hello_time HELLO_TIME ]\n"
++		"                  [ max_age MAX_AGE ]\n"
++	);
++}
++
++static int bridge_parse_opt(struct link_util *lu, int argc, char **argv,
++			    struct nlmsghdr *n)
++{
++	__u32 val;
++
++	while (argc > 0) {
++		if (matches(*argv, "forward_delay") == 0) {
++			NEXT_ARG();
++			if (get_u32(&val, *argv, 0)) {
++				invarg("invalid forward_delay", *argv);
++				return -1;
++			}
++			addattr32(n, 1024, IFLA_BR_FORWARD_DELAY, val);
++		} else if (matches(*argv, "hello_time") == 0) {
++			NEXT_ARG();
++			if (get_u32(&val, *argv, 0)) {
++				invarg("invalid hello_time", *argv);
++				return -1;
++			}
++			addattr32(n, 1024, IFLA_BR_HELLO_TIME, val);
++		} else if (matches(*argv, "max_age") == 0) {
++			NEXT_ARG();
++			if (get_u32(&val, *argv, 0)) {
++				invarg("invalid max_age", *argv);
++				return -1;
++			}
++			addattr32(n, 1024, IFLA_BR_MAX_AGE, val);
++		} else if (matches(*argv, "help") == 0) {
++			explain();
++			return -1;
++		} else {
++			fprintf(stderr, "bridge: unknown command \"%s\"?\n", *argv);
++			explain();
++			return -1;
++		}
++		argc--, argv++;
++	}
++
++	return 0;
++}
++
++static void bridge_print_opt(struct link_util *lu, FILE *f, struct rtattr *tb[])
++{
++	if (!tb)
++		return;
++
++	if (tb[IFLA_BR_FORWARD_DELAY])
++		fprintf(f, "forward_delay %u ",
++			rta_getattr_u32(tb[IFLA_BR_FORWARD_DELAY]));
++
++	if (tb[IFLA_BR_HELLO_TIME])
++		fprintf(f, "hello_time %u ",
++			rta_getattr_u32(tb[IFLA_BR_HELLO_TIME]));
++
++	if (tb[IFLA_BR_MAX_AGE])
++		fprintf(f, "max_age %u ",
++			rta_getattr_u32(tb[IFLA_BR_MAX_AGE]));
++}
++
++struct link_util bridge_link_util = {
++	.id		= "bridge",
++	.maxattr	= IFLA_BR_MAX,
++	.parse_opt	= bridge_parse_opt,
++	.print_opt	= bridge_print_opt,
++};
+-- 
+2.5.0
+

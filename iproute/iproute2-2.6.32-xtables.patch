@@ -1,0 +1,115 @@
+--- iproute2-2.6.31/tc/m_xt.c	2011-02-22 18:11:46.986561173 +0100
++++ iproute2-2.6.31/tc/m_xt.c.new	2011-02-22 18:14:34.424562939 +0100
+@@ -39,6 +39,11 @@
+ #       define XT_LIB_DIR "/lib/xtables"
+ #endif
+ 
++#ifndef ALIGN
++#define ALIGN(x,a)      __ALIGN_MASK(x,(typeof(x))(a)-1)
++#define __ALIGN_MASK(x,mask)    (((x)+(mask))&~(mask))
++#endif
++
+ static const char *tname = "mangle";
+ 
+ char *lib_dir;
+@@ -83,7 +88,7 @@
+ 		target->t = xtables_calloc(1, size);
+ 		target->t->u.target_size = size;
+ 		strcpy(target->t->u.user.name, target->name);
+-		xtables_set_revision(target->t->u.user.name, target->revision);
++		target->t->u.user.name, target->revision;
+ 
+ 		if (target->init != NULL)
+ 			target->init(target->t);
+--- iproute2-2.6.31/tc/Makefile	2009-12-26 19:26:44.000000000 +0100
++++ iproute2-2.6.31/tc/Makefile.new	2011-02-22 19:43:00.226565019 +0100
+@@ -43,18 +43,34 @@
+ TCMODULES += em_u32.o
+ TCMODULES += em_meta.o
+ 
++ifeq ($(SHARED_LIBS),y)
++LDLIBS += -ldl
++LDFLAGS += -Wl,-export-dynamic
++endif
++
++TCLIB := tc_core.o
++TCLIB += tc_red.o
++TCLIB += tc_cbq.o
++TCLIB += tc_estimator.o
++TCLIB += tc_stab.o
++
++CFLAGS += -DCONFIG_GACT -DCONFIG_GACT_PROB
+ 
++TCSO :=
++ifeq ($(TC_CONFIG_ATM),y)
++  TCSO += q_atm.so
++endif
+ ifeq ($(TC_CONFIG_XT),y)
+-  TCMODULES += m_xt.o
++  TCSO += m_xt.so
+   LDLIBS += -lxtables
+ else
+   ifeq ($(TC_CONFIG_XT_OLD),y)
+-    TCMODULES += m_xt_old.o
++    TCSO += m_xt_old.so
+     LDLIBS += -lxtables
+   else
+     ifeq ($(TC_CONFIG_XT_OLD_H),y)
+ 	CFLAGS += -DTC_CONFIG_XT_H
+-	TCMODULES += m_xt_old.o
++	TCSO += m_xt_old.so
+ 	LDLIBS += -lxtables
+     else
+       TCMODULES += m_ipt.o
+@@ -65,24 +81,6 @@
+ TCOBJ += $(TCMODULES)
+ LDLIBS += -L. -ltc -lm
+ 
+-ifeq ($(SHARED_LIBS),y)
+-LDLIBS += -ldl
+-LDFLAGS += -Wl,-export-dynamic
+-endif
+-
+-TCLIB := tc_core.o
+-TCLIB += tc_red.o
+-TCLIB += tc_cbq.o
+-TCLIB += tc_estimator.o
+-TCLIB += tc_stab.o
+-
+-CFLAGS += -DCONFIG_GACT -DCONFIG_GACT_PROB
+-
+-TCSO :=
+-ifeq ($(TC_CONFIG_ATM),y)
+-  TCSO += q_atm.so
+-endif
+-
+ YACC := bison
+ LEX := flex
+ 
+@@ -103,6 +101,13 @@
+ 	for i in $(TCSO); \
+ 	do install -m 755 $$i $(DESTDIR)$(LIBDIR)/tc; \
+ 	done
++	if [ ! -f $(DESTDIR)$(LIBDIR)/tc ]; then \
++	if [ -f $(DESTDIR)$(LIBDIR)/tc/m_xt.so ]; \
++		then ln -s m_xt.so $(DESTDIR)$(LIBDIR)/tc/m_ipt.so ; \
++	elif [ -f $(DESTDIR)$(LIBDIR)/tc/m_xt_old.so ]; \
++		then ln -s m_xt_old.so $(DESTDIR)$(LIBDIR)/tc/m_ipt.so ; \
++	fi; \
++	fi
+ 
+ clean:
+ 	rm -f $(TCOBJ) $(TCLIB) libtc.a tc *.so emp_ematch.yacc.h; \
+@@ -111,6 +116,12 @@
+ q_atm.so: q_atm.c
+ 	$(CC) $(CFLAGS) $(LDFLAGS) -shared -fpic -o q_atm.so q_atm.c -latm
+ 
++m_xt.so: m_xt.c
++	$(CC) $(CFLAGS) $(LDFLAGS) -shared -fpic -o m_xt.so m_xt.c -lxtables
++
++m_xt_old.so: m_xt_old.c
++	$(CC) $(CFLAGS) $(LDFLAGS) -shared -fpic -o m_xt_old.so m_xt_old.c -lxtables
++
+ %.yacc.c: %.y
+ 	$(YACC) $(YACCFLAGS) -o $@ $<
+ 

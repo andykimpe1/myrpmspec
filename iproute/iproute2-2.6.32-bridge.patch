@@ -1,0 +1,1481 @@
+From 65f04daa091d1e7d0334da1de91660a74b98be42 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20=C5=A0abata?= <contyk@redhat.com>
+Date: Fri, 23 Aug 2013 16:42:59 +0200
+Subject: [PATCH] Rebase bridge to the current upstream
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Petr Šabata <contyk@redhat.com>
+---
+ bridge/Makefile    |   2 +-
+ bridge/br_common.h |   9 ++
+ bridge/bridge.c    |  14 +-
+ bridge/fdb.c       |  24 +--
+ bridge/link.c      | 425 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ bridge/mdb.c       | 254 ++++++++++++++++++++++++++++++++
+ bridge/monitor.c   |  66 ++++++++-
+ bridge/vlan.c      | 220 +++++++++++++++++++++++++++
+ 8 files changed, 995 insertions(+), 19 deletions(-)
+ create mode 100644 bridge/link.c
+ create mode 100644 bridge/mdb.c
+ create mode 100644 bridge/vlan.c
+
+diff --git a/bridge/Makefile b/bridge/Makefile
+index 0e1ea01..1fb8320 100644
+--- a/bridge/Makefile
++++ b/bridge/Makefile
+@@ -1,4 +1,4 @@
+-BROBJ = bridge.o fdb.o monitor.o
++BROBJ = bridge.o fdb.o monitor.o link.o mdb.o vlan.o
+ 
+ include ../Config
+ 
+diff --git a/bridge/br_common.h b/bridge/br_common.h
+index 87098b9..12fce3e 100644
+--- a/bridge/br_common.h
++++ b/bridge/br_common.h
+@@ -1,10 +1,19 @@
++extern int print_linkinfo(const struct sockaddr_nl *who,
++			  struct nlmsghdr *n,
++			  void *arg);
+ extern int print_fdb(const struct sockaddr_nl *who,
+ 		     struct nlmsghdr *n, void *arg);
++extern int print_mdb(const struct sockaddr_nl *who,
++		     struct nlmsghdr *n, void *arg);
+ 
+ extern int do_fdb(int argc, char **argv);
++extern int do_mdb(int argc, char **argv);
+ extern int do_monitor(int argc, char **argv);
++extern int do_vlan(int argc, char **argv);
++extern int do_link(int argc, char **argv);
+ 
+ extern int preferred_family;
+ extern int show_stats;
++extern int show_details;
+ extern int timestamp;
+ extern struct rtnl_handle rth;
+diff --git a/bridge/bridge.c b/bridge/bridge.c
+index c0fdace..ee08f90 100644
+--- a/bridge/bridge.c
++++ b/bridge/bridge.c
+@@ -8,9 +8,9 @@
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <sys/socket.h>
+-#include <linux/rtnetlink.h>
+ #include <string.h>
+ 
++#include "SNAPSHOT.h"
+ #include "utils.h"
+ #include "br_common.h"
+ 
+@@ -19,6 +19,7 @@ int preferred_family = AF_UNSPEC;
+ int resolve_hosts;
+ int oneline = 0;
+ int show_stats;
++int show_details;
+ int timestamp;
+ char * _SL_ = NULL;
+ 
+@@ -28,9 +29,9 @@ static void usage(void)
+ {
+ 	fprintf(stderr,
+ "Usage: bridge [ OPTIONS ] OBJECT { COMMAND | help }\n"
+-"where  OBJECT := { fdb | monitor }\n"
+-"       OPTIONS := { -V[ersion] | -s[tatistics] | \n"
+-"                    -o[neline] | -t[imestamp] }\n");
++"where  OBJECT := { link | fdb | mdb | vlan | monitor }\n"
++"       OPTIONS := { -V[ersion] | -s[tatistics] | -d[etails] |\n"
++"                    -o[neline] | -t[imestamp] \n");
+ 	exit(-1);
+ }
+ 
+@@ -44,7 +45,10 @@ static const struct cmd {
+ 	const char *cmd;
+ 	int (*func)(int argc, char **argv);
+ } cmds[] = {
++	{ "link", 	do_link },
+ 	{ "fdb", 	do_fdb },
++	{ "mdb", 	do_mdb },
++	{ "vlan",	do_vlan },
+ 	{ "monitor",	do_monitor },
+ 	{ "help",	do_help },
+ 	{ 0 }
+@@ -85,6 +89,8 @@ main(int argc, char **argv)
+ 		} else if (matches(opt, "-stats") == 0 ||
+ 			   matches(opt, "-statistics") == 0) {
+ 			++show_stats;
++		} else if (matches(opt, "-details") == 0) {
++			++show_details;
+ 		} else if (matches(opt, "-oneline") == 0) {
+ 			++oneline;
+ 		} else if (matches(opt, "-timestamp") == 0) {
+diff --git a/bridge/fdb.c b/bridge/fdb.c
+index 0f031cc..e2e53f1 100644
+--- a/bridge/fdb.c
++++ b/bridge/fdb.c
+@@ -30,8 +30,8 @@ int filter_index;
+ 
+ static void usage(void)
+ {
+-	fprintf(stderr, "Usage: bridge fdb { add | del } ADDR dev DEV {self|master} [ temp ] [router]\n"
+-		        "              [ dst IPADDR] [ vlan VID ]\n"
++	fprintf(stderr, "Usage: bridge fdb { add | append | del | replace } ADDR dev DEV {self|master} [ temp ]\n"
++		        "              [router] [ dst IPADDR] [ vlan VID ]\n"
+ 		        "              [ port PORT] [ vni VNI ] [via DEV]\n");
+ 	fprintf(stderr, "       bridge fdb {show} [ dev DEV ]\n");
+ 	exit(-1);
+@@ -111,16 +111,16 @@ int print_fdb(const struct sockaddr_nl *who, struct nlmsghdr *n, void *arg)
+ 	}
+ 
+ 	if (tb[NDA_VLAN]) {
+-		__u16 vid = *(__u16 *)RTA_DATA(tb[NDA_VLAN]);
++		__u16 vid = rta_getattr_u16(tb[NDA_VLAN]);
+ 		fprintf(fp, "vlan %hu ", vid);
+ 	}
+ 
+ 	if (tb[NDA_PORT])
+-		fprintf(fp, "port %d ", ntohs(*(__u16 *)RTA_DATA(tb[NDA_PORT])));
++		fprintf(fp, "port %d ", ntohs(rta_getattr_u16(tb[NDA_PORT])));
+ 	if (tb[NDA_VNI])
+-		fprintf(fp, "vni %d ", *(__u32 *)RTA_DATA(tb[NDA_VNI]));
++		fprintf(fp, "vni %d ", rta_getattr_u32(tb[NDA_VNI]));
+ 	if (tb[NDA_IFINDEX]) {
+-		unsigned int ifindex = *(__u32 *)RTA_DATA(tb[NDA_IFINDEX]);
++		unsigned int ifindex = rta_getattr_u32(tb[NDA_IFINDEX]);
+ 
+ 		if (ifindex) {
+ 			char ifname[IF_NAMESIZE];
+@@ -136,7 +136,7 @@ int print_fdb(const struct sockaddr_nl *who, struct nlmsghdr *n, void *arg)
+ 		struct nda_cacheinfo *ci = RTA_DATA(tb[NDA_CACHEINFO]);
+ 		int hz = get_user_hz();
+ 
+-		fprintf(fp, "used %d/%d ", ci->ndm_used/hz,
++		fprintf(fp, " used %d/%d", ci->ndm_used/hz,
+ 		       ci->ndm_updated/hz);
+ 	}
+ 	if (r->ndm_flags & NTF_SELF)
+@@ -300,13 +300,13 @@ static int fdb_modify(int cmd, int flags, int argc, char **argv)
+ 		addattr_l(&req.n, sizeof(req), NDA_DST, &dst.data, dst.bytelen);
+ 
+ 	if (vid >= 0)
+-		addattr_l(&req.n, sizeof(req), NDA_VLAN, &vid, sizeof(__u16));
++		addattr16(&req.n, sizeof(req), NDA_VLAN, vid);
+ 
+ 	if (port) {
+ 		unsigned short dport;
+ 
+ 		dport = htons((unsigned short)port);
+-		addattr_l(&req.n, sizeof(req), NDA_PORT, &dport, sizeof(__u16));
++		addattr16(&req.n, sizeof(req), NDA_PORT, dport);
+ 	}
+ 	if (vni != ~0)
+ 		addattr32(&req.n, sizeof(req), NDA_VNI, vni);
+@@ -334,6 +334,8 @@ int do_fdb(int argc, char **argv)
+ 			return fdb_modify(RTM_NEWNEIGH, NLM_F_CREATE|NLM_F_EXCL, argc-1, argv+1);
+ 		if (matches(*argv, "append") == 0)
+ 			return fdb_modify(RTM_NEWNEIGH, NLM_F_CREATE|NLM_F_APPEND, argc-1, argv+1);
++		if (matches(*argv, "replace") == 0)
++			return fdb_modify(RTM_NEWNEIGH, NLM_F_CREATE|NLM_F_REPLACE, argc-1, argv+1);
+ 		if (matches(*argv, "delete") == 0)
+ 			return fdb_modify(RTM_DELNEIGH, 0, argc-1, argv+1);
+ 		if (matches(*argv, "show") == 0 ||
+diff --git a/bridge/link.c b/bridge/link.c
+new file mode 100644
+index 0000000..38dfaea
+--- /dev/null
++++ b/bridge/link.c
+@@ -0,0 +1,425 @@
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <time.h>
++#include <sys/socket.h>
++#include <sys/time.h>
++#include <netinet/in.h>
++#include <linux/if.h>
++#include <linux/if_bridge.h>
++#include <string.h>
++#include <stdbool.h>
++
++#include "libnetlink.h"
++#include "utils.h"
++#include "br_common.h"
++
++unsigned int filter_index;
++
++static const char *port_states[] = {
++	[BR_STATE_DISABLED] = "disabled",
++	[BR_STATE_LISTENING] = "listening",
++	[BR_STATE_LEARNING] = "learning",
++	[BR_STATE_FORWARDING] = "forwarding",
++	[BR_STATE_BLOCKING] = "blocking",
++};
++
++extern char *if_indextoname (unsigned int __ifindex, char *__ifname);
++
++static void print_link_flags(FILE *fp, unsigned flags)
++{
++	fprintf(fp, "<");
++	if (flags & IFF_UP && !(flags & IFF_RUNNING))
++		fprintf(fp, "NO-CARRIER%s", flags ? "," : "");
++	flags &= ~IFF_RUNNING;
++#define _PF(f) if (flags&IFF_##f) { \
++                  flags &= ~IFF_##f ; \
++                  fprintf(fp, #f "%s", flags ? "," : ""); }
++	_PF(LOOPBACK);
++	_PF(BROADCAST);
++	_PF(POINTOPOINT);
++	_PF(MULTICAST);
++	_PF(NOARP);
++	_PF(ALLMULTI);
++	_PF(PROMISC);
++	_PF(MASTER);
++	_PF(SLAVE);
++	_PF(DEBUG);
++	_PF(DYNAMIC);
++	_PF(AUTOMEDIA);
++	_PF(PORTSEL);
++	_PF(NOTRAILERS);
++	_PF(UP);
++	_PF(LOWER_UP);
++	_PF(DORMANT);
++	_PF(ECHO);
++#undef _PF
++        if (flags)
++		fprintf(fp, "%x", flags);
++	fprintf(fp, "> ");
++}
++
++static const char *oper_states[] = {
++	"UNKNOWN", "NOTPRESENT", "DOWN", "LOWERLAYERDOWN",
++	"TESTING", "DORMANT",	 "UP"
++};
++
++static const char *hw_mode[] = {"VEB", "VEPA"};
++
++static void print_operstate(FILE *f, __u8 state)
++{
++	if (state >= sizeof(oper_states)/sizeof(oper_states[0]))
++		fprintf(f, "state %#x ", state);
++	else
++		fprintf(f, "state %s ", oper_states[state]);
++}
++
++static void print_portstate(FILE *f, __u8 state)
++{
++	if (state <= BR_STATE_BLOCKING)
++		fprintf(f, "state %s ", port_states[state]);
++	else
++		fprintf(f, "state (%d) ", state);
++}
++
++static void print_onoff(FILE *f, char *flag, __u8 val)
++{
++	fprintf(f, "%s %s ", flag, val ? "on" : "off");
++}
++
++static void print_hwmode(FILE *f, __u16 mode)
++{
++	if (mode >= sizeof(hw_mode)/sizeof(hw_mode[0]))
++		fprintf(f, "hwmode %#hx ", mode);
++	else
++		fprintf(f, "hwmode %s ", hw_mode[mode]);
++}
++
++int print_linkinfo(const struct sockaddr_nl *who,
++		   struct nlmsghdr *n, void *arg)
++{
++	FILE *fp = arg;
++	int len = n->nlmsg_len;
++	struct ifinfomsg *ifi = NLMSG_DATA(n);
++	struct rtattr * tb[IFLA_MAX+1];
++	char b1[IFNAMSIZ];
++
++	len -= NLMSG_LENGTH(sizeof(*ifi));
++	if (len < 0) {
++		fprintf(stderr, "Message too short!\n");
++		return -1;
++        }
++
++	if (!(ifi->ifi_family == AF_BRIDGE || ifi->ifi_family == AF_UNSPEC))
++		return 0;
++
++	if (filter_index && filter_index != ifi->ifi_index)
++		return 0;
++
++	parse_rtattr_flags(tb, IFLA_MAX, IFLA_RTA(ifi), len, NLA_F_NESTED);
++
++	if (tb[IFLA_IFNAME] == NULL) {
++		fprintf(stderr, "BUG: nil ifname\n");
++		return -1;
++	}
++
++	if (n->nlmsg_type == RTM_DELLINK)
++		fprintf(fp, "Deleted ");
++
++	fprintf(fp, "%d: %s ", ifi->ifi_index,
++		tb[IFLA_IFNAME] ? rta_getattr_str(tb[IFLA_IFNAME]) : "<nil>");
++
++	if (tb[IFLA_OPERSTATE])
++		print_operstate(fp, rta_getattr_u8(tb[IFLA_OPERSTATE]));
++
++	if (tb[IFLA_LINK]) {
++		SPRINT_BUF(b1);
++		int iflink = rta_getattr_u32(tb[IFLA_LINK]);
++		if (iflink == 0)
++			fprintf(fp, "@NONE: ");
++		else
++			fprintf(fp, "@%s: ",
++				if_indextoname(iflink, b1));
++	} else
++		fprintf(fp, ": ");
++
++	print_link_flags(fp, ifi->ifi_flags);
++
++	if (tb[IFLA_MTU])
++		fprintf(fp, "mtu %u ", rta_getattr_u32(tb[IFLA_MTU]));
++
++	if (tb[IFLA_MASTER])
++		fprintf(fp, "master %s ",
++			if_indextoname(rta_getattr_u32(tb[IFLA_MASTER]), b1));
++
++	if (tb[IFLA_PROTINFO]) {
++		if (tb[IFLA_PROTINFO]->rta_type & NLA_F_NESTED) {
++			struct rtattr *prtb[IFLA_BRPORT_MAX+1];
++
++			parse_rtattr_nested(prtb, IFLA_BRPORT_MAX,
++					    tb[IFLA_PROTINFO]);
++
++			if (prtb[IFLA_BRPORT_STATE])
++				print_portstate(fp,
++						rta_getattr_u8(prtb[IFLA_BRPORT_STATE]));
++			if (prtb[IFLA_BRPORT_PRIORITY])
++				fprintf(fp, "priority %hu ",
++					rta_getattr_u16(prtb[IFLA_BRPORT_PRIORITY]));
++			if (prtb[IFLA_BRPORT_COST])
++				fprintf(fp, "cost %u ",
++					rta_getattr_u32(prtb[IFLA_BRPORT_COST]));
++
++			if (show_details) {
++				fprintf(fp, "%s    ", _SL_);
++
++				if (prtb[IFLA_BRPORT_MODE])
++					print_onoff(fp, "hairpin",
++						    rta_getattr_u8(prtb[IFLA_BRPORT_MODE]));
++				if (prtb[IFLA_BRPORT_GUARD])
++					print_onoff(fp, "guard",
++						    rta_getattr_u8(prtb[IFLA_BRPORT_GUARD]));
++				if (prtb[IFLA_BRPORT_PROTECT])
++					print_onoff(fp, "root_block",
++						    rta_getattr_u8(prtb[IFLA_BRPORT_PROTECT]));
++				if (prtb[IFLA_BRPORT_FAST_LEAVE])
++					print_onoff(fp, "fastleave",
++						    rta_getattr_u8(prtb[IFLA_BRPORT_FAST_LEAVE]));
++			}
++		} else
++			print_portstate(fp, rta_getattr_u8(tb[IFLA_PROTINFO]));
++	}
++
++	if (tb[IFLA_AF_SPEC]) {
++		/* This is reported by HW devices that have some bridging
++		 * capabilities.
++		 */
++		struct rtattr *aftb[IFLA_BRIDGE_MAX+1];
++
++		parse_rtattr_nested(aftb, IFLA_BRIDGE_MAX, tb[IFLA_AF_SPEC]);
++
++		if (aftb[IFLA_BRIDGE_MODE])
++			print_hwmode(fp, rta_getattr_u16(aftb[IFLA_BRIDGE_MODE]));
++	}
++
++	fprintf(fp, "\n");
++	fflush(fp);
++	return 0;
++}
++
++static void usage(void)
++{
++	fprintf(stderr, "Usage: bridge link set dev DEV [ cost COST ] [ priority PRIO ] [ state STATE ]\n");
++	fprintf(stderr, "                               [ guard {on | off} ]\n");
++	fprintf(stderr, "                               [ hairpin {on | off} ] \n");
++	fprintf(stderr, "                               [ fastleave {on | off} ]\n");
++	fprintf(stderr,	"                               [ root_block {on | off} ]\n");
++	fprintf(stderr, "                               [ hwmode {vepa | veb} ]\n");
++	fprintf(stderr, "       bridge link show [dev DEV]\n");
++	exit(-1);
++}
++
++static bool on_off(char *arg, __s8 *attr, char *val)
++{
++	if (strcmp(val, "on") == 0)
++		*attr = 1;
++	else if (strcmp(val, "off") == 0)
++		*attr = 0;
++	else {
++		fprintf(stderr,
++			"Error: argument of \"%s\" must be \"on\" or \"off\"\n",
++			arg);
++		return false;
++	}
++
++	return true;
++}
++
++static int brlink_modify(int argc, char **argv)
++{
++	struct {
++		struct nlmsghdr  n;
++		struct ifinfomsg ifm;
++		char             buf[512];
++	} req;
++	char *d = NULL;
++	__s8 hairpin = -1;
++	__s8 bpdu_guard = -1;
++	__s8 fast_leave = -1;
++	__s8 root_block = -1;
++	__u32 cost = 0;
++	__s16 priority = -1;
++	__s8 state = -1;
++	__s16 mode = -1;
++	__u16 flags = BRIDGE_FLAGS_MASTER;
++	struct rtattr *nest;
++
++	memset(&req, 0, sizeof(req));
++
++	req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
++	req.n.nlmsg_flags = NLM_F_REQUEST;
++	req.n.nlmsg_type = RTM_SETLINK;
++	req.ifm.ifi_family = PF_BRIDGE;
++
++	while (argc > 0) {
++		if (strcmp(*argv, "dev") == 0) {
++			NEXT_ARG();
++			d = *argv;
++		} else if (strcmp(*argv, "guard") == 0) {
++			NEXT_ARG();
++			if (!on_off("guard", &bpdu_guard, *argv))
++				exit(-1);
++		} else if (strcmp(*argv, "hairpin") == 0) {
++			NEXT_ARG();
++			if (!on_off("hairping", &hairpin, *argv))
++				exit(-1);
++		} else if (strcmp(*argv, "fastleave") == 0) {
++			NEXT_ARG();
++			if (!on_off("fastleave", &fast_leave, *argv))
++				exit(-1);
++		} else if (strcmp(*argv, "root_block") == 0) {
++			NEXT_ARG();
++			if (!on_off("root_block", &root_block, *argv))
++				exit(-1);
++		} else if (strcmp(*argv, "cost") == 0) {
++			NEXT_ARG();
++			cost = atoi(*argv);
++		} else if (strcmp(*argv, "priority") == 0) {
++			NEXT_ARG();
++			priority = atoi(*argv);
++		} else if (strcmp(*argv, "state") == 0) {
++			NEXT_ARG();
++			state = atoi(*argv);
++		} else if (strcmp(*argv, "hwmode") == 0) {
++			NEXT_ARG();
++			flags = BRIDGE_FLAGS_SELF;
++			if (strcmp(*argv, "vepa") == 0)
++				mode = BRIDGE_MODE_VEPA;
++			else if (strcmp(*argv, "veb") == 0)
++				mode = BRIDGE_MODE_VEB;
++			else {
++				fprintf(stderr,
++					"Mode argument must be \"vepa\" or "
++					"\"veb\".\n");
++				exit(-1);
++			}
++		} else {
++			usage();
++		}
++		argc--; argv++;
++	}
++	if (d == NULL) {
++		fprintf(stderr, "Device is a required argument.\n");
++		exit(-1);
++	}
++
++
++	req.ifm.ifi_index = ll_name_to_index(d);
++	if (req.ifm.ifi_index == 0) {
++		fprintf(stderr, "Cannot find bridge device \"%s\"\n", d);
++		exit(-1);
++	}
++
++	/* Nested PROTINFO attribute.  Contains: port flags, cost, priority and
++	 * state.
++	 */
++	nest = addattr_nest(&req.n, sizeof(req),
++			    IFLA_PROTINFO | NLA_F_NESTED);
++	/* Flags first */
++	if (bpdu_guard >= 0)
++		addattr8(&req.n, sizeof(req), IFLA_BRPORT_GUARD, bpdu_guard);
++	if (hairpin >= 0)
++		addattr8(&req.n, sizeof(req), IFLA_BRPORT_MODE, hairpin);
++	if (fast_leave >= 0)
++		addattr8(&req.n, sizeof(req), IFLA_BRPORT_FAST_LEAVE,
++			 fast_leave);
++	if (root_block >= 0)
++		addattr8(&req.n, sizeof(req), IFLA_BRPORT_PROTECT, root_block);
++
++	if (cost > 0)
++		addattr32(&req.n, sizeof(req), IFLA_BRPORT_COST, cost);
++
++	if (priority >= 0)
++		addattr16(&req.n, sizeof(req), IFLA_BRPORT_PRIORITY, priority);
++
++	if (state >= 0)
++		addattr8(&req.n, sizeof(req), IFLA_BRPORT_STATE, state);
++
++	addattr_nest_end(&req.n, nest);
++
++	/* IFLA_AF_SPEC nested attribute.  Contains IFLA_BRIDGE_FLAGS that
++	 * designates master or self operation as well as 'vepa' or 'veb'
++	 * operation modes.  These are only valid in 'self' mode on some
++	 * devices so far.  Thus we only need to include the flags attribute
++	 * if we are setting the hw mode.
++	 */
++	if (mode >= 0) {
++		nest = addattr_nest(&req.n, sizeof(req), IFLA_AF_SPEC);
++
++		addattr16(&req.n, sizeof(req), IFLA_BRIDGE_FLAGS, flags);
++
++		if (mode >= 0)
++			addattr16(&req.n, sizeof(req), IFLA_BRIDGE_MODE, mode);
++
++		addattr_nest_end(&req.n, nest);
++	}
++
++	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++		exit(2);
++
++	return 0;
++}
++
++static int brlink_show(int argc, char **argv)
++{
++	char *filter_dev = NULL;
++
++	while (argc > 0) {
++		if (strcmp(*argv, "dev") == 0) {
++			NEXT_ARG();
++			if (filter_dev)
++				duparg("dev", *argv);
++			filter_dev = *argv;
++		}
++		argc--; argv++;
++	}
++
++	if (filter_dev) {
++		if ((filter_index = ll_name_to_index(filter_dev)) == 0) {
++			fprintf(stderr, "Cannot find device \"%s\"\n",
++				filter_dev);
++			return -1;
++		}
++	}
++
++	if (rtnl_wilddump_request(&rth, PF_BRIDGE, RTM_GETLINK) < 0) {
++		perror("Cannon send dump request");
++		exit(1);
++	}
++
++	if (rtnl_dump_filter(&rth, print_linkinfo, stdout, NULL, NULL) < 0) {
++		fprintf(stderr, "Dump terminated\n");
++		exit(1);
++	}
++	return 0;
++}
++
++int do_link(int argc, char **argv)
++{
++	ll_init_map(&rth);
++	if (argc > 0) {
++		if (matches(*argv, "set") == 0 ||
++		    matches(*argv, "change") == 0)
++			return brlink_modify(argc-1, argv+1);
++		if (matches(*argv, "show") == 0 ||
++		    matches(*argv, "lst") == 0 ||
++		    matches(*argv, "list") == 0)
++			return brlink_show(argc-1, argv+1);
++		if (matches(*argv, "help") == 0)
++			usage();
++	} else
++		return brlink_show(0, NULL);
++
++	fprintf(stderr, "Command \"%s\" is unknown, try \"bridge link help\".\n", *argv);
++	exit(-1);
++}
+diff --git a/bridge/mdb.c b/bridge/mdb.c
+new file mode 100644
+index 0000000..81d479b
+--- /dev/null
++++ b/bridge/mdb.c
+@@ -0,0 +1,254 @@
++/*
++ * Get mdb table with netlink
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <sys/socket.h>
++#include <net/if.h>
++#include <netinet/in.h>
++#include <linux/if_bridge.h>
++#include <linux/if_ether.h>
++#include <string.h>
++#include <arpa/inet.h>
++
++#include "libnetlink.h"
++#include "br_common.h"
++#include "rt_names.h"
++#include "utils.h"
++
++#ifndef MDBA_RTA
++#define MDBA_RTA(r) \
++	((struct rtattr*)(((char*)(r)) + NLMSG_ALIGN(sizeof(struct br_port_msg))))
++#endif
++
++int filter_index;
++
++static void usage(void)
++{
++	fprintf(stderr, "Usage: bridge mdb { add | del } dev DEV port PORT grp GROUP [permanent | temp]\n");
++	fprintf(stderr, "       bridge mdb {show} [ dev DEV ]\n");
++	exit(-1);
++}
++
++static void br_print_router_ports(FILE *f, struct rtattr *attr)
++{
++	uint32_t *port_ifindex;
++	struct rtattr *i;
++	int rem;
++
++	rem = RTA_PAYLOAD(attr);
++	for (i = RTA_DATA(attr); RTA_OK(i, rem); i = RTA_NEXT(i, rem)) {
++		port_ifindex = RTA_DATA(i);
++		fprintf(f, "%s ", ll_index_to_name(*port_ifindex));
++	}
++
++	fprintf(f, "\n");
++}
++
++static void print_mdb_entry(FILE *f, int ifindex, struct br_mdb_entry *e)
++{
++	SPRINT_BUF(abuf);
++
++	if (e->addr.proto == htons(ETH_P_IP))
++		fprintf(f, "dev %s port %s grp %s %s\n", ll_index_to_name(ifindex),
++			ll_index_to_name(e->ifindex),
++			inet_ntop(AF_INET, &e->addr.u.ip4, abuf, sizeof(abuf)),
++			(e->state & MDB_PERMANENT) ? "permanent" : "temp");
++	else
++		fprintf(f, "dev %s port %s grp %s %s\n", ll_index_to_name(ifindex),
++			ll_index_to_name(e->ifindex),
++			inet_ntop(AF_INET6, &e->addr.u.ip6, abuf, sizeof(abuf)),
++			(e->state & MDB_PERMANENT) ? "permanent" : "temp");
++}
++
++static void br_print_mdb_entry(FILE *f, int ifindex, struct rtattr *attr)
++{
++	struct rtattr *i;
++	int rem;
++	struct br_mdb_entry *e;
++
++	rem = RTA_PAYLOAD(attr);
++	for (i = RTA_DATA(attr); RTA_OK(i, rem); i = RTA_NEXT(i, rem)) {
++		e = RTA_DATA(i);
++		print_mdb_entry(f, ifindex, e);
++	}
++}
++
++int print_mdb(const struct sockaddr_nl *who, struct nlmsghdr *n, void *arg)
++{
++	FILE *fp = arg;
++	struct br_port_msg *r = NLMSG_DATA(n);
++	int len = n->nlmsg_len;
++	struct rtattr * tb[MDBA_MAX+1];
++
++	if (n->nlmsg_type != RTM_GETMDB && n->nlmsg_type != RTM_NEWMDB && n->nlmsg_type != RTM_DELMDB) {
++		fprintf(stderr, "Not RTM_GETMDB, RTM_NEWMDB or RTM_DELMDB: %08x %08x %08x\n",
++			n->nlmsg_len, n->nlmsg_type, n->nlmsg_flags);
++
++		return 0;
++	}
++
++	len -= NLMSG_LENGTH(sizeof(*r));
++	if (len < 0) {
++		fprintf(stderr, "BUG: wrong nlmsg len %d\n", len);
++		return -1;
++	}
++
++	if (filter_index && filter_index != r->ifindex)
++		return 0;
++
++	parse_rtattr(tb, MDBA_MAX, MDBA_RTA(r), n->nlmsg_len - NLMSG_LENGTH(sizeof(*r)));
++
++	if (tb[MDBA_MDB]) {
++		struct rtattr *i;
++		int rem = RTA_PAYLOAD(tb[MDBA_MDB]);
++
++		for (i = RTA_DATA(tb[MDBA_MDB]); RTA_OK(i, rem); i = RTA_NEXT(i, rem))
++			br_print_mdb_entry(fp, r->ifindex, i);
++	}
++
++	if (tb[MDBA_ROUTER]) {
++		if (show_details) {
++			fprintf(fp, "router ports on %s: ", ll_index_to_name(r->ifindex));
++			br_print_router_ports(fp, tb[MDBA_ROUTER]);
++		}
++	}
++
++	return 0;
++}
++
++static int mdb_show(int argc, char **argv)
++{
++	char *filter_dev = NULL;
++
++	while (argc > 0) {
++		if (strcmp(*argv, "dev") == 0) {
++			NEXT_ARG();
++			if (filter_dev)
++				duparg("dev", *argv);
++			filter_dev = *argv;
++		}
++		argc--; argv++;
++	}
++
++	if (filter_dev) {
++		filter_index = if_nametoindex(filter_dev);
++		if (filter_index == 0) {
++			fprintf(stderr, "Cannot find device \"%s\"\n",
++				filter_dev);
++			return -1;
++		}
++	}
++
++	if (rtnl_wilddump_request(&rth, PF_BRIDGE, RTM_GETMDB) < 0) {
++		perror("Cannot send dump request");
++		exit(1);
++	}
++
++	if (rtnl_dump_filter(&rth, print_mdb, stdout, NULL, NULL) < 0) {
++		fprintf(stderr, "Dump terminated\n");
++		exit(1);
++	}
++
++	return 0;
++}
++
++static int mdb_modify(int cmd, int flags, int argc, char **argv)
++{
++	struct {
++		struct nlmsghdr 	n;
++		struct br_port_msg	bpm;
++		char   			buf[1024];
++	} req;
++	struct br_mdb_entry entry;
++	char *d = NULL, *p = NULL, *grp = NULL;
++
++	memset(&req, 0, sizeof(req));
++	memset(&entry, 0, sizeof(entry));
++
++	req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct br_port_msg));
++	req.n.nlmsg_flags = NLM_F_REQUEST|flags;
++	req.n.nlmsg_type = cmd;
++	req.bpm.family = PF_BRIDGE;
++
++	while (argc > 0) {
++		if (strcmp(*argv, "dev") == 0) {
++			NEXT_ARG();
++			d = *argv;
++		} else if (strcmp(*argv, "grp") == 0) {
++			NEXT_ARG();
++			grp = *argv;
++		} else if (strcmp(*argv, "port") == 0) {
++			NEXT_ARG();
++			p = *argv;
++		} else if (strcmp(*argv, "permanent") == 0) {
++			if (cmd == RTM_NEWMDB)
++				entry.state |= MDB_PERMANENT;
++		} else if (strcmp(*argv, "temp") == 0) {
++			;/* nothing */
++		} else {
++			if (matches(*argv, "help") == 0)
++				usage();
++		}
++		argc--; argv++;
++	}
++
++	if (d == NULL || grp == NULL || p == NULL) {
++		fprintf(stderr, "Device, group address and port name are required arguments.\n");
++		exit(-1);
++	}
++
++	req.bpm.ifindex = ll_name_to_index(d);
++	if (req.bpm.ifindex == 0) {
++		fprintf(stderr, "Cannot find device \"%s\"\n", d);
++		return -1;
++	}
++
++	entry.ifindex = ll_name_to_index(p);
++	if (entry.ifindex == 0) {
++		fprintf(stderr, "Cannot find device \"%s\"\n", p);
++		return -1;
++	}
++
++	if (!inet_pton(AF_INET, grp, &entry.addr.u.ip4)) {
++		if (!inet_pton(AF_INET6, grp, &entry.addr.u.ip6)) {
++			fprintf(stderr, "Invalid address \"%s\"\n", grp);
++			return -1;
++		} else
++			entry.addr.proto = htons(ETH_P_IPV6);
++	} else
++		entry.addr.proto = htons(ETH_P_IP);
++
++	addattr_l(&req.n, sizeof(req), MDBA_SET_ENTRY, &entry, sizeof(entry));
++
++	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++		exit(2);
++
++	return 0;
++}
++
++int do_mdb(int argc, char **argv)
++{
++	ll_init_map(&rth);
++
++	if (argc > 0) {
++		if (matches(*argv, "add") == 0)
++			return mdb_modify(RTM_NEWMDB, NLM_F_CREATE|NLM_F_EXCL, argc-1, argv+1);
++		if (matches(*argv, "delete") == 0)
++			return mdb_modify(RTM_DELMDB, 0, argc-1, argv+1);
++
++		if (matches(*argv, "show") == 0 ||
++		    matches(*argv, "lst") == 0 ||
++		    matches(*argv, "list") == 0)
++			return mdb_show(argc-1, argv+1);
++		if (matches(*argv, "help") == 0)
++			usage();
++	} else
++		return mdb_show(0, NULL);
++
++	fprintf(stderr, "Command \"%s\" is unknown, try \"bridge mdb help\".\n", *argv);
++	exit(-1);
++}
+diff --git a/bridge/monitor.c b/bridge/monitor.c
+index 9d9c369..e96fcaf 100644
+--- a/bridge/monitor.c
++++ b/bridge/monitor.c
+@@ -20,7 +20,6 @@
+ #include <netinet/in.h>
+ #include <linux/if_bridge.h>
+ #include <linux/neighbour.h>
+-#include <linux/rtnetlink.h>
+ #include <string.h>
+ 
+ #include "utils.h"
+@@ -32,10 +31,21 @@ int prefix_banner;
+ 
+ static void usage(void)
+ {
+-	fprintf(stderr, "Usage: bridge monitor [fdb | all]\n");
++	fprintf(stderr, "Usage: bridge monitor [file | link | fdb | mdb | all]\n");
+ 	exit(-1);
+ }
+ 
++static int show_mark(FILE *fp, const struct nlmsghdr *n)
++{
++	char *tstr;
++	time_t secs = ((__u32*)NLMSG_DATA(n))[0];
++	long usecs = ((__u32*)NLMSG_DATA(n))[1];
++	tstr = asctime(localtime(&secs));
++	tstr[strlen(tstr)-1] = 0;
++	fprintf(fp, "Timestamp: %s %lu us\n", tstr, usecs);
++	return 0;
++}
++
+ static int accept_msg(const struct sockaddr_nl *who,
+ 		      struct nlmsghdr *n, void *arg)
+ {
+@@ -45,11 +55,28 @@ static int accept_msg(const struct sockaddr_nl *who,
+ 		print_timestamp(fp);
+ 
+ 	switch (n->nlmsg_type) {
++	case RTM_NEWLINK:
++	case RTM_DELLINK:
++		if (prefix_banner)
++			fprintf(fp, "[LINK]");
++
++		return print_linkinfo(who, n, arg);
++
+ 	case RTM_NEWNEIGH:
+ 	case RTM_DELNEIGH:
+ 		if (prefix_banner)
+ 			fprintf(fp, "[NEIGH]");
+ 		return print_fdb(who, n, arg);
++
++	case RTM_NEWMDB:
++	case RTM_DELMDB:
++		if (prefix_banner)
++			fprintf(fp, "[MDB]");
++		return print_mdb(who, n, arg);
++
++	case 15:
++		return show_mark(fp, n);
++
+ 	default:
+ 		return 0;
+ 	}
+@@ -59,15 +86,27 @@ static int accept_msg(const struct sockaddr_nl *who,
+ 
+ int do_monitor(int argc, char **argv)
+ {
++	char *file = NULL;
+ 	unsigned groups = ~RTMGRP_TC;
++	int llink=0;
+ 	int lneigh=0;
++	int lmdb=0;
+ 
+ 	rtnl_close(&rth);
+ 
+ 	while (argc > 0) {
+-		if (matches(*argv, "fdb") == 0) {
++		if (matches(*argv, "file") == 0) {
++			NEXT_ARG();
++			file = *argv;
++		} else if (matches(*argv, "link") == 0) {
++			llink=1;
++			groups = 0;
++		} else if (matches(*argv, "fdb") == 0) {
+ 			lneigh = 1;
+ 			groups = 0;
++		} else if (matches(*argv, "mdb") == 0) {
++			lmdb = 1;
++			groups = 0;
+ 		} else if (strcmp(*argv, "all") == 0) {
+ 			groups = ~RTMGRP_TC;
+ 			prefix_banner=1;
+@@ -80,6 +119,27 @@ int do_monitor(int argc, char **argv)
+ 		argc--;	argv++;
+ 	}
+ 
++	if (llink)
++		groups |= nl_mgrp(RTNLGRP_LINK);
++
++	if (lneigh) {
++		groups |= nl_mgrp(RTNLGRP_NEIGH);
++	}
++
++	if (lmdb) {
++		groups |= nl_mgrp(RTNLGRP_MDB);
++	}
++
++	if (file) {
++		FILE *fp;
++		fp = fopen(file, "r");
++		if (fp == NULL) {
++			perror("Cannot fopen");
++			exit(-1);
++		}
++		return rtnl_from_file(fp, accept_msg, stdout);
++	}
++
+ 	if (rtnl_open(&rth, groups) < 0)
+ 		exit(1);
+ 	ll_init_map(&rth);
+diff --git a/bridge/vlan.c b/bridge/vlan.c
+new file mode 100644
+index 0000000..83c4088
+--- /dev/null
++++ b/bridge/vlan.c
+@@ -0,0 +1,220 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <sys/socket.h>
++#include <net/if.h>
++#include <netinet/in.h>
++#include <linux/if_bridge.h>
++#include <linux/if_ether.h>
++#include <string.h>
++
++#include "libnetlink.h"
++#include "br_common.h"
++#include "utils.h"
++
++int filter_index;
++
++static void usage(void)
++{
++	fprintf(stderr, "Usage: bridge vlan { add | del } vid VLAN_ID dev DEV [ pvid] [ untagged ]\n");
++	fprintf(stderr, "                                                     [ self ] [ master ]\n");
++	fprintf(stderr, "       bridge vlan { show } [ dev DEV ]\n");
++	exit(-1);
++}
++
++static int vlan_modify(int cmd, int argc, char **argv)
++{
++	struct {
++		struct nlmsghdr 	n;
++		struct ifinfomsg 	ifm;
++		char   			buf[1024];
++	} req;
++	char *d = NULL;
++	short vid = -1;
++	struct rtattr *afspec;
++	struct bridge_vlan_info vinfo;
++	unsigned short flags = 0;
++
++	memset(&vinfo, 0, sizeof(vinfo));
++	memset(&req, 0, sizeof(req));
++
++	req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
++	req.n.nlmsg_flags = NLM_F_REQUEST;
++	req.n.nlmsg_type = cmd;
++	req.ifm.ifi_family = PF_BRIDGE;
++
++	while (argc > 0) {
++		if (strcmp(*argv, "dev") == 0) {
++			NEXT_ARG();
++			d = *argv;
++		} else if (strcmp(*argv, "vid") == 0) {
++			NEXT_ARG();
++			vid = atoi(*argv);
++		} else if (strcmp(*argv, "self") == 0) {
++			flags |= BRIDGE_FLAGS_SELF;
++		} else if (strcmp(*argv, "master") == 0) {
++			flags |= BRIDGE_FLAGS_MASTER;
++		} else if (strcmp(*argv, "pvid") == 0) {
++			vinfo.flags |= BRIDGE_VLAN_INFO_PVID;
++		} else if (strcmp(*argv, "untagged") == 0) {
++			vinfo.flags |= BRIDGE_VLAN_INFO_UNTAGGED;
++		} else {
++			if (matches(*argv, "help") == 0) {
++				NEXT_ARG();
++			}
++		}
++		argc--; argv++;
++	}
++
++	if (d == NULL || vid == -1) {
++		fprintf(stderr, "Device and VLAN ID are required arguments.\n");
++		exit(-1);
++	}
++
++	req.ifm.ifi_index = ll_name_to_index(d);
++	if (req.ifm.ifi_index == 0) {
++		fprintf(stderr, "Cannot find bridge device \"%s\"\n", d);
++		return -1;
++	}
++
++	if (vid >= 4096) {
++		fprintf(stderr, "Invalid VLAN ID \"%hu\"\n", vid);
++		return -1;
++	}
++
++	vinfo.vid = vid;
++
++	afspec = addattr_nest(&req.n, sizeof(req), IFLA_AF_SPEC);
++
++	if (flags)
++		addattr16(&req.n, sizeof(req), IFLA_BRIDGE_FLAGS, flags);
++
++	addattr_l(&req.n, sizeof(req), IFLA_BRIDGE_VLAN_INFO, &vinfo,
++		  sizeof(vinfo));
++
++	addattr_nest_end(&req.n, afspec);
++
++	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++		exit(2);
++
++	return 0;
++}
++
++static int print_vlan(const struct sockaddr_nl *who,
++		      struct nlmsghdr *n,
++		      void *arg)
++{
++	FILE *fp = arg;
++	struct ifinfomsg *ifm = NLMSG_DATA(n);
++	int len = n->nlmsg_len;
++	struct rtattr * tb[IFLA_MAX+1];
++
++	if (n->nlmsg_type != RTM_NEWLINK) {
++		fprintf(stderr, "Not RTM_NEWLINK: %08x %08x %08x\n",
++			n->nlmsg_len, n->nlmsg_type, n->nlmsg_flags);
++		return 0;
++	}
++
++	len -= NLMSG_LENGTH(sizeof(*ifm));
++	if (len < 0) {
++		fprintf(stderr, "BUG: wrong nlmsg len %d\n", len);
++		return -1;
++	}
++
++	if (ifm->ifi_family != AF_BRIDGE)
++		return 0;
++
++	if (filter_index && filter_index != ifm->ifi_index)
++		return 0;
++
++	parse_rtattr(tb, IFLA_MAX, IFLA_RTA(ifm), len);
++
++	/* if AF_SPEC isn't there, vlan table is not preset for this port */
++	if (!tb[IFLA_AF_SPEC]) {
++		fprintf(fp, "%s\tNone\n", ll_index_to_name(ifm->ifi_index));
++		return 0;
++	} else {
++		struct rtattr *i, *list = tb[IFLA_AF_SPEC];
++		int rem = RTA_PAYLOAD(list);
++
++		fprintf(fp, "%s", ll_index_to_name(ifm->ifi_index));
++		for (i = RTA_DATA(list); RTA_OK(i, rem); i = RTA_NEXT(i, rem)) {
++			struct bridge_vlan_info *vinfo;
++
++			if (i->rta_type != IFLA_BRIDGE_VLAN_INFO)
++				continue;
++
++			vinfo = RTA_DATA(i);
++			fprintf(fp, "\t %hu", vinfo->vid);
++			if (vinfo->flags & BRIDGE_VLAN_INFO_PVID)
++				fprintf(fp, " PVID");
++			if (vinfo->flags & BRIDGE_VLAN_INFO_UNTAGGED)
++				fprintf(fp, " Egress Untagged");
++			fprintf(fp, "\n");
++		}
++	}
++	fprintf(fp, "\n");
++	fflush(fp);
++	return 0;
++}
++
++static int vlan_show(int argc, char **argv)
++{
++	char *filter_dev = NULL;
++
++	while (argc > 0) {
++		if (strcmp(*argv, "dev") == 0) {
++			NEXT_ARG();
++			if (filter_dev)
++				duparg("dev", *argv);
++			filter_dev = *argv;
++		}
++		argc--; argv++;
++	}
++
++	if (filter_dev) {
++		if ((filter_index = if_nametoindex(filter_dev)) == 0) {
++			fprintf(stderr, "Cannot find device \"%s\"\n",
++			       filter_dev);
++			return -1;
++		}
++	}
++
++	if (rtnl_wilddump_req_filter(&rth, PF_BRIDGE, RTM_GETLINK,
++				     RTEXT_FILTER_BRVLAN) < 0) {
++		perror("Cannont send dump request");
++		exit(1);
++	}
++
++	printf("port\tvlan ids\n");
++	if (rtnl_dump_filter(&rth, print_vlan, stdout, NULL, NULL) < 0) {
++		fprintf(stderr, "Dump ternminated\n");
++		exit(1);
++	}
++
++	return 0;
++}
++
++
++int do_vlan(int argc, char **argv)
++{
++	ll_init_map(&rth);
++
++	if (argc > 0) {
++		if (matches(*argv, "add") == 0)
++			return vlan_modify(RTM_SETLINK, argc-1, argv+1);
++		if (matches(*argv, "delete") == 0)
++			return vlan_modify(RTM_DELLINK, argc-1, argv+1);
++		if (matches(*argv, "show") == 0 ||
++		    matches(*argv, "lst") == 0 ||
++		    matches(*argv, "list") == 0)
++			return vlan_show(argc-1, argv+1);
++		if (matches(*argv, "help") == 0)
++			usage();
++	} else
++		return vlan_show(0, NULL);
++
++	fprintf(stderr, "Command \"%s\" is unknown, try \"bridge fdb help\".\n", *argv);
++	exit(-1);
++}
+-- 
+1.8.3.1
+
+diff --git a/include/linux/rtnetlink.h b/include/linux/rtnetlink.h
+index a059785..18c84f3 100644
+--- a/include/linux/rtnetlink.h
++++ b/include/linux/rtnetlink.h
+@@ -120,6 +120,13 @@ enum {
+ 	RTM_SETDCB,
+ #define RTM_SETDCB RTM_SETDCB
+ 
++	RTM_NEWMDB = 84,
++#define RTM_NEWMDB RTM_NEWMDB
++	RTM_DELMDB = 85,
++#define RTM_DELMDB RTM_DELMDB
++	RTM_GETMDB = 86,
++#define RTM_GETMDB RTM_GETMDB
++
+ 	__RTM_MAX,
+ #define RTM_MAX		(((__RTM_MAX + 3) & ~3) - 1)
+ };
+diff --git a/include/linux/rtnetlink.h b/include/linux/rtnetlink.h
+index 18c84f3..6c706bf 100644
+--- a/include/linux/rtnetlink.h
++++ b/include/linux/rtnetlink.h
+@@ -589,6 +589,14 @@ enum rtnetlink_groups {
+ #define RTNLGRP_PHONET_IFADDR	RTNLGRP_PHONET_IFADDR
+ 	RTNLGRP_PHONET_ROUTE,
+ #define RTNLGRP_PHONET_ROUTE	RTNLGRP_PHONET_ROUTE
++	RTNLGRP_DCB,
++#define RTNLGRP_DCB             RTNLGRP_DCB
++	RTNLGRP_IPV4_NETCONF,
++#define RTNLGRP_IPV4_NETCONF    RTNLGRP_IPV4_NETCONF
++	RTNLGRP_IPV6_NETCONF,
++#define RTNLGRP_IPV6_NETCONF    RTNLGRP_IPV6_NETCONF
++	RTNLGRP_MDB,
++#define RTNLGRP_MDB             RTNLGRP_MDB
+ 	__RTNLGRP_MAX
+ };
+ #define RTNLGRP_MAX	(__RTNLGRP_MAX - 1)
+diff --git a/include/linux/if_link.h b/include/linux/if_link.h
+index 35afe9e..7c7a00c 100644
+--- a/include/linux/if_link.h
++++ b/include/linux/if_link.h
+@@ -154,6 +154,26 @@ enum {
+ 
+ #define IFLA_INET6_MAX	(__IFLA_INET6_MAX - 1)
+ 
++enum {
++	BRIDGE_MODE_UNSPEC,
++	BRIDGE_MODE_HAIRPIN,
++};
++
++enum {
++	IFLA_BRPORT_UNSPEC,
++	IFLA_BRPORT_STATE,      /* Spanning tree state     */
++	IFLA_BRPORT_PRIORITY,   /* "             priority  */
++	IFLA_BRPORT_COST,       /* "             cost      */
++	IFLA_BRPORT_MODE,       /* mode (hairpin)          */
++	IFLA_BRPORT_GUARD,      /* bpdu guard              */
++	IFLA_BRPORT_PROTECT,    /* root port protection    */
++	IFLA_BRPORT_FAST_LEAVE, /* multicast fast leave    */
++	IFLA_BRPORT_LEARNING,   /* mac learning */
++	IFLA_BRPORT_UNICAST_FLOOD, /* flood unicast traffic */
++	__IFLA_BRPORT_MAX
++};
++#define IFLA_BRPORT_MAX (__IFLA_BRPORT_MAX - 1)
++
+ struct ifla_cacheinfo {
+ 	__u32	max_reasm_len;
+ 	__u32	tstamp;		/* ipv6InterfaceTable updated timestamp */
+diff --git a/include/linux/rtnetlink.h b/include/linux/rtnetlink.h
+index 6c706bf..13041ac 100644
+--- a/include/linux/rtnetlink.h
++++ b/include/linux/rtnetlink.h
+@@ -614,6 +614,7 @@ struct tcamsg {
+ 
+ /* New extended info filters for IFLA_EXT_MASK */
+ #define RTEXT_FILTER_VF		(1 << 0)
++#define RTEXT_FILTER_BRVLAN     (1 << 1)
+ 
+ /* End of information exported to user level */
+ 
+diff --git a/include/libnetlink.h b/include/libnetlink.h
+index 07bd707..027e34a 100644
+--- a/include/libnetlink.h
++++ b/include/libnetlink.h
+@@ -23,6 +23,8 @@ extern int rtnl_open(struct rtnl_handle *rth, unsigned subscriptions);
+ extern int rtnl_open_byproto(struct rtnl_handle *rth, unsigned subscriptions, int protocol);
+ extern void rtnl_close(struct rtnl_handle *rth);
+ extern int rtnl_wilddump_request(struct rtnl_handle *rth, int fam, int type);
++extern int rtnl_wilddump_req_filter(struct rtnl_handle *rth, int fam, int type,
++		                    __u32 filt_mask);
+ extern int rtnl_dump_request(struct rtnl_handle *rth, int type, void *req, int len);
+ 
+ typedef int (*rtnl_filter_t)(const struct sockaddr_nl *,
+@@ -50,7 +52,13 @@ extern int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n, pid_t peer,
+ extern int rtnl_send(struct rtnl_handle *rth, const char *buf, int);
+ extern int rtnl_send_check(struct rtnl_handle *rth, const char *buf, int);
+ 
++extern int addattr(struct nlmsghdr *n, int maxlen, int type);
++extern int addattr8(struct nlmsghdr *n, int maxlen, int type, __u8 data);
++extern int addattr16(struct nlmsghdr *n, int maxlen, int type, __u16 data);
+ extern int addattr32(struct nlmsghdr *n, int maxlen, int type, __u32 data);
++extern int addattr64(struct nlmsghdr *n, int maxlen, int type, __u64 data);
++extern int addattrstrz(struct nlmsghdr *n, int maxlen, int type, const char *data);
++
+ extern int addattr_l(struct nlmsghdr *n, int maxlen, int type, const void *data, int alen);
+ extern int addraw_l(struct nlmsghdr *n, int maxlen, const void *data, int len);
+ extern struct rtattr *addattr_nest(struct nlmsghdr *n, int maxlen, int type);
+@@ -61,6 +69,8 @@ extern int rta_addattr32(struct rtattr *rta, int maxlen, int type, __u32 data);
+ extern int rta_addattr_l(struct rtattr *rta, int maxlen, int type, const void *data, int alen);
+ 
+ extern int parse_rtattr(struct rtattr *tb[], int max, struct rtattr *rta, int len);
++extern int parse_rtattr_flags(struct rtattr *tb[], int max, struct rtattr *rta,
++		              int len, unsigned short flags);
+ extern int parse_rtattr_byindex(struct rtattr *tb[], int max, struct rtattr *rta, int len);
+ extern int __parse_rtattr_nested_compat(struct rtattr *tb[], int max, struct rtattr *rta, int len);
+ 
+@@ -71,6 +81,29 @@ extern int __parse_rtattr_nested_compat(struct rtattr *tb[], int max, struct rta
+ ({	data = RTA_PAYLOAD(rta) >= len ? RTA_DATA(rta) : NULL; \
+ 	__parse_rtattr_nested_compat(tb, max, rta, len); })
+ 
++static inline __u8 rta_getattr_u8(const struct rtattr *rta)
++{
++	return *(__u8 *)RTA_DATA(rta);
++}
++static inline __u16 rta_getattr_u16(const struct rtattr *rta)
++{
++	return *(__u16 *)RTA_DATA(rta);
++}
++static inline __u32 rta_getattr_u32(const struct rtattr *rta)
++{
++	return *(__u32 *)RTA_DATA(rta);
++}
++static inline __u64 rta_getattr_u64(const struct rtattr *rta)
++{
++	__u64 tmp;
++	memcpy(&tmp, RTA_DATA(rta), sizeof(__u64));
++	return tmp;
++}
++static inline const char *rta_getattr_str(const struct rtattr *rta)
++{
++	return (const char *)RTA_DATA(rta);
++}
++
+ extern int rtnl_listen(struct rtnl_handle *, rtnl_filter_t handler,
+ 		       void *jarg);
+ extern int rtnl_from_file(FILE *, rtnl_filter_t handler,
+diff --git a/lib/libnetlink.c b/lib/libnetlink.c
+index f20143b..6771d99 100644
+--- a/lib/libnetlink.c
++++ b/lib/libnetlink.c
+@@ -91,25 +91,31 @@ int rtnl_open(struct rtnl_handle *rth, unsigned subscriptions)
+ 
+ int rtnl_wilddump_request(struct rtnl_handle *rth, int family, int type)
+ {
++	return rtnl_wilddump_req_filter(rth, family, type, RTEXT_FILTER_VF);
++}
++
++int rtnl_wilddump_req_filter(struct rtnl_handle *rth, int family, int type,
++		             __u32 filt_mask)
++{
+ 	struct {
+ 		struct nlmsghdr nlh;
+-		struct rtgenmsg g;
+-		__u16 align_rta;	/* attribute has to be 32bit aligned */
+-		struct rtattr ext_req;
++		struct ifinfomsg ifm;
++		/* attribute has to be NLMSG aligned */
++		struct rtattr ext_req __attribute__ ((aligned(NLMSG_ALIGNTO)));
+ 		__u32 ext_filter_mask;
+ 	} req;
+ 
+ 	memset(&req, 0, sizeof(req));
+ 	req.nlh.nlmsg_len = sizeof(req);
+ 	req.nlh.nlmsg_type = type;
+-	req.nlh.nlmsg_flags = NLM_F_ROOT|NLM_F_MATCH|NLM_F_REQUEST;
++	req.nlh.nlmsg_flags = NLM_F_DUMP|NLM_F_REQUEST;
+ 	req.nlh.nlmsg_pid = 0;
+ 	req.nlh.nlmsg_seq = rth->dump = ++rth->seq;
+-	req.g.rtgen_family = family;
++	req.ifm.ifi_family = family;
+ 
+ 	req.ext_req.rta_type = IFLA_EXT_MASK;
+ 	req.ext_req.rta_len = RTA_LENGTH(sizeof(__u32));
+-	req.ext_filter_mask = RTEXT_FILTER_VF;
++	req.ext_filter_mask = filt_mask;
+ 
+ 	return send(rth->fd, (void*)&req, sizeof(req), 0);
+ }
+@@ -541,20 +547,34 @@ int rtnl_from_file(FILE *rtnl, rtnl_filter_t handler,
+ 	}
+ }
+ 
++int addattr(struct nlmsghdr *n, int maxlen, int type)
++{
++	return addattr_l(n, maxlen, type, NULL, 0);
++}
++
++int addattr8(struct nlmsghdr *n, int maxlen, int type, __u8 data)
++{
++	return addattr_l(n, maxlen, type, &data, sizeof(__u8));
++}
++
++int addattr16(struct nlmsghdr *n, int maxlen, int type, __u16 data)
++{
++	return addattr_l(n, maxlen, type, &data, sizeof(__u16));
++}
++
+ int addattr32(struct nlmsghdr *n, int maxlen, int type, __u32 data)
+ {
+-	int len = RTA_LENGTH(4);
+-	struct rtattr *rta;
+-	if (NLMSG_ALIGN(n->nlmsg_len) + len > maxlen) {
+-		fprintf(stderr,"addattr32: Error! max allowed bound %d exceeded\n",maxlen);
+-		return -1;
+-	}
+-	rta = NLMSG_TAIL(n);
+-	rta->rta_type = type;
+-	rta->rta_len = len;
+-	memcpy(RTA_DATA(rta), &data, 4);
+-	n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len) + len;
+-	return 0;
++	return addattr_l(n, maxlen, type, &data, sizeof(__u32));
++}
++
++int addattr64(struct nlmsghdr *n, int maxlen, int type, __u64 data)
++{
++	return addattr_l(n, maxlen, type, &data, sizeof(__u64));
++}
++
++int addattrstrz(struct nlmsghdr *n, int maxlen, int type, const char *str)
++{
++	return addattr_l(n, maxlen, type, str, strlen(str)+1);
+ }
+ 
+ int addattr_l(struct nlmsghdr *n, int maxlen, int type, const void *data,
+@@ -658,10 +678,19 @@ int rta_addattr_l(struct rtattr *rta, int maxlen, int type,
+ 
+ int parse_rtattr(struct rtattr *tb[], int max, struct rtattr *rta, int len)
+ {
++	return parse_rtattr_flags(tb, max, rta, len, 0);
++}
++
++int parse_rtattr_flags(struct rtattr *tb[], int max, struct rtattr *rta,
++		       int len, unsigned short flags)
++{
++	unsigned short type;
++
+ 	memset(tb, 0, sizeof(struct rtattr *) * (max + 1));
+ 	while (RTA_OK(rta, len)) {
+-		if (rta->rta_type <= max)
+-			tb[rta->rta_type] = rta;
++		type = rta->rta_type & ~flags;
++		if ((type <= max) && (!tb[type]))
++			tb[type] = rta;
+ 		rta = RTA_NEXT(rta,len);
+ 	}
+ 	if (len)

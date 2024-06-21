@@ -1,0 +1,98 @@
+From 2e735f307e2fa9509cc0c4bee7446649d2cacaed Mon Sep 17 00:00:00 2001
+From: Phil Sutter <psutter@redhat.com>
+Date: Thu, 7 Jan 2016 19:09:43 +0100
+Subject: [PATCH] ss: add support for bytes_acked, bytes_received, segs_in and
+ segs_out
+
+Bugzilla: https://bugzilla.redhat.com/show_bug.cgi?id=1268058
+Conflicts: Since the old code accesses the u_int64_t fields of struct
+           tcp_info directly, the compiler warns when trying to print
+	   them using '%llu'. Use PRIu64 macro instead.
+
+This is a combination of two commits:
+
+commit 1a4dda7103bcd5efcca72ffe03eef43318897dae
+Author: Eric Dumazet <edumazet@google.com>
+Date:   Mon May 11 10:03:49 2015 -0700
+
+    ss: add support for bytes_acked & bytes_received
+
+    tcp_info has 2 new fields : bytes_acked & bytes_received
+
+    $ ss -ti src :22
+    ...
+    	 cubic wscale:7,6 rto:234 rtt:33.199/17.225 ato:17.225 mss:1418 cwnd:9
+    ssthresh:9 send 3.1Mbps lastsnd:3 lastrcv:4 lastack:193
+    bytes_acked:188396 bytes_received:13639 pacing_rate 6.2Mbps unacked:1
+    retrans:0/4 reordering:4 rcv_rtt:47.25 rcv_space:28960
+
+    Signed-off-by: Eric Dumazet <edumazet@google.com>
+
+commit ecb435eacd50161d2a7cce5731a269ef916c0dd4
+Author: Craig Gallek <kraig@google.com>
+Date:   Tue May 26 14:54:41 2015 -0400
+
+    ss: add support for segs_in and segs_out
+
+    Two new tcp_info fields: tcpi_segs_in and tcpi_segs_out.
+    (2efd055c53c06b7e89c167c98069bab9afce7e59)
+
+    ~: ss -ti src :22
+    	 cubic wscale:7,6 rto:201 rtt:0.244/0.012 ato:40 mss:1418 cwnd:21 bytes_acked:80605 bytes_received:20491 segs_out:414 segs_in:600 send 976.3Mbps lastsnd:23 lastrcv:23 lastack:22 pacing_rate 1952.7Mbps rcv_rtt:98 rcv_space:28960
+
+    Signed-off-by: Craig Gallek <kraig@google.com>
+    Reviewed-by: Marcelo Ricardo Leitner <mleitner@redhat.com>
+
+Signed-off-by: Phil Sutter <psutter@redhat.com>
+---
+ include/netinet/tcp.h | 6 ++++++
+ misc/ss.c             | 9 +++++++++
+ 2 files changed, 15 insertions(+)
+
+diff --git a/include/netinet/tcp.h b/include/netinet/tcp.h
+index 282b29c5dae64..effd9773f5f09 100644
+--- a/include/netinet/tcp.h
++++ b/include/netinet/tcp.h
+@@ -223,6 +223,12 @@ struct tcp_info
+   u_int32_t	tcpi_rcv_space;
+   u_int32_t	tcpi_total_retrans;
+ 
++  u_int64_t	tcpi_pacing_rate;
++  u_int64_t	tcpi_max_pacing_rate;
++  u_int64_t	tcpi_bytes_acked;    /* RFC4898 tcpEStatsAppHCThruOctetsAcked */
++  u_int64_t	tcpi_bytes_received; /* RFC4898 tcpEStatsAppHCThruOctetsReceived */
++  u_int32_t	tcpi_segs_out;       /* RFC4898 tcpEStatsPerfSegsOut */
++  u_int32_t	tcpi_segs_in;        /* RFC4898 tcpEStatsPerfSegsIn */
+ };
+ 
+ #endif /* Misc.  */
+diff --git a/misc/ss.c b/misc/ss.c
+index 9a6136efddc03..f0bc69235dbe4 100644
+--- a/misc/ss.c
++++ b/misc/ss.c
+@@ -26,6 +26,7 @@
+ #include <dirent.h>
+ #include <fnmatch.h>
+ #include <getopt.h>
++#include <inttypes.h>
+ 
+ #include "utils.h"
+ #include "rt_names.h"
+@@ -1318,6 +1319,14 @@ static void tcp_show_info(const struct nlmsghdr *nlh, struct inet_diag_msg *r)
+ 			printf(" cwnd:%d", info->tcpi_snd_cwnd);
+ 		if (info->tcpi_snd_ssthresh < 0xFFFF)
+ 			printf(" ssthresh:%d", info->tcpi_snd_ssthresh);
++		if (info->tcpi_bytes_acked)
++			printf(" bytes_acked:%" PRIu64, info->tcpi_bytes_acked);
++		if (info->tcpi_bytes_received)
++			printf(" bytes_received:%" PRIu64, info->tcpi_bytes_received);
++		if (info->tcpi_segs_out)
++			printf(" segs_out:%u", info->tcpi_segs_out);
++		if (info->tcpi_segs_in)
++			printf(" segs_in:%u", info->tcpi_segs_in);
+ 
+ 		rtt = (double) info->tcpi_rtt;
+ 		if (tb[INET_DIAG_VEGASINFO]) {
+-- 
+2.6.4
+

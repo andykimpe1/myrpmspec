@@ -1,0 +1,160 @@
+From 0a75b4e377e10d30fd1d1c78ea595336e5a0a729 Mon Sep 17 00:00:00 2001
+From: Phil Sutter <psutter@redhat.com>
+Date: Sat, 26 Sep 2015 16:57:20 +0200
+Subject: [PATCH] ipaddress: enable -details option
+
+The original problem was a lack of details in ip monitor output when -details
+was given. The first four patches are just there to make the final one apply
+more cleanly. As a side-effect, 'promiscuity' flag display is enabled and fixes
+-oneline output when an interface alias is present.
+
+This series did still not apply cleanly due to missing commit ff24746 ("Convert
+to use rta_getattr_ functions") which would have introduced too many conflicts
+to make backporting reasonable. Aside from this, there was just a context
+conflict due to a missing empty line somewhere.
+
+This is a combination of 5 commits:
+
+commit ede6a3eaf53aed3671a4236d3006de0693ab6246
+Author: Nicolas Dichtel <nicolas.dichtel@6wind.com>
+Date:   Tue Feb 5 00:38:34 2013 -0800
+
+    iplink: display the value of IFLA_PROMISCUITY
+
+    This is useful to know the 'real' status of an interface (the flag IFF_PROMISC
+    is exported by the kernel only when the user set it explicitly, for example it
+    will not be exported when a tcpdump is running).
+
+    This information will be displayed when '-details' is provided by the user.
+
+    Example:
+    $ ip -d l l tun10
+    6: tun10: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1480 qdisc noqueue state UNKNOWN mode DEFAULT
+        link/sit 10.16.0.249 peer 10.16.0.121
+        sit remote 10.16.0.121 local 10.16.0.249 ttl inherit pmtudisc 6rd-prefix 2002::/16
+        promiscuity 2
+
+    Signed-off-by: Nicolas Dichtel <nicolas.dichtel@6wind.com>
+
+commit 1cb6a110d676cb261bedf2ba0103209fcbbc4367
+Author: Stephen Hemminger <stephen@networkplumber.org>
+Date:   Tue Feb 5 08:16:28 2013 -0800
+
+    ip: change format of promiscuity display
+
+    Don't put it on separate line, keep it on line with link address.
+
+commit 263c894fd114c489ca29290d24b088556a85e73d
+Author: roopa <roopa@cumulusnetworks.com>
+Date:   Tue Mar 12 15:04:02 2013 -0700
+
+    Fix -oneline output when alias present
+
+    This patch removes '\n' in -oneline output when alias
+    present on interface
+
+    Signed-off-by: Roopa Prabhu <roopa@cumulusnetworks.com>
+
+commit 1124ffb721ea4f3e53abdb54070314cbd6bb6956
+Author: Stephen Hemminger <stephen@networkplumber.org>
+Date:   Thu Mar 14 13:47:49 2013 -0700
+
+    ipaddress: minor white space cleanup
+
+    Convert leading spaces to tabs, and put alias in one printf
+
+commit 2ec28933b6cdeaf98ad8d3d6e9471b50bac91223
+Author: Nicolas Dichtel <nicolas.dichtel@6wind.com>
+Date:   Thu Dec 4 17:41:07 2014 +0100
+
+    ipaddress: enable -details option
+
+    This option was used only for 'ip link', but it can be useful to have it for
+    'ip address'. Thus it is possible to display link details and addresses with one
+    command.
+
+    Example:
+    $ ip -d a ls dev gre1
+    9: gre1@NONE: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1468 qdisc noqueue state UNKNOWN group de
+        link/gre 10.16.0.249 peer 10.16.0.121 promiscuity 0
+        gre remote 10.16.0.121 local 10.16.0.249 ttl inherit ikey 0.0.0.10 okey 0.0.0.10 icsum
+        inet 192.168.0.249 peer 192.168.0.121/32 scope global gre1
+           valid_lft forever preferred_lft forever
+        inet6 fe80::5efe:a10:f9/64 scope link
+           valid_lft forever preferred_lft forever
+
+    Suggested-by: Christophe Gouault <christophe.gouault@6wind.com>
+    Signed-off-by: Nicolas Dichtel <nicolas.dichtel@6wind.com>
+---
+ ip/ipaddress.c | 22 +++++++++++++---------
+ 1 file changed, 13 insertions(+), 9 deletions(-)
+
+diff --git a/ip/ipaddress.c b/ip/ipaddress.c
+index 024cb4a..c7370c5 100644
+--- a/ip/ipaddress.c
++++ b/ip/ipaddress.c
+@@ -89,8 +89,8 @@ void print_link_flags(FILE *fp, unsigned flags, unsigned mdown)
+ 		fprintf(fp, "NO-CARRIER%s", flags ? "," : "");
+ 	flags &= ~IFF_RUNNING;
+ #define _PF(f) if (flags&IFF_##f) { \
+-                  flags &= ~IFF_##f ; \
+-                  fprintf(fp, #f "%s", flags ? "," : ""); }
++		  flags &= ~IFF_##f ; \
++		  fprintf(fp, #f "%s", flags ? "," : ""); }
+ 	_PF(LOOPBACK);
+ 	_PF(BROADCAST);
+ 	_PF(POINTOPOINT);
+@@ -110,7 +110,7 @@ void print_link_flags(FILE *fp, unsigned flags, unsigned mdown)
+ 	_PF(DORMANT);
+ 	_PF(ECHO);
+ #undef _PF
+-        if (flags)
++	if (flags)
+ 		fprintf(fp, "%x", flags);
+ 	if (mdown)
+ 		fprintf(fp, ",M-DOWN");
+@@ -530,7 +530,7 @@ int print_linkinfo(const struct sockaddr_nl *who,
+ 	if (filter.showqueue)
+ 		print_queuelen(fp, (char*)RTA_DATA(tb[IFLA_IFNAME]));
+ 
+-	if (!filter.family || filter.family == AF_PACKET) {
++	if (!filter.family || filter.family == AF_PACKET || show_details) {
+ 		SPRINT_BUF(b1);
+ 		fprintf(fp, "%s", _SL_);
+ 		fprintf(fp, "    link/%s ", ll_type_n2a(ifi->ifi_type, b1, sizeof(b1)));
+@@ -553,18 +553,23 @@ int print_linkinfo(const struct sockaddr_nl *who,
+ 		}
+ 	}
+ 
+-	if (do_link && tb[IFLA_LINKINFO] && show_details)
++	if (tb[IFLA_PROMISCUITY] && show_details)
++		fprintf(fp, " promiscuity %u ",
++			*(int*)RTA_DATA(tb[IFLA_PROMISCUITY]));
++
++	if (tb[IFLA_LINKINFO] && show_details)
+ 		print_linktype(fp, tb[IFLA_LINKINFO]);
+ 
+-	if (do_link && tb[IFLA_IFALIAS])
+-		fprintf(fp,"\n    alias %s", 
++	if ((do_link || show_details) && tb[IFLA_IFALIAS]) {
++		fprintf(fp, "%s    alias %s", _SL_,
+ 			(const char *) RTA_DATA(tb[IFLA_IFALIAS]));
++	}
+ 
+ 	if (do_link && show_stats) {
+ 		fprintf(fp, "%s", _SL_);
+ 		__print_link_stats(fp, tb);
+ 	}
+-	if (do_link && tb[IFLA_VFINFO_LIST] && tb[IFLA_NUM_VF]) {
++	if ((do_link || show_details) && tb[IFLA_VFINFO_LIST] && tb[IFLA_NUM_VF]) {
+ 		struct rtattr *i, *vflist = tb[IFLA_VFINFO_LIST];
+ 		int rem = RTA_PAYLOAD(vflist);
+ 		for (i = RTA_DATA(vflist); RTA_OK(i, rem); i = RTA_NEXT(i, rem))
+@@ -1352,4 +1357,3 @@ int do_ipaddr(int argc, char **argv)
+ 	fprintf(stderr, "Command \"%s\" is unknown, try \"ip addr help\".\n", *argv);
+ 	exit(-1);
+ }
+-
+-- 
+1.8.3.1
+

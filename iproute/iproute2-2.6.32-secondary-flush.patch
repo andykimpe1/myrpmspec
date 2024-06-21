@@ -1,0 +1,256 @@
+From d7934846f1fc708e79786c6c1288cee93643affc Mon Sep 17 00:00:00 2001
+From: Ben Greear <greearb@candelatech.com>
+Date: Mon, 16 Aug 2010 10:00:08 -0700
+Subject: [PATCH] iproute2: Fix filtering related to flushing IP addresses.
+
+Fix spurious errors when flushing many IP addresses.
+
+Conflicts: Minor context conflict due to missing commit a1b9ffccc29f1
+	   ("ip: print "temporary" for IPv6 temp addresses")
+
+This is a combination of two commits:
+
+commit 3bc1c4f29777171b484d36abf673667e3729202b
+Author: Ben Greear <greearb@candelatech.com>
+Date:   Mon Aug 16 10:00:08 2010 -0700
+
+    iproute2: Fix filtering related to flushing IP addresses.
+
+    The old 'ip addr flush' logic had several flaws:
+
+    * It reversed logic for primary v/s secondary flags
+      (though, it sort of worked right anyway)
+
+    * The code tried to remove secondaries and then primaries,
+      but in practice, it always removed one primary per loop,
+      which not at all efficient.
+
+    * The filter logic in the core would run only the first
+      filter in most cases.
+
+    * If you used '-s -s', the ifa_flags member would be
+      modified, which could make future filters fail
+      to function fine.
+
+    This patch attempts to fix all of these issues.
+
+    Tested-by: Brian Haley <brian.haley@hp.com>
+    Signed-off-by: Ben Greear <greearb@candelatech.com>
+
+commit e149d4e84384f88965ce43a6390acf7ba356187c
+Author: Neil Horman <nhorman@tuxdriver.com>
+Date:   Thu Nov 5 14:54:17 2015 -0500
+
+    iproute2: Ignore EADDRNOTAVAIL errors during address flush operation
+
+    I found recently that, if I disabled address promotion in the kernel, that
+    ip addr flush dev <dev>
+
+    would fail with an EADDRNOTAVAIL errno (though the flush operation would in fact
+    flush all addresses from an interface properly)
+
+    Whats happening is that, if I add a primary and multiple secondary addresses to
+    an interface, the flush operation first ennumerates them all with a GETADDR |
+    DUMP operation, then sends a delete request for each address.  But the kernel,
+    having promotion disabled, deletes all secondary addresses when the primary is
+    removed.  That means, that several delete requests may still be pending in the
+    netlink request for addresses that have been removed on our behalf, resulting in
+    EADDRNOTAVAIL return codes.
+
+    It seems the simplest thing to do is to understand that EADDRUNAVAIL isn't a
+    fatal outcome on a flush operation, as it just indicates that an address which
+    you want to remove is already removed, so it can safely be ignored.
+
+    Signed-off-by: Neil Horman <nhorman@tuxdriver.com>
+    CC: Stephen Hemminger <stephen@networkplumber.org>
+    CC: Alexey Kuznetsov <kuznet@ms2.inr.ac.ru>
+---
+ ip/ipaddress.c   | 46 ++++++++++++++++++++++++++++++++++------------
+ lib/libnetlink.c | 23 ++++++++++++++++-------
+ 2 files changed, 50 insertions(+), 19 deletions(-)
+
+diff --git a/ip/ipaddress.c b/ip/ipaddress.c
+index 8ad17d3db4c3b..6d872da4aa43d 100644
+--- a/ip/ipaddress.c
++++ b/ip/ipaddress.c
+@@ -374,7 +374,17 @@ int print_linkinfo(const struct sockaddr_nl *who,
+ 
+ static int flush_update(void)
+ {
+-	if (rtnl_send_check(&rth, filter.flushb, filter.flushp) < 0) {
++
++	/*
++	 * Note that the kernel may delete multiple addresses for one
++	 * delete request (e.g. if ipv4 address promotion is disabled).
++	 * Since a flush operation is really a series of delete requests
++	 * its possible that we may request an address delete that has
++	 * already been done by the kernel. Therefore, ignore EADDRNOTAVAIL
++	 * errors returned from a flush request
++	 */
++	if ((rtnl_send_check(&rth, filter.flushb, filter.flushp) < 0) &&
++	    (errno != EADDRNOTAVAIL)) {
+ 		perror("Failed to send flush request");
+ 		return -1;
+ 	}
+@@ -399,6 +409,8 @@ int print_addrinfo(const struct sockaddr_nl *who, struct nlmsghdr *n,
+ 	struct ifaddrmsg *ifa = NLMSG_DATA(n);
+ 	int len = n->nlmsg_len;
+ 	int deprecated = 0;
++	/* Use local copy of ifa_flags to not interfere with filtering code */
++	unsigned int ifa_flags;
+ 	struct rtattr * rta_tb[IFA_MAX+1];
+ 	char abuf[256];
+ 	SPRINT_BUF(b1);
+@@ -518,37 +530,38 @@ int print_addrinfo(const struct sockaddr_nl *who, struct nlmsghdr *n,
+ 				    abuf, sizeof(abuf)));
+ 	}
+ 	fprintf(fp, "scope %s ", rtnl_rtscope_n2a(ifa->ifa_scope, b1, sizeof(b1)));
++	ifa_flags = ifa->ifa_flags;
+ 	if (ifa->ifa_flags&IFA_F_SECONDARY) {
+-		ifa->ifa_flags &= ~IFA_F_SECONDARY;
++		ifa_flags &= ~IFA_F_SECONDARY;
+ 		fprintf(fp, "secondary ");
+ 	}
+ 	if (ifa->ifa_flags&IFA_F_TENTATIVE) {
+-		ifa->ifa_flags &= ~IFA_F_TENTATIVE;
++		ifa_flags &= ~IFA_F_TENTATIVE;
+ 		fprintf(fp, "tentative ");
+ 	}
+ 	if (ifa->ifa_flags&IFA_F_DEPRECATED) {
+-		ifa->ifa_flags &= ~IFA_F_DEPRECATED;
++		ifa_flags &= ~IFA_F_DEPRECATED;
+ 		deprecated = 1;
+ 		fprintf(fp, "deprecated ");
+ 	}
+ 	if (ifa->ifa_flags&IFA_F_HOMEADDRESS) {
+-		ifa->ifa_flags &= ~IFA_F_HOMEADDRESS;
++		ifa_flags &= ~IFA_F_HOMEADDRESS;
+ 		fprintf(fp, "home ");
+ 	}
+ 	if (ifa->ifa_flags&IFA_F_NODAD) {
+-		ifa->ifa_flags &= ~IFA_F_NODAD;
++		ifa_flags &= ~IFA_F_NODAD;
+ 		fprintf(fp, "nodad ");
+ 	}
+ 	if (!(ifa->ifa_flags&IFA_F_PERMANENT)) {
+ 		fprintf(fp, "dynamic ");
+ 	} else
+-		ifa->ifa_flags &= ~IFA_F_PERMANENT;
++		ifa_flags &= ~IFA_F_PERMANENT;
+ 	if (ifa->ifa_flags&IFA_F_DADFAILED) {
+-		ifa->ifa_flags &= ~IFA_F_DADFAILED;
++		ifa_flags &= ~IFA_F_DADFAILED;
+ 		fprintf(fp, "dadfailed ");
+ 	}
+-	if (ifa->ifa_flags)
+-		fprintf(fp, "flags %02x ", ifa->ifa_flags);
++	if (ifa_flags)
++		fprintf(fp, "flags %02x ", ifa_flags);
+ 	if (rta_tb[IFA_LABEL])
+ 		fprintf(fp, "%s", (char*)RTA_DATA(rta_tb[IFA_LABEL]));
+ 	if (rta_tb[IFA_CACHEINFO]) {
+@@ -581,7 +594,7 @@ int print_addrinfo_primary(const struct sockaddr_nl *who, struct nlmsghdr *n,
+ {
+ 	struct ifaddrmsg *ifa = NLMSG_DATA(n);
+ 
+-	if (!ifa->ifa_flags & IFA_F_SECONDARY)
++	if (ifa->ifa_flags & IFA_F_SECONDARY)
+ 		return 0;
+ 
+ 	return print_addrinfo(who, n, arg);
+@@ -592,7 +605,7 @@ int print_addrinfo_secondary(const struct sockaddr_nl *who, struct nlmsghdr *n,
+ {
+ 	struct ifaddrmsg *ifa = NLMSG_DATA(n);
+ 
+-	if (ifa->ifa_flags & IFA_F_SECONDARY)
++	if (!(ifa->ifa_flags & IFA_F_SECONDARY))
+ 		return 0;
+ 
+ 	return print_addrinfo(who, n, arg);
+@@ -788,6 +801,7 @@ static int ipaddr_list_or_flush(int argc, char **argv, int flush)
+ 				exit(1);
+ 			}
+ 			if (filter.flushed == 0) {
++flush_done:
+ 				if (show_stats) {
+ 					if (round == 0)
+ 						printf("Nothing to flush.\n");
+@@ -805,6 +819,14 @@ static int ipaddr_list_or_flush(int argc, char **argv, int flush)
+ 				printf("\n*** Round %d, deleting %d addresses ***\n", round, filter.flushed);
+ 				fflush(stdout);
+ 			}
++
++			/* If we are flushing, and specifying primary, then we
++			 * want to flush only a single round.  Otherwise, we'll
++			 * start flushing secondaries that were promoted to
++			 * primaries.
++			 */
++			if (!(filter.flags & IFA_F_SECONDARY) && (filter.flagmask & IFA_F_SECONDARY))
++				goto flush_done;
+ 		}
+ 		fprintf(stderr, "*** Flush remains incomplete after %d rounds. ***\n", MAX_ROUNDS); fflush(stderr);
+ 		return 1;
+diff --git a/lib/libnetlink.c b/lib/libnetlink.c
+index 4ba60190da6ff..49e3deb83b95b 100644
+--- a/lib/libnetlink.c
++++ b/lib/libnetlink.c
+@@ -189,6 +189,8 @@ int rtnl_dump_filter_l(struct rtnl_handle *rth,
+ 	while (1) {
+ 		int status;
+ 		const struct rtnl_dump_filter_arg *a;
++		int found_done = 0;
++		int msglen = 0;
+ 
+ 		iov.iov_len = sizeof(buf);
+ 		status = recvmsg(rth->fd, &msg, 0);
+@@ -208,8 +210,9 @@ int rtnl_dump_filter_l(struct rtnl_handle *rth,
+ 
+ 		for (a = arg; a->filter; a++) {
+ 			struct nlmsghdr *h = (struct nlmsghdr*)buf;
++			msglen = status;
+ 
+-			while (NLMSG_OK(h, status)) {
++			while (NLMSG_OK(h, msglen)) {
+ 				int err;
+ 
+ 				if (nladdr.nl_pid != 0 ||
+@@ -224,8 +227,10 @@ int rtnl_dump_filter_l(struct rtnl_handle *rth,
+ 					goto skip_it;
+ 				}
+ 
+-				if (h->nlmsg_type == NLMSG_DONE)
+-					return 0;
++				if (h->nlmsg_type == NLMSG_DONE) {
++					found_done = 1;
++					break; /* process next filter */
++				}
+ 				if (h->nlmsg_type == NLMSG_ERROR) {
+ 					struct nlmsgerr *err = (struct nlmsgerr*)NLMSG_DATA(h);
+ 					if (h->nlmsg_len < NLMSG_LENGTH(sizeof(struct nlmsgerr))) {
+@@ -242,15 +247,19 @@ int rtnl_dump_filter_l(struct rtnl_handle *rth,
+ 					return err;
+ 
+ skip_it:
+-				h = NLMSG_NEXT(h, status);
++				h = NLMSG_NEXT(h, msglen);
+ 			}
+-		} while (0);
++		}
++
++		if (found_done)
++			return 0;
++
+ 		if (msg.msg_flags & MSG_TRUNC) {
+ 			fprintf(stderr, "Message truncated\n");
+ 			continue;
+ 		}
+-		if (status) {
+-			fprintf(stderr, "!!!Remnant of size %d\n", status);
++		if (msglen) {
++			fprintf(stderr, "!!!Remnant of size %d\n", msglen);
+ 			exit(1);
+ 		}
+ 	}
+-- 
+2.5.0
+

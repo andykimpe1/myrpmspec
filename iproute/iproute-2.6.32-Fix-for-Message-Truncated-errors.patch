@@ -1,0 +1,981 @@
+From 4f525e0d9458f7081c476db352d91cb1787845ad Mon Sep 17 00:00:00 2001
+From: Phil Sutter <psutter@redhat.com>
+Date: Thu, 21 Jan 2016 19:45:08 +0100
+Subject: [PATCH] Fix for Message Truncated errors
+
+Bugzilla: https://bugzilla.redhat.com/show_bug.cgi?id=1086512
+
+This is a combination of three commits:
+
+commit cd70f3f522e04b4d2fa80ae10292379bf223a53b
+Author: Stephen Hemminger <shemminger@vyatta.com>
+Date:   Wed Dec 28 10:37:12 2011 -0800
+
+    libnetlink: remove unused junk callback
+
+    Both rtnl_talk and rtnl_dump had a callback for handling portions
+    of netlink message that do not match the correct pid or seq.
+    But this callback was never used by any part of iproute2 so remove
+    it.
+
+commit c079e121a73af5eb49e003b13607e8a690331df6
+Author: Stephen Hemminger <shemming@brocade.com>
+Date:   Wed May 27 12:26:14 2015 -0700
+
+    libnetlink: add size argument to rtnl_talk
+
+    There have been several instances where response from kernel
+    has overrun the stack buffer from the caller. Avoid future problems
+    by passing a size argument.
+
+    Also drop the unused peer and group arguments to rtnl_talk.
+
+commit ed108cfc0260b6b751647982b77d6363b1defb15
+Author: Nicolas Dichtel <nicolas.dichtel@6wind.com>
+Date:   Thu Dec 3 17:13:48 2015 +0100
+
+    libnetlink: don't confuse variables in rtnl_talk()
+
+    There is two variables named 'len' in rtnl_talk. In fact, commit
+    c079e121a73a didn't work. For example, it was possible to trigger
+    a seg fault with this command:
+    $ ip link set gre2 type ip6gre hoplimit 32
+
+    Let's rename the argument len to maxlen.
+
+    Fixes: c079e121a73a ("libnetlink: add size argument to rtnl_talk")
+    Reported-by: Thomas Faivre <thomas.faivre@6wind.com>
+    Signed-off-by: Nicolas Dichtel <nicolas.dichtel@6wind.com>
+---
+ bridge/fdb.c         |  4 ++--
+ bridge/link.c        |  4 ++--
+ bridge/mdb.c         |  4 ++--
+ bridge/vlan.c        |  4 ++--
+ genl/ctrl.c          |  6 ++---
+ include/libnetlink.h | 17 ++++----------
+ ip/ipaddress.c       | 12 +++-------
+ ip/ipaddrlabel.c     |  8 +++----
+ ip/iplink.c          |  2 +-
+ ip/ipneigh.c         |  6 ++---
+ ip/ipntable.c        |  4 ++--
+ ip/iproute.c         | 10 ++++----
+ ip/iprule.c          |  8 +++----
+ ip/iptoken.c         |  2 +-
+ ip/link_gre.c        |  2 +-
+ ip/rtmon.c           |  2 +-
+ ip/xfrm_policy.c     | 18 +++++++-------
+ ip/xfrm_state.c      | 16 ++++++-------
+ lib/libnetlink.c     | 66 +++++++++++++++++++++-------------------------------
+ lib/ll_map.c         |  2 +-
+ misc/ifstat.c        |  2 +-
+ tc/m_action.c        |  8 +++----
+ tc/tc_class.c        |  4 ++--
+ tc/tc_filter.c       |  4 ++--
+ tc/tc_qdisc.c        |  4 ++--
+ 25 files changed, 97 insertions(+), 122 deletions(-)
+
+diff --git a/bridge/fdb.c b/bridge/fdb.c
+index e27e789773cfa..faee4ac269578 100644
+--- a/bridge/fdb.c
++++ b/bridge/fdb.c
+@@ -178,7 +178,7 @@ static int fdb_show(int argc, char **argv)
+ 		exit(1);
+ 	}
+ 
+-	if (rtnl_dump_filter(&rth, print_fdb, stdout, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(&rth, print_fdb, stdout) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		exit(1);
+ 	}
+@@ -319,7 +319,7 @@ static int fdb_modify(int cmd, int flags, int argc, char **argv)
+ 		return -1;
+ 	}
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		exit(2);
+ 
+ 	return 0;
+diff --git a/bridge/link.c b/bridge/link.c
+index 5a8d81db4be33..19d06420aa818 100644
+--- a/bridge/link.c
++++ b/bridge/link.c
+@@ -364,7 +364,7 @@ static int brlink_modify(int argc, char **argv)
+ 		addattr_nest_end(&req.n, nest);
+ 	}
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		exit(2);
+ 
+ 	return 0;
+@@ -397,7 +397,7 @@ static int brlink_show(int argc, char **argv)
+ 		exit(1);
+ 	}
+ 
+-	if (rtnl_dump_filter(&rth, print_linkinfo, stdout, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(&rth, print_linkinfo, stdout) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		exit(1);
+ 	}
+diff --git a/bridge/mdb.c b/bridge/mdb.c
+index 1351baae28ab1..1cd03e011ded0 100644
+--- a/bridge/mdb.c
++++ b/bridge/mdb.c
+@@ -148,7 +148,7 @@ static int mdb_show(int argc, char **argv)
+ 		exit(1);
+ 	}
+ 
+-	if (rtnl_dump_filter(&rth, print_mdb, stdout, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(&rth, print_mdb, stdout) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		exit(1);
+ 	}
+@@ -224,7 +224,7 @@ static int mdb_modify(int cmd, int flags, int argc, char **argv)
+ 
+ 	addattr_l(&req.n, sizeof(req), MDBA_SET_ENTRY, &entry, sizeof(entry));
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		exit(2);
+ 
+ 	return 0;
+diff --git a/bridge/vlan.c b/bridge/vlan.c
+index 5ba9cc595f251..54e10d0d94b22 100644
+--- a/bridge/vlan.c
++++ b/bridge/vlan.c
+@@ -95,7 +95,7 @@ static int vlan_modify(int cmd, int argc, char **argv)
+ 
+ 	addattr_nest_end(&req.n, afspec);
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		exit(2);
+ 
+ 	return 0;
+@@ -188,7 +188,7 @@ static int vlan_show(int argc, char **argv)
+ 	}
+ 
+ 	printf("port\tvlan ids\n");
+-	if (rtnl_dump_filter(&rth, print_vlan, stdout, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(&rth, print_vlan, stdout) < 0) {
+ 		fprintf(stderr, "Dump ternminated\n");
+ 		exit(1);
+ 	}
+diff --git a/genl/ctrl.c b/genl/ctrl.c
+index 30ea4d704df43..529e32ea51300 100644
+--- a/genl/ctrl.c
++++ b/genl/ctrl.c
+@@ -67,7 +67,7 @@ int genl_ctrl_resolve_family(const char *family)
+ 
+ 	addattr_l(nlh, 128, CTRL_ATTR_FAMILY_NAME, family, strlen(family) + 1);
+ 
+-	if (rtnl_talk(&rth, nlh, 0, 0, nlh, NULL, NULL) < 0) {
++	if (rtnl_talk(&rth, nlh, nlh, sizeof(req)) < 0) {
+ 		fprintf(stderr, "Error talking to the kernel\n");
+ 		goto errout;
+ 	}
+@@ -334,7 +334,7 @@ static int ctrl_list(int cmd, int argc, char **argv)
+ 			goto ctrl_done;
+ 		}
+ 
+-		if (rtnl_talk(&rth, nlh, 0, 0, nlh, NULL, NULL) < 0) {
++		if (rtnl_talk(&rth, nlh, nlh, sizeof(req)) < 0) {
+ 			fprintf(stderr, "Error talking to the kernel\n");
+ 			goto ctrl_done;
+ 		}
+@@ -355,7 +355,7 @@ static int ctrl_list(int cmd, int argc, char **argv)
+ 			goto ctrl_done;
+ 		}
+ 
+-		rtnl_dump_filter(&rth, print_ctrl, stdout, NULL, NULL);
++		rtnl_dump_filter(&rth, print_ctrl, stdout);
+ 
+         }
+ 
+diff --git a/include/libnetlink.h b/include/libnetlink.h
+index d073a497a3e81..0da154a57bd75 100644
+--- a/include/libnetlink.h
++++ b/include/libnetlink.h
+@@ -35,21 +35,14 @@ struct rtnl_dump_filter_arg
+ {
+ 	rtnl_filter_t filter;
+ 	void *arg1;
+-	rtnl_filter_t junk;
+-	void *arg2;
+ };
+ 
+ extern int rtnl_dump_filter_l(struct rtnl_handle *rth,
+ 			      const struct rtnl_dump_filter_arg *arg);
+ extern int rtnl_dump_filter(struct rtnl_handle *rth, rtnl_filter_t filter,
+-			    void *arg1,
+-			    rtnl_filter_t junk,
+-			    void *arg2);
+-
+-extern int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n, pid_t peer,
+-		     unsigned groups, struct nlmsghdr *answer,
+-		     rtnl_filter_t junk,
+-		     void *jarg);
++			    void *arg);
++extern int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n,
++		     struct nlmsghdr *answer, size_t len);
+ extern int rtnl_send(struct rtnl_handle *rth, const char *buf, int);
+ extern int rtnl_send_check(struct rtnl_handle *rth, const char *buf, int);
+ 
+@@ -79,8 +72,8 @@ extern int __parse_rtattr_nested_compat(struct rtattr *tb[], int max, struct rta
+ 	(parse_rtattr((tb), (max), RTA_DATA(rta), RTA_PAYLOAD(rta)))
+ 
+ #define parse_rtattr_nested_compat(tb, max, rta, data, len) \
+-({	data = RTA_PAYLOAD(rta) >= len ? RTA_DATA(rta) : NULL; \
+-	__parse_rtattr_nested_compat(tb, max, rta, len); })
++	({ data = RTA_PAYLOAD(rta) >= len ? RTA_DATA(rta) : NULL;	\
++		__parse_rtattr_nested_compat(tb, max, rta, len); })
+ 
+ static inline __u8 rta_getattr_u8(const struct rtattr *rta)
+ {
+diff --git a/ip/ipaddress.c b/ip/ipaddress.c
+index 514587dddb28f..ddad33d523f05 100644
+--- a/ip/ipaddress.c
++++ b/ip/ipaddress.c
+@@ -948,7 +948,7 @@ static int ipaddr_list_or_flush(int argc, char **argv, int flush)
+ 		exit(1);
+ 	}
+ 
+-	if (rtnl_dump_filter(&rth, store_nlmsg, &linfo, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(&rth, store_nlmsg, &linfo) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		exit(1);
+ 	}
+@@ -974,20 +974,14 @@ static int ipaddr_list_or_flush(int argc, char **argv, int flush)
+ 				{
+ 					.filter = print_addrinfo_secondary,
+ 					.arg1 = stdout,
+-					.junk = NULL,
+-					.arg2 = NULL
+ 				},
+ 				{
+ 					.filter = print_addrinfo_primary,
+ 					.arg1 = stdout,
+-					.junk = NULL,
+-					.arg2 = NULL
+ 				},
+ 				{
+ 					.filter = NULL,
+ 					.arg1 = NULL,
+-					.junk = NULL,
+-					.arg2 = NULL
+ 				},
+ 			};
+ 			if (rtnl_wilddump_request(&rth, filter.family, RTM_GETADDR) < 0) {
+@@ -1037,7 +1031,7 @@ flush_done:
+ 			exit(1);
+ 		}
+ 
+-		if (rtnl_dump_filter(&rth, store_nlmsg, &ainfo, NULL, NULL) < 0) {
++		if (rtnl_dump_filter(&rth, store_nlmsg, &ainfo) < 0) {
+ 			fprintf(stderr, "Dump terminated\n");
+ 			exit(1);
+ 		}
+@@ -1328,7 +1322,7 @@ static int ipaddr_modify(int cmd, int flags, int argc, char **argv)
+ 			  sizeof(cinfo));
+ 	}
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		exit(2);
+ 
+ 	return 0;
+diff --git a/ip/ipaddrlabel.c b/ip/ipaddrlabel.c
+index cf438d639df2b..14990ac0ffac1 100644
+--- a/ip/ipaddrlabel.c
++++ b/ip/ipaddrlabel.c
+@@ -120,7 +120,7 @@ static int ipaddrlabel_list(int argc, char **argv)
+ 		return 1;
+ 	}
+ 
+-	if (rtnl_dump_filter(&rth, print_addrlabel, stdout, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(&rth, print_addrlabel, stdout) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		return 1;
+ 	}
+@@ -189,7 +189,7 @@ static int ipaddrlabel_modify(int cmd, int argc, char **argv)
+ 	if (req.ifal.ifal_family == AF_UNSPEC)
+ 		req.ifal.ifal_family = AF_INET6;
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		return 2;
+ 
+ 	return 0;
+@@ -216,7 +216,7 @@ static int flush_addrlabel(const struct sockaddr_nl *who, struct nlmsghdr *n, vo
+ 		if (rtnl_open(&rth2, 0) < 0)
+ 			return -1;
+ 
+-		if (rtnl_talk(&rth2, n, 0, 0, NULL, NULL, NULL) < 0)
++		if (rtnl_talk(&rth2, n, NULL, 0) < 0)
+ 			return -2;
+ 
+ 		rtnl_close(&rth2);
+@@ -242,7 +242,7 @@ static int ipaddrlabel_flush(int argc, char **argv)
+ 		return 1;
+ 	}
+ 
+-	if (rtnl_dump_filter(&rth, flush_addrlabel, NULL, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(&rth, flush_addrlabel, NULL) < 0) {
+ 		fprintf(stderr, "Flush terminated\n");
+ 		return 1;
+ 	}
+diff --git a/ip/iplink.c b/ip/iplink.c
+index 585ac75aa27e9..b1c27b0e9d10d 100644
+--- a/ip/iplink.c
++++ b/ip/iplink.c
+@@ -515,7 +515,7 @@ static int iplink_modify(int cmd, unsigned int flags, int argc, char **argv)
+ 		addattr_l(&req.n, sizeof(req), IFLA_IFNAME, name, len);
+ 	}
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		exit(2);
+ 
+ 	return 0;
+diff --git a/ip/ipneigh.c b/ip/ipneigh.c
+index cb98f42e72765..28238cb15641e 100644
+--- a/ip/ipneigh.c
++++ b/ip/ipneigh.c
+@@ -179,7 +179,7 @@ static int ipneigh_modify(int cmd, int flags, int argc, char **argv)
+ 		return -1;
+ 	}
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		exit(2);
+ 
+ 	return 0;
+@@ -403,7 +403,7 @@ int do_show_or_flush(int argc, char **argv, int flush)
+ 				exit(1);
+ 			}
+ 			filter.flushed = 0;
+-			if (rtnl_dump_filter(&rth, print_neigh, stdout, NULL, NULL) < 0) {
++			if (rtnl_dump_filter(&rth, print_neigh, stdout) < 0) {
+ 				fprintf(stderr, "Flush terminated\n");
+ 				exit(1);
+ 			}
+@@ -435,7 +435,7 @@ int do_show_or_flush(int argc, char **argv, int flush)
+ 		exit(1);
+ 	}
+ 
+-	if (rtnl_dump_filter(&rth, print_neigh, stdout, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(&rth, print_neigh, stdout) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		exit(1);
+ 	}
+diff --git a/ip/ipntable.c b/ip/ipntable.c
+index 141ad425e534f..d84c6a47bc1b4 100644
+--- a/ip/ipntable.c
++++ b/ip/ipntable.c
+@@ -313,7 +313,7 @@ static int ipntable_modify(int cmd, int flags, int argc, char **argv)
+ 			  RTA_PAYLOAD(parms_rta));
+ 	}
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		exit(2);
+ 
+ 	return 0;
+@@ -625,7 +625,7 @@ static int ipntable_show(int argc, char **argv)
+ 		exit(1);
+ 	}
+ 
+-	if (rtnl_dump_filter(&rth, print_ntable, stdout, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(&rth, print_ntable, stdout) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		exit(1);
+ 	}
+diff --git a/ip/iproute.c b/ip/iproute.c
+index 8a0f4c15484d6..5599ec0d19b96 100644
+--- a/ip/iproute.c
++++ b/ip/iproute.c
+@@ -999,7 +999,7 @@ int iproute_modify(int cmd, unsigned flags, int argc, char **argv)
+ 	if (req.r.rtm_family == AF_UNSPEC)
+ 		req.r.rtm_family = AF_INET;
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		exit(2);
+ 
+ 	return 0;
+@@ -1236,7 +1236,7 @@ static int iproute_list_or_flush(int argc, char **argv, int flush)
+ 				exit(1);
+ 			}
+ 			filter.flushed = 0;
+-			if (rtnl_dump_filter(&rth, print_route, stdout, NULL, NULL) < 0) {
++			if (rtnl_dump_filter(&rth, print_route, stdout) < 0) {
+ 				fprintf(stderr, "Flush terminated\n");
+ 				exit(1);
+ 			}
+@@ -1279,7 +1279,7 @@ static int iproute_list_or_flush(int argc, char **argv, int flush)
+ 		}
+ 	}
+ 
+-	if (rtnl_dump_filter(&rth, print_route, stdout, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(&rth, print_route, stdout) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		exit(1);
+ 	}
+@@ -1393,7 +1393,7 @@ int iproute_get(int argc, char **argv)
+ 	if (req.r.rtm_family == AF_UNSPEC)
+ 		req.r.rtm_family = AF_INET;
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, &req.n, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, &req.n, sizeof(req)) < 0)
+ 		exit(2);
+ 
+ 	if (connected && !from_ok) {
+@@ -1434,7 +1434,7 @@ int iproute_get(int argc, char **argv)
+ 		req.n.nlmsg_flags = NLM_F_REQUEST;
+ 		req.n.nlmsg_type = RTM_GETROUTE;
+ 
+-		if (rtnl_talk(&rth, &req.n, 0, 0, &req.n, NULL, NULL) < 0)
++		if (rtnl_talk(&rth, &req.n, &req.n, sizeof(req)) < 0)
+ 			exit(2);
+ 	}
+ 
+diff --git a/ip/iprule.c b/ip/iprule.c
+index 639ae83490bdf..508a109ae9254 100644
+--- a/ip/iprule.c
++++ b/ip/iprule.c
+@@ -205,7 +205,7 @@ static int iprule_list(int argc, char **argv)
+ 		return 1;
+ 	}
+ 
+-	if (rtnl_dump_filter(&rth, print_rule, stdout, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(&rth, print_rule, stdout) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		return 1;
+ 	}
+@@ -344,7 +344,7 @@ static int iprule_modify(int cmd, int argc, char **argv)
+ 	if (!table_ok && cmd == RTM_NEWRULE)
+ 		req.r.rtm_table = RT_TABLE_MAIN;
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		return 2;
+ 
+ 	return 0;
+@@ -371,7 +371,7 @@ static int flush_rule(const struct sockaddr_nl *who, struct nlmsghdr *n, void *a
+ 		if (rtnl_open(&rth2, 0) < 0)
+ 			return -1;
+ 
+-		if (rtnl_talk(&rth2, n, 0, 0, NULL, NULL, NULL) < 0)
++		if (rtnl_talk(&rth2, n, NULL, 0) < 0)
+ 			return -2;
+ 
+ 		rtnl_close(&rth2);
+@@ -397,7 +397,7 @@ static int iprule_flush(int argc, char **argv)
+ 		return 1;
+ 	}
+ 
+-	if (rtnl_dump_filter(&rth, flush_rule, NULL, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(&rth, flush_rule, NULL) < 0) {
+ 		fprintf(stderr, "Flush terminated\n");
+ 		return 1;
+ 	}
+diff --git a/ip/iptoken.c b/ip/iptoken.c
+index 798a69419ab4b..0d265e6da8711 100644
+--- a/ip/iptoken.c
++++ b/ip/iptoken.c
+@@ -182,7 +182,7 @@ static int iptoken_set(int argc, char **argv)
+ 		return -1;
+ 	}
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		return -2;
+ 
+ 	return 0;
+diff --git a/ip/link_gre.c b/ip/link_gre.c
+index 9f8bde66da1f8..3cc6ad07c5c3b 100644
+--- a/ip/link_gre.c
++++ b/ip/link_gre.c
+@@ -72,7 +72,7 @@ static int gre_parse_opt(struct link_util *lu, int argc, char **argv,
+ 		req.i.ifi_family = preferred_family;
+ 		req.i.ifi_index = ifi->ifi_index;
+ 
+-		if (rtnl_talk(&rth, &req.n, 0, 0, &req.n, NULL, NULL) < 0) {
++		if (rtnl_talk(&rth, &req.n, &req.n, sizeof(req)) < 0) {
+ get_failed:
+ 			fprintf(stderr,
+ 				"Failed to get existing tunnel info.\n");
+diff --git a/ip/rtmon.c b/ip/rtmon.c
+index 7869b32c1a8ff..c1416a0bdf0b7 100644
+--- a/ip/rtmon.c
++++ b/ip/rtmon.c
+@@ -163,7 +163,7 @@ main(int argc, char **argv)
+ 
+ 	write_stamp(fp);
+ 
+-	if (rtnl_dump_filter(&rth, dump_msg, fp, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(&rth, dump_msg, fp) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		return 1;
+ 	}
+diff --git a/ip/xfrm_policy.c b/ip/xfrm_policy.c
+index 7d5e5c39ff347..b3ebb74c8d7b4 100644
+--- a/ip/xfrm_policy.c
++++ b/ip/xfrm_policy.c
+@@ -377,7 +377,7 @@ static int xfrm_policy_modify(int cmd, unsigned flags, int argc, char **argv)
+ 	if (req.xpinfo.sel.family == AF_UNSPEC)
+ 		req.xpinfo.sel.family = AF_INET;
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		exit(2);
+ 
+ 	rtnl_close(&rth);
+@@ -539,7 +539,7 @@ int xfrm_policy_print(const struct sockaddr_nl *who, struct nlmsghdr *n,
+ }
+ 
+ static int xfrm_policy_get_or_delete(int argc, char **argv, int delete,
+-				     void *res_nlbuf)
++				     void *res_nlbuf, size_t res_size)
+ {
+ 	struct rtnl_handle rth;
+ 	struct {
+@@ -641,7 +641,7 @@ static int xfrm_policy_get_or_delete(int argc, char **argv, int delete,
+ 			(void *)&ctx, ctx.sctx.len);
+ 	}
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, res_nlbuf, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, res_nlbuf, res_size) < 0)
+ 		exit(2);
+ 
+ 	rtnl_close(&rth);
+@@ -651,7 +651,7 @@ static int xfrm_policy_get_or_delete(int argc, char **argv, int delete,
+ 
+ static int xfrm_policy_delete(int argc, char **argv)
+ {
+-	return xfrm_policy_get_or_delete(argc, argv, 1, NULL);
++	return xfrm_policy_get_or_delete(argc, argv, 1, NULL, 0);
+ }
+ 
+ static int xfrm_policy_get(int argc, char **argv)
+@@ -661,7 +661,7 @@ static int xfrm_policy_get(int argc, char **argv)
+ 
+ 	memset(buf, 0, sizeof(buf));
+ 
+-	xfrm_policy_get_or_delete(argc, argv, 0, n);
++	xfrm_policy_get_or_delete(argc, argv, 0, n, sizeof(buf));
+ 
+ 	if (xfrm_policy_print(NULL, n, (void*)stdout) < 0) {
+ 		fprintf(stderr, "An error :-)\n");
+@@ -830,7 +830,7 @@ static int xfrm_policy_list_or_deleteall(int argc, char **argv, int deleteall)
+ 				exit(1);
+ 			}
+ 
+-			if (rtnl_dump_filter(&rth, xfrm_policy_keep, &xb, NULL, NULL) < 0) {
++			if (rtnl_dump_filter(&rth, xfrm_policy_keep, &xb) < 0) {
+ 				fprintf(stderr, "Delete-all terminated\n");
+ 				exit(1);
+ 			}
+@@ -856,7 +856,7 @@ static int xfrm_policy_list_or_deleteall(int argc, char **argv, int deleteall)
+ 			exit(1);
+ 		}
+ 
+-		if (rtnl_dump_filter(&rth, xfrm_policy_print, stdout, NULL, NULL) < 0) {
++		if (rtnl_dump_filter(&rth, xfrm_policy_print, stdout) < 0) {
+ 			fprintf(stderr, "Dump terminated\n");
+ 			exit(1);
+ 		}
+@@ -946,7 +946,7 @@ static int xfrm_spd_getinfo(int argc, char **argv)
+ 	if (rtnl_open_byproto(&rth, 0, NETLINK_XFRM) < 0)
+ 		exit(1);
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, &req.n, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, &req.n, sizeof(req)) < 0)
+ 		exit(2);
+ 
+ 	print_spdinfo(&req.n, (void*)stdout);
+@@ -998,7 +998,7 @@ static int xfrm_policy_flush(int argc, char **argv)
+ 	if (show_stats > 1)
+ 		fprintf(stderr, "Flush policy\n");
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		exit(2);
+ 
+ 	rtnl_close(&rth);
+diff --git a/ip/xfrm_state.c b/ip/xfrm_state.c
+index cd7300d0bb3da..398e0fb83d202 100644
+--- a/ip/xfrm_state.c
++++ b/ip/xfrm_state.c
+@@ -520,7 +520,7 @@ parse_algo:
+ 	if (req.xsinfo.family == AF_UNSPEC)
+ 		req.xsinfo.family = AF_INET;
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		exit(2);
+ 
+ 	rtnl_close(&rth);
+@@ -645,7 +645,7 @@ static int xfrm_state_allocspi(int argc, char **argv)
+ 		req.xspi.info.family = AF_INET;
+ 
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, res_n, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, res_n, sizeof(res_buf)) < 0)
+ 		exit(2);
+ 
+ 	if (xfrm_state_print(NULL, res_n, (void*)stdout) < 0) {
+@@ -821,7 +821,7 @@ static int xfrm_state_get_or_delete(int argc, char **argv, int delete)
+ 		req.xsid.family = AF_INET;
+ 
+ 	if (delete) {
+-		if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++		if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 			exit(2);
+ 	} else {
+ 		char buf[NLMSG_BUF_SIZE];
+@@ -829,7 +829,7 @@ static int xfrm_state_get_or_delete(int argc, char **argv, int delete)
+ 
+ 		memset(buf, 0, sizeof(buf));
+ 
+-		if (rtnl_talk(&rth, &req.n, 0, 0, res_n, NULL, NULL) < 0)
++		if (rtnl_talk(&rth, &req.n, res_n, sizeof(req)) < 0)
+ 			exit(2);
+ 
+ 		if (xfrm_state_print(NULL, res_n, (void*)stdout) < 0) {
+@@ -965,7 +965,7 @@ static int xfrm_state_list_or_deleteall(int argc, char **argv, int deleteall)
+ 				exit(1);
+ 			}
+ 
+-			if (rtnl_dump_filter(&rth, xfrm_state_keep, &xb, NULL, NULL) < 0) {
++			if (rtnl_dump_filter(&rth, xfrm_state_keep, &xb) < 0) {
+ 				fprintf(stderr, "Delete-all terminated\n");
+ 				exit(1);
+ 			}
+@@ -992,7 +992,7 @@ static int xfrm_state_list_or_deleteall(int argc, char **argv, int deleteall)
+ 			exit(1);
+ 		}
+ 
+-		if (rtnl_dump_filter(&rth, xfrm_state_print, stdout, NULL, NULL) < 0) {
++		if (rtnl_dump_filter(&rth, xfrm_state_print, stdout) < 0) {
+ 			fprintf(stderr, "Dump terminated\n");
+ 			exit(1);
+ 		}
+@@ -1070,7 +1070,7 @@ static int xfrm_sad_getinfo(int argc, char **argv)
+ 	if (rtnl_open_byproto(&rth, 0, NETLINK_XFRM) < 0)
+ 		exit(1);
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, &req.n, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, &req.n, sizeof(req)) < 0)
+ 		exit(2);
+ 
+ 	print_sadinfo(&req.n, (void*)stdout);
+@@ -1124,7 +1124,7 @@ static int xfrm_state_flush(int argc, char **argv)
+ 		fprintf(stderr, "Flush state proto=%s\n",
+ 			strxf_xfrmproto(req.xsf.proto));
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		exit(2);
+ 
+ 	rtnl_close(&rth);
+diff --git a/lib/libnetlink.c b/lib/libnetlink.c
+index 8f6bb759e5497..624a6a9a86992 100644
+--- a/lib/libnetlink.c
++++ b/lib/libnetlink.c
+@@ -25,6 +25,10 @@
+ 
+ #include "libnetlink.h"
+ 
++#ifndef MIN
++#define MIN(a, b) ((a) < (b) ? (a) : (b))
++#endif
++
+ int rcvbuf = 1024 * 1024;
+ 
+ void rtnl_close(struct rtnl_handle *rth)
+@@ -230,15 +234,8 @@ int rtnl_dump_filter_l(struct rtnl_handle *rth,
+ 
+ 				if (nladdr.nl_pid != 0 ||
+ 				    h->nlmsg_pid != rth->local.nl_pid ||
+-				    h->nlmsg_seq != rth->dump) {
+-					if (a->junk) {
+-						err = a->junk(&nladdr, h,
+-							      a->arg2);
+-						if (err < 0)
+-							return err;
+-					}
++				    h->nlmsg_seq != rth->dump)
+ 					goto skip_it;
+-				}
+ 
+ 				if (h->nlmsg_type == NLMSG_DONE) {
+ 					found_done = 1;
+@@ -280,22 +277,18 @@ skip_it:
+ 
+ int rtnl_dump_filter(struct rtnl_handle *rth,
+ 		     rtnl_filter_t filter,
+-		     void *arg1,
+-		     rtnl_filter_t junk,
+-		     void *arg2)
++		     void *arg1)
+ {
+ 	const struct rtnl_dump_filter_arg a[2] = {
+-		{ .filter = filter, .arg1 = arg1, .junk = junk, .arg2 = arg2 },
+-		{ .filter = NULL,   .arg1 = NULL, .junk = NULL, .arg2 = NULL }
++		{ .filter = filter, .arg1 = arg1, },
++		{ .filter = NULL,   .arg1 = NULL, },
+ 	};
+ 
+ 	return rtnl_dump_filter_l(rth, a);
+ }
+ 
+-int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n, pid_t peer,
+-	      unsigned groups, struct nlmsghdr *answer,
+-	      rtnl_filter_t junk,
+-	      void *jarg)
++int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n,
++	      struct nlmsghdr *answer, size_t maxlen)
+ {
+ 	int status;
+ 	unsigned seq;
+@@ -311,12 +304,10 @@ int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n, pid_t peer,
+ 		.msg_iov = &iov,
+ 		.msg_iovlen = 1,
+ 	};
+-	char   buf[16384];
++	char   buf[32768];
+ 
+ 	memset(&nladdr, 0, sizeof(nladdr));
+ 	nladdr.nl_family = AF_NETLINK;
+-	nladdr.nl_pid = peer;
+-	nladdr.nl_groups = groups;
+ 
+ 	n->nlmsg_seq = seq = ++rtnl->seq;
+ 
+@@ -324,7 +315,6 @@ int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n, pid_t peer,
+ 		n->nlmsg_flags |= NLM_F_ACK;
+ 
+ 	status = sendmsg(rtnl->fd, &msg, 0);
+-
+ 	if (status < 0) {
+ 		perror("Cannot talk to rtnetlink");
+ 		return -1;
+@@ -333,7 +323,6 @@ int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n, pid_t peer,
+ 	memset(buf,0,sizeof(buf));
+ 
+ 	iov.iov_base = buf;
+-
+ 	while (1) {
+ 		iov.iov_len = sizeof(buf);
+ 		status = recvmsg(rtnl->fd, &msg, 0);
+@@ -354,11 +343,10 @@ int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n, pid_t peer,
+ 			exit(1);
+ 		}
+ 		for (h = (struct nlmsghdr*)buf; status >= sizeof(*h); ) {
+-			int err;
+ 			int len = h->nlmsg_len;
+ 			int l = len - sizeof(*h);
+ 
+-			if (l<0 || len>status) {
++			if (l < 0 || len>status) {
+ 				if (msg.msg_flags & MSG_TRUNC) {
+ 					fprintf(stderr, "Truncated message\n");
+ 					return -1;
+@@ -367,14 +355,9 @@ int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n, pid_t peer,
+ 				exit(1);
+ 			}
+ 
+-			if (nladdr.nl_pid != peer ||
++			if (nladdr.nl_pid != 0 ||
+ 			    h->nlmsg_pid != rtnl->local.nl_pid ||
+ 			    h->nlmsg_seq != seq) {
+-				if (junk) {
+-					err = junk(&nladdr, h, jarg);
+-					if (err < 0)
+-						return err;
+-				}
+ 				/* Don't forget to skip that message. */
+ 				status -= NLMSG_ALIGN(len);
+ 				h = (struct nlmsghdr*)((char*)h + NLMSG_ALIGN(len));
+@@ -385,19 +368,22 @@ int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n, pid_t peer,
+ 				struct nlmsgerr *err = (struct nlmsgerr*)NLMSG_DATA(h);
+ 				if (l < sizeof(struct nlmsgerr)) {
+ 					fprintf(stderr, "ERROR truncated\n");
+-				} else {
+-					errno = -err->error;
+-					if (errno == 0) {
+-						if (answer)
+-							memcpy(answer, h, h->nlmsg_len);
+-						return 0;
+-					}
+-					perror("RTNETLINK answers");
++				} else if (!err->error) {
++					if (answer)
++						memcpy(answer, h,
++						       MIN(maxlen, h->nlmsg_len));
++					return 0;
+ 				}
++
++				fprintf(stderr, "RTNETLINK answers: %s\n",
++					strerror(-err->error));
++				errno = -err->error;
+ 				return -1;
+ 			}
++
+ 			if (answer) {
+-				memcpy(answer, h, h->nlmsg_len);
++				memcpy(answer, h,
++				       MIN(maxlen, h->nlmsg_len));
+ 				return 0;
+ 			}
+ 
+@@ -406,10 +392,12 @@ int rtnl_talk(struct rtnl_handle *rtnl, struct nlmsghdr *n, pid_t peer,
+ 			status -= NLMSG_ALIGN(len);
+ 			h = (struct nlmsghdr*)((char*)h + NLMSG_ALIGN(len));
+ 		}
++
+ 		if (msg.msg_flags & MSG_TRUNC) {
+ 			fprintf(stderr, "Message truncated\n");
+ 			continue;
+ 		}
++
+ 		if (status) {
+ 			fprintf(stderr, "!!!Remnant of size %d\n", status);
+ 			exit(1);
+diff --git a/lib/ll_map.c b/lib/ll_map.c
+index 5addf4a4cf4ba..da5fe0390f7fd 100644
+--- a/lib/ll_map.c
++++ b/lib/ll_map.c
+@@ -186,7 +186,7 @@ int ll_init_map(struct rtnl_handle *rth)
+ 		exit(1);
+ 	}
+ 
+-	if (rtnl_dump_filter(rth, ll_remember_index, &idxmap, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(rth, ll_remember_index, &idxmap) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		exit(1);
+ 	}
+diff --git a/misc/ifstat.c b/misc/ifstat.c
+index 0ce8c928d3831..58860f926415c 100644
+--- a/misc/ifstat.c
++++ b/misc/ifstat.c
+@@ -127,7 +127,7 @@ void load_info(void)
+ 		exit(1);
+ 	}
+ 
+-	if (rtnl_dump_filter(&rth, get_nlmsg, NULL, NULL, NULL) < 0) {
++	if (rtnl_dump_filter(&rth, get_nlmsg, NULL) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		exit(1);
+ 	}
+diff --git a/tc/m_action.c b/tc/m_action.c
+index 9f2402289b2b2..234104893d966 100644
+--- a/tc/m_action.c
++++ b/tc/m_action.c
+@@ -451,7 +451,7 @@ int tc_action_gd(int cmd, unsigned flags, int *argc_p, char ***argv_p)
+ 	if (cmd == RTM_GETACTION)
+ 		ans = &req.n;
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, ans, NULL, NULL) < 0) {
++	if (rtnl_talk(&rth, &req.n, ans, MAX_MSG) < 0) {
+ 		fprintf(stderr, "We have an error talking to the kernel\n");
+ 		return 1;
+ 	}
+@@ -496,7 +496,7 @@ int tc_action_modify(int cmd, unsigned flags, int *argc_p, char ***argv_p)
+ 	}
+ 	tail->rta_len = (void *) NLMSG_TAIL(&req.n) - (void *) tail;
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0) {
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0) {
+ 		fprintf(stderr, "We have an error talking to the kernel\n");
+ 		ret = -1;
+ 	}
+@@ -558,7 +558,7 @@ int tc_act_list_or_flush(int argc, char **argv, int event)
+ 			perror("Cannot send dump request");
+ 			return 1;
+ 		}
+-		ret = rtnl_dump_filter(&rth, print_action, stdout, NULL, NULL);
++		ret = rtnl_dump_filter(&rth, print_action, stdout);
+ 	}
+ 
+ 	if (event == RTM_DELACTION) {
+@@ -566,7 +566,7 @@ int tc_act_list_or_flush(int argc, char **argv, int event)
+ 		req.n.nlmsg_type = RTM_DELACTION;
+ 		req.n.nlmsg_flags |= NLM_F_ROOT;
+ 		req.n.nlmsg_flags |= NLM_F_REQUEST;
+-		if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0) {
++		if (rtnl_talk(&rth, &req.n, NULL, 0) < 0) {
+ 			fprintf(stderr, "We have an error flushing\n");
+ 			return 1;
+ 		}
+diff --git a/tc/tc_class.c b/tc/tc_class.c
+index 9d4eea5c1c8f2..3ae8b8577e523 100644
+--- a/tc/tc_class.c
++++ b/tc/tc_class.c
+@@ -138,7 +138,7 @@ int tc_class_modify(int cmd, unsigned flags, int argc, char **argv)
+ 		}
+ 	}
+ 
+-	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		return 2;
+ 
+ 	return 0;
+@@ -298,7 +298,7 @@ int tc_class_list(int argc, char **argv)
+ 		return 1;
+ 	}
+ 
+- 	if (rtnl_dump_filter(&rth, print_class, stdout, NULL, NULL) < 0) {
++ 	if (rtnl_dump_filter(&rth, print_class, stdout) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		return 1;
+ 	}
+diff --git a/tc/tc_filter.c b/tc/tc_filter.c
+index 919c57c133681..792429b956f3f 100644
+--- a/tc/tc_filter.c
++++ b/tc/tc_filter.c
+@@ -167,7 +167,7 @@ int tc_filter_modify(int cmd, unsigned flags, int argc, char **argv)
+ 		}
+ 	}
+ 
+- 	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0) {
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0) {
+ 		fprintf(stderr, "We have an error talking to the kernel\n");
+ 		return 2;
+ 	}
+@@ -341,7 +341,7 @@ int tc_filter_list(int argc, char **argv)
+ 		return 1;
+ 	}
+ 
+- 	if (rtnl_dump_filter(&rth, print_filter, stdout, NULL, NULL) < 0) {
++ 	if (rtnl_dump_filter(&rth, print_filter, stdout) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		return 1;
+ 	}
+diff --git a/tc/tc_qdisc.c b/tc/tc_qdisc.c
+index 83cc2d9227283..bee176c05f8e1 100644
+--- a/tc/tc_qdisc.c
++++ b/tc/tc_qdisc.c
+@@ -187,7 +187,7 @@ int tc_qdisc_modify(int cmd, unsigned flags, int argc, char **argv)
+ 		req.t.tcm_ifindex = idx;
+ 	}
+ 
+- 	if (rtnl_talk(&rth, &req.n, 0, 0, NULL, NULL, NULL) < 0)
++	if (rtnl_talk(&rth, &req.n, NULL, 0) < 0)
+ 		return 2;
+ 
+ 	return 0;
+@@ -324,7 +324,7 @@ int tc_qdisc_list(int argc, char **argv)
+ 		return 1;
+ 	}
+ 
+- 	if (rtnl_dump_filter(&rth, print_qdisc, stdout, NULL, NULL) < 0) {
++ 	if (rtnl_dump_filter(&rth, print_qdisc, stdout) < 0) {
+ 		fprintf(stderr, "Dump terminated\n");
+ 		return 1;
+ 	}
+-- 
+2.6.4
+
