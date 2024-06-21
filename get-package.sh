@@ -28,12 +28,12 @@ rm -rf *
 rpm2cpio ../*.rpm | cpio -idmv
 echo "folder $packagename"
 #decompte 600
-rm -rf *.tar.*
-rm -rf *.tgz.*
-rm -rf *.zip.*
-rm -rf *.7z.*
-rm -rf *.rar.*
-rm -rf *.rpm.*
+find . -name '*.tar.*' -exec rm -f {} \;
+find . -name '*.tgz.*' -exec rm -f {} \;
+find . -name '*.zip.*' -exec rm -f {} \;
+find . -name '*.7z.*' -exec rm -f {} \;
+find . -name '*.rar.*' -exec rm -f {} \;
+find . -name '*.rpm.*' -exec rm -f {} \;
 cd ..
 rm -f *.rpm
 git add --all *
