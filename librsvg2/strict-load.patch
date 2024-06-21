@@ -1,0 +1,215 @@
+diff -up librsvg-2.26.0/rsvg-base.c.strict-load librsvg-2.26.0/rsvg-base.c
+--- librsvg-2.26.0/rsvg-base.c.strict-load	2014-01-15 23:33:14.295667391 -0500
++++ librsvg-2.26.0/rsvg-base.c	2014-01-15 23:59:46.373874891 -0500
+@@ -25,6 +25,7 @@
+ 
+ #include "config.h"
+ 
++#define _GNU_SOURCE
+ #ifdef HAVE_SVGZ
+ #include <gsf/gsf-input-gzip.h>
+ #include <gsf/gsf-input-memory.h>
+@@ -46,6 +47,8 @@
+ #include "rsvg-cairo-render.h"
+ 
+ #include <libxml/uri.h>
++#include <libxml/parser.h>
++#include <libxml/parserInternals.h>
+ 
+ #include <math.h>
+ #include <string.h>
+@@ -55,6 +58,8 @@
+ #include "rsvg-path.h"
+ #include "rsvg-paint-server.h"
+ 
++#include "rsvg-xml.h"
++#include <stdlib.h>
+ /*
+  * This is configurable at runtime
+  */
+@@ -584,11 +589,11 @@ rsvg_start_xinclude (RsvgHandle * ctx, R
+ 	    char *text_data;
+ 	    gsize text_data_len;
+ 
+-	    text_data = g_convert (data, data_len, "utf-8", encoding, NULL,
++	    text_data = g_convert ((const gchar *)data, data_len, "utf-8", encoding, NULL,
+                                    &text_data_len, NULL);
+ 
+ 	    g_free (data);
+-	    data = text_data;
++	    data = (guint8 *)text_data;
+ 	    data_len = text_data_len;
+ 	}
+ 
+@@ -603,7 +608,6 @@ rsvg_start_xinclude (RsvgHandle * ctx, R
+ 	xmlParserCtxtPtr xml_parser;
+ 	xmlParserInputBufferPtr buffer;
+ 	xmlParserInputPtr input;
+-	int result;
+ 
+ 	stream = _rsvg_handle_acquire_stream (ctx, href, NULL);
+ 	if (stream == NULL)
+@@ -1064,6 +1068,26 @@ rsvg_get_base_uri_from_filename (const g
+     return base_uri;
+ }
+ 
++static void
++rsvg_handle_set_base_gfile (RsvgHandle *handle,
++                            GFile      *base_file)
++{
++    RsvgHandlePrivate *priv;
++
++    g_return_if_fail (RSVG_IS_HANDLE (handle));
++    g_return_if_fail (G_IS_FILE (base_file));
++
++    priv = handle->priv;
++
++    g_object_ref (base_file);
++    if (priv->base_gfile)
++        g_object_unref (priv->base_gfile);
++    priv->base_gfile = base_file;
++    
++    g_free (priv->base_uri);
++    priv->base_uri = g_file_get_uri (base_file);
++}
++
+ /**
+  * rsvg_handle_set_base_uri
+  * @handle: A #RsvgHandle
+@@ -1078,6 +1102,7 @@ void
+ rsvg_handle_set_base_uri (RsvgHandle * handle, const char *base_uri)
+ {
+     gchar *uri;
++    GFile *file;
+ 
+     g_return_if_fail (handle != NULL);
+ 
+@@ -1089,11 +1114,10 @@ rsvg_handle_set_base_uri (RsvgHandle * h
+     else
+ 	uri = rsvg_get_base_uri_from_filename (base_uri);
+ 
+-    if (uri) {
+-        if (handle->priv->base_uri)
+-            g_free (handle->priv->base_uri);
+-        handle->priv->base_uri = uri;
+-    }
++    file = g_file_new_for_uri (uri ? uri : "data:");
++    rsvg_handle_set_base_gfile (handle, file);
++    g_object_unref (file);
++    g_free (uri);
+ }
+ 
+ /**
+@@ -2055,12 +2079,84 @@ _rsvg_handle_allow_load (RsvgHandle *han
+                          const char *uri,
+                          GError **error)
+ {
+-    RsvgLoadPolicy policy = handle->priv->load_policy;
++    RsvgHandlePrivate *priv = handle->priv;
++    GFile *base;
++    char *path, *dir;
++    char *scheme = NULL, *cpath = NULL, *cdir = NULL;
+ 
+-    if (policy == RSVG_LOAD_POLICY_ALL_PERMISSIVE)
+-        return TRUE;
++    g_assert (handle->priv->load_policy == RSVG_LOAD_POLICY_STRICT);
+ 
+-    return TRUE;
++    scheme = g_uri_parse_scheme (uri);
++
++    /* Not a valid URI */
++    if (scheme == NULL)
++        goto deny;
++
++    /* Allow loads of data: from any location */
++    if (g_str_equal (scheme, "data"))
++        goto allow;
++
++    /* No base to compare to? */
++    if (priv->base_gfile == NULL)
++        goto deny;
++
++    /* Deny loads from differing URI schemes */
++    if (!g_file_has_uri_scheme (priv->base_gfile, scheme))
++        goto deny;
++
++    /* resource: is allowed to load anything from other resources */
++    if (g_str_equal (scheme, "resource"))
++        goto allow;
++
++    /* Non-file: isn't allowed to load anything */
++    if (!g_str_equal (scheme, "file"))
++        goto deny;
++
++    base = g_file_get_parent (priv->base_gfile);
++    if (base == NULL)
++        goto deny;
++
++    dir = g_file_get_path (base);
++    g_object_unref (base);
++
++    /* FIXME portability */
++    cdir = canonicalize_file_name (dir);
++    g_free (dir);
++    if (cdir == NULL)
++        goto deny;
++
++    path = g_filename_from_uri (uri, NULL, NULL);
++    if (path == NULL)
++        goto deny;
++
++    /* FIXME portability */
++    cpath = canonicalize_file_name (path);
++    g_free (path);
++
++    if (cpath == NULL)
++        goto deny;
++
++    /* Now check that @cpath is below @cdir */
++    if (!g_str_has_prefix (cpath, cdir) ||
++        cpath[strlen (cdir)] != G_DIR_SEPARATOR)
++        goto deny;
++
++    /* Allow load! */
++
++ allow:
++    g_free (scheme);
++    free (cpath);
++    free (cdir);
++     return TRUE;
++
++ deny:
++    g_free (scheme);
++    free (cpath);
++    free (cdir);
++
++    g_set_error (error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
++                 "File may not link to URI \"%s\"", uri);
++    return FALSE;
+ }
+ 
+ guint8* 
+diff -up librsvg-2.26.0/rsvg-private.h.strict-load librsvg-2.26.0/rsvg-private.h
+--- librsvg-2.26.0/rsvg-private.h.strict-load	2014-01-15 23:33:14.293667394 -0500
++++ librsvg-2.26.0/rsvg-private.h	2014-01-15 23:56:48.249185196 -0500
+@@ -124,10 +124,10 @@ struct RsvgSaxHandler {
+ };
+ 
+ typedef enum {
+-    RSVG_LOAD_POLICY_ALL_PERMISSIVE
++    RSVG_LOAD_POLICY_STRICT
+ } RsvgLoadPolicy;
+ 
+-#define RSVG_LOAD_POLICY_DEFAULT (RSVG_LOAD_POLICY_ALL_PERMISSIVE)
++#define RSVG_LOAD_POLICY_DEFAULT (RSVG_LOAD_POLICY_STRICT)
+ 
+ struct RsvgHandlePrivate {
+     RsvgLoadPolicy load_policy;
+@@ -168,6 +168,7 @@ struct RsvgHandlePrivate {
+     GString *desc;
+     GString *metadata;
+ 
++    GFile *base_gfile;
+     gchar *base_uri;
+ 
+     gboolean finished;

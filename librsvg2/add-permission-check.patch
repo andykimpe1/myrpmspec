@@ -1,0 +1,321 @@
+diff -pruN librsvg-2.26.0.orig/rsvg-base.c librsvg-2.26.0/rsvg-base.c
+--- librsvg-2.26.0.orig/rsvg-base.c	2014-02-04 11:14:41.000000000 +0100
++++ librsvg-2.26.0/rsvg-base.c	2014-02-04 11:15:14.000000000 +0100
+@@ -575,7 +575,7 @@ rsvg_start_xinclude (RsvgHandle * ctx, R
+ 	gsize data_len;
+ 	const char *encoding;
+ 
+-	data = _rsvg_io_acquire_data (href, rsvg_handle_get_base_uri (ctx), &data_len, NULL);
++	data = _rsvg_handle_acquire_data (ctx, href, &data_len, NULL);
+ 	if (data == NULL)
+ 	    goto fallback;
+ 
+@@ -605,7 +605,7 @@ rsvg_start_xinclude (RsvgHandle * ctx, R
+ 	xmlParserInputPtr input;
+ 	int result;
+ 
+-	stream = _rsvg_io_acquire_stream (href, rsvg_handle_get_base_uri (ctx), NULL);
++	stream = _rsvg_handle_acquire_stream (ctx, href, NULL);
+ 	if (stream == NULL)
+ 	    goto fallback;
+ 
+@@ -847,15 +847,15 @@ rsvg_entity_decl (void *data, const xmlC
+ 	gsize entity_data_len;
+ 
+ 	if (systemId)
+-	    entity_data = _rsvg_io_acquire_data ((const char *) systemId,
+-						 rsvg_handle_get_base_uri (ctx),
+-						 &entity_data_len,
+-						 NULL);
++	    entity_data = _rsvg_handle_acquire_data (ctx,
++                                                     (const char *) systemId,
++						     &entity_data_len,
++						     NULL);
+ 	else if (publicId)
+-	    entity_data = _rsvg_io_acquire_data ((const char *) publicId,
+-						 rsvg_handle_get_base_uri (ctx),
+-						 &entity_data_len,
+-						 NULL);
++	    entity_data = _rsvg_handle_acquire_data (ctx,
++                                                     (const char *) publicId,
++						     &entity_data_len,
++						     NULL);
+ 	if (entity_data) {
+ 	    content = xmlCharStrndup (entity_data, entity_data_len);
+ 	    g_free (entity_data);
+@@ -970,10 +970,10 @@ rsvg_processing_instruction (void *ctx,
+                         guint8 *style_data;
+                         gsize style_data_len;
+ 
+-                        style_data = _rsvg_io_acquire_data (value,
+-                                                            rsvg_handle_get_base_uri (handle),
+-                                                            &style_data_len,
+-                                                            NULL);
++                        style_data = _rsvg_handle_acquire_data (handle,
++                                                                value,
++                                                                &style_data_len,
++                                                                NULL);
+                         if (style_data) {
+                             rsvg_parse_cssbuffer (handle, (char *) style_data, style_data_len);
+                            g_free (style_data);
+@@ -1092,7 +1092,6 @@ rsvg_handle_set_base_uri (RsvgHandle * h
+         if (handle->priv->base_uri)
+             g_free (handle->priv->base_uri);
+         handle->priv->base_uri = uri;
+-        rsvg_defs_set_base_uri (handle->priv->defs, handle->priv->base_uri);
+     }
+ }
+ 
+@@ -2047,3 +2046,40 @@ rsvg_return_if_fail_warning (const char
+ {
+     g_set_error (error, RSVG_ERROR, 0, _("%s: assertion `%s' failed"), pretty_function, expression);
+ }
++
++
++static gboolean
++_rsvg_handle_allow_load (RsvgHandle *handle,
++                         const char *uri,
++                         GError **error)
++{
++    RsvgLoadPolicy policy = handle->priv->load_policy;
++
++    if (policy == RSVG_LOAD_POLICY_ALL_PERMISSIVE)
++        return TRUE;
++
++    return TRUE;
++}
++
++guint8* 
++_rsvg_handle_acquire_data (RsvgHandle *handle,
++                           const char *uri,
++                           gsize *len,
++                           GError **error)
++{
++    if (!_rsvg_handle_allow_load (handle, uri, error))
++        return NULL;
++
++    return _rsvg_io_acquire_data (uri, rsvg_handle_get_base_uri (handle), len, error);
++}
++
++GInputStream *
++_rsvg_handle_acquire_stream (RsvgHandle *handle,
++                             const char *uri,
++                             GError **error)
++{
++    if (!_rsvg_handle_allow_load (handle, uri, error))
++        return NULL;
++
++    return _rsvg_io_acquire_stream (uri, rsvg_handle_get_base_uri (handle), error);
++}
+diff -pruN librsvg-2.26.0.orig/rsvg-defs.c librsvg-2.26.0/rsvg-defs.c
+--- librsvg-2.26.0.orig/rsvg-defs.c	2014-02-04 11:14:41.000000000 +0100
++++ librsvg-2.26.0/rsvg-defs.c	2014-02-04 11:15:14.000000000 +0100
+@@ -35,8 +35,8 @@ struct _RsvgDefs {
+     GHashTable *hash;
+     GPtrArray *unnamed;
+     GHashTable *externs;
+-    gchar *base_uri;
+     GSList *toresolve;
++    RsvgHandle *ctx;
+ };
+ 
+ typedef struct _RsvgResolutionPending RsvgResolutionPending;
+@@ -47,7 +47,7 @@ struct _RsvgResolutionPending {
+ };
+ 
+ RsvgDefs *
+-rsvg_defs_new (void)
++rsvg_defs_new (RsvgHandle *handle)
+ {
+     RsvgDefs *result = g_new (RsvgDefs, 1);
+ 
+@@ -55,18 +55,12 @@ rsvg_defs_new (void)
+     result->externs =
+         g_hash_table_new_full (g_str_hash, g_str_equal, g_free, (GDestroyNotify) g_object_unref);
+     result->unnamed = g_ptr_array_new ();
+-    result->base_uri = NULL;
+     result->toresolve = NULL;
++    result->ctx = handle; /* no need to take a ref here */
+ 
+     return result;
+ }
+ 
+-void
+-rsvg_defs_set_base_uri (RsvgDefs * self, gchar * base_uri)
+-{
+-    self->base_uri = base_uri;
+-}
+-
+ static int
+ rsvg_defs_load_extern (const RsvgDefs * defs, const char *name)
+ {
+@@ -75,9 +69,9 @@ rsvg_defs_load_extern (const RsvgDefs *
+     guint8 *data;
+     gsize data_len;
+ 
+-    filename = rsvg_get_file_path (name, defs->base_uri);
++    filename = rsvg_get_file_path (name, rsvg_handle_get_base_uri (defs->ctx));
+ 
+-    data = _rsvg_io_acquire_data (name, defs->base_uri, &data_len, NULL);
++    data = _rsvg_handle_acquire_data (defs->ctx, name, &data_len, NULL);
+ 
+     if (data) {
+         handle = rsvg_handle_new ();
+diff -pruN librsvg-2.26.0.orig/rsvg-defs.h librsvg-2.26.0/rsvg-defs.h
+--- librsvg-2.26.0.orig/rsvg-defs.h	2009-02-20 00:20:06.000000000 +0100
++++ librsvg-2.26.0/rsvg-defs.h	2014-02-04 11:15:14.000000000 +0100
+@@ -30,13 +30,14 @@
+ 
+ #include <glib.h>
+ 
++#include "rsvg.h"
++
+ G_BEGIN_DECLS 
+ 
+-RsvgDefs    *rsvg_defs_new		(void);
++RsvgDefs    *rsvg_defs_new		(RsvgHandle *handle);
+ RsvgNode    *rsvg_defs_lookup		(const RsvgDefs * defs, const char *name);
+ void	     rsvg_defs_set		(RsvgDefs * defs, const char *name, RsvgNode * val);
+ void	     rsvg_defs_free		(RsvgDefs * defs);
+-void	     rsvg_defs_set_base_uri	(RsvgDefs * self, gchar * base_uri);
+ void	     rsvg_defs_add_resolver	(RsvgDefs * defs, RsvgNode ** tochange, const gchar * name);
+ void	     rsvg_defs_resolve_all	(RsvgDefs * defs);
+ void	     rsvg_defs_register_name	(RsvgDefs * defs, const char *name, RsvgNode * val);
+diff -pruN librsvg-2.26.0.orig/rsvg-filter.c librsvg-2.26.0/rsvg-filter.c
+--- librsvg-2.26.0.orig/rsvg-filter.c	2014-02-04 11:14:41.000000000 +0100
++++ librsvg-2.26.0/rsvg-filter.c	2014-02-04 11:15:14.000000000 +0100
+@@ -3361,8 +3361,7 @@ rsvg_filter_primitive_image_render_ext (
+ 
+     boundarys = rsvg_filter_primitive_get_bounds (self, ctx);
+ 
+-    img = rsvg_pixbuf_new_from_href (upself->href->str,
+-                                     rsvg_handle_get_base_uri (upself->ctx), NULL);
++    img = rsvg_pixbuf_new_from_href (upself->ctx, upself->href->str, NULL);
+ 
+     if (!img)
+         return NULL;
+diff -pruN librsvg-2.26.0.orig/rsvg-gobject.c librsvg-2.26.0/rsvg-gobject.c
+--- librsvg-2.26.0.orig/rsvg-gobject.c	2008-11-22 17:37:14.000000000 +0100
++++ librsvg-2.26.0/rsvg-gobject.c	2014-02-04 11:15:14.000000000 +0100
+@@ -47,7 +47,8 @@ static void
+ instance_init (RsvgHandle * self)
+ {
+     self->priv = g_new0 (RsvgHandlePrivate, 1);
+-    self->priv->defs = rsvg_defs_new ();
++    self->priv->load_policy = RSVG_LOAD_POLICY_DEFAULT;
++    self->priv->defs = rsvg_defs_new (self);
+     self->priv->handler_nest = 0;
+     self->priv->entities = g_hash_table_new (g_str_hash, g_str_equal);
+     self->priv->dpi_x = rsvg_internal_dpi_x;
+diff -pruN librsvg-2.26.0.orig/rsvg-image.c librsvg-2.26.0/rsvg-image.c
+--- librsvg-2.26.0.orig/rsvg-image.c	2014-02-04 11:14:41.000000000 +0100
++++ librsvg-2.26.0/rsvg-image.c	2014-02-04 11:17:49.332226767 +0100
+@@ -378,20 +378,21 @@ _rsvg_acquire_xlink_href_resource (const
+ }
+ 
+ GdkPixbuf *
+-rsvg_pixbuf_new_from_href (const char *href, const char *base_uri, GError ** error)
++rsvg_pixbuf_new_from_href (RsvgHandle *handle, const char *href, GError ** error)
+ {
+-    GByteArray *arr;
++    char *data;
++    size_t data_len;
+ 
+-    arr = _rsvg_acquire_xlink_href_resource (href, base_uri, error);
+-    if (arr) {
++    data = _rsvg_handle_acquire_data (handle, href, &data_len, error);
++    if (data) {
+         GdkPixbufLoader *loader;
+         GdkPixbuf *pixbuf = NULL;
+         int res;
+ 
+         loader = gdk_pixbuf_loader_new ();
+ 
+-        res = gdk_pixbuf_loader_write (loader, arr->data, arr->len, error);
+-        g_byte_array_free (arr, TRUE);
++        res = gdk_pixbuf_loader_write (loader, data, data_len, error);
++        g_free (data);
+ 
+         if (!res) {
+             gdk_pixbuf_loader_close (loader, NULL);
+@@ -528,7 +529,7 @@ rsvg_node_image_set_atts (RsvgNode * sel
+         /* path is used by some older adobe illustrator versions */
+         if ((value = rsvg_property_bag_lookup (atts, "path"))
+             || (value = rsvg_property_bag_lookup (atts, "xlink:href"))) {
+-            image->img = rsvg_pixbuf_new_from_href (value, rsvg_handle_get_base_uri (ctx), NULL);
++            image->img = rsvg_pixbuf_new_from_href (ctx, value, NULL);
+ 
+             if (!image->img) {
+ #ifdef G_ENABLE_DEBUG
+diff -pruN librsvg-2.26.0.orig/rsvg-image.h librsvg-2.26.0/rsvg-image.h
+--- librsvg-2.26.0.orig/rsvg-image.h	2008-08-20 14:41:00.000000000 +0200
++++ librsvg-2.26.0/rsvg-image.h	2014-02-04 11:15:14.000000000 +0100
+@@ -50,7 +50,7 @@ void rsvg_preserve_aspect_ratio (unsigne
+ 
+ gchar *rsvg_get_file_path (const gchar * filename, const gchar * basedir);
+ 
+-GdkPixbuf *rsvg_pixbuf_new_from_href (const char *href, const char *base_uri, GError ** error);
++GdkPixbuf *rsvg_pixbuf_new_from_href (RsvgHandle *handle, const char *href, GError ** error);
+ 
+ G_END_DECLS
+ 
+diff -pruN librsvg-2.26.0.orig/rsvg-private.h librsvg-2.26.0/rsvg-private.h
+--- librsvg-2.26.0.orig/rsvg-private.h	2014-02-04 11:14:41.000000000 +0100
++++ librsvg-2.26.0/rsvg-private.h	2014-02-04 11:15:14.000000000 +0100
+@@ -123,7 +123,15 @@ struct RsvgSaxHandler {
+     void (*characters) (RsvgSaxHandler * self, const char *ch, int len);
+ };
+ 
++typedef enum {
++    RSVG_LOAD_POLICY_ALL_PERMISSIVE
++} RsvgLoadPolicy;
++
++#define RSVG_LOAD_POLICY_DEFAULT (RSVG_LOAD_POLICY_ALL_PERMISSIVE)
++
+ struct RsvgHandlePrivate {
++    RsvgLoadPolicy load_policy;
++
+     gboolean is_disposed;
+     gboolean is_closed;
+ 
+@@ -415,6 +423,14 @@ void rsvg_SAX_handler_struct_init (void)
+ 
+ char *rsvg_get_url_string (const char *str);
+ 
++guint8* _rsvg_handle_acquire_data (RsvgHandle *handle,
++                                   const char *uri,
++                                   gsize *len,
++                                   GError **error);
++GInputStream *_rsvg_handle_acquire_stream (RsvgHandle *handle,
++                                           const char *uri,
++                                           GError **error);
++
+ void rsvg_return_if_fail_warning (const char *pretty_function,
+                                   const char *expression, GError ** error);
+ 
+diff -pruN librsvg-2.26.0.orig/rsvg-styles.c librsvg-2.26.0/rsvg-styles.c
+--- librsvg-2.26.0.orig/rsvg-styles.c	2014-02-04 11:14:41.000000000 +0100
++++ librsvg-2.26.0/rsvg-styles.c	2014-02-04 11:15:14.000000000 +0100
+@@ -29,7 +29,6 @@
+ #include "rsvg-private.h"
+ #include "rsvg-filter.h"
+ #include "rsvg-css.h"
+-#include "rsvg-io.h"
+ #include "rsvg-styles.h"
+ #include "rsvg-shapes.h"
+ #include "rsvg-mask.h"
+@@ -1029,10 +1028,10 @@ ccss_import_style (CRDocHandler * a_this
+     if (a_uri == NULL)
+         return;
+ 
+-    stylesheet_data = _rsvg_io_acquire_data ((gchar *) cr_string_peek_raw_str (a_uri),
+-                                             rsvg_handle_get_base_uri (user_data->ctx), 
+-                                             &stylesheet_data_len,
+-                                             NULL);
++    stylesheet_data = _rsvg_handle_acquire_data (user_data->ctx,
++                                                 (gchar *) cr_string_peek_raw_str (a_uri),
++                                                 &stylesheet_data_len,
++                                                 NULL);
+     if (stylesheet_data == NULL)
+         return;
+ 

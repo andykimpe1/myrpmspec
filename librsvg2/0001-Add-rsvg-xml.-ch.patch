@@ -1,0 +1,179 @@
+diff -up librsvg-2.26.0/doc/xml/rsvg-cairo.xml librsvg-2.26.0/doc/xml/rsvg-cairo
+diff -up librsvg-2.26.0/doc/xml/rsvg-file-util.xml librsvg-2.26.0/doc/xml/rsvg-file-util
+diff -up librsvg-2.26.0/doc/xml/rsvg.xml librsvg-2.26.0/doc/xml/rsvg
+diff -up librsvg-2.26.0/Makefile.am.xml librsvg-2.26.0/Makefile.am
+--- librsvg-2.26.0/Makefile.am.xml	2008-11-22 11:40:31.000000000 -0500
++++ librsvg-2.26.0/Makefile.am	2014-01-15 22:15:59.843515671 -0500
+@@ -67,7 +67,9 @@ librsvg_2_la_SOURCES = 		\
+ 	rsvg-cairo-clip.c	\
+ 	rsvg.c			\
+ 	rsvg-gobject.c		\
+-	rsvg-file-util.c
++	rsvg-file-util.c	\
++	rsvg-xml.c		\
++	rsvg-xml.h
+ 
+ librsvg_2_la_LDFLAGS = -version-info @VERSION_INFO@ -export-dynamic -no-undefined -export-symbols $(srcdir)/librsvg.def
+ librsvg_2_la_LIBADD = $(LIBGSF_LIBS) $(LIBCROCO_LIBS) $(LIBRSVG_LIBS)
+diff -up librsvg-2.26.0/Makefile.in.xml librsvg-2.26.0/Makefile.in
+--- librsvg-2.26.0/Makefile.in.xml	2009-03-16 13:21:35.000000000 -0400
++++ librsvg-2.26.0/Makefile.in	2014-01-15 22:16:11.095498558 -0500
+@@ -78,7 +78,7 @@ am_librsvg_2_la_OBJECTS = rsvg-affine.lo
+ 	rsvg-structure.lo rsvg-styles.lo rsvg-text.lo rsvg-cond.lo \
+ 	rsvg-base.lo librsvg-enum-types.lo rsvg-cairo-draw.lo \
+ 	rsvg-cairo-render.lo rsvg-cairo-clip.lo rsvg.lo \
+-	rsvg-gobject.lo rsvg-file-util.lo
++	rsvg-gobject.lo rsvg-file-util.lo rsvg-xml.lo
+ librsvg_2_la_OBJECTS = $(am_librsvg_2_la_OBJECTS)
+ librsvg_2_la_LINK = $(LIBTOOL) --tag=CC $(AM_LIBTOOLFLAGS) \
+ 	$(LIBTOOLFLAGS) --mode=link $(CCLD) $(AM_CFLAGS) $(CFLAGS) \
+@@ -370,7 +370,9 @@ librsvg_2_la_SOURCES = \
+ 	rsvg-cairo-clip.c	\
+ 	rsvg.c			\
+ 	rsvg-gobject.c		\
+-	rsvg-file-util.c
++	rsvg-file-util.c	\
++	rsvg-xml.c		\
++	rsvg-xml.h
+ 
+ librsvg_2_la_LDFLAGS = -version-info @VERSION_INFO@ -export-dynamic -no-undefined -export-symbols $(srcdir)/librsvg.def
+ librsvg_2_la_LIBADD = $(LIBGSF_LIBS) $(LIBCROCO_LIBS) $(LIBRSVG_LIBS)
+diff -up librsvg-2.26.0/rsvg-xml.c.xml librsvg-2.26.0/rsvg-xml.c
+--- librsvg-2.26.0/rsvg-xml.c.xml	2014-01-15 22:15:59.844515670 -0500
++++ librsvg-2.26.0/rsvg-xml.c	2014-01-15 22:15:59.844515670 -0500
+@@ -0,0 +1,96 @@
++/*
++ * Copyright © 2010 Christian Persch
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public License as
++ * published by the Free Software Foundation; either version 2.1 of the
++ * License, or (at your option) any later version.
++  
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++  
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this program; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 02111-1307, USA.
++*/
++
++#include "config.h"
++
++#include "rsvg-xml.h"
++
++typedef struct {
++    GInputStream *stream;
++    GCancellable *cancellable;
++    GError      **error;
++} RsvgXmlInputStreamContext;
++
++/* this should use gsize, but libxml2 is borked */
++static int
++context_read (RsvgXmlInputStreamContext *context,
++              char *buffer,
++              int   len)
++{
++    gssize n_read;
++
++    if (*(context->error))
++        return -1;
++
++    n_read = g_input_stream_read (context->stream, buffer, (gsize) len,
++                                  context->cancellable,
++                                  context->error);
++    if (n_read < 0)
++        return -1;
++
++    return (int) n_read;
++}
++
++static int
++context_close (RsvgXmlInputStreamContext *context)
++{
++    gboolean ret;
++
++    /* Don't overwrite a previous error */
++    ret = g_input_stream_close (context->stream, context->cancellable,
++                                *(context->error) == NULL ? context->error : NULL);
++
++    g_object_unref (context->stream);
++    if (context->cancellable)
++        g_object_unref (context->cancellable);
++    g_slice_free (RsvgXmlInputStreamContext, context);
++
++    return ret ? 0 : -1;
++}
++
++/**
++ * _rsvg_xml_input_buffer_new_from_stream:
++ * @context: a #xmlParserCtxtPtr
++ * @input_stream: a #GInputStream
++ *
++ * Returns: a new #xmlParserInputPtr wrapping @input_stream
++ */
++xmlParserInputBufferPtr
++_rsvg_xml_input_buffer_new_from_stream (GInputStream   *stream,
++                                        GCancellable   *cancellable,
++                                        xmlCharEncoding enc,
++                                        GError        **error)
++
++{
++    RsvgXmlInputStreamContext *context;
++
++    g_return_val_if_fail (G_IS_INPUT_STREAM (stream), NULL);
++    g_return_val_if_fail (cancellable == NULL || G_IS_CANCELLABLE (cancellable), NULL);
++    g_return_val_if_fail (error != NULL, NULL);
++
++    context = g_slice_new (RsvgXmlInputStreamContext);
++    context->stream = g_object_ref (stream);
++    context->cancellable = cancellable ? g_object_ref (cancellable) : NULL;
++    context->error = error;
++
++    return xmlParserInputBufferCreateIO ((xmlInputReadCallback) context_read,
++                                         (xmlInputCloseCallback) context_close,
++                                         context,
++                                         enc);
++}
+diff -up librsvg-2.26.0/rsvg-xml.h.xml librsvg-2.26.0/rsvg-xml.h
+--- librsvg-2.26.0/rsvg-xml.h.xml	2014-01-15 22:15:59.844515670 -0500
++++ librsvg-2.26.0/rsvg-xml.h	2014-01-15 22:15:59.844515670 -0500
+@@ -0,0 +1,35 @@
++/*
++ * Copyright © 2010 Christian Persch
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public License as
++ * published by the Free Software Foundation; either version 2.1 of the
++ * License, or (at your option) any later version.
++  
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++  
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this program; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 02111-1307, USA.
++*/
++
++#ifndef RSVG_XML_H
++#define RSVG_XML_H
++
++#include <libxml/xmlIO.h>
++#include <gio/gio.h>
++
++G_BEGIN_DECLS
++
++xmlParserInputBufferPtr _rsvg_xml_input_buffer_new_from_stream (GInputStream   *stream,
++                                                                GCancellable   *cancellable,
++                                                                xmlCharEncoding enc,
++                                                                GError        **error);
++
++G_END_DECLS
++
++#endif /* !RSVG_XML_H */
