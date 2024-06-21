@@ -1,0 +1,86 @@
+From 5d7dd2299b608a1ae5e9f38cca37b9866a33106e Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Mon, 29 Aug 2016 18:16:41 +0200
+Subject: [PATCH] show only warning when crm_mon xml is invalid
+
+---
+ pcs/lib/pacemaker_state.py           | 13 ++++++++++---
+ pcs/test/test_lib_pacemaker_state.py | 24 ++++++++++++++++++++----
+ 2 files changed, 30 insertions(+), 7 deletions(-)
+
+diff --git a/pcs/lib/pacemaker_state.py b/pcs/lib/pacemaker_state.py
+index b413b90..e300da7 100644
+--- a/pcs/lib/pacemaker_state.py
++++ b/pcs/lib/pacemaker_state.py
+@@ -136,10 +136,17 @@ class _NodeSection(_Element):
+ def _get_valid_cluster_state_dom(xml):
+     try:
+         dom = etree.fromstring(xml)
+-        if os.path.isfile(settings.crm_mon_schema):
+-            etree.RelaxNG(file=settings.crm_mon_schema).assertValid(dom)
++        if(
++            os.path.isfile(settings.crm_mon_schema)
++            and
++            not etree.RelaxNG(file=settings.crm_mon_schema).validate(dom)
++        ):
++            print(
++                "Warning: xml with cluster status does not conform to the"
++                " crm_mon schema"
++            )
+         return dom
+-    except (etree.XMLSyntaxError, etree.DocumentInvalid):
++    except etree.XMLSyntaxError:
+         raise LibraryError(reports.cluster_state_invalid_format())
+ 
+ class ClusterState(_Element):
+diff --git a/pcs/test/test_lib_pacemaker_state.py b/pcs/test/test_lib_pacemaker_state.py
+index 13f6eb0..83b30a3 100644
+--- a/pcs/test/test_lib_pacemaker_state.py
++++ b/pcs/test/test_lib_pacemaker_state.py
+@@ -5,6 +5,14 @@ from __future__ import (
+     unicode_literals,
+ )
+ 
++import sys
++try:
++    from cStringIO import StringIO
++except ImportError:
++    #python 3
++    from io import StringIO
++
++
+ from pcs.test.tools.pcs_unittest import TestCase
+ from lxml import etree
+ 
+@@ -84,16 +92,24 @@ class ClusterStatusTest(TestBase):
+         )
+ 
+     def test_refuse_invalid_document(self):
++        #commands writes to stdout
++        #we want clean test output, so we capture it
++        tmp_stdout = sys.stdout
++        stdout_catpture = StringIO()
++        sys.stdout = stdout_catpture
+         self.covered_status.append_to_first_tag_name(
+             'nodes',
+             '<node without="required attributes" />'
+         )
+-
+-        assert_raise_library_error(
+-            lambda: ClusterState(str(self.covered_status)),
+-            (severities.ERROR, report_codes.BAD_CLUSTER_STATE_FORMAT, {})
++        ClusterState(str(self.covered_status))
++        self.assertEqual(
++            stdout_catpture.getvalue(),
++            "Warning: xml with cluster status does not conform to the crm_mon"
++                " schema\n"
+         )
+ 
++        sys.stdout = tmp_stdout
++
+ 
+ class WorkWithClusterStatusNodesTest(TestBase):
+     def fixture_node_string(self, **kwargs):
+-- 
+1.8.3.1
+

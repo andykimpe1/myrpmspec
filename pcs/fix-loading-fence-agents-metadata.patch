@@ -1,0 +1,145 @@
+From 5a20cc217fa77cb8c2a5718ac7b809150564636d Mon Sep 17 00:00:00 2001
+From: Tomas Jelinek <tojeline@redhat.com>
+Date: Fri, 14 Oct 2016 15:55:52 +0200
+Subject: [PATCH] fix loading fence agents metadata
+
+---
+ pcs/lib/resource_agent.py           | 29 +++++++++++++++++++++++++++++
+ pcs/lib/test/test_resource_agent.py | 24 ++++++++----------------
+ pcs/test/test_stonith.py            |  7 +++----
+ 3 files changed, 40 insertions(+), 20 deletions(-)
+
+diff --git a/pcs/lib/resource_agent.py b/pcs/lib/resource_agent.py
+index 150f2b4..296d733 100644
+--- a/pcs/lib/resource_agent.py
++++ b/pcs/lib/resource_agent.py
+@@ -571,6 +571,15 @@ class StonithAgent(CrmAgent):
+                 ]))
+                 new_param["required"] = False
+                 filtered.append(new_param)
++            elif param["name"] == "port":
++                # 'port' parameter is required by a fence agent, but it is
++                # filled automatically by pacemaker based on 'pcmk_host_map' or
++                # 'pcmk_host_list' parameter from stonithd metadata. However we
++                # still need the user to be able to set it due to backward
++                # compatibility reasons. So we just mark it as not required.
++                new_param = dict(param)
++                new_param["required"] = False
++                filtered.append(new_param)
+             else:
+                 filtered.append(param)
+             # 'port' parameter is required by a fence agent, but it is filled
+@@ -619,6 +628,26 @@ class StonithAgent(CrmAgent):
+         return False
+ 
+ 
++    def _load_metadata(self):
++        agent_exec = os.path.join("/usr/sbin/", self.get_name())
++        if not (
++            self.get_name().startswith("fence_")
++            and
++            agent_exec == os.path.abspath(agent_exec)
++            and
++            os.path.isfile(agent_exec)
++            and
++            os.access(agent_exec, os.X_OK)
++        ):
++            raise UnableToGetAgentMetadata(self.get_name(), "agent not found")
++        stdout, stderr, dummy_retval = self._runner.run(
++            [agent_exec, "-o", "metadata"]
++        )
++        if stdout.strip() == "":
++            raise UnableToGetAgentMetadata(self.get_name(), stderr.strip())
++        return stdout.strip()
++
++
+ def resource_agent_error_to_report_item(
+     e, severity=ReportItemSeverity.ERROR, forceable=False
+ ):
+diff --git a/pcs/lib/test/test_resource_agent.py b/pcs/lib/test/test_resource_agent.py
+index 5298415..a624e17 100644
+--- a/pcs/lib/test/test_resource_agent.py
++++ b/pcs/lib/test/test_resource_agent.py
+@@ -1257,6 +1257,9 @@ class StonithAgentMetadataGetMetadataTest(TestCase, ExtendedAssertionsMixin):
+         lib_ra.StonithAgent._stonithd_metadata = None
+ 
+ 
++    @mock.patch("os.path.abspath", lambda path: path)
++    @mock.patch("os.path.isfile", lambda path: True)
++    @mock.patch("os.access", lambda path, mode: True)
+     def test_success(self):
+         metadata = """
+             <resource-agent>
+@@ -1271,14 +1274,7 @@ class StonithAgentMetadataGetMetadataTest(TestCase, ExtendedAssertionsMixin):
+         )
+ 
+         self.mock_runner.run.assert_called_once_with(
+-            [
+-                "/usr/sbin/crm_resource",
+-                "--show-metadata",
+-                "stonith:{0}".format(self.agent_name)
+-            ],
+-             env_extend={
+-                 "PATH": "/usr/sbin/:/bin/:/usr/bin/",
+-             }
++            ["/usr/sbin/{0}".format(self.agent_name), "-o", "metadata"]
+         )
+ 
+ 
+@@ -1327,6 +1323,9 @@ class StonithAgentMetadataGetParametersTest(TestCase):
+         lib_ra.StonithAgent._stonithd_metadata = None
+ 
+ 
++    @mock.patch("os.path.abspath", lambda path: path)
++    @mock.patch("os.path.isfile", lambda path: True)
++    @mock.patch("os.access", lambda path, mode: True)
+     def test_success(self):
+         metadata = """
+             <resource-agent>
+@@ -1405,14 +1404,7 @@ class StonithAgentMetadataGetParametersTest(TestCase):
+         self.assertEqual(2, len(self.mock_runner.run.mock_calls))
+         self.mock_runner.run.assert_has_calls([
+             mock.call(
+-                [
+-                    "/usr/sbin/crm_resource",
+-                    "--show-metadata",
+-                    "stonith:{0}".format(self.agent_name)
+-                ],
+-                 env_extend={
+-                     "PATH": "/usr/sbin/:/bin/:/usr/bin/",
+-                 }
++                ["/usr/sbin/{0}".format(self.agent_name), "-o", "metadata"]
+             ),
+             mock.call(
+                 ["/usr/libexec/pacemaker/stonithd", "metadata"]
+diff --git a/pcs/test/test_stonith.py b/pcs/test/test_stonith.py
+index 5cac717..a82f2b6 100644
+--- a/pcs/test/test_stonith.py
++++ b/pcs/test/test_stonith.py
+@@ -44,8 +44,7 @@ Stonith options:
+             "stonith describe fence_noexist",
+             (
+                 "Error: Agent 'fence_noexist' is not installed or does not"
+-                " provide valid metadata: Metadata query for"
+-                " stonith:fence_noexist failed: -5\n"
++                " provide valid metadata: agent not found\n"
+             )
+         )
+ 
+@@ -70,11 +69,11 @@ class StonithTest(unittest.TestCase):
+ 
+     def testStonithCreation(self):
+         output, returnVal = pcs(temp_cib, "stonith create test1 fence_noxist")
+-        ac(output, "Error: Agent 'fence_noxist' is not installed or does not provide valid metadata: Metadata query for stonith:fence_noxist failed: -5, use --force to override\n")
++        ac(output, "Error: Agent 'fence_noxist' is not installed or does not provide valid metadata: agent not found, use --force to override\n")
+         assert returnVal == 1
+ 
+         output, returnVal = pcs(temp_cib, "stonith create test1 fence_noxist --force")
+-        ac(output, "Warning: Agent 'fence_noxist' is not installed or does not provide valid metadata: Metadata query for stonith:fence_noxist failed: -5\n")
++        ac(output, "Warning: Agent 'fence_noxist' is not installed or does not provide valid metadata: agent not found\n")
+         self.assertEqual(returnVal, 0)
+ 
+         output, returnVal = pcs(temp_cib, "stonith create test2 fence_apc")
+-- 
+1.8.3.1
+

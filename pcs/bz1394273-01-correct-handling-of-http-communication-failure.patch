@@ -1,0 +1,107 @@
+From e90ce8afd7996be7a3fb5f17be7c610d9ddb1b5c Mon Sep 17 00:00:00 2001
+From: Ivan Devat <idevat@redhat.com>
+Date: Tue, 22 Nov 2016 17:41:17 +0100
+Subject: [PATCH] Correct handling of HTTP communication failure
+
+---
+ pcs/lib/external.py | 23 +++++++++++++++++------
+ pcs/utils.py        | 28 ++++++++++++++++++++++------
+ 2 files changed, 39 insertions(+), 12 deletions(-)
+
+diff --git a/pcs/lib/external.py b/pcs/lib/external.py
+index 160586a..8f33ad1 100644
+--- a/pcs/lib/external.py
++++ b/pcs/lib/external.py
+@@ -22,6 +22,12 @@ import subprocess
+ import sys
+ try:
+     # python2
++    from httplib import HTTPException
++except ImportError:
++    # python3
++    from http.client import HTTPException
++try:
++    # python2
+     from urllib import urlencode as urllib_urlencode
+ except ImportError:
+     # python3
+@@ -611,12 +617,17 @@ class NodeCommunicator(object):
+                     host, request, "HTTP error: {0}".format(e.code)
+                 )
+         except urllib_URLError as e:
+-            msg = "Unable to connect to {node} ({reason})"
+-            self._logger.debug(msg.format(node=host, reason=e.reason))
+-            self._reporter.process(
+-                reports.node_communication_not_connected(host, e.reason)
+-            )
+-            raise NodeConnectionException(host, request, e.reason)
++            self.__handle_connection_error(host, request, e.reason)
++        except HTTPException:
++            self.__handle_connection_error(host, request, "Connection error")
++
++    def __handle_connection_error(self, host, request, reason):
++        msg = "Unable to connect to {node} ({reason})"
++        self._logger.debug(msg.format(node=host, reason=reason))
++        self._reporter.process(
++            reports.node_communication_not_connected(host, reason)
++        )
++        raise NodeConnectionException(host, request, reason)
+ 
+     def __get_opener(self):
+         # enable self-signed certificates
+diff --git a/pcs/utils.py b/pcs/utils.py
+index 50f00bc..929effc 100644
+--- a/pcs/utils.py
++++ b/pcs/utils.py
+@@ -69,7 +69,12 @@ from pcs.cli.common.reports import build_report_message
+ from pcs.cli.booth.command import DEFAULT_BOOTH_NAME
+ import pcs.cli.booth.env
+ 
+-
++try:
++    # python2
++    from httplib import HTTPException
++except ImportError:
++    # python3
++    from http.client import HTTPException
+ try:
+     # python2
+     from urllib import urlencode as urllib_urlencode
+@@ -414,6 +419,7 @@ def sendHTTPRequest(host, request, data = None, printResult = True, printSuccess
+             print(host + ": " + html.strip())
+         if "--debug" in pcs_options:
+             print("Response Code: 0")
++
+             print("--Debug Response Start--\n{0}".format(html), end="")
+             print("--Debug Response End--")
+             print()
+@@ -449,11 +455,21 @@ def sendHTTPRequest(host, request, data = None, printResult = True, printSuccess
+             print(output[1])
+         return output
+     except urllib_URLError as e:
+-        if "--debug" in pcs_options:
+-            print("Response Reason: " + str(e.reason))
+-        if printResult:
+-            print("Unable to connect to %s (%s)" % (host, e.reason))
+-        return (2,"Unable to connect to %s (%s)" % (host, e.reason))
++        return __handle_HTTP_connection_error(host, str(e.reason), printResult)
++    except HTTPException:
++        return __handle_HTTP_connection_error(
++            host, "Connection error", printResult
++        )
++
++def __handle_HTTP_connection_error(host, reason,  print_result):
++    if "--debug" in pcs_options:
++        print("Response Reason: {0}".format(reason))
++    msg = "Unable to connect to {host} ({reason})".format(
++        host=host, reason=reason
++    )
++    if print_result:
++        print(msg)
++    return (2, msg)
+ 
+ def getNodesFromCorosyncConf(conf_text=None):
+     if is_rhel6():
+-- 
+1.8.3.1
+
