@@ -1,0 +1,331 @@
+@@ -, +, @@ 
+  * SECURITY UPDATE: privilege escalation via mountpoint race conditions
+    (LP: #732628)
+    - src/utils/mount.ecryptfs_private.c: chdir into mountpoint before
+      checking permissions. Patch thanks to Dan Rosenberg.
+    - CVE-2011-1831
+    - CVE-2011-1832
+  * SECURITY UPDATE: race condition when checking source during mount
+    (LP: #732628)
+    - src/utils/mount.ecryptfs_private.c: use new ecryptfs_check_dev_ruid
+      kernel option when mounting directory.
+    - CVE-2011-1833
+  * SECURITY UPDATE: mtab corruption via improper handling (LP: #732628)
+    - src/utils/mount.ecryptfs_private.c: modify mtab via a temp file first
+      and make sure it succeeds before replacing the real mtab. Patch
+      thanks to Dan Rosenberg.
+    - CVE-2011-1834
+  * SECURITY UPDATE: key poisoning via insecure temp directory handling
+    (LP: #732628)
+    - src/utils/ecryptfs-setup-private: make sure we don't copy into a
+      user controlled directory.
+    - CVE-2011-1835
+  * SECURITY UPDATE: arbitrary file overwrite via lock counter race
+    condition (LP: #732628)
+    - src/utils/mount.ecryptfs_private.c: verify permissions with a file
+      descriptor, and don't follow symlinks.
+    - CVE-2011-1837
+diff -up ecryptfs-utils-82/src/utils/ecryptfs-setup-private.multicve ecryptfs-utils-82/src/utils/ecryptfs-setup-private
+--- ecryptfs-utils-82/src/utils/ecryptfs-setup-private.multicve	2009-11-02 23:54:26.000000000 +0100
++++ ecryptfs-utils-82/src/utils/ecryptfs-setup-private	2011-08-22 18:34:26.375608455 +0200
+@@ -380,7 +380,7 @@ if [ "$BOOTSTRAP" = "1" ]; then
+ 	# ramdisk, to keep it from leaking to the hard-drive.
+ 	temp=`mktemp /dev/shm/.ecryptfs-XXXXXX`
+ 	printf "%s" "$MOUNTPASS" > "$temp"
+-	mv "$temp" "/dev/shm/.ecryptfs-$USER"
++	mv -f -T "$temp" "/dev/shm/.ecryptfs-$USER" || error "Could not create passphrase file"
+ else
+ 	printf "%s\n%s" "$MOUNTPASS" "$LOGINPASS" | ecryptfs-wrap-passphrase "$HOME/.ecryptfs/wrapped-passphrase" - || error "$(gettext 'Could not wrap passphrase')"
+ fi
+@@ -435,12 +435,14 @@ fi
+ 
+ # Now let's perform some basic mount/write/umount/read sanity testing...
+ echo "$(gettext 'Testing mount/write/umount/read...')"
++printf "%s" "$MOUNTPASS" | ecryptfs-add-passphrase $FNEK -
+ /sbin/mount.ecryptfs_private || error "$(gettext 'Could not mount private ecryptfs directory')"
+ temp=`mktemp "$MOUNTPOINT/ecryptfs.test.XXXXXX"` || error_testing "$temp" "$(gettext 'Could not create empty file')"
+ random_data=`head -c 16000 /dev/urandom | od -x` || error_testing "$temp" "$(gettext 'Could not generate random data')"
+ echo "$random_data" > "$temp" || error_testing "$temp" "$(gettext 'Could not write encrypted file')"
+ md5sum1=`md5sum "$temp"` || error_testing "$temp" "$(gettext 'Could not read encrypted file')"
+ /sbin/umount.ecryptfs_private || error_testing "$temp" "$(gettext 'Could not unmount private ecryptfs directory')"
++printf "%s" "$MOUNTPASS" | ecryptfs-add-passphrase $FNEK -
+ /sbin/mount.ecryptfs_private || error_testing "$temp" "$(gettext 'Could not mount private ecryptfs directory (2)')"
+ md5sum2=`md5sum "$temp"` || error_testing "$temp" "$(gettext 'Could not read encrypted file (2)')"
+ rm -f "$temp"
+diff -up ecryptfs-utils-82/src/utils/mount.ecryptfs_private.c.multicve ecryptfs-utils-82/src/utils/mount.ecryptfs_private.c
+--- ecryptfs-utils-82/src/utils/mount.ecryptfs_private.c.multicve	2009-10-20 20:49:55.000000000 +0200
++++ ecryptfs-utils-82/src/utils/mount.ecryptfs_private.c	2011-08-22 18:33:00.671810411 +0200
+@@ -31,6 +31,7 @@
+ #include <sys/param.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#include <errno.h>
+ #include <keyutils.h>
+ #include <mntent.h>
+ #include <pwd.h>
+@@ -152,6 +153,47 @@ char *fetch_sig(char *pw_dir, int entry)
+ 	return sig;
+ }
+ 
++int check_ownership_mnt(int uid, char **mnt) {
++/* Check ownership of mount point, chdir into it, and
++ * canonicalize the path for use in mtab updating.
++ * Return 0 if everything is in order, 1 on error.
++ */
++	struct stat s;
++	char *cwd;
++
++	/* From here on, we'll refer to "." as our mountpoint, to avoid
++	 * races.
++	 */
++	if (chdir(*mnt) != 0) {
++		fputs("Cannot chdir into mountpoint.\n", stderr);
++		return 1;
++	}
++	if (stat(".", &s) != 0) {
++		fputs("Cannot examine mountpoint.\n", stderr);
++		return 1;
++	}
++	if (!S_ISDIR(s.st_mode)) {
++		fputs("Mountpoint is not a directory.\n", stderr);
++		return 1;
++	}
++	if (s.st_uid != uid) {
++		fputs("You do not own that mountpoint.\n", stderr);
++		return 1;
++	}
++
++	/* Canonicalize our pathname based on the current directory to
++	 * avoid races.
++	 */
++	cwd = getcwd(NULL, 0);
++	if (!cwd) {
++		fputs("Failed to get current directory\n", stderr);
++		return 1;
++	}
++	*mnt = cwd;
++	return 0;
++}
++
++
+ int check_ownerships(int uid, char *path) {
+ /* Check ownership of device and mount point.
+  * Return 0 if everything is in order, 1 on error.
+@@ -177,31 +219,77 @@ int update_mtab(char *dev, char *mnt, ch
+ /* Update /etc/mtab with new mount entry.
+  * Return 0 on success, 1 on failure.
+  */
+-	FILE *fh;
+-	struct mntent m;
+-	fh = setmntent("/etc/mtab", "a");
+-	if (fh == NULL) {
++	int fd;
++	FILE *old_mtab, *new_mtab;
++	struct mntent *old_ent, new_ent;
++
++	/* Make an attempt to play nice with other mount helpers
++	 * by creating an /etc/mtab~ lock file. Of course this
++	 * only works if those other helpers actually check for
++	 * this.
++	 */
++	fd = open("/etc/mtab~", O_RDONLY | O_CREAT | O_EXCL, 0644);
++	if (fd < 0) {
++		perror("open");
++		return 1;
++	}
++	close(fd);
++
++	old_mtab = setmntent("/etc/mtab", "r");
++	if (old_mtab == NULL) {
+ 		perror("setmntent");
+-		/* Unmount if mtab cannot be updated */
+-		umount(mnt);
+ 		return 1;
+ 	}
+-	m.mnt_fsname = dev;
+-	m.mnt_dir = mnt;
+-	m.mnt_type = FSTYPE;
+-	m.mnt_opts = opt;
+-	m.mnt_freq = 0;
+-	m.mnt_passno = 0;
+-	flockfile(fh);
+-	if (addmntent(fh, &m) != 0) {
++
++	new_mtab = setmntent("/etc/mtab.tmp", "w");
++	if (new_mtab == NULL) {
++		perror("setmntent");
++		goto fail_early;
++	}
++
++	while ((old_ent = getmntent(old_mtab))) {
++		if (addmntent(new_mtab, old_ent) != 0) {
++			perror("addmntent");
++			goto fail;
++		}
++	}
++	endmntent(old_mtab);
++
++	new_ent.mnt_fsname = dev;
++	new_ent.mnt_dir = mnt;
++	new_ent.mnt_type = FSTYPE;
++	new_ent.mnt_opts = opt;
++	new_ent.mnt_freq = 0;
++	new_ent.mnt_passno = 0;
++
++	if (addmntent(new_mtab, &new_ent) != 0) {
+ 		perror("addmntent");
+-		endmntent(fh);
+-		/* Unmount if mtab cannot be updated */
+-		umount(mnt);
+-		return 1;
++		goto fail;
++	}
++
++	if (fchmod(fileno(new_mtab), S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH) < 0) {
++		perror("fchmod");
++		goto fail;
++	}
++	endmntent(new_mtab);
++
++	if (rename("/etc/mtab.tmp", "/etc/mtab") < 0) {
++		perror("rename");
++		goto fail_late;
+ 	}
+-	endmntent(fh);
++
++	unlink("/etc/mtab~");
++
+ 	return 0;
++
++fail:
++	endmntent(new_mtab);
++fail_late:
++	unlink("/etc/mtab.tmp");
++fail_early:
++	endmntent(old_mtab);
++	unlink("/etc/mtab~");
++	return 1;
+ }
+ 
+ FILE *lock_counter(char *u, int uid) {
+@@ -220,26 +308,27 @@ FILE *lock_counter(char *u, int uid) {
+ 	 * file, or it's not owned by the current user, append iterator
+ 	 * until we find a filename we can use.
+ 	 */
+-	while (1) {
+-		if (stat(f, &s)==0 && (!S_ISREG(s.st_mode) || s.st_uid!=uid)) {
++	while (i < 50) {
++		if (((fd = open(f, O_RDWR | O_CREAT | O_NOFOLLOW, 0600)) >= 0) &&
++		    (fstat(fd, &s)==0 && (S_ISREG(s.st_mode) && s.st_uid==uid))) {
++			break;
++		} else {
++			if (fd >= 0)
++				close(fd);
+ 			free(f);
+ 			if (asprintf(&f, "%s/%s-%s-%s-%d", TMP, FSTYPE, u,
+ 			    ECRYPTFS_PRIVATE_DIR, i++) < 0) {
+ 				perror("asprintf");
+ 				return NULL;
+ 			}
+-		} else {
+-			break;
+ 		}
+ 	}
+-	/* open file for reading and writing */
+-	if ((fd = open(f, O_RDWR)) < 0) {
+-		/* Could not open it, so try to safely create it */
+-		if ((fd = open(f, O_RDWR | O_CREAT | O_EXCL, 0600)) < 0) {
+-			perror("open");
+-			return NULL;
+-		}
++
++	if (fd < 0) {
++		perror("open");
++		return NULL;
+ 	}
++
+ 	flock(fd, LOCK_EX);
+ 	fh = fdopen(fd, "r+");
+ 	if (fh == NULL) {
+@@ -414,7 +503,7 @@ int main(int argc, char *argv[]) {
+ 	if (fnek == 1) {
+ 		/* Filename encryption is on, so specific the fnek sig */
+ 		if ((asprintf(&opt,
+-"ecryptfs_sig=%s,ecryptfs_fnek_sig=%s,ecryptfs_cipher=%s,ecryptfs_key_bytes=%d",
++"ecryptfs_check_dev_ruid,ecryptfs_sig=%s,ecryptfs_fnek_sig=%s,ecryptfs_cipher=%s,ecryptfs_key_bytes=%d,ecryptfs_unlink_sigs",
+ 		 sig, sig_fnek, KEY_CIPHER, KEY_BYTES) < 0) ||
+ 		 opt == NULL) {
+ 			perror("asprintf (opt)");
+@@ -423,7 +512,7 @@ int main(int argc, char *argv[]) {
+ 	} else {
+ 		/* Filename encryption is off; legacy support */
+ 		if ((asprintf(&opt,
+-		 "ecryptfs_sig=%s,ecryptfs_cipher=%s,ecryptfs_key_bytes=%d",
++		 "ecryptfs_sig=%s,ecryptfs_cipher=%s,ecryptfs_key_bytes=%d,ecryptfs_unlink_sigs",
+ 		 sig, KEY_CIPHER, KEY_BYTES) < 0) ||
+ 		 opt == NULL) {
+ 			perror("asprintf (opt)");
+@@ -431,8 +520,9 @@ int main(int argc, char *argv[]) {
+ 		}
+ 	}
+ 
+-	/* Check ownership of mnt */
+-	if (check_ownerships(uid, mnt) != 0) {
++	/* Check ownership of the mountpoint. From here on, mnt refers
++	 * to a canonicalized path, and the mountpoint is the cwd. */
++	if (check_ownership_mnt(uid, &mnt) != 0) {
+ 		goto fail;
+ 	}
+ 
+@@ -462,7 +552,7 @@ int main(int argc, char *argv[]) {
+ 		 */
+ 		setreuid(-1, 0);
+ 		/* Perform mount */
+-		if (mount(dev, mnt, FSTYPE, 0, opt) == 0) {
++		if (mount(dev, ".", FSTYPE, 0, opt) == 0) {
+ 			if (update_mtab(dev, mnt, opt) != 0) {
+ 				goto fail;
+ 			}
+@@ -475,6 +565,7 @@ int main(int argc, char *argv[]) {
+ 			goto fail;
+ 		}
+ 	} else {
++		int rc = 0;
+ 		/* Decrement counter, exiting if >0, and non-forced unmount */
+ 		if (force == 1) {
+ 			zero(fh_counter);
+@@ -482,6 +573,20 @@ int main(int argc, char *argv[]) {
+ 			fputs("Sessions still open, not unmounting\n", stderr);
+ 			goto fail;
+ 		}
++		/* Attempt to clear the user's keys from the keyring,
++                   to prevent root from mounting without the user's key.
++                   This is a best-effort basis, so we'll just print messages
++                   on error. */
++		if (sig != NULL) {
++			rc = ecryptfs_remove_auth_tok_from_keyring(sig);
++			if (rc != 0 && rc != ENOKEY)
++				fputs("Could not remove key from keyring, try 'ecryptfs-umount-private'\n", stderr);
++		}
++		if (sig_fnek != NULL) {
++			rc = ecryptfs_remove_auth_tok_from_keyring(sig_fnek);
++			if (rc != 0 && rc != ENOKEY)
++				fputs("Could not remove key from keyring, try 'ecryptfs-umount-private'\n", stderr);
++		}
+ 		/* Unmounting, so exit if not mounted */
+ 		if (ecryptfs_private_is_mounted(dev, mnt, sig, mounting) == 0) {
+ 			goto fail;
+@@ -492,7 +597,12 @@ int main(int argc, char *argv[]) {
+ 		 * Do not use the umount.ecryptfs helper (-i).
+  		 */
+ 		setresuid(0,0,0);
+-		execl("/bin/umount", "umount", "-i", "-l", mnt, NULL);
++
++		/* Since we're doing a lazy unmount anyway, just unmount the current
++		 * directory. This avoids a lot of complexity in dealing with race
++		 * conditions, and guarantees that we're only unmounting a filesystem
++		 * that we own. */
++		execl("/bin/umount", "umount", "-i", "-l", ".", NULL);
+ 		perror("execl unmount failed");
+ 		goto fail;
+ 	}
