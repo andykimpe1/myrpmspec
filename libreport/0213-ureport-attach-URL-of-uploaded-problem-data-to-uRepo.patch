@@ -1,0 +1,2107 @@
+From 9034e9195f53df9d103bf25f24f1fff4a8ef6945 Mon Sep 17 00:00:00 2001
+From: Matej Habrnal <mhabrnal@redhat.com>
+Date: Tue, 19 Jan 2016 15:24:31 +0100
+Subject: [PATCH] ureport: attach URL of uploaded problem data to uReport
+
+and add the URL to reported_to file in dump dir
+
+Related to: rhbz#1300777
+
+Signed-off-by: Matej Habrnal <mhabrnal@redhat.com>
+---
+ doc/reporter-ureport.txt          |   19 +++-
+ po/POTFILES.in                    |    3 +
+ src/include/dump_dir.h            |   75 +++++++++-
+ src/include/internal_libreport.h  |   36 +++++
+ src/lib/Makefile.am               |    4 +-
+ src/lib/abrt_curl.c               |   66 +++++++---
+ src/lib/dump_dir.c                |  129 +++++++++++++++++
+ src/lib/iso_date_string.c         |   27 ++++-
+ src/lib/logging.c                 |    5 +
+ src/lib/reported_to.c             |   55 +++++++-
+ src/lib/ureport.c                 |   21 ++--
+ src/lib/uriparser.c               |  166 ++++++++++++++++++++++
+ src/plugins/Makefile.am           |    2 -
+ src/plugins/reporter-bugzilla.c   |    7 +-
+ src/plugins/reporter-kerneloops.c |    6 +-
+ src/plugins/reporter-mailx.c      |    7 +-
+ src/plugins/reporter-print.c      |    7 +-
+ src/plugins/reporter-rhtsupport.c |   13 +-
+ src/plugins/reporter-upload.c     |  161 ++++++++--------------
+ src/plugins/reporter-ureport.c    |   65 +++++++++-
+ tests/Makefile.am                 |    4 +-
+ tests/dump_dir.at                 |  277 +++++++++++++++++++++++++++++++++++++
+ tests/iso_date.at                 |  106 ++++++++++++++
+ tests/reported_to.at              |  148 ++++++++++++++++++++-
+ tests/testsuite.at                |    2 +
+ tests/uriparser.at                |  144 +++++++++++++++++++
+ 26 files changed, 1384 insertions(+), 171 deletions(-)
+ create mode 100644 src/lib/uriparser.c
+ create mode 100644 tests/iso_date.at
+ create mode 100644 tests/uriparser.at
+
+diff --git a/doc/reporter-ureport.txt b/doc/reporter-ureport.txt
+index 1441407..85dac8b 100644
+--- a/doc/reporter-ureport.txt
++++ b/doc/reporter-ureport.txt
+@@ -7,7 +7,7 @@ reporter-ureport - Reports ABRT problems in format of micro report
+ 
+ SYNOPSIS
+ --------
+-'reporter-ureport' [-v] [-c CONFFILE] [-u URL] [-k] [-A -a bthash -B -b bug-id -E -e email] [-r] [-d DIR]
++'reporter-ureport' [-v] [-c CONFFILE] [-u URL] [-k] [-A -a bthash -B -b bug-id -E -e email -l DATA -L FIELD -T TYPE -r RESULT_TYPE] [-d DIR]
+ 
+ DESCRIPTION
+ -----------
+@@ -119,6 +119,23 @@ OPTIONS
+ -i AUTH_DATA_ITEMS::
+    List of dump dir files included in the 'auth' uReport object.
+ 
++-l DATA::
++   Attach DATA (requires -T and -a|-A)
++
++-L REPORT_RESULT_FILED::
++   Attach the value of REPORT_RESULT_FILED member of the last report result
++   indentified by REPORT_RESULT_TYPE passed with -r option
++   (requires -r, -T and -a|-A).
++
++-T ATTACHMENT_TYPE::
++   Specifies the attachment type when attaching an arbitrary data to BTHASH
++   (takes effect only with -l or -L)
++
++-r REPORT_RESULT_TYP::
++   Used to single out report results ('reported_to' file lines) when attaching
++   an arbitrary data to BTHASH (takes effect only with -L)
++
++
+ ENVIRONMENT VARIABLES
+ ---------------------
+ Environment variables take precedence over values provided in
+diff --git a/po/POTFILES.in b/po/POTFILES.in
+index c617b99..dacd7a8 100644
+--- a/po/POTFILES.in
++++ b/po/POTFILES.in
+@@ -11,7 +11,9 @@ src/gui-wizard-gtk/wizard.c
+ src/gui-wizard-gtk/wizard.glade
+ src/lib/abrt_sock.c
+ src/lib/create_dump_dir.c
++src/lib/dump_dir.c
+ src/lib/event_config.c
++src/lib/iso_date_string.c
+ src/lib/make_descr.c
+ src/lib/parse_options.c
+ src/lib/abrt_curl.c
+@@ -20,6 +22,7 @@ src/lib/ureport.c
+ src/lib/run_event.c
+ src/lib/problem_data.c
+ src/lib/problem_report.c
++src/lib/reported_to.c
+ src/plugins/abrt_rh_support.c
+ src/plugins/report.c
+ src/plugins/report_Bugzilla.xml.in
+diff --git a/src/include/dump_dir.h b/src/include/dump_dir.h
+index 4fd9760..821ff37 100644
+--- a/src/include/dump_dir.h
++++ b/src/include/dump_dir.h
+@@ -21,6 +21,9 @@
+ #ifndef LIBREPORT_DUMP_DIR_H_
+ #define LIBREPORT_DUMP_DIR_H_
+ 
++/* For const_string_vector_const_ptr_t */
++#include "libreport_types.h"
++
+ /* For DIR */
+ #include <sys/types.h>
+ #include <dirent.h>
+@@ -100,20 +103,57 @@ int dd_delete(struct dump_dir *dd);
+ 
+ 
+ /* reported_to handling */
+-#define add_reported_to_data libreport_add_reported_to_data
+-int add_reported_to_data(char **reported_to, const char *line);
+-#define add_reported_to libreport_add_reported_to
+-void add_reported_to(struct dump_dir *dd, const char *line);
+ struct report_result {
+     char *label;
+     char *url;
+     char *msg;
+     char *bthash;
+-    /* char *whole_line; */
+-    /* time_t timestamp; */
++    time_t timestamp;
+     /* ^^^ if you add more fields, don't forget to update free_report_result() */
+ };
+ typedef struct report_result report_result_t;
++
++/* Appends a new unique line to the list of report results
++ *
++ * If the reported_to data already contains the given line, the line will not
++ * be added again.
++ *
++ * @param reported_to The data
++ * @param line The appended line
++ * @return 1 if the line was added at the end of the reported_to; otherwise 0.
++ */
++#define add_reported_to_data libreport_add_reported_to_data
++int add_reported_to_data(char **reported_to, const char *line);
++
++/* Appends a new unique entry to the list of report results
++ *
++ * result->label must be non-empty string which does not contain ':' character.
++ *
++ * The function converts the result to a valid reported_to line and calls
++ * add_reported_to_data().
++ *
++ * @param reported_to The data
++ * @param result The appended entry
++ * @return -EINVAL if result->label is invalid; otherwise return value of
++ * add_reported_to_data
++ */
++#define add_reported_to_entry_data libreport_add_reported_to_entry_data
++int add_reported_to_entry_data(char **reported_to, struct report_result *result);
++
++/* This is a wrapper of add_reported_to_data which accepts 'struct dump_dir *'
++ * in the first argument instead of 'char **'. The added line is stored in
++ * 'reported_to' dump directory file.
++ */
++#define add_reported_to libreport_add_reported_to
++void add_reported_to(struct dump_dir *dd, const char *line);
++
++/* This is a wrapper of add_reported_to_entry_data which accepts 'struct
++ * dump_dir *' in the first argument instead of 'char **'. The added entry is
++ * stored in 'reported_to' dump directory file.
++ */
++#define add_reported_to_entry libreport_add_reported_to_entry
++void add_reported_to_entry(struct dump_dir *dd, struct report_result *result);
++
+ #define free_report_result libreport_free_report_result
+ void free_report_result(struct report_result *result);
+ #define find_in_reported_to_data libreport_find_in_reported_to_data
+@@ -137,6 +177,29 @@ void delete_dump_dir(const char *dirname);
+ int dump_dir_accessible_by_uid(const char *dirname, uid_t uid);
+ int fdump_dir_accessible_by_uid(int dir_fd, uid_t uid);
+ 
++/* Creates a new archive from the dump directory contents
++ *
++ * The dd argument must be opened for reading.
++ *
++ * The archive_name must not exist. The file will be created with 0600 mode.
++ *
++ * The archive type is deduced from archive_name suffix. The supported archive
++ * suffixes are the following:
++ *   - '.tag.gz' (note: the implementation uses child gzip process)
++ *
++ * The archive will include only the files that are not in the exclude_elements
++ * list. See get_global_always_excluded_elements().
++ *
++ * The argument "flags" is currently unused.
++ *
++ * @return 0 on success; otherwise non-0 value. -ENOSYS if archive type is not
++ * supported. -EEXIST if the archive file already exists. -ECHILD if child
++ * process fails. Other negative values can be converted to errno values by
++ * turning them positive.
++ */
++int dd_create_archive(struct dump_dir *dd, const char *archive_name,
++        string_vector_ptr_t exclude_elements, int flags);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index 3d03427..361ff23 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -455,6 +455,9 @@ extern int xfunc_error_retval;
+ #define EXIT_CANCEL_BY_USER 69
+ #define EXIT_STOP_EVENT_RUN 70
+ 
++#define set_xfunc_error_retval libreport_set_xfunc_error_retval
++void set_xfunc_error_retval(int retval);
++
+ /* Verbosity level */
+ #define g_verbose libreport_g_verbose
+ extern int g_verbose;
+@@ -601,6 +604,17 @@ char* get_environ(pid_t pid);
+ #define iso_date_string libreport_iso_date_string
+ char *iso_date_string(const time_t *pt);
+ #define LIBREPORT_ISO_DATE_STRING_SAMPLE "YYYY-MM-DD-hh:mm:ss"
++#define LIBREPORT_ISO_DATE_STRING_FORMAT "%Y-%m-%d-%H:%M:%S"
++
++/* Parses date into integer UNIX time stamp
++ *
++ * @param date The parsed date string
++ * @param pt Return value
++ * @return 0 on success; otherwise non-0 number. -EINVAL if the parameter date
++ * does not match LIBREPORT_ISO_DATE_STRING_FORMAT
++ */
++#define iso_date_string_parse libreport_iso_date_string_parse
++int iso_date_string_parse(const char *date, time_t *pt);
+ 
+ enum {
+     MAKEDESC_SHOW_FILES     = (1 << 0),
+@@ -891,6 +905,28 @@ void show_usage_and_die(const char *usage, const struct options *opt) NORETURN;
+  */
+ struct abrt_post_state;
+ 
++/* Decomposes uri to its base elements, removes userinfo out of the hostname and
++ * composes a new uri without userinfo.
++ *
++ * The function does not validate the url.
++ *
++ * @param uri The uri that might contain userinfo
++ * @param result The userinfo free uri will be store here. Cannot be null. Must
++ * be de-allocated by free.
++ * @param scheme Scheme of the uri. Can be NULL. Result can be NULL. Result
++ * must be de-allocated by free.
++ * @param hostname Hostname of the uri. Can be NULL. Result can be NULL. Result
++ * must be de-allocated by free.
++ * @param username Username of the uri. Can be NULL. Result can be NULL. Result
++ * must be de-allocated by free.
++ * @param password Password of the uri. Can be NULL. Result can be NULL. Result
++ * must be de-allocated by free.
++ * @param location Location of the uri. Can be NULL. Result is never NULL. Result
++ * must be de-allocated by free.
++ */
++#define uri_userinfo_remove libreport_uri_userinfo_remove
++int uri_userinfo_remove(const char *uri, char **result, char **scheme, char **hostname, char **username, char **password, char **location);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/lib/Makefile.am b/src/lib/Makefile.am
+index ee0363f..d3d4081 100644
+--- a/src/lib/Makefile.am
++++ b/src/lib/Makefile.am
+@@ -53,7 +53,8 @@ libreport_la_SOURCES = \
+     utf8.c \
+     file_list.c \
+     file_obj.c \
+-    global_configuration.c
++    global_configuration.c \
++    uriparser.c
+ 
+ libreport_la_CPPFLAGS = \
+     -Wall -Wwrite-strings -Werror \
+@@ -73,6 +74,7 @@ libreport_la_CPPFLAGS = \
+     $(SATYR_CFLAGS) \
+     -D_GNU_SOURCE
+ libreport_la_LDFLAGS = \
++    -ltar \
+     -version-info 0:1:0
+ libreport_la_LIBADD = \
+     $(JSON_C_LIBS) \
+diff --git a/src/lib/abrt_curl.c b/src/lib/abrt_curl.c
+index 9c23dd8..1c069e6 100644
+--- a/src/lib/abrt_curl.c
++++ b/src/lib/abrt_curl.c
+@@ -559,24 +559,18 @@ char *upload_file(const char *url, const char *filename, map_string_t *settings)
+ {
+     /* we don't want to print the whole url as it may contain password
+      * rhbz#856960
+-     * there can be '@' in the login or password so let's try to find the
+-     * first '@' from the end
++     *
++     * jfilak:
++     * We want to print valid URLs in useful messages.
++     *
++     * The old code had this approach:
++     *   there can be '@' in the login or password so let's try to find the
++     *   first '@' from the end
++     *
++     * The new implementation decomposes URI to its base elements and uses only
++     * scheme and hostname for the logging purpose. These elements should not
++     * contain any sensitive information.
+      */
+-    const char *clean_url = strrchr(url, '@');
+-    if (clean_url)
+-        clean_url++;
+-    else
+-        clean_url = url;
+-
+-    log(_("Sending %s to %s"), filename, clean_url);
+-
+-    char *whole_url;
+-    unsigned len = strlen(url);
+-    if (len > 0 && url[len-1] == '/')
+-        whole_url = concat_path_file(url, strrchr(filename, '/') ? : filename);
+-    else
+-        whole_url = xstrdup(url);
+-
+     abrt_post_state_t *state = new_abrt_post_state(ABRT_POST_WANT_ERROR_MSG);
+ 
+     if (settings != NULL)
+@@ -591,6 +585,35 @@ char *upload_file(const char *url, const char *filename, map_string_t *settings)
+             VERB3 log("Using SSH private key '%s'", state->client_ssh_private_keyfile);
+     }
+ 
++    char *whole_url = NULL;
++    char *scheme = NULL;
++    char *hostname = NULL;
++    char *username = NULL;
++    char *password = NULL;
++    char *clean_url = NULL;
++
++    if (uri_userinfo_remove(url, &clean_url, &scheme, &hostname, &username, &password, NULL) != 0)
++        goto finito;
++
++    if (scheme == NULL || hostname == NULL)
++    {
++        log(_("Ingoring URL without scheme and hostname"));
++        goto finito;
++    }
++
++    if (username && (state->username == NULL || state->username[0] == '\0'))
++    {
++        state->username = username;
++        state->password = password;
++    }
++
++    unsigned len = strlen(clean_url);
++    if (len > 0 && clean_url[len-1] == '/')
++        whole_url = concat_path_file(clean_url, strrchr(filename, '/') ? : filename);
++    else
++        whole_url = xstrdup(clean_url);
++
++    log(_("Sending %s to %s//%s"), filename, scheme, hostname);
+     abrt_post(state,
+                 whole_url,
+                 /*content_type:*/ "???",
+@@ -613,10 +636,17 @@ char *upload_file(const char *url, const char *filename, map_string_t *settings)
+     else
+     {
+         /* This ends up a "reporting status message" in abrtd */
+-        log(_("Successfully sent %s to %s"), filename, clean_url);
++        log(_("Successfully created %s"), whole_url);
+     }
+ 
++finito:
+     free_abrt_post_state(state);
+ 
++    free(password);
++    free(username);
++    free(hostname);
++    free(scheme);
++    free(clean_url);
++
+     return whole_url;
+ }
+diff --git a/src/lib/dump_dir.c b/src/lib/dump_dir.c
+index 7fa8f2f..338e174 100644
+--- a/src/lib/dump_dir.c
++++ b/src/lib/dump_dir.c
+@@ -17,6 +17,7 @@
+     51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+ #include <sys/utsname.h>
++#include <libtar.h>
+ #include "internal_libreport.h"
+ 
+ // Locking logic:
+@@ -1121,6 +1122,18 @@ void add_reported_to(struct dump_dir *dd, const char *line)
+     free(reported_to);
+ }
+ 
++void add_reported_to_entry(struct dump_dir *dd, struct report_result *result)
++{
++    if (!dd->locked)
++        error_msg_and_die("dump_dir is not opened"); /* bug */
++
++    char *reported_to = dd_load_text_ext(dd, FILENAME_REPORTED_TO, DD_FAIL_QUIETLY_ENOENT | DD_LOAD_TEXT_RETURN_NULL_ON_FAILURE);
++    if (add_reported_to_entry_data(&reported_to, result))
++        dd_save_text(dd, FILENAME_REPORTED_TO, reported_to);
++
++    free(reported_to);
++}
++
+ report_result_t *find_in_reported_to(struct dump_dir *dd, const char *prefix)
+ {
+     char *reported_to = dd_load_text_ext(dd, FILENAME_REPORTED_TO,
+@@ -1249,3 +1262,119 @@ int dump_dir_accessible_by_uid(const char *dirname, uid_t uid)
+ 
+     return 0;
+ }
++
++/* flags - for future needs */
++int dd_create_archive(struct dump_dir *dd, const char *archive_name,
++        string_vector_ptr_t exclude_elements, int flags)
++{
++    if (suffixcmp(archive_name, ".tar.gz") != 0)
++        return -ENOSYS;
++
++    int result = 0;
++    pid_t child;
++    TAR* tar = NULL;
++    int pipe_from_parent_to_child[2];
++    xpipe(pipe_from_parent_to_child);
++    child = fork();
++    if (child < 0)
++    {
++        result = -errno;
++        /* Don't die, let the caller to execute his clean-up code. */
++        perror_msg("vfork");
++        return result;
++    }
++    if (child == 0)
++    {
++        /* child */
++        close(pipe_from_parent_to_child[1]);
++        xmove_fd(pipe_from_parent_to_child[0], 0);
++
++        int fd = open(archive_name, O_WRONLY | O_CREAT | O_EXCL, 0600);
++        if (fd < 0)
++        {
++            /* This r might interfer with exit status of gzip, but it is
++             * very unlikely (man 1 gzip):
++             *   Exit status is normally 0; if an error occurs, exit status is
++             *   1. If a warning occurs, exit status is 2.
++             */
++            result = errno == EEXIST ? 100 : 3;
++            perror_msg("Can't open '%s'", archive_name);
++            exit(result);
++        }
++
++        xmove_fd(fd, 1);
++        execlp("gzip", "gzip", NULL);
++        perror_msg_and_die("Can't execute '%s'", "gzip");
++    }
++    close(pipe_from_parent_to_child[0]);
++
++    /* If child died (say, in xopen), then parent might get SIGPIPE.
++     * We want to properly unlock dd, therefore we must not die on SIGPIPE:
++     */
++    sighandler_t old_handler = signal(SIGPIPE, SIG_IGN);
++
++    /* Create tar writer object */
++    if (tar_fdopen(&tar, pipe_from_parent_to_child[1], (char*)archive_name,
++                /*fileops:(standard)*/ NULL, O_WRONLY | O_CREAT, 0644, TAR_GNU) != 0)
++    {
++        result = -errno;
++        log(_("Failed to open TAR writer"));
++        goto finito;
++    }
++
++    /* Write data to the tarball */
++    dd_init_next_file(dd);
++    char *short_name, *full_name;
++    while (dd_get_next_file(dd, &short_name, &full_name))
++    {
++        if (!(exclude_elements && is_in_string_list(short_name, exclude_elements)))
++        {
++           if (tar_append_file(tar, full_name, short_name))
++               result = -errno;
++        }
++
++        free(short_name);
++        free(full_name);
++
++        if (result != 0)
++            goto finito;
++    }
++
++    /* Close tar writer... */
++    if (tar_append_eof(tar) != 0)
++    {
++        result = -errno;
++        log(_("Failed to finalize TAR archive"));
++        goto finito;
++    }
++
++finito:
++    signal(SIGPIPE, old_handler);
++
++    if (tar != NULL && tar_close(tar) != 0)
++    {
++        result = -errno;
++        log(_("Failed to close TAR writer"));
++    }
++
++    /* ...and check that gzip child finished successfully */
++    int status;
++    safe_waitpid(child, &status, 0);
++    if (status != 0)
++    {
++        result = -ECHILD;
++        if (WIFSIGNALED(status))
++            log(_("gzip killed with signal %d"), WTERMSIG(status));
++        else if (WIFEXITED(status))
++        {
++            if (WEXITSTATUS(status) == 100)
++                result = -EEXIST;
++            else
++                log(_("gzip exited with %d"), WEXITSTATUS(status));
++        }
++        else
++            log(_("gzip process failed"));
++    }
++
++    return result;
++}
+diff --git a/src/lib/iso_date_string.c b/src/lib/iso_date_string.c
+index a7fb867..d1c092a 100644
+--- a/src/lib/iso_date_string.c
++++ b/src/lib/iso_date_string.c
+@@ -33,7 +33,32 @@ char *iso_date_string(const time_t *pt)
+     if (ptm->tm_year+1900 < 0 || ptm->tm_year+1900 > 9999)
+         error_msg_and_die("Year=%d?? Aborting", ptm->tm_year+1900);
+ 
+-    strftime(buf, sizeof(buf), "%Y-%m-%d-%H:%M:%S", ptm);
++    strftime(buf, sizeof(buf), LIBREPORT_ISO_DATE_STRING_FORMAT, ptm);
+ 
+     return buf;
+ }
++
++int iso_date_string_parse(const char *date, time_t *pt)
++{
++    struct tm local;
++    const char *r = strptime(date, LIBREPORT_ISO_DATE_STRING_FORMAT, &local);
++
++    if (r == NULL)
++    {
++        log(_("String doesn't seem to be a date: '%s'"), date);
++        return -EINVAL;
++    }
++    if (*r != '\0')
++    {
++        log(_("The date: '%s' has unrecognized suffix: '%s'"), date, r);
++        return -EINVAL;
++    }
++    if (local.tm_year < 70)
++    {
++        log(_("The date: '%s' is out of UNIX time stamp range"), date);
++        return -EINVAL;
++    }
++
++    *pt = mktime(&local);
++    return 0;
++}
+diff --git a/src/lib/logging.c b/src/lib/logging.c
+index 644753b..3b2a4cd 100644
+--- a/src/lib/logging.c
++++ b/src/lib/logging.c
+@@ -26,6 +26,11 @@ int logmode = LOGMODE_STDIO;
+ int xfunc_error_retval = EXIT_FAILURE;
+ int g_verbose;
+ 
++void set_xfunc_error_retval(int retval)
++{
++    xfunc_error_retval = retval;
++}
++
+ void xfunc_die(void)
+ {
+     exit(xfunc_error_retval);
+diff --git a/src/lib/reported_to.c b/src/lib/reported_to.c
+index 98dbbc7..8896e97 100644
+--- a/src/lib/reported_to.c
++++ b/src/lib/reported_to.c
+@@ -45,6 +45,45 @@ int add_reported_to_data(char **reported_to, const char *line)
+     return 1;
+ }
+ 
++int add_reported_to_entry_data(char **reported_to, struct report_result *result)
++{
++    if (NULL == result->label || result->label[0] == '\0')
++    {
++        log(_("Report result label mustn't be empty string."));
++        return -EINVAL;
++    }
++
++    if (strchr(result->label, ':') != NULL)
++    {
++        log(_("Report result label mustn't contain ':' character."));
++        return -EINVAL;
++    }
++
++    struct strbuf *buf = strbuf_new();
++    strbuf_append_strf(buf, "%s:", result->label);
++
++    if (result->timestamp != 0)
++    {
++        const char *const time = iso_date_string(&(result->timestamp));
++        strbuf_append_strf(buf, " TIME=%s", time);
++    }
++
++    if (result->url != NULL)
++        strbuf_append_strf(buf, " URL=%s", result->url);
++
++    if (result->bthash != NULL)
++        strbuf_append_strf(buf, " BTHASH=%s", result->bthash);
++
++    /* MSG must be last because the value is delimited by new line character */
++    if (result->msg != NULL)
++        strbuf_append_strf(buf, " MSG=%s", result->msg);
++
++    const int r = add_reported_to_data(reported_to, buf->buf);
++    strbuf_free(buf);
++
++    return r;
++}
++
+ void free_report_result(struct report_result *result)
+ {
+     if (!result)
+@@ -94,13 +133,15 @@ static report_result_t *parse_reported_line(const char *line, size_t label_len)
+             free(result->bthash);
+             result->bthash = xstrndup(line + 7, end - (line + 7));
+         }
+-        //else
+-        //if (strncmp(line, "TIME=", 5) == 0)
+-        //{
+-        //    free(result->time);
+-        //    result->time = foo(line + 5, end - (line + 5));
+-        //}
+-        //...
++        if (strncmp(line, "TIME=", 5) == 0)
++        {
++            char *datetime = xstrndup(line + 5, end - (line + 5));
++            const int r = iso_date_string_parse(datetime, &result->timestamp);
++            if (r != 0)
++                log(_("Ignored invalid ISO date of report result '%s'"), result->label);
++
++            free(datetime);
++        }
+         line = end;
+         continue;
+     }
+diff --git a/src/lib/ureport.c b/src/lib/ureport.c
+index 6bcd981..da9f746 100644
+--- a/src/lib/ureport.c
++++ b/src/lib/ureport.c
+@@ -650,15 +650,18 @@ ureport_server_response_save_in_dump_dir(struct ureport_server_response *resp,
+ 
+     if (resp->urr_bthash)
+     {
+-        char *msg = xasprintf("uReport: BTHASH=%s", resp->urr_bthash);
+-        add_reported_to(dd, msg);
+-        free(msg);
+-
+-        char *report_url = ureport_server_response_get_report_url(resp, config);
+-        msg = xasprintf("ABRT Server: URL=%s", report_url);
+-        add_reported_to(dd, msg);
+-        free(msg);
+-        free(report_url);
++        {
++            report_result_t rr = { .label = (char *)"uReport" };
++            rr.bthash = resp->urr_bthash;
++            add_reported_to_entry(dd, &rr);
++        }
++
++        {
++            report_result_t rr = { .label = (char *)"ABRT Server" };
++            rr.url = ureport_server_response_get_report_url(resp, config);
++            add_reported_to_entry(dd, &rr);
++            free(rr.url);
++        }
+     }
+ 
+     if (resp->urr_reported_to_list)
+diff --git a/src/lib/uriparser.c b/src/lib/uriparser.c
+new file mode 100644
+index 0000000..07d9e88
+--- /dev/null
++++ b/src/lib/uriparser.c
+@@ -0,0 +1,166 @@
++/*
++    Copyright (C) 2015  ABRT team
++    Copyright (C) 2015  RedHat Inc
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License along
++    with this program; if not, write to the Free Software Foundation, Inc.,
++    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++*/
++
++#include "internal_libreport.h"
++
++#include <regex.h>
++
++int uri_userinfo_remove(const char *uri, char **result, char **scheme, char **hostname, char **username, char **password, char **location)
++{
++    /* https://www.ietf.org/rfc/rfc3986.txt
++     * Appendix B.  Parsing a URI Reference with a Regular Expression
++     *
++     * scheme    = $2
++     * authority = $4
++     * location  = $5 <- introduced by jfilak
++     * path      = $6
++     * query     = $8
++     * fragment  = $10
++     *                         12            3  4          56       7   8        9 10 */
++    const char *rfc3986_rx = "^(([^:/?#]+):)?(//([^/?#]*))?(([^?#]*)(\\?([^#]*))?(#(.*))?)$";
++    regex_t re;
++    int r = regcomp(&re, rfc3986_rx, REG_EXTENDED);
++    assert(r == 0 || !"BUG: invalid regular expression");
++
++    regmatch_t matchptr[10];
++    r = regexec(&re, uri, ARRAY_SIZE(matchptr), matchptr, 0);
++    if (r != 0)
++    {
++        VERB3 log("URI does not match RFC3986 regular expression.");
++        return -EINVAL;
++    }
++
++    char *ptr = xzalloc((strlen(uri) + 1) * sizeof(char));
++    *result = ptr;
++    if (scheme != NULL)
++        *scheme = NULL;
++    if (hostname != NULL)
++        *hostname = NULL;
++    if (username != NULL)
++        *username = NULL;
++    if (password != NULL)
++        *password = NULL;
++    if (location != NULL)
++        *location= NULL;
++
++    /* https://www.ietf.org/rfc/rfc3986.txt
++     * 5.3.  Component Recomposition
++     *
++      result = ""
++
++      if defined(scheme) then
++         append scheme to result;
++         append ":" to result;
++      endif;
++
++      if defined(authority) then
++         append "//" to result;
++         append authority to result;
++      endif;
++
++      append path to result;
++
++      if defined(query) then
++         append "?" to result;
++         append query to result;
++      endif;
++
++      if defined(fragment) then
++         append "#" to result;
++         append fragment to result;
++      endif;
++
++      return result;
++    */
++
++#define APPEND_MATCH(i, output) \
++    if (matchptr[(i)].rm_so != -1) \
++    { \
++        size_t len = 0; \
++        len = matchptr[(i)].rm_eo - matchptr[(i)].rm_so; \
++        if (output) *output = xstrndup(uri + matchptr[(i)].rm_so, len); \
++        strncpy(ptr, uri + matchptr[(i)].rm_so, len); \
++        ptr += len; \
++    }
++
++    /* Append "scheme:" if defined */
++    APPEND_MATCH(1, scheme);
++
++    /* If authority is defined, append "//" */
++    regmatch_t *match_authority = matchptr + 3;
++    if (match_authority->rm_so != -1)
++    {
++        strcat(ptr, "//");
++        ptr += 2;
++    }
++
++    ++match_authority;
++    /* If authority has address part, remove userinfo and add the address */
++    if (match_authority->rm_so != -1)
++    {
++        size_t len = match_authority->rm_eo - match_authority->rm_so;
++        const char *authority = uri + match_authority->rm_so;
++
++        /* Find the last '@'. Just for the case some used @ in username or
++         * password */
++        size_t at = len;
++        while (at != 0)
++        {
++            if (authority[--at] != '@')
++                continue;
++
++            /* Find the first ':' before @. There should not be more ':' but this
++             * is the most secure way -> avoid leaking an excerpt of a password
++             * containing ':'.*/
++            size_t colon = 0;
++            while (colon < at)
++            {
++                if (authority[colon] != ':')
++                {
++                    ++colon;
++                    continue;
++                }
++
++                if (password != NULL)
++                    *password = xstrndup(authority + colon + 1, at - colon - 1);
++
++                break;
++            }
++
++            if (username != NULL)
++                *username = xstrndup(authority, colon);
++
++            ++at;
++            break;
++        }
++
++        len -= at;
++
++        if (hostname != NULL)
++            *hostname = xstrndup(authority + at, len);
++
++        strncpy(ptr, authority + at, len);
++        ptr += len;
++    }
++
++    /* Append path, query and fragment or "" */
++    APPEND_MATCH(5, location);
++
++    return 0;
++}
+diff --git a/src/plugins/Makefile.am b/src/plugins/Makefile.am
+index 5f9421e..e0046fd 100644
+--- a/src/plugins/Makefile.am
++++ b/src/plugins/Makefile.am
+@@ -107,7 +107,6 @@ reporter_rhtsupport_CPPFLAGS = \
+     $(XMLRPC_CFLAGS) $(XMLRPC_CLIENT_CFLAGS) \
+     -D_GNU_SOURCE \
+     -Wall -Wwrite-strings -Werror
+-reporter_rhtsupport_LDFLAGS = -ltar
+ reporter_rhtsupport_LDADD = \
+     $(GLIB_LIBS) \
+     $(XMLRPC_LIBS) $(XMLRPC_CLIENT_LIBS) \
+@@ -131,7 +130,6 @@ reporter_upload_CPPFLAGS = \
+     $(LIBREPORT_CFLAGS) \
+     -D_GNU_SOURCE \
+     -Wall -Wwrite-strings -Werror
+-reporter_upload_LDFLAGS = -ltar
+ reporter_upload_LDADD = \
+     $(GLIB_LIBS) \
+     ../lib/libabrt_web.la \
+diff --git a/src/plugins/reporter-bugzilla.c b/src/plugins/reporter-bugzilla.c
+index 9b2a73d..3a8b16d 100644
+--- a/src/plugins/reporter-bugzilla.c
++++ b/src/plugins/reporter-bugzilla.c
+@@ -538,9 +538,10 @@ int main(int argc, char **argv)
+     dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
+     if (dd)
+     {
+-        char *msg = xasprintf("Bugzilla: URL=%s/show_bug.cgi?id=%u", rhbz.b_bugzilla_url, bz->bi_id);
+-        add_reported_to(dd, msg);
+-        free(msg);
++        report_result_t rr = { .label = (char *)"Bugzilla" };
++        rr.url = xasprintf("%s/show_bug.cgi?id=%u", rhbz.b_bugzilla_url, bz->bi_id);
++        add_reported_to_entry(dd, &rr);
++        free(rr.url);
+         dd_close(dd);
+     }
+ 
+diff --git a/src/plugins/reporter-kerneloops.c b/src/plugins/reporter-kerneloops.c
+index 792f20a..1f733eb 100644
+--- a/src/plugins/reporter-kerneloops.c
++++ b/src/plugins/reporter-kerneloops.c
+@@ -118,9 +118,9 @@ static void report_to_kerneloops(
+     struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
+     if (dd)
+     {
+-        char *msg = xasprintf("kerneloops: URL=%s", submitURL);
+-        add_reported_to(dd, msg);
+-        free(msg);
++        report_result_t rr = { .label = (char *)"kerneloops" };
++        rr.url = (char *)submitURL;
++        add_reported_to_entry(dd, &rr);
+         dd_close(dd);
+     }
+ 
+diff --git a/src/plugins/reporter-mailx.c b/src/plugins/reporter-mailx.c
+index 6974f0e..710fe2b 100644
+--- a/src/plugins/reporter-mailx.c
++++ b/src/plugins/reporter-mailx.c
+@@ -124,9 +124,10 @@ static void create_and_send_email(
+         struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
+         if (dd)
+         {
+-            char *msg = xasprintf("email: %s", email_to);
+-            add_reported_to(dd, msg);
+-            free(msg);
++            report_result_t rr = { .label = (char *)"email" };
++            rr.url = xasprintf("mailto:%s", email_to);
++            add_reported_to_entry(dd, &rr);
++            free(rr.url);
+             dd_close(dd);
+         }
+     }
+diff --git a/src/plugins/reporter-print.c b/src/plugins/reporter-print.c
+index ec0c5bb..f5bb7af 100644
+--- a/src/plugins/reporter-print.c
++++ b/src/plugins/reporter-print.c
+@@ -131,9 +131,10 @@ int main(int argc, char **argv)
+             struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
+             if (dd)
+             {
+-                char *msg = xasprintf("file: %s", output_file);
+-                add_reported_to(dd, msg);
+-                free(msg);
++                report_result_t rr = { .label = (char *)"file" };
++                rr.url = xasprintf("file://%s", output_file);
++                add_reported_to_entry(dd, &rr);
++                free(rr.url);
+                 dd_close(dd);
+             }
+         }
+diff --git a/src/plugins/reporter-rhtsupport.c b/src/plugins/reporter-rhtsupport.c
+index dce9c45..25055e2 100644
+--- a/src/plugins/reporter-rhtsupport.c
++++ b/src/plugins/reporter-rhtsupport.c
+@@ -835,13 +835,12 @@ int main(int argc, char **argv)
+         struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
+         if (dd)
+         {
+-            char *msg = xasprintf("RHTSupport: TIME=%s URL=%s%s%s",
+-                    iso_date_string(NULL),
+-                    result->url,
+-                    result->msg ? " MSG=" : "", result->msg ? result->msg : ""
+-            );
+-            add_reported_to(dd, msg);
+-            free(msg);
++            struct report_result rr = { .label = (char *)"RHTSupport" };
++            rr.url = result->url;
++            rr.msg = result->msg;
++            time(&rr.timestamp);
++            add_reported_to_entry(dd, &rr);
++
+             dd_close(dd);
+             if (result->msg)
+                 log("%s", result->msg);
+diff --git a/src/plugins/reporter-upload.c b/src/plugins/reporter-upload.c
+index c341969..92b49b4 100644
+--- a/src/plugins/reporter-upload.c
++++ b/src/plugins/reporter-upload.c
+@@ -19,113 +19,45 @@
+ #include <libtar.h>
+ #include "abrt_curl.h"
+ #include "internal_libreport.h"
++#include "client.h"
++
++static char *ask_url(const char *message)
++{
++    char *url = ask(message);
++    if (url == NULL || url[0] == '\0')
++    {
++        set_xfunc_error_retval(EXIT_CANCEL_BY_USER);
++        error_msg_and_die(_("Can't continue without URL"));
++    }
++
++    return url;
++}
+ 
+ static int create_and_upload_archive(
+                 const char *dump_dir_name,
+-                map_string_t *settings)
++                const char *url,
++                map_string_t *settings,
++                char **remote_name)
+ {
+     int result = 1; /* error */
+ 
+-    pid_t child;
+-    TAR* tar = NULL;
+-    const char* errmsg = NULL;
+-    char* tempfile = NULL;
+-
+     struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
+     if (!dd)
+         xfunc_die(); /* error msg is already logged by dd_opendir */
+ 
+-    /* Gzipping e.g. 0.5gig coredump takes a while. Let client know what we are doing */
+-    log(_("Compressing data"));
+-
+-//TODO:
+-//Encrypt = yes
+-//ArchiveType = .tar.bz2
+-//ExcludeFiles = foo,bar*,b*z
+-    char* env;
+-    env = getenv("Upload_URL");
+-    const char *url = (env ? env : get_map_string_item_or_empty(settings, "URL"));
+-
+     /* Create a child gzip which will compress the data */
+     /* SELinux guys are not happy with /tmp, using /var/run/abrt */
+     /* Reverted back to /tmp for ABRT2 */
++    char* tempfile = NULL;
+     tempfile = concat_path_basename("/tmp", dump_dir_name);
+     tempfile = append_to_malloced_string(tempfile, ".tar.gz");
+ 
+-    int pipe_from_parent_to_child[2];
+-    xpipe(pipe_from_parent_to_child);
+-    child = vfork();
+-    if (child == 0)
+-    {
+-        /* child */
+-        close(pipe_from_parent_to_child[1]);
+-        xmove_fd(pipe_from_parent_to_child[0], 0);
+-        xmove_fd(xopen3(tempfile, O_WRONLY | O_CREAT | O_EXCL, 0600), 1);
+-        execlp("gzip", "gzip", NULL);
+-        perror_msg_and_die("Can't execute '%s'", "gzip");
+-    }
+-    close(pipe_from_parent_to_child[0]);
+-
+-    /* If child died (say, in xopen), then parent might get SIGPIPE.
+-     * We want to properly unlock dd, therefore we must not die on SIGPIPE:
+-     */
+-    signal(SIGPIPE, SIG_IGN);
+-
+-    /* Create tar writer object */
+-    if (tar_fdopen(&tar, pipe_from_parent_to_child[1], tempfile,
+-                /*fileops:(standard)*/ NULL, O_WRONLY | O_CREAT, 0644, TAR_GNU) != 0)
+-    {
+-        errmsg = "Can't create temporary file in /tmp";
+-        goto ret;
+-    }
+-
+-    /* Write data to the tarball */
+-    {
+-        char *exclude_from_report = getenv("EXCLUDE_FROM_REPORT");
+-        dd_init_next_file(dd);
+-        char *short_name, *full_name;
+-        while (dd_get_next_file(dd, &short_name, &full_name))
+-        {
+-            if (exclude_from_report && is_in_comma_separated_list(short_name, exclude_from_report))
+-                goto next;
+-
+-            // dd_get_next_file guarantees that it's a REG:
+-            //struct stat stbuf;
+-            //if (stat(full_name, &stbuf) != 0)
+-            // || !S_ISREG(stbuf.st_mode)
+-            //) {
+-            //     goto next;
+-            //}
+-            if (tar_append_file(tar, full_name, short_name) != 0)
+-            {
+-                errmsg = "Can't create temporary file in /tmp";
+-                free(short_name);
+-                free(full_name);
+-                goto ret;
+-            }
+- next:
+-            free(short_name);
+-            free(full_name);
+-        }
+-    }
+-    dd_close(dd);
+-    dd = NULL;
+-
+-    /* Close tar writer... */
+-    if (tar_append_eof(tar) != 0 || tar_close(tar) != 0)
+-    {
+-        errmsg = "Can't create temporary file in /tmp";
+-        goto ret;
+-    }
+-    tar = NULL;
+-    /* ...and check that gzip child finished successfully */
+-    int status;
+-    safe_waitpid(child, &status, 0);
+-    child = -1;
+-    if (status != 0)
++    string_vector_ptr_t exclude_from_report = get_global_always_excluded_elements();
++    /* Gzipping e.g. 0.5gig coredump takes a while. Let client know what we are doing */
++    log(_("Compressing data"));
++    if (dd_create_archive(dd, tempfile, exclude_from_report, 0) != 0)
+     {
+-        /* We assume the error was out-of-disk-space or out-of-quota */
+-        errmsg = "Can't create temporary file in /tmp";
++        error_msg("Can't create temporary file in /tmp");
+         goto ret;
+     }
+ 
+@@ -133,39 +65,38 @@ static int create_and_upload_archive(
+     /* Upload from /tmp to /tmp + deletion -> BAD, exclude this possibility */
+     if (url && url[0] && strcmp(url, "file:///tmp/") != 0)
+     {
+-        char *remote_name = upload_file(url, tempfile, settings);
+-        result = (remote_name == NULL); /* error if NULL */
+-        free(remote_name);
+-        /* cleanup code will delete tempfile */
++        char *tmp = upload_file(url, tempfile, settings);
++        if (remote_name)
++            *remote_name = tmp;
++        else
++            free(tmp);
++
++        result = (tmp == NULL);
+     }
+     else
+     {
+         result = 0; /* success */
+         log(_("Archive is created: '%s'"), tempfile);
+-        free(tempfile);
++        *remote_name = tempfile;
+         tempfile = NULL;
+     }
+ 
+  ret:
+     dd_close(dd);
+-    if (tar)
+-        tar_close(tar);
+-    /* close(pipe_from_parent_to_child[1]); - tar_close() does it itself */
+-    if (child > 0)
+-        safe_waitpid(child, NULL, 0);
+     if (tempfile)
+     {
+         unlink(tempfile);
+         free(tempfile);
+     }
+-    if (errmsg)
+-        error_msg_and_die("%s", errmsg);
+ 
+     return result;
+ }
+ 
+ int main(int argc, char **argv)
+ {
++    if (!load_global_configuration())
++        error_msg_and_die("Cannot continue without libreport global configuration.");
++
+     abrt_init(argv);
+ 
+     /* I18n */
+@@ -240,8 +171,32 @@ int main(int argc, char **argv)
+     else if (getenv("Upload_SSHPrivateKey") != NULL)
+         set_map_string_item_from_string(settings, "SSHPrivateKey", getenv("Upload_SSHPrivateKey"));
+ 
+-    int result = create_and_upload_archive(dump_dir_name, settings);
++    char *input_url = NULL;
++    const char *conf_url = getenv("Upload_URL");
++    if (!conf_url || conf_url[0] == '\0')
++        conf_url = url;
++    if (!conf_url || conf_url[0] == '\0')
++        conf_url = get_map_string_item_or_empty(settings, "URL");
++    if (!conf_url || conf_url[0] == '\0')
++        conf_url = input_url = ask_url(_("Please enter a URL (scp, ftp, etc.) where the problem data is to be exported:"));
++
++    char *remote_name = NULL;
++    const int result = create_and_upload_archive(dump_dir_name, conf_url, settings, &remote_name);
++    if (result != 0)
++        goto finito;
++
++    struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
++    if (dd)
++    {
++        report_result_t rr = { .label = (char *)"upload" };
++        rr.url = remote_name,
++        add_reported_to_entry(dd, &rr);
++        dd_close(dd);
++    }
++    free(remote_name);
+ 
++finito:
++    free(input_url);
+     free_map_string(settings);
+     return result;
+ }
+diff --git a/src/plugins/reporter-ureport.c b/src/plugins/reporter-ureport.c
+index 6dc89d4..0157036 100644
+--- a/src/plugins/reporter-ureport.c
++++ b/src/plugins/reporter-ureport.c
+@@ -61,6 +61,11 @@ int main(int argc, char **argv)
+     int rhbz_bug_from_rt = 0;
+     const char *email_address = NULL;
+     int email_address_from_env = 0;
++    char *attach_value = NULL;
++    char *attach_value_from_rt = NULL;
++    char *attach_value_from_rt_data = NULL;
++    char *report_result_type = NULL;
++    char *attach_type = NULL;
+     struct dump_dir *dd = NULL;
+     struct options program_options[] = {
+         OPT__VERBOSE(&g_verbose),
+@@ -84,11 +89,23 @@ int main(int argc, char **argv)
+                           _("attach RHBZ bug (requires -a|-A, conflicts with -B)")),
+         OPT_BOOL('B', "bug-id-rt", &rhbz_bug_from_rt,
+                           _("attach last RHBZ bug from reported_to (requires -a|-A, conflicts with -b)")),
++ /* va l ue */
++        OPT_STRING('l', "value", &attach_value, "DATA",
++                          _("attach value (requires -a|-A and -T, conflicts with -L)")),
++        OPT_STRING('L', "value-rt", &attach_value_from_rt, "FIELD",
++                          _("attach data of FIELD [URL] of the last report result (requires -a|-A, -r and -T, conflicts with -l)")),
++
++        OPT_STRING('r', "report-result-type", &report_result_type, "REPORT_RESULT_TYPE",
++                          _("use REPORT_RESULT_TYPE when looking for FIELD in reported_to (used only with -L)")),
++        OPT_STRING('T', "type", &attach_type, "ATTACHMENT_TYPE",
++                          _("attach DATA as ureporte attachment ATTACHMENT_TYPE (used only with -l|-L)")),
+         OPT_END(),
+     };
+ 
+     const char *program_usage_string = _(
+         "& [-v] [-c FILE] [-u URL] [-k] [-t SOURCE] [-h CREDENTIALS] [-A -a bthash -B -b bug-id -E -e email] [-d DIR]\n"
++        "  [-A -a bthash -T ATTACHMENT_TYPE -r REPORT_RESULT_TYPE -L RESULT_FIELD] [-d DIR]\n"
++        "  [-A -a bthash -T ATTACHMENT_TYPE -l DATA] [-d DIR]\n"
+         "& [-v] [-c FILE] [-u URL] [-k] [-t SOURCE] [-h CREDENTIALS] [-i AUTH_ITEMS]\\\n"
+         "  [-A -a bthash -B -b bug-id -E -e email] [-d DIR]\n"
+         "\n"
+@@ -130,7 +147,24 @@ int main(int argc, char **argv)
+     if (email_address && email_address_from_env)
+         error_msg_and_die("You need to pass either -e bthash or -E");
+ 
+-    if (ureport_hash_from_rt || rhbz_bug_from_rt)
++    if (attach_value && attach_value_from_rt)
++        error_msg_and_die("You need to pass either -l url or -L");
++
++    if ((attach_value || attach_value_from_rt) && attach_type == NULL)
++        error_msg_and_die("You need to pass -T together with -l and -L");
++
++    if (attach_value_from_rt)
++    {
++        if (report_result_type == NULL)
++            error_msg_and_die("You need to pass -r together with -L");
++
++        /* If you introduce a new recognized value, don't forget to update
++         * the documentation and the conditions below. */
++        if (strcmp(attach_value_from_rt, "URL") != 0)
++            error_msg_and_die("-L accepts only 'URL'");
++    }
++
++    if (ureport_hash_from_rt || rhbz_bug_from_rt ||  attach_value_from_rt)
+     {
+         dd = dd_opendir(dump_dir_path, DD_OPEN_READONLY);
+         if (!dd)
+@@ -168,6 +202,25 @@ int main(int argc, char **argv)
+             free_report_result(bz_result);
+         }
+ 
++        if (attach_value_from_rt)
++        {
++            report_result_t *result = find_in_reported_to(dd, report_result_type);
++
++            if (!result)
++                error_msg_and_die(_("This problem has not been reported to '%s'."), report_result_type);
++
++            /* If you introduce a new attach_value_from_rt recognized value,
++             * this condition will become invalid. */
++            if (!result->url)
++                error_msg_and_die(_("The report result '%s' is missing URL."), report_result_type);
++
++            /* Avoid the need to duplicate the string. */
++            attach_value = attach_value_from_rt_data = result->url;
++            result->url = NULL;
++
++            free_report_result(result);
++        }
++
+         dd_close(dd);
+     }
+ 
+@@ -181,7 +234,7 @@ int main(int argc, char **argv)
+ 
+     if (ureport_hash)
+     {
+-        if (rhbz_bug < 0 && !email_address)
++        if (rhbz_bug < 0 && !email_address && !attach_value)
+             error_msg_and_die(_("You need to specify bug ID, contact email or both"));
+ 
+         if (rhbz_bug >= 0)
+@@ -196,6 +249,12 @@ int main(int argc, char **argv)
+                 goto finalize;
+         }
+ 
++        if (attach_value)
++        {
++            if (ureport_attach_string(ureport_hash, attach_type, attach_value, &config))
++                goto finalize;
++        }
++
+         ret = 0;
+         goto finalize;
+     }
+@@ -239,6 +298,8 @@ int main(int argc, char **argv)
+     ureport_server_response_free(response);
+ 
+ finalize:
++    free(attach_value_from_rt_data);
++
+     if (config.ur_prefs.urp_auth_items == auth_items)
+         config.ur_prefs.urp_auth_items = NULL;
+ 
+diff --git a/tests/Makefile.am b/tests/Makefile.am
+index 373d74f..5789665 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -40,7 +40,9 @@ TESTSUITE_AT = \
+   global_config.at \
+   event_config.at \
+   problem_data.at \
+-  problem_report.at
++  problem_report.at \
++  iso_date.at \
++  uriparser.at
+ 
+ TESTSUITE_AT_IN = \
+   bugzilla_plugin.at
+diff --git a/tests/dump_dir.at b/tests/dump_dir.at
+index d61adc9..c70c41b 100644
+--- a/tests/dump_dir.at
++++ b/tests/dump_dir.at
+@@ -80,3 +80,280 @@ int main(void)
+     return 0;
+ }
+ ]])
++
++## ----------------- ##
++## dd_create_archive ##
++## ----------------- ##
++
++AT_TESTFUN([dd_create_archive],
++[[
++#include "internal_libreport.h"
++#include <libtar.h>
++#include <assert.h>
++
++void verify_archive(struct dump_dir *dd, const char *file_name,
++    const char **included_files,
++    const char **excluded_files)
++{
++    unsigned c = 0;
++    for (const char **i = included_files; i && *i; ++i)
++        ++c;
++    int *check_array = xzalloc(c * sizeof(int));
++
++    int pipe_from_parent_to_child[2];
++    xpipe(pipe_from_parent_to_child);
++    pid_t child = fork();
++    if (child < 0)
++        perror_msg_and_die("vfork");
++
++    if (child == 0)
++    {
++        /* child */
++        close(pipe_from_parent_to_child[0]);
++        xmove_fd(xopen(file_name, O_RDONLY), 0);
++        xmove_fd(pipe_from_parent_to_child[1], 1);
++        execlp("gzip", "gzip", "-d", NULL);
++        perror_msg_and_die("Can't execute '%s'", "gzip");
++    }
++    close(pipe_from_parent_to_child[1]);
++
++    /* If child died (say, in xopen), then parent might get SIGPIPE.
++     * We want to properly unlock dd, therefore we must not die on SIGPIPE:
++     */
++    signal(SIGPIPE, SIG_IGN);
++
++    TAR* tar = NULL;
++    /* Create tar writer object */
++    if (tar_fdopen(&tar, pipe_from_parent_to_child[0], (char *)file_name,
++                /*fileops:(standard)*/ NULL, O_RDONLY, 0644, TAR_GNU) != 0)
++    {
++        fprintf(stderr, "Failed to open the pipe to gzip for archive: '%s'\n", file_name);
++        abort();
++    }
++
++    int r = 0;
++    const char *real_file = "/tmp/libreport-attest-extracted";
++    while ((r = th_read(tar)) == 0)
++    {
++        char *path = th_get_pathname(tar);
++
++        if (!TH_ISREG(tar))
++        {
++            fprintf(stderr, "Not regular file: '%s', found in archive: '%s'\n", path, file_name);
++            continue;
++        }
++
++        const char **i = included_files;
++        for (c = 0; i && *i; ++i, ++c)
++        {
++            if (strcmp(*i, path) == 0)
++                break;
++        }
++
++        if (i && *i != NULL)
++        {
++            printf("Included file: '%s', found in archive '%s'\n", path, file_name);
++            check_array[c] += 1;
++
++            unlink(real_file);
++            if(tar_extract_regfile(tar, xstrdup(real_file)) != 0)
++            {
++                fprintf(stderr, "TAR failed to extract '%s' to '%s': %s\n", path, real_file, strerror(errno));
++                abort();
++            }
++
++            char *original = dd_load_text(dd, path);
++            assert(original != NULL);
++            assert(original[0] != '\0');
++
++            char *extracted = xmalloc_xopen_read_close("/tmp/libreport-attest-extracted", NULL);
++            assert(extracted != NULL);
++
++            if (strcmp(extracted, original) != 0)
++            {
++                fprintf(stderr, "Invalid file contents: '%s'\nExp: '%s'\nGot: '%s'\n", path, original, extracted);
++                abort();
++            }
++
++            free(original);
++            free(extracted);
++
++            continue;
++        }
++
++        i = excluded_files;
++        for (; i && *i; ++i)
++        {
++            if (strcmp(*i, path) == 0)
++                break;
++        }
++
++        if (i && *i != NULL)
++        {
++            fprintf(stderr, "Excluded file: '%s', found in archive '%s'\n", path, file_name);
++            abort();
++        }
++
++        fprintf(stderr, "Uncategorized file: '%s', found in archive '%s'\n", path, file_name);
++    }
++
++    if (r != 1)
++    {
++        fprintf(stderr, "th_read() failed: %s\n", strerror(errno));
++        abort();
++    }
++
++    tar_close(tar);
++
++    int status;
++    safe_waitpid(child, &status, 0);
++    if (status != 0)
++    {
++        fprintf(stderr, "gzip status code '%d'\n", status);
++        abort();
++    }
++
++    int err = 0;
++    const char **i = included_files;
++    for (c = 0; i && *i; ++i, ++c)
++    {
++        switch (check_array[c])
++        {
++            case 0:
++                fprintf(stderr, "Not found included file: '%s', in archive: %s\n", *i, file_name);
++                ++err;
++                break;
++            case 1:
++                fprintf(stdout, "Found included file: '%s', in archive: %s\n", *i, file_name);
++                break;
++            default:
++                fprintf(stderr, "%d occurrences of included file: '%s', in archive: %s\n", check_array[c], *i, file_name);
++                ++err;
++                break;
++        }
++    }
++
++    if (err)
++        abort();
++
++    return;
++}
++
++int main(void)
++{
++    g_verbose = 3;
++
++    char template[] = "/tmp/XXXXXX";
++
++    if (mkdtemp(template) == NULL) {
++        perror("mkdtemp()");
++        return EXIT_FAILURE;
++    }
++
++    printf("Dump dir path: %s\n", template);
++
++    struct dump_dir *dd = dd_create(template, (uid_t)-1, 0640);
++    assert(dd != NULL || !"Cannot create new dump directory");
++
++
++#define COMMON_FILES "time", "last_occurrence", "uid", "kernel", \
++                     "architecture", "hostname", "os_release", \
++                     "type", "count", "component", "program_log"
++#define SENSITIVE_FILES "environ", "backtrace", "secret_file", "private_file", \
++                        "useless_file"
++
++    dd_create_basic_files(dd, geteuid(), NULL);
++    dd_save_text(dd, FILENAME_TYPE, "attest");
++    dd_save_text(dd, FILENAME_COUNT, "1");
++    dd_save_text(dd, FILENAME_COMPONENT, "libreport-attest");
++    dd_save_text(dd, "program_log", "Something very important!");
++
++    const gchar *excluded_files[] = {
++        SENSITIVE_FILES,
++        NULL,
++    };
++
++    for (const gchar **iter = excluded_files; *iter; ++iter)
++        dd_save_text(dd, *iter, *iter);
++
++    /* Un-supported archive type */
++
++    {
++        fprintf(stderr, "TEST-CASE: Un-supported type\n");
++        fprintf(stdout, "TEST-CASE: Un-supported type\n");
++        const int r = dd_create_archive(dd, "/tmp/libreport-attest.omg", NULL, 0);
++        printf("dd_create_archive() == %d\n", r);
++        assert(r == -ENOSYS || !"Not supported");
++    }
++
++    /* File already exists. */
++    dd_close(dd);
++    dd = dd_opendir(template, DD_OPEN_READONLY);
++
++    {
++        fprintf(stderr, "TEST-CASE: File exists\n");
++        fprintf(stdout, "TEST-CASE: File exists\n");
++        char file_contents[] = "Non emtpy file";
++        const char *file_name = "/tmp/libreport-attest.tar.gz";
++        FILE *test_file = fopen(file_name, "w");
++        assert(test_file != NULL);
++        assert(fprintf(test_file, "%s", file_contents) == strlen(file_contents));
++        fclose(test_file);
++
++        assert(dd_create_archive(dd, file_name, NULL, 0) == -EEXIST || !"Exists");
++
++        char *canary = xmalloc_xopen_read_close(file_name, NULL);
++        assert(canary != NULL);
++        assert(strcmp(canary, file_contents) == 0);
++    }
++
++    dd_close(dd);
++    dd = dd_opendir(template, DD_OPEN_READONLY);
++    /* All elements */
++    {
++        fprintf(stderr, "TEST-CASE: Compress all elements\n");
++        fprintf(stdout, "TEST-CASE: Compress all elements\n");
++
++        const gchar *included_files[] = {
++            COMMON_FILES,
++            SENSITIVE_FILES,
++            NULL,
++        };
++
++        const char *file_name = "/tmp/libreport-attest-all.tar.gz";
++        unlink(file_name);
++        assert(dd_create_archive(dd, file_name, NULL, 0) == 0 || !"All elements");
++
++        verify_archive(dd, file_name, included_files, NULL);
++
++        unlink(file_name);
++    }
++
++    dd_close(dd);
++    dd = dd_opendir(template, DD_OPEN_READONLY);
++    /* Excluded elements */
++    {
++        fprintf(stderr, "TEST-CASE: Exclude elements\n");
++        fprintf(stdout, "TEST-CASE: Exclude elements\n");
++
++        const char *included_files[] = {
++            COMMON_FILES,
++            NULL,
++        };
++
++        const char *file_name = "/tmp/libreport-attest-excluded.tar.gz";
++        unlink(file_name);
++        assert(dd_create_archive(dd, file_name, (string_vector_ptr_t)excluded_files, 0) == 0 || !"Excluded elements");
++
++        verify_archive(dd, file_name, included_files, excluded_files);
++
++        unlink(file_name);
++    }
++
++    dd_close(dd);
++    dd = dd_opendir(template, 0);
++    assert(dd_delete(dd) == 0);
++
++    return 0;
++}
++]])
+diff --git a/tests/iso_date.at b/tests/iso_date.at
+new file mode 100644
+index 0000000..789b46d
+--- /dev/null
++++ b/tests/iso_date.at
+@@ -0,0 +1,106 @@
++# -*- Autotest -*-
++
++AT_BANNER([ISO_date])
++
++## --------------- ##
++## iso_date_string ##
++## --------------- ##
++
++AT_TESTFUN([iso_date_string],
++[[#include "internal_libreport.h"
++#include <assert.h>
++#include <string.h>
++#include <stdio.h>
++
++bool string_cmp(const char *orig, const char *other)
++{
++    if (strcmp(orig, other) == 0)
++        return true;
++
++    printf("'%s' != '%s'\n", orig, other);
++    return false;
++}
++
++int main(void)
++{
++    g_verbose=3;
++
++    setenv("TZ", "", 1);
++    setenv("LC_ALL", "C", 1);
++
++    time_t local[3];
++
++    time(&local[0]);
++    char *date = xstrdup(iso_date_string(NULL));
++
++    local[1] = local[0] + 1;
++    local[2] = local[0] + 2;
++    size_t i = 0;
++    for (; ARRAY_SIZE(local); ++i)
++    {
++        if (string_cmp(date, iso_date_string(local + i)))
++            break;
++    }
++    assert((i != ARRAY_SIZE(local)) || !"None of attempts hit result date");
++    free(date);
++
++    time_t y2k = 946684800;
++    assert(string_cmp("2000-01-01-00:00:00", iso_date_string(&y2k)));
++
++    return 0;
++}
++
++]])
++
++## --------------------- ##
++## iso_date_string_parse ##
++## --------------------- ##
++
++AT_TESTFUN([parse_numbers],
++[[#include "internal_libreport.h"
++#include <assert.h>
++#include <string.h>
++#include <stdio.h>
++
++int main(void)
++{
++    g_verbose=3;
++
++    setenv("TZ", "", 1);
++    setenv("LC_ALL", "C", 1);
++
++    {
++        time_t result = 0;
++        assert(iso_date_string_parse("", &result) == -EINVAL);
++    }
++
++    {
++        time_t result = 0;
++        assert(iso_date_string_parse("foo", &result) == -EINVAL);
++    }
++
++    {
++        time_t result = 0;
++        assert(iso_date_string_parse("1969-12-31-23:59:59", &result) == -EINVAL);
++    }
++
++    {
++        time_t result = 0;
++        assert(iso_date_string_parse("1970-01-01-00:00:00", &result) == 0);
++        assert(result == 0);
++    }
++
++    {
++        time_t result = 0;
++        assert(iso_date_string_parse("2000-01-01-00:00:00", &result) == 0);
++        assert(result == 946684800 || !"Y2k");
++    }
++
++    {
++        time_t result = 0;
++        assert(iso_date_string_parse("2000-01-01-00:00:00fooo", &result) == -EINVAL);
++    }
++
++    return 0;
++}
++]])
+diff --git a/tests/reported_to.at b/tests/reported_to.at
+index 8364d44..433a0c4 100644
+--- a/tests/reported_to.at
++++ b/tests/reported_to.at
+@@ -53,6 +53,136 @@ int main(void)
+ }
+ ]])
+ 
++## -------------------------- ##
++## add_reported_to_entry_data ##
++## -------------------------- ##
++
++AT_TESTFUN([add_reported_to_entry_data],
++[[
++#include "internal_libreport.h"
++#include <assert.h>
++
++bool string_cmp(const char *orig, const char *other)
++{
++    if (strcmp(orig, other) == 0)
++        return true;
++
++    printf("Exp: '%s'\nGot: '%s'\n", orig, other);
++    return false;
++}
++
++int main(void)
++{
++    g_verbose=3;
++
++    setenv("TZ", "", 1);
++    setenv("LC_ALL", "C", 1);
++
++    {
++        char *reported_to = NULL;
++        report_result_t result = {
++            .label = NULL,
++        };
++
++        assert(add_reported_to_entry_data(&reported_to, &result) == -EINVAL || !"0 string");
++    }
++
++    {
++        char *reported_to = NULL;
++        report_result_t result = {
++            .label = (char *)"",
++        };
++
++        assert(add_reported_to_entry_data(&reported_to, &result) == -EINVAL || !"Empty string");
++    }
++
++    {
++        char *reported_to = NULL;
++        report_result_t result = {
++            .label = (char *)"Fo:",
++        };
++
++        assert(add_reported_to_entry_data(&reported_to, &result) == -EINVAL || !"Contains :");
++    }
++
++    {
++        char *reported_to = NULL;
++        report_result_t result = {
++            .label = (char *)"Foo = blah",
++        };
++
++        assert(add_reported_to_entry_data(&reported_to, &result) || !"Label contains = and space");
++        assert(reported_to != NULL);
++        assert(string_cmp("Foo = blah:\n", reported_to));
++    }
++
++    {
++        char *reported_to = NULL;
++        report_result_t result = {
++            .label = (char *)"OnlyURL",
++            .url = (char *)"http://test1.com",
++        };
++
++        assert(add_reported_to_entry_data(&reported_to, &result) || !"Only URL");
++        assert(reported_to != NULL);
++        assert(string_cmp("OnlyURL: URL=http://test1.com\n", reported_to));
++    }
++
++    {
++        char *reported_to = NULL;
++        report_result_t result = {
++            .label = (char *)"OnlyBTHASH",
++            .bthash = (char *)"0123456789ABCDEF",
++        };
++
++        assert(add_reported_to_entry_data(&reported_to, &result) || !"Only BTHASH");
++        assert(reported_to != NULL);
++        assert(string_cmp("OnlyBTHASH: BTHASH=0123456789ABCDEF\n", reported_to));
++    }
++
++    {
++        char *reported_to = NULL;
++        report_result_t result = {
++            .label = (char *)"OnlyMSG",
++            .msg = (char *)"Message = foo : blah!",
++        };
++
++        assert(add_reported_to_entry_data(&reported_to, &result) || !"Only MSG");
++        assert(reported_to != NULL);
++        assert(string_cmp("OnlyMSG: MSG=Message = foo : blah!\n", reported_to));
++    }
++
++    {
++        char *reported_to = NULL;
++        report_result_t result = {
++            .label = (char *)"OnlyTIME",
++            /* 2000-01-01-00:00:00 */
++            .timestamp = 946684800,
++        };
++
++        assert(add_reported_to_entry_data(&reported_to, &result) || !"Only MSG");
++        assert(reported_to != NULL);
++        assert(string_cmp("OnlyTIME: TIME=2000-01-01-00:00:00\n", reported_to));
++    }
++
++    {
++        char *reported_to = NULL;
++        report_result_t result = {
++            .label = (char *)"Everything",
++            /* 2000-01-01-00:00:00 */
++            .timestamp = 946684800,
++            .url = (char *)"http://epic.win",
++            .bthash = (char *)"0123456789ABCDEF",
++            .msg = (char *)"Exhausting libreport test!",
++        };
++
++        assert(add_reported_to_entry_data(&reported_to, &result) || !"Everything");
++        assert(reported_to != NULL);
++        assert(string_cmp("Everything: TIME=2000-01-01-00:00:00 URL=http://epic.win BTHASH=0123456789ABCDEF MSG=Exhausting libreport test!\n", reported_to));
++    }
++}
++]])
++
+ ## ---------------------- ##
+ ## parse_reported_to_data ##
+ ## ---------------------- ##
+@@ -87,6 +217,12 @@ bool parse_and_check(const char *reported_to, GList *expected)
+             goto finish;
+         }
+ 
++        if(e->timestamp != c->timestamp)
++        {
++            printf("Timestamps: '%lld' != '%lld'\n", e->timestamp, c->timestamp);
++            goto finish;
++        }
++
+         if(!((e->url == NULL && c->url == NULL) || strcmp(e->url, c->url) == 0))
+         {
+             printf("'%s' != '%s'\n", e->url, c->url);
+@@ -116,20 +252,26 @@ int main(void)
+ {
+     g_verbose=3;
+ 
++    setenv("TZ", "", 1);
++    setenv("LC_ALL", "C", 1);
++
+ #define FIRST_LINE "Bugzilla: URL=https://goodluck.org"
++#define FOURTH_LINE "Bugzilla: TIME=invalid URL=https://goodluck.org"
+     report_result_t first_result = {
+         .label = (char *)"Bugzilla",
+         .url   = (char *)"https://goodluck.org"
+     };
+ 
+ #define SECOND_LINE "ABRT Server: BTHASH=81680083BIGBOOBS"
++#define FIFTH_LINE "ABRT Server: TIME=invalid BTHASH=81680083BIGBOOBS"
+     report_result_t second_result = {
+         .label = (char *)"ABRT Server",
+         .bthash = (char *)"81680083BIGBOOBS"
+     };
+ 
+-#define THIRD_LINE "RHTSupport: TIME=12345678 URL=https://access.redhat.com/home MSG=The world's best IT support"
++#define THIRD_LINE "RHTSupport: TIME=2000-01-01-00:00:00 URL=https://access.redhat.com/home MSG=The world's best IT support"
+     report_result_t third_result = {
++        .timestamp = 946684800,
+         .label = (char *)"RHTSupport",
+         .url = (char *)"https://access.redhat.com/home",
+         .msg = (char *)"The world's best IT support",
+@@ -137,9 +279,11 @@ int main(void)
+ 
+     GList *expected = g_list_append(NULL, &first_result);
+     assert(parse_and_check(FIRST_LINE, expected));
++    assert(parse_and_check(FOURTH_LINE, expected));
+ 
+     expected = g_list_append(expected, &second_result);
+     assert(parse_and_check(FIRST_LINE"\n"SECOND_LINE, expected));
++    assert(parse_and_check(FIRST_LINE"\n"FIFTH_LINE, expected));
+ 
+     expected = g_list_append(expected, &third_result);
+     assert(parse_and_check(FIRST_LINE"\n"SECOND_LINE"\n"THIRD_LINE, expected));
+@@ -312,3 +456,5 @@ int main(void)
+     return 0;
+ }
+ ]])
++
++
+diff --git a/tests/testsuite.at b/tests/testsuite.at
+index 49e48fb..435d4ab 100644
+--- a/tests/testsuite.at
++++ b/tests/testsuite.at
+@@ -16,3 +16,5 @@ m4_include([global_config.at])
+ m4_include([bugzilla_plugin.at])
+ m4_include([problem_data.at])
+ m4_include([problem_report.at])
++m4_include([iso_date.at])
++m4_include([uriparser.at])
+diff --git a/tests/uriparser.at b/tests/uriparser.at
+new file mode 100644
+index 0000000..def021f
+--- /dev/null
++++ b/tests/uriparser.at
+@@ -0,0 +1,144 @@
++# -*- Autotest -*-
++
++AT_BANNER([uriparser])
++
++## ------------------- ##
++## uri_userinfo_remove ##
++## ------------------- ##
++
++AT_TESTFUN([uri_userinfo_remove],
++[[#include "internal_libreport.h"
++#include <assert.h>
++#include <string.h>
++#include <stdio.h>
++
++bool string_cmp(const char *message, const char *orig, const char *other)
++{
++    if (orig == NULL && other != NULL)
++    {
++        printf("%s: expected NULL got '%s'\n", message, other);
++        return false;
++    }
++
++    if (orig != NULL && other == NULL)
++    {
++        printf("%s: expected '%s' got NULL\n", message, orig);
++        return false;
++    }
++
++    if (orig == NULL && other == NULL)
++        return true;
++
++    if (strcmp(orig, other) == 0)
++        return true;
++
++    printf("%s: '%s' != '%s'\n", message, orig, other);
++    return false;
++}
++
++int test(int retval, const char *uri, const char *result, const char *scheme, const char *hostname, const char *username, const char *password, const char *location)
++{
++    int e = 0;
++    const char *names[] = {"result", "scheme", "hostname", "username", "password", "location"} ;
++    char *outputs[6];
++    const char *expected[6];
++
++    for (size_t i = 0; i < ARRAY_SIZE(outputs); ++i)
++        outputs[i] = (char *)0xDEADBEEF;
++
++    expected[0] = result;
++    expected[1] = scheme;
++    expected[2] = hostname;
++    expected[3] = username;
++    expected[4] = password;
++    expected[5] = location;
++
++    fprintf(stderr, "==== Testing: '%s'\n", uri);
++    fprintf(stdout, "==== Testing: '%s'\n", uri);
++
++    int r = uri_userinfo_remove(uri, &outputs[0], &outputs[1], &outputs[2], &outputs[3], &outputs[4], &outputs[5]);
++    if (r != retval)
++    {
++        printf("Invalid retval %d != %d\n", retval, r);
++        ++e;
++    }
++
++    if (r != -EINVAL)
++    {
++        for (size_t i = 0; i < ARRAY_SIZE(outputs); ++i)
++        {
++            if (outputs[i] == (char *)0xDEADBEEF)
++            {
++                printf("Not initialized argument '%s'\n", names[i]);
++                ++e;
++            }
++            else
++            {
++                e += !string_cmp(names[i], expected[i], outputs[i]);
++                free(outputs[i]);
++                outputs[i] = (char *)0xDEADBEEF;
++            }
++        }
++    }
++    else
++    {
++        for (size_t i = 0; i < ARRAY_SIZE(outputs); ++i)
++        {
++            if (outputs[i] != (char *)0xDEADBEEF)
++            {
++                printf("Touched argument '%s'\n", names[i]);
++                ++e;
++            }
++        }
++    }
++
++    fprintf(stderr, "== Test without arguments\n");
++    fprintf(stdout, "== Test without arguments\n");
++
++
++    r = uri_userinfo_remove(uri, &outputs[0], NULL, NULL, NULL, NULL, NULL);
++    if (r != retval)
++    {
++        printf("Invalid retval without arguments: %d != %d\n", retval, r);
++        ++e;
++    }
++
++    e += !string_cmp(names[0], result, outputs[0]);
++    free(outputs[0]);
++
++    return e;
++}
++
++int main(void)
++{
++    g_verbose=3;
++
++    int e = 0;
++    e += test(      0, "ftp://root:password@", "ftp://", "ftp:", "", "root", "password", "");
++    e += test(      0, "ftp://root:password@/", "ftp:///", "ftp:", "", "root", "password", "/");
++    e += test(      0, "ftp://root:password@/foo", "ftp:///foo", "ftp:", "", "root", "password", "/foo");
++    e += test(      0, "ftp://@", "ftp://", "ftp:", "", "", NULL, "");
++    e += test(      0, "ftp://@/", "ftp:///", "ftp:", "", "", NULL, "/");
++    e += test(      0, "ftp://@/foo", "ftp:///foo", "ftp:", "", "", NULL, "/foo");
++    e += test(      0, "ftp://:@", "ftp://", "ftp:", "", "", "", "");
++    e += test(      0, "ftp://:@/", "ftp:///", "ftp:", "", "", "", "/");
++    e += test(      0, "ftp://:@/foo", "ftp:///foo", "ftp:", "", "", "", "/foo");
++    e += test(      0, "root:password", "root:password", "root:", NULL, NULL, NULL, "password");
++    e += test(      0, "root:password@", "root:password@", "root:", NULL, NULL, NULL, "password@");
++    e += test(      0, "ftp://root:password", "ftp://root:password", "ftp:", "root:password", NULL, NULL, "");
++    e += test(      0, "scp:://root:password@localhost", "scp:://root:password@localhost", "scp:", NULL, NULL, NULL, "://root:password@localhost");
++    e += test(      0, "scp:///root:password@localhost", "scp:///root:password@localhost", "scp:", "", NULL, NULL, "/root:password@localhost");
++    e += test(      0, "ftp://root:password/", "ftp://root:password/", "ftp:", "root:password", NULL, NULL, "/");
++    e += test(      0, "scp://B@rt:P@ssw0rd@localhost/t@rget1?query=foo#head", "scp://localhost/t@rget1?query=foo#head", "scp:", "localhost", "B@rt", "P@ssw0rd", "/t@rget1?query=foo#head");
++    e += test(      0, "scp://B@rt@localhost/t@rget1?query=foo#head", "scp://localhost/t@rget1?query=foo#head", "scp:", "localhost", "B@rt", NULL, "/t@rget1?query=foo#head");
++    e += test(      0, "scp://B@rt:@localhost/t@rget1?query=foo#head", "scp://localhost/t@rget1?query=foo#head", "scp:", "localhost", "B@rt", "", "/t@rget1?query=foo#head");
++    e += test(      0, "scp://:P@ssw0rd@localhost/t@rget1?query=foo#head", "scp://localhost/t@rget1?query=foo#head", "scp:", "localhost", "", "P@ssw0rd", "/t@rget1?query=foo#head");
++    e += test(      0, "scp://@localhost/t@rget1?query=foo#head", "scp://localhost/t@rget1?query=foo#head", "scp:", "localhost", "", NULL, "/t@rget1?query=foo#head");
++    e += test(      0, "scp://:@localhost/t@rget1?query=foo#head", "scp://localhost/t@rget1?query=foo#head", "scp:", "localhost", "", "", "/t@rget1?query=foo#head");
++    e += test(      0, "password/root", "password/root", NULL, NULL, NULL, NULL, "password/root");
++    e += test(      0, "/password/root", "/password/root", NULL, NULL, NULL, NULL, "/password/root");
++    e += test(      0, "://root:passowrd@localhost", "://root:passowrd@localhost", NULL, NULL, NULL, NULL, "://root:passowrd@localhost");
++
++    return e;
++}
++]])
+-- 
+1.7.1
+

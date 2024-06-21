@@ -1,0 +1,1110 @@
+From 9eebad092fa0c2011bfaa21f79a798df82ea1291 Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Tue, 6 May 2014 17:23:25 +0200
+Subject: [LIBREPORT PATCH] load/save configuration via augeas
+
+Related to #205
+
+Signed-off-by: Jakub Filak <jfilak@redhat.com>
+
+Conflicts:
+
+	configure.ac
+	src/lib/Makefile.am
+	src/lib/load_plugin_settings.c
+	src/lib/user_settings.c
+	tests/configuration_files.at
+---
+ configure.ac                     |   2 +
+ src/include/internal_libreport.h |   4 +
+ src/lib/Makefile.am              |   7 +-
+ src/lib/configuration_files.c    | 362 ++++++++++++++++++++++++++++++
+ src/lib/user_settings.c          |  79 +++----
+ tests/Makefile.am                |   4 +-
+ tests/conf/default/file.conf     |   4 +
+ tests/conf/first/file.conf       |   5 +
+ tests/conf/second/file.conf      |   4 +
+ tests/configuration_files.at     | 473 +++++++++++++++++++++++++++++++++++++++
+ tests/testsuite.at               |   1 +
+ 11 files changed, 891 insertions(+), 54 deletions(-)
+ create mode 100644 src/lib/configuration_files.c
+ create mode 100644 tests/conf/default/file.conf
+ create mode 100644 tests/conf/first/file.conf
+ create mode 100644 tests/conf/second/file.conf
+ create mode 100644 tests/configuration_files.at
+
+diff --git a/configure.ac b/configure.ac
+index 6ef0c5a..f436341 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -75,6 +75,8 @@ PKG_CHECK_MODULES([XMLRPC_CLIENT], [xmlrpc_client])
+ PKG_CHECK_MODULES([CURL], [libcurl])
+ PKG_CHECK_MODULES([GNOME_KEYRING], [gnome-keyring-1])
+ PKG_CHECK_MODULES([SATYR], [satyr])
++PKG_CHECK_MODULES([AUGEAS], [augeas])
++
+ 
+ # Just PKG_CHECK_MODULES([PYTHON], [python]) works only with python2.7+
+ # Below, if python is not found, we set up for python2.6 w/o checking:
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index f8e998a..6cfbf26 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -613,6 +613,10 @@ void parse_release_for_rhts(const char *pRelease, char **product, char **version
+ #define load_conf_file libreport_load_conf_file
+ bool load_conf_file(const char *pPath, map_string_t *settings, bool skipKeysWithoutValue);
+ 
++#define load_conf_file_from_dirs libreport_load_conf_file_from_dirs
++bool load_conf_file_from_dirs(const char *base_name, const char *const *directories, map_string_t *settings, bool skipKeysWithoutValue);
++
++
+ #define save_conf_file libreport_save_conf_file
+ bool save_conf_file(const char *path, map_string_t *settings);
+ #define save_user_settings libreport_save_user_settings
+diff --git a/src/lib/Makefile.am b/src/lib/Makefile.am
+index dc35e1d..7ef8116 100644
+--- a/src/lib/Makefile.am
++++ b/src/lib/Makefile.am
+@@ -33,7 +33,7 @@ libreport_la_SOURCES = \
+     dump_dir.c \
+     abrt_sock.c \
+     get_cmdline.c \
+-    load_plugin_settings.c \
++    configuration_files.c \
+     make_descr.c \
+     run_event.c \
+     problem_data.c \
+@@ -62,11 +62,14 @@ libreport_la_CPPFLAGS = \
+     -DEVENTS_DIR=\"$(EVENTS_DIR)\" \
+     -DBIN_DIR=\"$(bindir)\" \
+     $(GLIB_CFLAGS) \
++    $(AUGEAS_CFLAGS) \
+     -D_GNU_SOURCE
+ libreport_la_LDFLAGS = \
+     -version-info 0:1:0
+ libreport_la_LIBADD = \
+-    $(GLIB_LIBS)
++    $(GLIB_LIBS) \
++    $(JOURNAL_LIBS) \
++    $(AUGEAS_LIBS)
+ 
+ libreportconfdir = $(CONF_DIR)
+ dist_libreportconf_DATA = \
+diff --git a/src/lib/configuration_files.c b/src/lib/configuration_files.c
+new file mode 100644
+index 0000000..9b03a31
+--- /dev/null
++++ b/src/lib/configuration_files.c
+@@ -0,0 +1,362 @@
++/*
++    Copyright (C) 2013  ABRT Team
++    Copyright (C) 2009  Zdenek Prikryl (zprikryl@redhat.com)
++    Copyright (C) 2009  RedHat inc.
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License along
++    with this program; if not, write to the Free Software Foundation, Inc.,
++    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++*/
++#include "internal_libreport.h"
++#include <augeas.h>
++#include <libgen.h>
++
++/* Cannot use realpath() only because the function doesn't work for
++ * non-existing files.
++ *
++ * libreport uses these path patterns:
++ * /etc/libreport/plugins/cool-plugin.conf
++ * $HOME/.config/abrt/settings/sweat-plugin.conf
++ *
++ * unit test uses relative paths:
++ * ../../conf/default/file.conf
++ */
++static bool canonicalize_path(const char *path, char *canon_path)
++{
++    if (realpath(path, canon_path) != NULL)
++        return true;
++
++    if (errno != ENOENT && errno != ENOTDIR)
++        return false;
++
++    bool retval = false;
++
++    char *dirc = xstrdup(path);
++    char *basec = xstrdup(path);
++    /* Be ware that dirname("..") == ".." */
++    char *dname = dirname(dirc);
++    /* Be ware that basename("/"|".."|".") == "/"|".."|"." */
++    char *bname = basename(basec);
++
++    /* Don't want to support paths like '/root/notexist/notexist2/../file.conf' */
++    if (strcmp(bname, "..") == 0
++        || strcmp(bname, ".") == 0
++        /* Cannot get realpath for "/", how this could happened? */
++        || strcmp(bname, "/") == 0
++        /* It seems that CWD does not exist (CDW + ../file.conf)*/
++        || strcmp(dname, "..") == 0
++        /* Here as well as above */
++        || strcmp(dname, ".") == 0)
++    {
++        errno = ENOTDIR;
++        goto canon_cleanup;
++    }
++
++    if (!canonicalize_path(dname, canon_path))
++        goto canon_cleanup;
++
++    size_t canon_path_len = strlen(canon_path);
++    const size_t bname_len = strlen(bname);
++    /* + 1 for slash */
++    if (canon_path_len + bname_len + 1 >= PATH_MAX)
++    {
++        errno = ENAMETOOLONG;
++        goto canon_cleanup;
++    }
++
++    if (canon_path[canon_path_len - 1] != '/')
++    {
++        canon_path[canon_path_len] = '/';
++        ++canon_path_len;
++        canon_path[canon_path_len] = '\0';
++    }
++
++    strcpy(canon_path + canon_path_len, bname);
++    retval = true;
++
++canon_cleanup:
++    free(dirc);
++    free(basec);
++
++    return retval;
++}
++
++/* augeas refuses to create a directories :(
++ * http://www.redhat.com/archives/augeas-devel/2008-November/msg00012.html
++ * https://bugzilla.redhat.com/show_bug.cgi?id=1032562
++ */
++static bool create_parentdir(char *path)
++{
++    bool ret;
++    char *c;
++
++    c = g_path_get_dirname(path);
++    ret = g_mkdir_with_parents(c, 0700);
++    g_free(c);
++
++    return ret;
++}
++
++static void internal_aug_error_msg(augeas *aug, const char *def_msg)
++{
++    const char *err_msg = def_msg;
++
++    //if (aug_error(aug) != AUG_NOERROR)
++    {
++        /* Try to get the most detailed error. */
++        err_msg = aug_error_details(aug);
++        error_msg("%s", err_msg);
++
++        if (err_msg == NULL)
++            /* The detailed error message was not provided. */
++            /* Try to get a message elaborating the error code. */
++            err_msg = aug_error_minor_message(aug);
++
++        error_msg("%s", err_msg);
++        if (err_msg == NULL)
++            /* No more detailed message for the error code. */
++            /* Get a message for the error code. */
++            err_msg = aug_error_message(aug);
++
++        error_msg("%s", err_msg);
++    }
++
++    error_msg("%s", err_msg);
++}
++
++/* Only for debugging */
++#define NOAUTOLOAD 1
++
++/* Initializes augeas for libreport only
++ *
++ * The default initialization of augeas takes ages because it parses all
++ * configuration files which are known to augeas. Unfortunately we do want work
++ * only with the libreport configuration files. Hence, we have to disable the
++ * autoloading and configure augeas to load only the Libreport module.
++ *
++ * The list of loaded modules is stored in /augeas/load/\* nodes. If the
++ * autoloading is enabled, the path is populated with all augeas modules.  But
++ * in our case the path is empty (there is no child node at /augeas/load/ path)
++ * so we have to add Libreport node (aug_set() creates a new node if it not
++ * exists yet) and configure the lens and the included files for Libreport
++ * node.
++ */
++static bool
++internal_aug_init(augeas **aug, const char *path)
++{
++    int aug_flag = AUG_NO_ERR_CLOSE /* without this flag aug_init() returns
++                                     * NULL on errors and we cannot read the
++                                     * error message
++                                     */
++#if NOAUTOLOAD
++                 | AUG_NO_MODL_AUTOLOAD /* do not parse all configuration files
++                                         * in the system (empty /augeas/load)
++                                         */
++#endif
++                 ;
++
++    *aug = aug_init(/* default root */ NULL, /* default lens lib */ NULL, aug_flag);
++
++    if (aug_error(*aug) != AUG_NOERROR)
++    {
++        error_msg("%s", aug_error_message(*aug));
++        return false;
++    }
++
++#if NOAUTOLOAD
++    /* Libreport.lns -> use the lens from the Libreport module. */
++    /* Cannot use '@Libreport' (Libreport module) because this construction works */
++    /* only for autoloaded modules (augeas-1.1.0) */
++    if (aug_set(*aug, "/augeas/load/Libreport/lens", "Libreport.lns") < 0)
++    {
++        internal_aug_error_msg(*aug, "Cannot configure augeas to use Libreport.lns");
++        return false;
++    }
++
++    /* parse only this configuration file */
++    if (aug_set(*aug, "/augeas/load/Libreport/incl[1]", path) < 0)
++    {
++        internal_aug_error_msg(*aug, "Cannot configure augeas to read the configuration file");
++        return false;
++    }
++
++    if (aug_load(*aug) < 0)
++    {
++        internal_aug_error_msg(*aug, "Cannot load the configuration file");
++        return false;
++    }
++#endif
++
++    return true;
++}
++
++/* Returns false if any error occurs, else returns true.
++ */
++bool load_conf_file(const char *path, map_string_t *settings, bool skipKeysWithoutValue)
++{
++    bool retval = false;
++    char real_path[PATH_MAX + 1];
++    augeas *aug = NULL;
++
++    if (!canonicalize_path(path, real_path))
++    {
++        perror_msg("Cannot get real path for '%s'", path);
++        goto finalize;
++    }
++
++    if (!internal_aug_init(&aug, real_path))
++        goto finalize;
++
++    char *aug_expr = xasprintf("/files%s/*[label() != \"#comment\"]", real_path);
++    char **matches = NULL;
++    const int match_num = aug_match(aug, aug_expr, &matches);
++    free(aug_expr);
++
++    if (match_num < 0)
++    {
++        internal_aug_error_msg(aug, "An error occurred while searching for configuration options");
++        goto finalize;
++    }
++    if (match_num == 0)
++    {
++        struct stat buf;
++        if (0 != stat(real_path, &buf))
++        {
++            /* We expect that the path doesn't exist, therefore print ENOENT */
++            /* message in verbose mode and all other error messages in */
++            /* non-verbose mode. */
++            if (errno != ENOENT || g_verbose > 1)
++                perror_msg("Cannot read conf file '%s'", real_path);
++        }
++        else if (!S_ISREG(buf.st_mode))
++        {
++            /* A user should know that the path to configuration file is not */
++            /* a regular file. */
++            error_msg("Configuration path '%s' is not a regular file", real_path);
++        }
++        else
++        {
++            retval = true;
++            VERB1 log("Configuration file '%s' contains no option", real_path);
++        }
++        goto finalize;
++    }
++
++    int i = 0;
++    for (; i < match_num; ++i)
++    {
++        const char *option = strrchr(matches[i], '/') + 1;
++        const char *value = NULL;
++        const int ret = aug_get(aug, matches[i], &value);
++        if (ret == 0)
++        {
++            log("Option '%s' disappeared from '%s' while parsing", option, real_path);
++            goto cleanup;
++        }
++        if (ret == -1)
++        {
++            internal_aug_error_msg(aug, "An error occurred while retrieving an option's value");
++            goto cleanup;
++        }
++
++        VERB2 log("Loaded option '%s' = '%s'", option, value);
++
++        if (!skipKeysWithoutValue || value[0] != '\0')
++            replace_map_string_item(settings, xstrdup(option), xstrdup(value));
++
++        free(matches[i]);
++    }
++    retval = true;
++
++cleanup:
++    for (; i < match_num; ++i)
++        free(matches[i]);
++    free(matches);
++
++finalize:
++    if (aug != NULL)
++        aug_close(aug);
++
++    return retval;
++}
++
++bool load_conf_file_from_dirs(const char *base_name, const char *const *directories, map_string_t *settings, bool skipKeysWithoutValue)
++{
++    if (NULL == directories || NULL == *directories)
++    {
++        error_msg("No configuration directory specified");
++        return false;
++    }
++
++    bool result = true;
++    for (const char *const *dir = directories; *dir != NULL; ++dir)
++    {
++        char *conf_file = concat_path_file(*dir, base_name);
++        if (!load_conf_file(conf_file, settings, skipKeysWithoutValue))
++        {
++            perror_msg("Can't open '%s'", conf_file);
++            result = false;
++        }
++        free(conf_file);
++    }
++
++    return result;
++}
++
++/* Returns false if saving failed */
++bool save_conf_file(const char *path, map_string_t *settings)
++{
++    bool retval = false;
++    char real_path[PATH_MAX + 1];
++    augeas *aug = NULL;
++
++    if (!canonicalize_path(path, real_path))
++    {
++        perror_msg("Cannot get real path for '%s'", path);
++        goto finalize;
++    }
++
++    if (!internal_aug_init(&aug, real_path))
++        goto finalize;
++
++    const char *name = NULL;
++    const char *value = NULL;
++    map_string_iter_t iter;
++    init_map_string_iter(&iter, settings);
++    while (next_map_string_iter(&iter, &name, &value))
++    {
++        char *aug_path = xasprintf("/files%s/%s", real_path, name);
++        const int ret = aug_set(aug, aug_path, value);
++        free(aug_path);
++        if (ret < 0)
++        {
++            internal_aug_error_msg(aug, "Cannot set a value of a tree path");
++            goto finalize;
++        }
++    }
++
++    create_parentdir(real_path);
++    if (aug_save(aug) < 0)
++    {
++        internal_aug_error_msg(aug, "Cannot save the changes made to the configuration");
++        goto finalize;
++    }
++
++    retval = true;
++
++finalize:
++    if (aug != NULL)
++        aug_close(aug);
++
++    return retval;
++}
+diff --git a/src/lib/user_settings.c b/src/lib/user_settings.c
+index 01ec320..c7f3f7d 100644
+--- a/src/lib/user_settings.c
++++ b/src/lib/user_settings.c
+@@ -16,73 +16,50 @@
+     51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+ #include "internal_libreport.h"
++#include <augeas.h>
+ 
+ static GHashTable *user_settings;
+ static char *conf_path;
+ 
+-static bool create_parentdir(char *path)
++static char *get_conf_path(const char *name)
+ {
+-    bool ret;
+-    char *c;
+-
+-    /* in-place dirname() */
+-    for (c = path + strlen(path); c > path && *c != '/'; c--)
+-        ;
+-    if (*c != '/')
+-        return false;
+-    *c = '\0';
+-
+-    ret = make_dir_recursive(path, 0755);
+-    *c = '/'; /* restore path back */
++    char *HOME = getenv("HOME"), *s, *conf;
+ 
+-    return ret;
++    s = xasprintf("%s/%s.conf", ".abrt/settings", name);
++    conf = concat_path_file(HOME, s);
++    free(s);
++    return conf;
+ }
+ 
+-/* Returns false if write failed */
+-bool save_conf_file(const char *path, map_string_t *settings)
++bool save_app_conf_file(const char* application_name, map_string_t *settings)
+ {
+-    bool ret;
+-    char *temp_path;
+-    const char *name;
+-    const char *value;
+-    map_string_iter_t iter;
+-
+-    ret = false;
+-
+-    temp_path = xasprintf("%s.tmp", path);
+-
+-    if (!create_parentdir(temp_path))
+-        goto cleanup;
+-
+-    FILE *out = fopen(temp_path, "w");
+-    if (!out)
+-        goto cleanup;
+-
+-    init_map_string_iter(&iter, settings);
+-    while (next_map_string_iter(&iter, &name, &value))
+-        fprintf(out, "%s = \"%s\"\n", name, value);
+-
+-    fclose(out);
++    char *app_conf_path = get_conf_path(application_name);
++    bool result = save_conf_file(app_conf_path, settings);
++    free(app_conf_path);
+ 
+-    if (!rename(temp_path, path))
+-        goto cleanup;
+-
+-    ret = true; /* success */
++    return result;
++}
+ 
+-cleanup:
+-    free(temp_path);
++bool load_app_conf_file(const char *application_name, map_string_t *settings)
++{
++    char *app_conf_path = get_conf_path(application_name);
++    bool result = load_conf_file(app_conf_path, settings, false);
++    free(app_conf_path);
+ 
+-    return ret;
++    return result;
+ }
+ 
+-static char *get_conf_path(const char *name)
++void set_app_user_setting(map_string_t *settings, const char *name, const char *value)
+ {
+-    char *HOME = getenv("HOME"), *s, *conf;
++    if (value)
++        replace_map_string_item(settings, xstrdup(name), xstrdup(value));
++    else
++        remove_map_string_item(settings, name);
++}
+ 
+-    s = xasprintf("%s/%s.conf", ".abrt/settings", name);
+-    conf = concat_path_file(HOME, s);
+-    free(s);
+-    return conf;
++const char *get_app_user_setting(map_string_t *settings, const char *name)
++{
++    return get_map_string_item_or_NULL(settings, name);
+ }
+ 
+ bool save_user_settings()
+diff --git a/tests/Makefile.am b/tests/Makefile.am
+index dc17663..fa857c0 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -29,7 +29,8 @@ TESTSUITE_AT = \
+   testsuite.at \
+   strbuf.at \
+   osrelease.at \
+-  taghyperlinks.at
++  taghyperlinks.at \
++  configuration_files.at
+ 
+ EXTRA_DIST += $(TESTSUITE_AT)
+ TESTSUITE = $(srcdir)/testsuite
+@@ -42,6 +43,7 @@ atconfig: $(top_builddir)/config.status
+ 	(cd ${top_builddir} && ./config.status ${subdir}/atconfig)
+ 
+ check-local: $(check_DATA)
++	export AUGEAS_LENS_LIB="$(AUGEAS_LENS_LIB_DIR):$(abs_top_builddir)/augeas"; \
+ 	$(SHELL) '$(TESTSUITE)' $(TESTSUITEFLAGS)
+ 
+ installcheck-local: $(check_DATA)
+diff --git a/tests/conf/default/file.conf b/tests/conf/default/file.conf
+new file mode 100644
+index 0000000..3ccdf1e
+--- /dev/null
++++ b/tests/conf/default/file.conf
+@@ -0,0 +1,4 @@
++success = "total"
++failure = "none"
++effort = "minimal"
++state = "done"
+diff --git a/tests/conf/first/file.conf b/tests/conf/first/file.conf
+new file mode 100644
+index 0000000..4493b60
+--- /dev/null
++++ b/tests/conf/first/file.conf
+@@ -0,0 +1,5 @@
++success = "extreme"
++failure = "few"
++effort = "minimal"
++impact = "deep"
++usability = "good"
+diff --git a/tests/conf/second/file.conf b/tests/conf/second/file.conf
+new file mode 100644
+index 0000000..9aa9b0c
+--- /dev/null
++++ b/tests/conf/second/file.conf
+@@ -0,0 +1,4 @@
++success = "unbelievable"
++failure = "few"
++effort = "minimal"
++usability = "best"
+diff --git a/tests/configuration_files.at b/tests/configuration_files.at
+new file mode 100644
+index 0000000..37cc00e
+--- /dev/null
++++ b/tests/configuration_files.at
+@@ -0,0 +1,473 @@
++# -*- Autotest -*-
++
++AT_BANNER([Configuration files])
++
++## ---------------##
++## load_conf_file ##
++## ---------------##
++
++AT_TESTFUN([load_conf_file],
++[[
++#include "internal_libreport.h"
++#include "stdlib.h"
++#include "stdio.h"
++
++#define CONF_PATH "../../conf/default/file.conf"
++
++typedef enum equal_result
++{
++    EQUAL,
++    DIFF_SIZE,
++    MISS_KEY,
++    DIFF_VALUE,
++} equal_result_t;
++
++equal_result_t map_string_equals(map_string_t *f, map_string_t *s)
++{
++    const guint fsize = g_hash_table_size(f);
++    const guint ssize = g_hash_table_size(s);
++    if (fsize != ssize)
++    {
++        fprintf(stdout, "instances are not equal in size: %u != %u\n", fsize, ssize);
++        return DIFF_SIZE;
++    }
++
++    map_string_iter_t iter;
++    gpointer fkey = NULL;
++    gpointer fvalue = NULL;
++
++    init_map_string_iter(&iter, f);
++    while(next_map_string_iter(&iter, (const char **)&fkey, (const char **)&fvalue))
++    {
++        gpointer skey = NULL;
++        gpointer svalue = NULL;
++
++        if (!g_hash_table_lookup_extended(s, fkey, &skey, &svalue))
++        {
++            fprintf(stdout, "second misses key '%s'\n", (const char *)fkey);
++            return MISS_KEY;
++        }
++
++        if (strcmp((const char *)fvalue, (const char *)svalue) != 0)
++        {
++            fprintf(stdout, "a value of '%s' differs: '%s' != '%s'\n", (const char *)fkey, (const char *)fvalue, (const char *)svalue);
++            return DIFF_VALUE;
++        }
++    }
++
++    return EQUAL;
++}
++
++int main(int argc, char **argv)
++{
++    g_verbose = 3;
++
++    {
++        /* Self check */
++        map_string_t *first = new_map_string();
++        map_string_t *second = new_map_string();
++
++        assert(EQUAL == map_string_equals(first, first));
++        assert(EQUAL == map_string_equals(first, second));
++
++        insert_map_string(first, xstrdup("first"), xstrdup("1"));
++        insert_map_string(first, xstrdup("second"), xstrdup("2"));
++        insert_map_string(first, xstrdup("third"), xstrdup("3"));
++
++        assert(EQUAL == map_string_equals(first, first));
++
++        assert(DIFF_SIZE == map_string_equals(first, second));
++        assert(DIFF_SIZE == map_string_equals(second, first));
++
++        insert_map_string(second, xstrdup("first"), xstrdup("1"));
++        insert_map_string(second, xstrdup("second"), xstrdup("2"));
++        insert_map_string(second, xstrdup("third"), xstrdup("3"));
++
++        assert(EQUAL == map_string_equals(first, second));
++        assert(EQUAL == map_string_equals(second, first));
++
++        insert_map_string(first, xstrdup("fifth"), xstrdup("5"));
++        insert_map_string(second, xstrdup("fourth"), xstrdup("4"));
++
++        assert(MISS_KEY == map_string_equals(first, second));
++        assert(MISS_KEY == map_string_equals(second, first));
++
++        insert_map_string(first, xstrdup("fourth"), xstrdup("4"));
++        insert_map_string(second, xstrdup("fifth"), xstrdup("6"));
++
++        assert(DIFF_VALUE == map_string_equals(first, second));
++        assert(DIFF_VALUE == map_string_equals(second, first));
++
++        free_map_string(first);
++        free_map_string(second);
++    }
++
++    {
++        map_string_t *first = new_map_string();
++        insert_map_string(first, xstrdup("success"), xstrdup("\"total\""));
++        insert_map_string(first, xstrdup("failure"), xstrdup("\"none\""));
++        insert_map_string(first, xstrdup("effort"), xstrdup("\"minimal\""));
++        insert_map_string(first, xstrdup("state"), xstrdup("\"done\""));
++
++        map_string_t *second = new_map_string();
++
++        assert(load_conf_file(CONF_PATH, second, 0));
++
++        assert(EQUAL == map_string_equals(first, second) || !"The loaded configuration equals to the expected");
++
++        free_map_string(first);
++        free_map_string(second);
++    }
++
++    return 0;
++}
++]])
++
++
++
++## ------------------------ ##
++## load_conf_file_from_dirs ##
++## ------------------------ ##
++
++AT_TESTFUN([load_conf_file_from_dirs],
++[[
++#include "internal_libreport.h"
++
++#define CONF_NAME "file.conf"
++#define DEFAULT_DIR "../../conf/default"
++#define FIRST_DIR "../../conf/first"
++#define SECOND_DIR "../../conf/second"
++
++typedef enum equal_result
++{
++    EQUAL,
++    DIFF_SIZE,
++    MISS_KEY,
++    DIFF_VALUE,
++} equal_result_t;
++
++equal_result_t map_string_equals(map_string_t *f, map_string_t *s)
++{
++    const guint fsize = g_hash_table_size(f);
++    const guint ssize = g_hash_table_size(s);
++    if (fsize != ssize)
++    {
++        fprintf(stdout, "instances are not equal in size: %u != %u\n", fsize, ssize);
++        return DIFF_SIZE;
++    }
++
++    map_string_iter_t iter;
++    gpointer fkey = NULL;
++    gpointer fvalue = NULL;
++
++    init_map_string_iter(&iter, f);
++    while(next_map_string_iter(&iter, (const char **)&fkey, (const char **)&fvalue))
++    {
++        gpointer skey = NULL;
++        gpointer svalue = NULL;
++
++        if (!g_hash_table_lookup_extended(s, fkey, &skey, &svalue))
++        {
++            fprintf(stdout, "second misses key '%s'\n", (const char *)fkey);
++            return MISS_KEY;
++        }
++
++        if (strcmp((const char *)fvalue, (const char *)svalue) != 0)
++        {
++            fprintf(stdout, "a value of '%s' differs: '%s' != '%s'\n", (const char *)fkey, (const char *)fvalue, (const char *)svalue);
++            return DIFF_VALUE;
++        }
++    }
++
++    return EQUAL;
++}
++
++int main(int argc, char **argv)
++{
++    g_verbose = 3;
++
++    {
++        /* Self check */
++        map_string_t *first = new_map_string();
++        map_string_t *second = new_map_string();
++
++        assert(EQUAL == map_string_equals(first, first));
++        assert(EQUAL == map_string_equals(first, second));
++
++        insert_map_string(first, xstrdup("first"), xstrdup("1"));
++        insert_map_string(first, xstrdup("second"), xstrdup("2"));
++        insert_map_string(first, xstrdup("third"), xstrdup("3"));
++
++        assert(EQUAL == map_string_equals(first, first));
++
++        assert(DIFF_SIZE == map_string_equals(first, second));
++        assert(DIFF_SIZE == map_string_equals(second, first));
++
++        insert_map_string(second, xstrdup("first"), xstrdup("1"));
++        insert_map_string(second, xstrdup("second"), xstrdup("2"));
++        insert_map_string(second, xstrdup("third"), xstrdup("3"));
++
++        assert(EQUAL == map_string_equals(first, second));
++        assert(EQUAL == map_string_equals(second, first));
++
++        insert_map_string(first, xstrdup("fifth"), xstrdup("5"));
++        insert_map_string(second, xstrdup("fourth"), xstrdup("4"));
++
++        assert(MISS_KEY == map_string_equals(first, second));
++        assert(MISS_KEY == map_string_equals(second, first));
++
++        insert_map_string(first, xstrdup("fourth"), xstrdup("4"));
++        insert_map_string(second, xstrdup("fifth"), xstrdup("6"));
++
++        assert(DIFF_VALUE == map_string_equals(first, second));
++        assert(DIFF_VALUE == map_string_equals(second, first));
++
++        free_map_string(first);
++        free_map_string(second);
++    }
++
++    {
++        map_string_t *first = new_map_string();
++        map_string_t *second = new_map_string();
++
++        assert(!load_conf_file_from_dirs(CONF_NAME, NULL, second, 0));
++
++        assert(EQUAL == map_string_equals(first, second) || !"Not empty");
++
++        free_map_string(first);
++        free_map_string(second);
++    }
++
++    {
++        const char *const dir_vec[] = {
++            NULL,
++        };
++
++        map_string_t *first = new_map_string();
++        map_string_t *second = new_map_string();
++
++        assert(!load_conf_file_from_dirs(CONF_NAME, dir_vec, second, 0));
++
++        assert(EQUAL == map_string_equals(first, second) || !"Not empty");
++
++        free_map_string(first);
++        free_map_string(second);
++    }
++
++    {
++        const char *const dir_vec[] = {
++            DEFAULT_DIR,
++            NULL,
++        };
++
++        map_string_t *first = new_map_string();
++        load_conf_file(DEFAULT_DIR"/"CONF_NAME, first, 0);
++
++        map_string_t *second = new_map_string();
++        assert(load_conf_file_from_dirs(CONF_NAME, dir_vec, second, 0));
++
++        assert(EQUAL == map_string_equals(first, second));
++
++        free_map_string(first);
++        free_map_string(second);
++    }
++
++    {
++        const char *const dir_vec[] = {
++            DEFAULT_DIR,
++            FIRST_DIR,
++            SECOND_DIR,
++            NULL,
++        };
++
++        map_string_t *first = new_map_string();
++        load_conf_file(DEFAULT_DIR"/"CONF_NAME, first, 0);
++        load_conf_file(FIRST_DIR"/"CONF_NAME, first, 0);
++        load_conf_file(SECOND_DIR"/"CONF_NAME, first, 0);
++
++        map_string_t *second = new_map_string();
++        assert(load_conf_file_from_dirs(CONF_NAME, dir_vec, second, 0));
++
++        assert(EQUAL == map_string_equals(first, second));
++
++        free_map_string(first);
++        free_map_string(second);
++    }
++
++    {
++        const char *const dir_vec[] = {
++            DEFAULT_DIR,
++            "/foo/blah",
++            FIRST_DIR,
++            SECOND_DIR,
++            NULL,
++        };
++
++        map_string_t *first = new_map_string();
++        load_conf_file(DEFAULT_DIR"/"CONF_NAME, first, 0);
++        load_conf_file(FIRST_DIR"/"CONF_NAME, first, 0);
++        load_conf_file(SECOND_DIR"/"CONF_NAME, first, 0);
++
++        map_string_t *second = new_map_string();
++        assert(!load_conf_file_from_dirs(CONF_NAME, dir_vec, second, 0));
++
++        assert(EQUAL == map_string_equals(first, second));
++
++        free_map_string(first);
++        free_map_string(second);
++    }
++
++    return 0;
++}
++]])
++
++
++## ---------------##
++## save_conf_file ##
++## ---------------##
++
++AT_TESTFUN([save_conf_file],
++[[
++#include "internal_libreport.h"
++
++#define CONF_NAME "file.conf"
++#define CUSTOM_CONF "../../conf/default/custom.conf"
++
++typedef enum equal_result
++{
++    EQUAL,
++    DIFF_SIZE,
++    MISS_KEY,
++    DIFF_VALUE,
++} equal_result_t;
++
++equal_result_t map_string_equals(map_string_t *f, map_string_t *s)
++{
++    const guint fsize = g_hash_table_size(f);
++    const guint ssize = g_hash_table_size(s);
++    if (fsize != ssize)
++    {
++        fprintf(stdout, "instances are not equal in size: %u != %u\n", fsize, ssize);
++        return DIFF_SIZE;
++    }
++
++    map_string_iter_t iter;
++    gpointer fkey = NULL;
++    gpointer fvalue = NULL;
++
++    init_map_string_iter(&iter, f);
++    while(next_map_string_iter(&iter, (const char **)&fkey, (const char **)&fvalue))
++    {
++        gpointer skey = NULL;
++        gpointer svalue = NULL;
++
++        if (!g_hash_table_lookup_extended(s, fkey, &skey, &svalue))
++        {
++            fprintf(stdout, "second misses key '%s'\n", (const char *)fkey);
++            return MISS_KEY;
++        }
++
++        if (strcmp((const char *)fvalue, (const char *)svalue) != 0)
++        {
++            fprintf(stdout, "a value of '%s' differs: '%s' != '%s'\n", (const char *)fkey, (const char *)fvalue, (const char *)svalue);
++            return DIFF_VALUE;
++        }
++    }
++
++    return EQUAL;
++}
++
++int main(int argc, char **argv)
++{
++    g_verbose = 3;
++
++    {
++        /* Self check */
++        map_string_t *first = new_map_string();
++        map_string_t *second = new_map_string();
++
++        assert(EQUAL == map_string_equals(first, first));
++        assert(EQUAL == map_string_equals(first, second));
++
++        insert_map_string(first, xstrdup("first"), xstrdup("1"));
++        insert_map_string(first, xstrdup("second"), xstrdup("2"));
++        insert_map_string(first, xstrdup("third"), xstrdup("3"));
++
++        assert(EQUAL == map_string_equals(first, first));
++
++        assert(DIFF_SIZE == map_string_equals(first, second));
++        assert(DIFF_SIZE == map_string_equals(second, first));
++
++        insert_map_string(second, xstrdup("first"), xstrdup("1"));
++        insert_map_string(second, xstrdup("second"), xstrdup("2"));
++        insert_map_string(second, xstrdup("third"), xstrdup("3"));
++
++        assert(EQUAL == map_string_equals(first, second));
++        assert(EQUAL == map_string_equals(second, first));
++
++        insert_map_string(first, xstrdup("fifth"), xstrdup("5"));
++        insert_map_string(second, xstrdup("fourth"), xstrdup("4"));
++
++        assert(MISS_KEY == map_string_equals(first, second));
++        assert(MISS_KEY == map_string_equals(second, first));
++
++        insert_map_string(first, xstrdup("fourth"), xstrdup("4"));
++        insert_map_string(second, xstrdup("fifth"), xstrdup("6"));
++
++        assert(DIFF_VALUE == map_string_equals(first, second));
++        assert(DIFF_VALUE == map_string_equals(second, first));
++
++        free_map_string(first);
++        free_map_string(second);
++    }
++
++    {
++        map_string_t *first = new_map_string();
++        insert_map_string(first, xstrdup("success"), xstrdup("total"));
++        insert_map_string(first, xstrdup("failure"), xstrdup("none"));
++        insert_map_string(first, xstrdup("effort"), xstrdup("minimal"));
++        insert_map_string(first, xstrdup("state"), xstrdup("done"));
++
++        /* These commands must fail */
++        assert(!save_conf_file("/foo/blah/file.conf", first));
++        assert(!save_conf_file("../../../../../../../../../../../../../../../foo/blah/file.conf", first));
++        assert(!save_conf_file("/root/file.conf", first));
++
++        //char tmpdir[] = "/tmp/libreport_save_conf_file.XXXXXX";
++        char tmpdir[] = "/tmp";
++
++        /* OK, I know that I should not use tmpnam() but I want to check */
++        /* that save_conf_file() creates the directory */
++        //assert(tmpnam(tmpdir) != NULL);
++
++        char *conf_path = concat_path_file(tmpdir, CONF_NAME);
++
++        assert(save_conf_file(conf_path, first) || !"Save in not existing directory");
++
++        {
++            map_string_t *second = new_map_string();
++            assert(load_conf_file(conf_path, second, 0) || !"Loaded from not existing directory");
++
++            assert(EQUAL == map_string_equals(first, second) || !"The loaded configuration equals to the saved configuration");
++
++            free_map_string(second);
++        }
++
++        {
++            map_string_t *second = new_map_string();
++            unlink(CUSTOM_CONF);
++            assert(save_conf_file(CUSTOM_CONF, first) || !"Saved at relative path");
++            assert(load_conf_file(CUSTOM_CONF, second, 0) || !"Load the saved at relative path");
++
++            assert(EQUAL == map_string_equals(first, second) || !"The loaded configuration equals to the saved configuration");
++
++            free_map_string(second);
++        }
++
++        free_map_string(first);
++    }
++
++    return 0;
++}
++]])
++
+diff --git a/tests/testsuite.at b/tests/testsuite.at
+index 5d13168..30208fe 100644
+--- a/tests/testsuite.at
++++ b/tests/testsuite.at
+@@ -4,3 +4,4 @@
+ m4_include([strbuf.at])
+ m4_include([osrelease.at])
+ m4_include([taghyperlinks.at])
++m4_include([configuration_files.at])
+-- 
+1.8.3.1
+

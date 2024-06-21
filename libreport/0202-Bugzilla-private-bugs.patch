@@ -1,0 +1,3356 @@
+From dc0afc7fcdbcdc827794c03ca92c0cf982a52d6f Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Mon, 21 Dec 2015 15:04:51 +0100
+Subject: [PATCH] Bugzilla private bugs
+
+- open Bugzilla bugs private by default
+
+Resolves: #803769, #1279454
+---
+ configure.ac                          |   15 ++
+ po/POTFILES.skip                      |    2 +-
+ src/gui-wizard-gtk/main.c             |    1 +
+ src/gui-wizard-gtk/wizard.c           |  110 ++++++++++++-
+ src/gui-wizard-gtk/wizard.glade       |  273 +++++++++++--------------------
+ src/include/Makefile.am               |    3 +-
+ src/include/event_config.h            |    3 +
+ src/include/global_configuration.h    |   60 +++++++
+ src/include/internal_libreport.h      |   15 ++
+ src/lib/Makefile.am                   |    3 +-
+ src/lib/abrt_xmlrpc.c                 |   88 +++++++++-
+ src/lib/abrt_xmlrpc.h                 |   12 ++
+ src/lib/configuration_files.c         |   29 +++-
+ src/lib/event_config.c                |   32 ++++
+ src/lib/event_xml_parser.c            |   21 +++
+ src/lib/global_configuration.c        |  167 ++++++++++++++++++
+ src/plugins/Makefile.am               |    2 +-
+ src/plugins/report_Bugzilla.xml.in    |   44 -----
+ src/plugins/report_Bugzilla.xml.in.in |   57 +++++++
+ src/plugins/reporter-bugzilla.c       |   96 ++++++++++-
+ src/plugins/rhbz.c                    |   89 ++++++++---
+ src/plugins/rhbz.h                    |    9 +-
+ tests/Makefile.am                     |   13 +-
+ tests/atlocal.in                      |    2 +-
+ tests/bugzilla_plugin.at              |  125 ++++++++++++++
+ tests/bugzilla_plugin.at.in           |  125 ++++++++++++++
+ tests/configuration_files.at          |   43 +++++-
+ tests/event_config.at                 |   60 +++++++
+ tests/global_config.at                |  155 +++++++++++++++++
+ tests/helpers/testsuite.h             |  297 +++++++++++++++++++++++++++++++++
+ tests/helpers/testsuite_tools.h       |   67 ++++++++
+ tests/testsuite.at                    |    3 +
+ 33 files changed, 1744 insertions(+), 281 deletions(-)
+ create mode 100644 src/include/global_configuration.h
+ create mode 100644 src/lib/global_configuration.c
+ delete mode 100644 src/plugins/report_Bugzilla.xml.in
+ create mode 100644 src/plugins/report_Bugzilla.xml.in.in
+ create mode 100644 tests/bugzilla_plugin.at
+ create mode 100644 tests/bugzilla_plugin.at.in
+ create mode 100644 tests/event_config.at
+ create mode 100644 tests/global_config.at
+ create mode 100644 tests/helpers/testsuite.h
+ create mode 100644 tests/helpers/testsuite_tools.h
+
+diff --git a/configure.ac b/configure.ac
+index 56bb4d6..19d6350 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -65,6 +65,19 @@ AC_PATH_PROG([XMLTO], [xmlto], [no])
+     [exit 1]
+ [fi]
+ 
++AC_ARG_WITH([redhatbugzillacreateprivate],
++            AS_HELP_STRING([--with-redhatbugzillacreateprivate="yes/no"],
++                           [Whether the Red Hat Bugzilla plugin should open
++                            bugs private by default ("no")]),
++            [], [with_redhatbugzillacreateprivate="no"])
++AC_SUBST([RED_HAT_BUGZILLA_CREATE_PRIVATE], [$with_redhatbugzillacreateprivate])
++
++AC_ARG_WITH([redhatbugzillaprivategroups],
++            AS_HELP_STRING([--with-redhatbugzillaprivategroups="CSV"],
++                           [Name of groups separated by comma]),
++            [], [with_redhatbugzillaprivategroups="fedora_contrib_private"])
++AC_SUBST([RED_HAT_BUGZILLA_PRIVATE_GROUPS], [$with_redhatbugzillaprivategroups])
++
+ PKG_CHECK_MODULES([GTK], [$GTK_VER])
+ PKG_CHECK_MODULES([GLIB], [glib-2.0 >= 2.21])
+ PKG_CHECK_MODULES([DBUS], [dbus-1])
+@@ -159,6 +172,7 @@ AC_CONFIG_FILES([
+ 	libreport.pc
+ 	src/include/Makefile
+ 	src/lib/Makefile
++	src/plugins/report_Bugzilla.xml.in
+ 	src/report-python/Makefile
+ 	src/Makefile
+ 	src/gtk-helpers/Makefile
+@@ -170,6 +184,7 @@ AC_CONFIG_FILES([
+ 	src/client-python/Makefile
+ 	po/Makefile.in
+ 	doc/Makefile
++	tests/bugzilla_plugin.at
+ ])
+ 
+ #	src/plugins/Makefile
+diff --git a/po/POTFILES.skip b/po/POTFILES.skip
+index bb8a3b5..307e546 100644
+--- a/po/POTFILES.skip
++++ b/po/POTFILES.skip
+@@ -1,2 +1,2 @@
+ contrib/command-not-found/pk-tools-common.c
+-
++src/plugins/report_Bugzilla.xml.in.in
+diff --git a/src/gui-wizard-gtk/main.c b/src/gui-wizard-gtk/main.c
+index ae102ca..81c6b09 100644
+--- a/src/gui-wizard-gtk/main.c
++++ b/src/gui-wizard-gtk/main.c
+@@ -140,6 +140,7 @@ int main(int argc, char **argv)
+ 
+     g_dump_dir_name = xstrdup(argv[0]);
+ 
++    load_global_configuration();
+     /* load /etc/abrt/events/foo.{conf,xml} stuff
+        and ~/.abrt/events/foo.conf */
+     load_event_config_data();
+diff --git a/src/gui-wizard-gtk/wizard.c b/src/gui-wizard-gtk/wizard.c
+index 297fec7..40d4293 100644
+--- a/src/gui-wizard-gtk/wizard.c
++++ b/src/gui-wizard-gtk/wizard.c
+@@ -133,6 +133,22 @@ enum
+     CLEAR_PREVIOUS_RESULT = 1 << 0,
+ };
+ 
++static GtkWidget *g_sens_ticket;
++static GtkToggleButton *g_sens_ticket_cb;
++static GtkButton *g_privacy_info_btn;
++
++enum {
++    PRIV_WARN_SHOW_BTN      = 0x01,
++    PRIV_WARN_HIDE_BTN      = 0x02,
++    PRIV_WARN_SHOW_MSG      = 0x04,
++    PRIV_WARN_HIDE_MSG      = 0x08,
++    PRIV_WARN_BTN_CHECKED   = 0x10,
++    PRIV_WARN_BTN_UNCHECKED = 0x20,
++};
++
++static void private_ticket_creation_warning(int flags);
++static void update_private_ticket_creation_warning_for_selected_event(void);
++
+ /* Search in bt */
+ static guint g_timeout = 0;
+ static GtkEntry *g_search_entry_bt;
+@@ -1911,6 +1927,63 @@ static void clear_warnings()
+     gtk_container_foreach(GTK_CONTAINER(g_box_warning_labels), &remove_child_widget, NULL);
+ }
+ 
++static void on_sensitive_ticket_clicked_cb(GtkWidget *button, gpointer user_data)
++{
++    set_global_create_private_ticket(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(button)), /*transient*/0);
++}
++
++static void on_privacy_info_btn(GtkWidget *button, gpointer user_data)
++{
++    for (GList *r = g_list_selected_reporters; r; r = g_list_next(r))
++    {
++        event_config_t *cfg = get_event_config(r->data);
++        if (cfg == NULL || !cfg->ec_supports_restricted_access)
++            continue;
++
++        show_event_config_dialog(r->data, GTK_WINDOW(g_top_most_window));
++    }
++}
++
++static void private_ticket_creation_warning(int flags)
++{
++    if (flags & PRIV_WARN_HIDE_BTN)
++    {
++        gtk_widget_hide(GTK_WIDGET(g_sens_ticket));
++    }
++
++    if (flags & PRIV_WARN_SHOW_BTN)
++    {
++        gtk_widget_show_all(GTK_WIDGET(g_sens_ticket));
++        gtk_widget_show(GTK_WIDGET(g_sens_ticket));
++    }
++
++    if (flags & PRIV_WARN_BTN_UNCHECKED)
++        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_sens_ticket_cb), FALSE);
++
++    if (flags & PRIV_WARN_BTN_CHECKED)
++        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_sens_ticket_cb), TRUE);
++
++    if (flags & PRIV_WARN_HIDE_MSG)
++        clear_warnings();
++
++    if (flags & PRIV_WARN_SHOW_MSG)
++    {
++       add_warning(_("Possible sensitive data detected, feel free to edit the report and remove them."));
++       show_warnings();
++    }
++}
++
++static void add_sensitive_data_warning(void)
++{
++    int flags = PRIV_WARN_SHOW_MSG;
++
++    event_config_t *cfg = get_event_config(g_reporter_events_selected);
++    if (cfg != NULL && cfg->ec_supports_restricted_access)
++        flags |= PRIV_WARN_SHOW_BTN | PRIV_WARN_BTN_CHECKED;
++
++    private_ticket_creation_warning(flags);
++}
++
+ static void check_bt_rating_and_allow_send(void)
+ {
+     int minimal_rating = 0;
+@@ -2247,11 +2320,35 @@ static void highlight_forbidden()
+     }
+     if (found)
+     {
+-        add_warning(_("Possible sensitive data detected, please review the highlighted tabs carefully."));
++        add_sensitive_data_warning();
+     }
+     list_free_with_free(forbidden_words);
+ }
+ 
++static void update_private_ticket_creation_warning_for_selected_event(void)
++{
++    const int global = get_global_create_private_ticket();
++    int local = 0;
++    int local_supported = 0;
++
++    for (GList *r = g_list_selected_reporters; r != NULL; r = g_list_next(r))
++    {
++        event_config_t *cfg = get_event_config(r->data);
++
++        local_supported = cfg != NULL && cfg->ec_supports_restricted_access;
++        local = local_supported && ec_restricted_access_enabled(cfg);
++    };
++
++    if (!global && !local_supported)
++        return;
++
++    int flags = PRIV_WARN_SHOW_BTN | PRIV_WARN_HIDE_MSG;
++    if (global || local)
++        flags |= PRIV_WARN_BTN_CHECKED;
++
++    private_ticket_creation_warning(flags);
++}
++
+ static void on_page_prepare(GtkAssistant *assistant, GtkWidget *page, gpointer user_data)
+ {
+     //int page_no = gtk_assistant_get_current_page(g_assistant);
+@@ -2284,6 +2381,7 @@ static void on_page_prepare(GtkAssistant *assistant, GtkWidget *page, gpointer u
+     if (pages[PAGENO_EDIT_BACKTRACE].page_widget == page)
+     {
+         clear_warnings();
++        update_private_ticket_creation_warning_for_selected_event();
+         check_bt_rating_and_allow_send();
+         highlight_forbidden();
+         show_warnings();
+@@ -2322,7 +2420,9 @@ static void on_page_prepare(GtkAssistant *assistant, GtkWidget *page, gpointer u
+     }
+ 
+     if (pages[PAGENO_EDIT_COMMENT].page_widget == page)
++    {
+         on_comment_changed(gtk_text_view_get_buffer(g_tv_comment), NULL);
++    }
+     //log_ready_state();
+ }
+ 
+@@ -2759,6 +2859,13 @@ static void add_pages()
+     g_notebook             = GTK_NOTEBOOK(     gtk_builder_get_object(builder, "notebook_edit"));
+     g_ev_search_up         = GTK_EVENT_BOX(     gtk_builder_get_object(builder, "ev_search_up"));
+     g_ev_search_down       = GTK_EVENT_BOX(   gtk_builder_get_object(builder, "ev_search_down"));
++    g_sens_ticket          = GTK_WIDGET(       gtk_builder_get_object(builder, "sens_ticket"));
++    g_sens_ticket_cb       = GTK_TOGGLE_BUTTON(gtk_builder_get_object(builder, "sens_ticket_cb"));
++    g_privacy_info_btn     = GTK_BUTTON(       gtk_builder_get_object(builder, "privacy_info_btn"));
++
++    gtk_widget_hide(g_sens_ticket);
++    g_signal_connect(g_sens_ticket_cb, "toggled", G_CALLBACK(on_sensitive_ticket_clicked_cb), NULL);
++    g_signal_connect(g_privacy_info_btn, "clicked", G_CALLBACK(on_privacy_info_btn), NULL);
+ 
+     gtk_widget_hide(g_widget_warnings_area);
+ 
+@@ -2908,7 +3015,6 @@ void create_assistant(void)
+     g_signal_connect(obj_assistant, "prepare", G_CALLBACK(on_page_prepare), NULL);
+ 
+     add_pages();
+-
+     create_details_treeview();
+ 
+     g_signal_connect(g_tb_approve_bt, "toggled", G_CALLBACK(on_bt_approve_toggle), NULL);
+diff --git a/src/gui-wizard-gtk/wizard.glade b/src/gui-wizard-gtk/wizard.glade
+index 3c64220..3ea5ee7 100644
+--- a/src/gui-wizard-gtk/wizard.glade
++++ b/src/gui-wizard-gtk/wizard.glade
+@@ -1,19 +1,16 @@
+-<?xml version="1.0" encoding="UTF-8"?>
++<?xml version="1.0"?>
+ <interface>
+   <requires lib="gtk+" version="2.16"/>
+   <!-- interface-naming-policy toplevel-contextual -->
+   <object class="GtkWindow" id="window0">
+-    <property name="can_focus">False</property>
+     <child>
+       <object class="GtkVBox" id="page_0">
+         <property name="visible">True</property>
+-        <property name="can_focus">False</property>
+         <property name="border_width">3</property>
+         <property name="spacing">3</property>
+         <child>
+           <object class="GtkLabel" id="lbl_cd_reason">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="xalign">0</property>
+             <property name="yalign">0</property>
+             <property name="wrap">True</property>
+@@ -25,14 +22,12 @@
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">0</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkLabel" id="label7">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="xalign">0</property>
+             <property name="yalign">0</property>
+             <property name="label" translatable="yes">On the following screens, you will be asked to describe how the problem occurred, to choose how to analyze the problem (if needed), to review collected data, and to choose where the problem should be reported. Click 'Forward' to proceed.</property>
+@@ -40,7 +35,6 @@
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">1</property>
+           </packing>
+         </child>
+@@ -64,14 +58,11 @@
+             <child type="label">
+               <object class="GtkLabel" id="dump_elements">
+                 <property name="visible">True</property>
+-                <property name="can_focus">False</property>
+                 <property name="label" translatable="yes">Details</property>
+               </object>
+             </child>
+           </object>
+           <packing>
+-            <property name="expand">True</property>
+-            <property name="fill">True</property>
+             <property name="position">2</property>
+           </packing>
+         </child>
+@@ -79,17 +70,14 @@
+     </child>
+   </object>
+   <object class="GtkWindow" id="window1">
+-    <property name="can_focus">False</property>
+     <child>
+       <object class="GtkVBox" id="page_1">
+         <property name="visible">True</property>
+-        <property name="can_focus">False</property>
+         <property name="border_width">10</property>
+         <property name="spacing">3</property>
+         <child>
+           <object class="GtkLabel" id="label1">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="xalign">0</property>
+             <property name="yalign">0</property>
+             <property name="label" translatable="yes">How did this problem happen (step-by-step)? How can it be reproduced? Any additional comments useful for diagnosing the problem? Please use English if possible.</property>
+@@ -97,7 +85,6 @@
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">0</property>
+           </packing>
+         </child>
+@@ -115,18 +102,14 @@
+             </child>
+           </object>
+           <packing>
+-            <property name="expand">True</property>
+-            <property name="fill">True</property>
+             <property name="position">1</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkEventBox" id="eb_comment">
+-            <property name="can_focus">False</property>
+             <child>
+               <object class="GtkLabel" id="label5">
+                 <property name="visible">True</property>
+-                <property name="can_focus">False</property>
+                 <property name="label" translatable="yes">You need to fill the how to before you can proceed...</property>
+                 <property name="single_line_mode">True</property>
+               </object>
+@@ -134,14 +117,12 @@
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">2</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkLabel" id="label3">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="xalign">0</property>
+             <property name="yalign">0</property>
+             <property name="label" translatable="yes">&lt;b&gt;Your comments are not private.&lt;/b&gt; They may be included into publicly visible problem reports.</property>
+@@ -150,14 +131,12 @@
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">3</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkCheckButton" id="cb_no_comment">
+             <property name="label" translatable="yes">I don't know what caused this problem</property>
+-            <property name="use_action_appearance">False</property>
+             <property name="visible">True</property>
+             <property name="can_focus">True</property>
+             <property name="receives_default">False</property>
+@@ -166,7 +145,6 @@
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">4</property>
+           </packing>
+         </child>
+@@ -174,17 +152,14 @@
+     </child>
+   </object>
+   <object class="GtkWindow" id="window10">
+-    <property name="can_focus">False</property>
+     <child>
+       <object class="GtkVBox" id="page_4">
+         <property name="visible">True</property>
+-        <property name="can_focus">False</property>
+         <property name="border_width">10</property>
+         <property name="spacing">3</property>
+         <child>
+           <object class="GtkLabel" id="lbl_page7">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="xalign">0</property>
+             <property name="label" translatable="yes">Select additional files to attach to the report:</property>
+             <property name="use_markup">True</property>
+@@ -192,33 +167,26 @@
+             <property name="wrap">True</property>
+           </object>
+           <packing>
+-            <property name="expand">True</property>
+-            <property name="fill">True</property>
+             <property name="position">0</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkVBox" id="vb_collectors">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <child>
+               <placeholder/>
+             </child>
+           </object>
+           <packing>
+-            <property name="expand">True</property>
+-            <property name="fill">True</property>
+             <property name="position">1</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkHBox" id="hbox4">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <child>
+               <object class="GtkButton" id="button_cfg3">
+                 <property name="label">gtk-preferences</property>
+-                <property name="use_action_appearance">False</property>
+                 <property name="visible">True</property>
+                 <property name="can_focus">True</property>
+                 <property name="receives_default">True</property>
+@@ -235,14 +203,11 @@
+             <child>
+               <object class="GtkAlignment" id="alignment5">
+                 <property name="visible">True</property>
+-                <property name="can_focus">False</property>
+                 <child>
+                   <placeholder/>
+                 </child>
+               </object>
+               <packing>
+-                <property name="expand">True</property>
+-                <property name="fill">True</property>
+                 <property name="position">1</property>
+               </packing>
+             </child>
+@@ -257,17 +222,14 @@
+     </child>
+   </object>
+   <object class="GtkWindow" id="window11">
+-    <property name="can_focus">False</property>
+     <child>
+       <object class="GtkVBox" id="page_5">
+         <property name="visible">True</property>
+-        <property name="can_focus">False</property>
+         <property name="border_width">10</property>
+         <property name="spacing">3</property>
+         <child>
+           <object class="GtkLabel" id="lbl_collect_log">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="xalign">0</property>
+             <property name="label" translatable="yes">Collecting did not start yet</property>
+             <property name="use_markup">True</property>
+@@ -275,7 +237,6 @@
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">0</property>
+           </packing>
+         </child>
+@@ -294,8 +255,6 @@
+             </child>
+           </object>
+           <packing>
+-            <property name="expand">True</property>
+-            <property name="fill">True</property>
+             <property name="position">1</property>
+           </packing>
+         </child>
+@@ -303,49 +262,39 @@
+     </child>
+   </object>
+   <object class="GtkWindow" id="window2">
+-    <property name="can_focus">False</property>
+     <child>
+       <object class="GtkVBox" id="page_2">
+         <property name="visible">True</property>
+-        <property name="can_focus">False</property>
+         <property name="border_width">10</property>
+         <property name="spacing">3</property>
+         <child>
+           <object class="GtkLabel" id="lbl_page5">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="xalign">0</property>
+             <property name="label" translatable="yes">Select how you would like to analyze the problem:</property>
+             <property name="wrap">True</property>
+           </object>
+           <packing>
+-            <property name="expand">True</property>
+-            <property name="fill">True</property>
+             <property name="position">0</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkVBox" id="vb_analyzers">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <child>
+               <placeholder/>
+             </child>
+           </object>
+           <packing>
+-            <property name="expand">True</property>
+-            <property name="fill">True</property>
+             <property name="position">1</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkHBox" id="hbox2">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <child>
+               <object class="GtkButton" id="button_cfg1">
+                 <property name="label">gtk-preferences</property>
+-                <property name="use_action_appearance">False</property>
+                 <property name="visible">True</property>
+                 <property name="can_focus">True</property>
+                 <property name="receives_default">True</property>
+@@ -362,14 +311,11 @@
+             <child>
+               <object class="GtkAlignment" id="alignment3">
+                 <property name="visible">True</property>
+-                <property name="can_focus">False</property>
+                 <child>
+                   <placeholder/>
+                 </child>
+               </object>
+               <packing>
+-                <property name="expand">True</property>
+-                <property name="fill">True</property>
+                 <property name="position">1</property>
+               </packing>
+             </child>
+@@ -384,17 +330,14 @@
+     </child>
+   </object>
+   <object class="GtkWindow" id="window3">
+-    <property name="can_focus">False</property>
+     <child>
+       <object class="GtkVBox" id="page_3">
+         <property name="visible">True</property>
+-        <property name="can_focus">False</property>
+         <property name="border_width">10</property>
+         <property name="spacing">3</property>
+         <child>
+           <object class="GtkLabel" id="lbl_analyze_log">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="xalign">0</property>
+             <property name="label" translatable="yes">Analyzing did not start yet</property>
+             <property name="use_markup">True</property>
+@@ -404,18 +347,15 @@
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">0</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkProgressBar" id="pb_analyze">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">1</property>
+           </packing>
+         </child>
+@@ -441,25 +381,20 @@
+             <child type="label">
+               <object class="GtkLabel" id="lbl_analyze_show_log">
+                 <property name="visible">True</property>
+-                <property name="can_focus">False</property>
+                 <property name="label" translatable="yes">Show log</property>
+               </object>
+             </child>
+           </object>
+           <packing>
+-            <property name="expand">True</property>
+-            <property name="fill">True</property>
+             <property name="position">2</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkHBox" id="box2">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <child>
+               <object class="GtkButton" id="btn_cancel_analyze">
+                 <property name="label">gtk-stop</property>
+-                <property name="use_action_appearance">False</property>
+                 <property name="visible">True</property>
+                 <property name="can_focus">True</property>
+                 <property name="receives_default">True</property>
+@@ -467,7 +402,6 @@
+               </object>
+               <packing>
+                 <property name="expand">False</property>
+-                <property name="fill">True</property>
+                 <property name="position">0</property>
+               </packing>
+             </child>
+@@ -482,17 +416,14 @@
+     </child>
+   </object>
+   <object class="GtkWindow" id="window4">
+-    <property name="can_focus">False</property>
+     <child>
+       <object class="GtkVBox" id="page_6_report">
+         <property name="visible">True</property>
+-        <property name="can_focus">False</property>
+         <property name="border_width">10</property>
+         <property name="spacing">3</property>
+         <child>
+           <object class="GtkLabel" id="lbl_page3">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="xalign">0</property>
+             <property name="label" translatable="yes">Select how you would like to report the problem:</property>
+             <property name="use_markup">True</property>
+@@ -500,33 +431,26 @@
+             <property name="wrap">True</property>
+           </object>
+           <packing>
+-            <property name="expand">True</property>
+-            <property name="fill">True</property>
+             <property name="position">0</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkVBox" id="vb_reporters">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <child>
+               <placeholder/>
+             </child>
+           </object>
+           <packing>
+-            <property name="expand">True</property>
+-            <property name="fill">True</property>
+             <property name="position">1</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkHBox" id="hbox3">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <child>
+               <object class="GtkButton" id="button_cfg2">
+                 <property name="label">gtk-preferences</property>
+-                <property name="use_action_appearance">False</property>
+                 <property name="visible">True</property>
+                 <property name="can_focus">True</property>
+                 <property name="receives_default">True</property>
+@@ -543,14 +467,11 @@
+             <child>
+               <object class="GtkAlignment" id="alignment4">
+                 <property name="visible">True</property>
+-                <property name="can_focus">False</property>
+                 <child>
+                   <placeholder/>
+                 </child>
+               </object>
+               <packing>
+-                <property name="expand">True</property>
+-                <property name="fill">True</property>
+                 <property name="position">1</property>
+               </packing>
+             </child>
+@@ -565,13 +486,12 @@
+     </child>
+   </object>
+   <object class="GtkWindow" id="window5">
+-    <property name="can_focus">False</property>
+     <property name="tooltip_text" translatable="yes">Use this button to generate more informative backtrace after you installed additional debug packages</property>
+     <child>
+       <object class="GtkVBox" id="page_7_report">
+         <property name="visible">True</property>
+-        <property name="can_focus">False</property>
+         <property name="border_width">10</property>
++        <property name="orientation">vertical</property>
+         <property name="spacing">3</property>
+         <child>
+           <object class="GtkNotebook" id="notebook_edit">
+@@ -598,27 +518,56 @@
+             </child>
+           </object>
+           <packing>
+-            <property name="expand">True</property>
+-            <property name="fill">True</property>
+             <property name="position">0</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkHBox" id="hbox1">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="border_width">5</property>
+             <child>
+-              <object class="GtkHBox" id="box_warning_area">
++              <object class="GtkVBox" id="vbox2">
+                 <property name="visible">True</property>
+-                <property name="can_focus">False</property>
+-                <property name="no_show_all">True</property>
++                <property name="orientation">vertical</property>
+                 <child>
+-                  <object class="GtkImage" id="image1">
++                  <object class="GtkHBox" id="sens_ticket">
+                     <property name="visible">True</property>
+-                    <property name="can_focus">False</property>
+-                    <property name="stock">gtk-dialog-warning</property>
+-                    <property name="icon-size">6</property>
++                    <property name="no_show_all">True</property>
++                    <child>
++                      <object class="GtkCheckButton" id="sens_ticket_cb">
++                        <property name="label" translatable="yes">Restricte access to the report</property>
++                        <property name="visible">True</property>
++                        <property name="can_focus">True</property>
++                        <property name="receives_default">False</property>
++                        <property name="draw_indicator">True</property>
++                      </object>
++                      <packing>
++                        <property name="expand">False</property>
++                        <property name="fill">False</property>
++                        <property name="position">0</property>
++                      </packing>
++                    </child>
++                    <child>
++                      <object class="GtkButton" id="privacy_info_btn">
++                        <property name="visible">True</property>
++                        <property name="can_focus">True</property>
++                        <property name="receives_default">True</property>
++                        <property name="tooltip_text" translatable="yes">Learn more about restricted access in the configuration</property>
++                        <property name="relief">none</property>
++                        <property name="use_underline">True</property>
++                        <child>
++                          <object class="GtkImage" id="image2">
++                            <property name="visible">True</property>
++                            <property name="stock">gtk-dialog-question</property>
++                          </object>
++                        </child>
++                      </object>
++                      <packing>
++                        <property name="expand">False</property>
++                        <property name="fill">False</property>
++                        <property name="position">1</property>
++                      </packing>
++                    </child>
+                   </object>
+                   <packing>
+                     <property name="expand">False</property>
+@@ -627,89 +576,100 @@
+                   </packing>
+                 </child>
+                 <child>
+-                  <object class="GtkVBox" id="vbox6">
++                  <object class="GtkHBox" id="box_warning_area">
+                     <property name="visible">True</property>
+-                    <property name="can_focus">False</property>
++                    <property name="no_show_all">True</property>
+                     <child>
+-                      <object class="GtkAlignment" id="alignment1">
++                      <object class="GtkImage" id="image1">
+                         <property name="visible">True</property>
+-                        <property name="can_focus">False</property>
+-                        <child>
+-                          <placeholder/>
+-                        </child>
++                        <property name="stock">gtk-dialog-warning</property>
++                        <property name="icon-size">6</property>
+                       </object>
+                       <packing>
+-                        <property name="expand">True</property>
++                        <property name="expand">False</property>
+                         <property name="fill">False</property>
+                         <property name="position">0</property>
+                       </packing>
+                     </child>
+                     <child>
+-                      <object class="GtkVBox" id="box_warning_labels">
++                      <object class="GtkVBox" id="vbox6">
+                         <property name="visible">True</property>
+-                        <property name="can_focus">False</property>
++                        <property name="orientation">vertical</property>
+                         <child>
+-                          <placeholder/>
++                          <object class="GtkVBox" id="box_warning_labels">
++                            <property name="visible">True</property>
++                            <property name="orientation">vertical</property>
++                            <child>
++                              <placeholder/>
++                            </child>
++                            <child>
++                              <placeholder/>
++                            </child>
++                            <child>
++                              <placeholder/>
++                            </child>
++                          </object>
++                          <packing>
++                            <property name="expand">False</property>
++                            <property name="fill">False</property>
++                            <property name="position">0</property>
++                          </packing>
+                         </child>
+                         <child>
+-                          <placeholder/>
++                          <object class="GtkAlignment" id="alignment1">
++                            <property name="visible">True</property>
++                            <child>
++                              <placeholder/>
++                            </child>
++                          </object>
++                          <packing>
++                            <property name="fill">False</property>
++                            <property name="position">1</property>
++                          </packing>
+                         </child>
+                         <child>
+-                          <placeholder/>
++                          <object class="GtkAlignment" id="alignment2">
++                            <property name="visible">True</property>
++                            <child>
++                              <placeholder/>
++                            </child>
++                          </object>
++                          <packing>
++                            <property name="fill">False</property>
++                            <property name="padding">1</property>
++                            <property name="position">2</property>
++                          </packing>
+                         </child>
+                       </object>
+                       <packing>
+-                        <property name="expand">False</property>
+-                        <property name="fill">False</property>
+                         <property name="position">1</property>
+                       </packing>
+                     </child>
+-                    <child>
+-                      <object class="GtkAlignment" id="alignment2">
+-                        <property name="visible">True</property>
+-                        <property name="can_focus">False</property>
+-                        <child>
+-                          <placeholder/>
+-                        </child>
+-                      </object>
+-                      <packing>
+-                        <property name="expand">True</property>
+-                        <property name="fill">False</property>
+-                        <property name="padding">1</property>
+-                        <property name="position">2</property>
+-                      </packing>
+-                    </child>
+                   </object>
+                   <packing>
+-                    <property name="expand">True</property>
+-                    <property name="fill">True</property>
++                    <property name="padding">1</property>
+                     <property name="position">1</property>
+                   </packing>
+                 </child>
+               </object>
+               <packing>
+-                <property name="expand">True</property>
+-                <property name="fill">True</property>
+-                <property name="padding">1</property>
+                 <property name="position">0</property>
+               </packing>
+             </child>
+             <child>
+               <object class="GtkVBox" id="vbox5">
+                 <property name="visible">True</property>
+-                <property name="can_focus">False</property>
++                <property name="orientation">vertical</property>
+                 <child>
+                   <object class="GtkHBox" id="search_hbox">
+                     <property name="visible">True</property>
+-                    <property name="can_focus">False</property>
+                     <child>
+                       <object class="GtkEntry" id="entry_search_bt">
+                         <property name="visible">True</property>
+                         <property name="can_focus">True</property>
+-                        <property name="invisible_char">●</property>
++                        <property name="invisible_char">&#x25CF;</property>
+                         <property name="invisible_char_set">True</property>
+                         <property name="secondary_icon_stock">gtk-find</property>
+-                        <property name="primary_icon_activatable">False</property>
+                         <property name="secondary_icon_activatable">True</property>
+                         <property name="primary_icon_sensitive">True</property>
+                         <property name="secondary_icon_sensitive">True</property>
+@@ -723,40 +683,32 @@
+                     <child>
+                       <object class="GtkVBox" id="vbox1">
+                         <property name="visible">True</property>
+-                        <property name="can_focus">False</property>
++                        <property name="orientation">vertical</property>
+                         <child>
+                           <object class="GtkEventBox" id="ev_search_up">
+                             <property name="visible">True</property>
+-                            <property name="can_focus">False</property>
+                             <child>
+                               <object class="GtkArrow" id="arr_search_up">
+                                 <property name="visible">True</property>
+-                                <property name="can_focus">False</property>
+                                 <property name="arrow_type">up</property>
+                               </object>
+                             </child>
+                           </object>
+                           <packing>
+-                            <property name="expand">True</property>
+-                            <property name="fill">True</property>
+                             <property name="position">0</property>
+                           </packing>
+                         </child>
+                         <child>
+                           <object class="GtkEventBox" id="ev_search_down">
+                             <property name="visible">True</property>
+-                            <property name="can_focus">False</property>
+                             <child>
+                               <object class="GtkArrow" id="arr_search_down">
+                                 <property name="visible">True</property>
+-                                <property name="can_focus">False</property>
+                                 <property name="arrow_type">down</property>
+                               </object>
+                             </child>
+                           </object>
+                           <packing>
+-                            <property name="expand">True</property>
+-                            <property name="fill">True</property>
+                             <property name="position">1</property>
+                           </packing>
+                         </child>
+@@ -777,11 +729,10 @@
+                 <child>
+                   <object class="GtkButton" id="btn_refresh">
+                     <property name="label" translatable="yes">Regenerate backtrace</property>
+-                    <property name="use_action_appearance">False</property>
+                     <property name="visible">True</property>
+                     <property name="can_focus">True</property>
+                     <property name="receives_default">True</property>
+-                    <signal name="clicked" handler="on_b_refresh_clicked" swapped="no"/>
++                    <signal name="clicked" handler="on_b_refresh_clicked"/>
+                   </object>
+                   <packing>
+                     <property name="expand">False</property>
+@@ -794,7 +745,7 @@
+                 <property name="expand">False</property>
+                 <property name="fill">False</property>
+                 <property name="pack_type">end</property>
+-                <property name="position">1</property>
++                <property name="position">2</property>
+               </packing>
+             </child>
+           </object>
+@@ -808,17 +759,15 @@
+     </child>
+   </object>
+   <object class="GtkWindow" id="window6">
+-    <property name="can_focus">False</property>
+     <child>
+       <object class="GtkVBox" id="page_8_report">
+         <property name="visible">True</property>
+-        <property name="can_focus">False</property>
+         <property name="border_width">10</property>
++        <property name="orientation">vertical</property>
+         <property name="spacing">3</property>
+         <child>
+           <object class="GtkLabel" id="lbl_page6">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="xalign">0</property>
+             <property name="label" translatable="yes">Click 'Apply' to start reporting</property>
+             <property name="justify">fill</property>
+@@ -833,14 +782,12 @@
+         <child>
+           <object class="GtkTable" id="table1">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="n_rows">2</property>
+             <property name="n_columns">2</property>
+             <property name="column_spacing">10</property>
+             <child>
+               <object class="GtkLabel" id="label4">
+                 <property name="visible">True</property>
+-                <property name="can_focus">False</property>
+                 <property name="xalign">0</property>
+                 <property name="label" translatable="yes">Size:</property>
+                 <property name="justify">right</property>
+@@ -858,7 +805,6 @@
+             <child>
+               <object class="GtkLabel" id="label8">
+                 <property name="visible">True</property>
+-                <property name="can_focus">False</property>
+                 <property name="xalign">0</property>
+                 <property name="label" translatable="yes">Reporter(s):</property>
+                 <property name="justify">right</property>
+@@ -874,7 +820,6 @@
+             <child>
+               <object class="GtkLabel" id="lbl_reporters">
+                 <property name="visible">True</property>
+-                <property name="can_focus">False</property>
+                 <property name="xalign">0</property>
+               </object>
+               <packing>
+@@ -885,7 +830,6 @@
+             <child>
+               <object class="GtkLabel" id="lbl_size">
+                 <property name="visible">True</property>
+-                <property name="can_focus">False</property>
+                 <property name="xalign">0</property>
+               </object>
+               <packing>
+@@ -912,19 +856,15 @@
+             </child>
+           </object>
+           <packing>
+-            <property name="expand">True</property>
+-            <property name="fill">True</property>
+             <property name="position">2</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkHBox" id="box1">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <child>
+               <object class="GtkButton" id="btn_add_file">
+                 <property name="label" translatable="yes">Attach a file</property>
+-                <property name="use_action_appearance">False</property>
+                 <property name="visible">True</property>
+                 <property name="can_focus">True</property>
+                 <property name="receives_default">True</property>
+@@ -941,14 +881,12 @@
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">3</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkCheckButton" id="cb_approve_bt">
+             <property name="label" translatable="yes">I reviewed the data and _agree with submitting it</property>
+-            <property name="use_action_appearance">False</property>
+             <property name="visible">True</property>
+             <property name="can_focus">True</property>
+             <property name="receives_default">False</property>
+@@ -959,7 +897,6 @@
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">4</property>
+           </packing>
+         </child>
+@@ -967,17 +904,14 @@
+     </child>
+   </object>
+   <object class="GtkWindow" id="window7">
+-    <property name="can_focus">False</property>
+     <child>
+       <object class="GtkVBox" id="page_9_report">
+         <property name="visible">True</property>
+-        <property name="can_focus">False</property>
+         <property name="border_width">10</property>
+         <property name="spacing">3</property>
+         <child>
+           <object class="GtkLabel" id="lbl_report_log">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="xalign">0</property>
+             <property name="label" translatable="yes">Reporting did not start yet</property>
+             <property name="use_markup">True</property>
+@@ -987,18 +921,15 @@
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">0</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkProgressBar" id="pb_report">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">1</property>
+           </packing>
+         </child>
+@@ -1024,25 +955,20 @@
+             <child type="label">
+               <object class="GtkLabel" id="lbl_report_show_log">
+                 <property name="visible">True</property>
+-                <property name="can_focus">False</property>
+                 <property name="label" translatable="yes">Show log</property>
+               </object>
+             </child>
+           </object>
+           <packing>
+-            <property name="expand">True</property>
+-            <property name="fill">True</property>
+             <property name="position">2</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkHBox" id="box3">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <child>
+               <object class="GtkButton" id="btn_cancel_report">
+                 <property name="label">gtk-stop</property>
+-                <property name="use_action_appearance">False</property>
+                 <property name="visible">True</property>
+                 <property name="can_focus">True</property>
+                 <property name="receives_default">True</property>
+@@ -1050,7 +976,6 @@
+               </object>
+               <packing>
+                 <property name="expand">False</property>
+-                <property name="fill">True</property>
+                 <property name="position">0</property>
+               </packing>
+             </child>
+@@ -1068,17 +993,14 @@
+     </child>
+   </object>
+   <object class="GtkWindow" id="window8">
+-    <property name="can_focus">False</property>
+     <child>
+       <object class="GtkVBox" id="page_10_report">
+         <property name="visible">True</property>
+-        <property name="can_focus">False</property>
+         <property name="border_width">10</property>
+         <property name="spacing">3</property>
+         <child>
+           <object class="GtkLabel" id="label2">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="xalign">0</property>
+             <property name="yalign">0</property>
+             <property name="label" translatable="yes">Reporting has finished. You can close this window now.</property>
+@@ -1086,14 +1008,12 @@
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">0</property>
+           </packing>
+         </child>
+         <child>
+           <object class="GtkLabel" id="label6">
+             <property name="visible">True</property>
+-            <property name="can_focus">False</property>
+             <property name="xalign">0</property>
+             <property name="yalign">0</property>
+             <property name="label" translatable="yes">If you want to report the problem to a different destination, collect additional information, or provide a better problem description and repeat reporting process, press 'Forward'.</property>
+@@ -1101,7 +1021,6 @@
+           </object>
+           <packing>
+             <property name="expand">False</property>
+-            <property name="fill">True</property>
+             <property name="position">1</property>
+           </packing>
+         </child>
+@@ -1112,11 +1031,9 @@
+     </child>
+   </object>
+   <object class="GtkWindow" id="window9">
+-    <property name="can_focus">False</property>
+     <child>
+       <object class="GtkVBox" id="page_11_report">
+         <property name="visible">True</property>
+-        <property name="can_focus">False</property>
+         <property name="border_width">10</property>
+         <property name="spacing">3</property>
+         <child>
+diff --git a/src/include/Makefile.am b/src/include/Makefile.am
+index 17894bc..96c00da 100644
+--- a/src/include/Makefile.am
++++ b/src/include/Makefile.am
+@@ -11,4 +11,5 @@ libreport_include_HEADERS = \
+     file_obj.h \
+     internal_libreport.h \
+     internal_abrt_dbus.h \
+-    ureport.h
++    ureport.h \
++    global_configuration.h
+diff --git a/src/include/event_config.h b/src/include/event_config.h
+index 4a31794..54c7829 100644
+--- a/src/include/event_config.h
++++ b/src/include/event_config.h
+@@ -78,6 +78,8 @@ typedef struct
+     char *ec_exclude_items_always;
+     bool  ec_exclude_binary_items;
+     long  ec_minimal_rating;
++    bool  ec_supports_restricted_access;
++    char *ec_restricted_access_option;
+ 
+     GList *options;
+ } event_config_t;
+@@ -85,6 +87,7 @@ typedef struct
+ event_config_t *new_event_config(void);
+ void free_event_config(event_config_t *p);
+ 
++bool ec_restricted_access_enabled(event_config_t *ec);
+ 
+ void load_event_description_from_file(event_config_t *event_config, const char* filename);
+ 
+diff --git a/src/include/global_configuration.h b/src/include/global_configuration.h
+new file mode 100644
+index 0000000..de2401f
+--- /dev/null
++++ b/src/include/global_configuration.h
+@@ -0,0 +1,60 @@
++/*
++    Copyright (C) 2015  ABRT team
++    Copyright (C) 2015  RedHat Inc
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License along
++    with this program; if not, write to the Free Software Foundation, Inc.,
++    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++*/
++
++#ifndef LIBREPORT_GLOBAL_CONFIGURATION_H
++#define LIBREPORT_GLOBAL_CONFIGURATION_H
++
++#include "libreport_types.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define load_global_configuration libreport_load_global_configuration
++int load_global_configuration(void);
++
++#define load_global_configuration_from_dirs libreport_load_global_configuration_from_dirs
++int load_global_configuration_from_dirs(const char *dirs[], int dir_flags[]);
++
++#define free_global_configuration libreport_free_global_configuration
++void free_global_configuration(void);
++
++#define get_global_always_excluded_elements libreport_get_global_always_excluded_elements
++string_vector_ptr_t get_global_always_excluded_elements(void);
++
++#define get_global_create_private_ticket libreport_get_global_create_private_ticket
++int get_global_create_private_ticket(void);
++
++/**
++ * Configures the create private ticket global option
++ *
++ * The function changes the configuration only for the current process by
++ * default.
++ *
++ * @param enabled The option's value
++ * @param flags For future needs (enable persistent configuration)
++ */
++#define set_global_create_private_ticket libreport_set_global_create_private_ticket
++void set_global_create_private_ticket(int enabled, int flags);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* LIBREPORT_GLOBAL_CONFIGURATION_H */
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index 3dd9660..71ea454 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -85,8 +85,11 @@ int vdprintf(int d, const char *format, va_list ap);
+ #undef ARRAY_SIZE
+ #define ARRAY_SIZE(x) ((unsigned)(sizeof(x) / sizeof((x)[0])))
+ 
++/* consts used across whole libreport */
++#define CREATE_PRIVATE_TICKET "ABRT_CREATE_PRIVATE_TICKET"
+ 
+ /* Pull in entire public libreport API */
++#include "global_configuration.h"
+ #include "dump_dir.h"
+ #include "event_config.h"
+ #include "problem_data.h"
+@@ -640,9 +643,21 @@ bool load_conf_file(const char *pPath, map_string_t *settings, bool skipKeysWith
+ #define load_plugin_conf_file libreport_load_plugin_conf_file
+ bool load_plugin_conf_file(const char *name, map_string_t *settings, bool skipKeysWithoutValue);
+ 
++#define get_user_conf_base_dir libreport_get_user_conf_base_dir
++const char *get_user_conf_base_dir(void);
++
+ #define load_conf_file_from_dirs libreport_load_conf_file_from_dirs
+ bool load_conf_file_from_dirs(const char *base_name, const char *const *directories, map_string_t *settings, bool skipKeysWithoutValue);
+ 
++enum {
++    CONF_DIR_FLAG_NONE = 0,
++    CONF_DIR_FLAG_OPTIONAL = 1,
++};
++
++#define load_conf_file_from_dirs_ext libreport_load_conf_file_from_dirs_ext
++bool load_conf_file_from_dirs_ext(const char *base_name, const char *const *directories,
++                                  const int * dir_flags, map_string_t *settings,
++                                  bool skipKeysWithoutValue);
+ 
+ #define save_conf_file libreport_save_conf_file
+ bool save_conf_file(const char *path, map_string_t *settings);
+diff --git a/src/lib/Makefile.am b/src/lib/Makefile.am
+index d77913e..5ef7d1f 100644
+--- a/src/lib/Makefile.am
++++ b/src/lib/Makefile.am
+@@ -51,7 +51,8 @@ libreport_la_SOURCES = \
+     reported_to.c \
+     utf8.c \
+     file_list.c \
+-    file_obj.c
++    file_obj.c \
++    global_configuration.c
+ 
+ libreport_la_CPPFLAGS = \
+     -Wall -Wwrite-strings -Werror \
+diff --git a/src/lib/abrt_xmlrpc.c b/src/lib/abrt_xmlrpc.c
+index cf132f5..5fda241 100644
+--- a/src/lib/abrt_xmlrpc.c
++++ b/src/lib/abrt_xmlrpc.c
+@@ -54,9 +54,10 @@ struct abrt_xmlrpc *abrt_xmlrpc_new_client(const char *url, int ssl_verify)
+      * XMLRPC_XML_SIZE_LIMIT_DEFAULT is #defined to (512*1024) in xmlrpc-c/base.h
+      *
+      * Users reported trouble with 733402 byte long responses, hope raising the
+-     * limit to 4*512k is enough
++     * limit to 4*512k is enough.
++     * #961520 (2013-05-09): apparently 4*512k is still too small, making it 8*512k.
+      */
+-    xmlrpc_limit_set(XMLRPC_XML_SIZE_LIMIT_ID, 4 * XMLRPC_XML_SIZE_LIMIT_DEFAULT);
++    xmlrpc_limit_set(XMLRPC_XML_SIZE_LIMIT_ID, 8 * XMLRPC_XML_SIZE_LIMIT_DEFAULT);
+ 
+     struct xmlrpc_curl_xportparms curl_parms;
+     memset(&curl_parms, 0, sizeof(curl_parms));
+@@ -140,6 +141,10 @@ void abrt_xmlrpc_client_add_session_param_string(xmlrpc_env *env, struct abrt_xm
+ /* internal helper function */
+ static xmlrpc_value *abrt_xmlrpc_call_params_internal(xmlrpc_env *env, struct abrt_xmlrpc *ax, const char *method, xmlrpc_value *params)
+ {
++    xmlrpc_value *array = xmlrpc_array_new(env);
++    if (env->fault_occurred)
++        abrt_xmlrpc_die(env);
++
+     bool destroy_params = false;
+     if (xmlrpc_value_type(params) == XMLRPC_TYPE_NIL)
+     {
+@@ -160,10 +165,9 @@ static xmlrpc_value *abrt_xmlrpc_call_params_internal(xmlrpc_env *env, struct ab
+     }
+     else
+     {
+-        log("Bug: not yet supported XML RPC call type: argument type = '%s'", xmlrpc_type_name(xmlrpc_value_type(params)));
++        log("Bug: not yet supported XML RPC call type.");
+     }
+ 
+-    xmlrpc_value *array = abrt_xmlrpc_array_new(env);
+     xmlrpc_array_append_item(env, array, params);
+     if (env->fault_occurred)
+         abrt_xmlrpc_die(env);
+@@ -172,11 +176,10 @@ static xmlrpc_value *abrt_xmlrpc_call_params_internal(xmlrpc_env *env, struct ab
+     xmlrpc_client_call2(env, ax->ax_client, ax->ax_server_info, method,
+                         array, &result);
+ 
+-    xmlrpc_DECREF(array);
+-
+     if (destroy_params)
+         xmlrpc_DECREF(params);
+ 
++    xmlrpc_DECREF(array);
+     return result;
+ }
+ 
+@@ -186,15 +189,16 @@ xmlrpc_value *abrt_xmlrpc_call_full_va(xmlrpc_env *env, struct abrt_xmlrpc *ax,
+                                        const char *method, const char *format,
+                                        va_list args)
+ {
++    xmlrpc_env_init(env);
++
+     xmlrpc_value* param = NULL;
+     const char* suffix;
+ 
+     xmlrpc_build_value_va(env, format, args, &param, &suffix);
+-    va_end(args);
+     if (env->fault_occurred)
+         abrt_xmlrpc_die(env);
+ 
+-    xmlrpc_value* result = NULL;
++    xmlrpc_value *result = NULL;
+     if (*suffix != '\0')
+     {
+         xmlrpc_env_set_fault_formatted(
+@@ -219,6 +223,19 @@ xmlrpc_value *abrt_xmlrpc_array_new(xmlrpc_env *env)
+     return params;
+ }
+ 
++void abrt_xmlrpc_array_append_string(xmlrpc_env *env, xmlrpc_value *array, const char *value)
++{
++    xmlrpc_value *val = xmlrpc_string_new(env, value);
++    if (env->fault_occurred)
++        abrt_xmlrpc_die(env);
++
++    xmlrpc_array_append_item(env, array, val);
++    if (env->fault_occurred)
++        abrt_xmlrpc_die(env);
++
++    xmlrpc_DECREF(val);
++}
++
+ xmlrpc_value *abrt_xmlrpc_params_new(xmlrpc_env *env)
+ {
+     xmlrpc_value *params = xmlrpc_struct_new(env);
+@@ -228,12 +245,65 @@ xmlrpc_value *abrt_xmlrpc_params_new(xmlrpc_env *env)
+     return params;
+ }
+ 
++void abrt_xmlrpc_params_add_string(xmlrpc_env *env, xmlrpc_value *params, const char *name, const char *value)
++{
++    xmlrpc_value *val = xmlrpc_string_new(env, value);
++    if (env->fault_occurred)
++        abrt_xmlrpc_die(env);
++
++    xmlrpc_struct_set_value(env, params, name, val);
++    if (env->fault_occurred)
++        abrt_xmlrpc_die(env);
++
++    xmlrpc_DECREF(val);
++}
++
++void abrt_xmlrpc_params_add_int(xmlrpc_env *env, xmlrpc_value *params, const char *name, int value)
++{
++    xmlrpc_value *val = xmlrpc_int_new(env, value);
++    if (env->fault_occurred)
++        abrt_xmlrpc_die(env);
++
++    xmlrpc_struct_set_value(env, params, name, val);
++    if (env->fault_occurred)
++        abrt_xmlrpc_die(env);
++
++    xmlrpc_DECREF(val);
++}
++
++void abrt_xmlrpc_params_add_array(xmlrpc_env *env, xmlrpc_value *params, const char *name, xmlrpc_value *value)
++{
++    xmlrpc_struct_set_value(env, params, name, value);
++    if (env->fault_occurred)
++        abrt_xmlrpc_die(env);
++}
++
++xmlrpc_value *abrt_xmlrpc_call_params(xmlrpc_env *env, struct abrt_xmlrpc *ax, const char *method, xmlrpc_value *params)
++{
++    xmlrpc_value *result = abrt_xmlrpc_call_params_internal(env, ax, method, params);
++
++    if (env->fault_occurred)
++        abrt_xmlrpc_die(env);
++
++    return result;
++}
++
++xmlrpc_value *abrt_xmlrpc_call_full(xmlrpc_env *env, struct abrt_xmlrpc *ax,
++                                    const char *method, const char *format, ...)
++{
++    va_list args;
++    va_start(args, format);
++    xmlrpc_value *result = abrt_xmlrpc_call_full_va(env, ax, method, format, args);
++    va_end(args);
++
++    return result;
++}
++
+ /* die or return expected results */
+ xmlrpc_value *abrt_xmlrpc_call(struct abrt_xmlrpc *ax,
+                                const char *method, const char *format, ...)
+ {
+     xmlrpc_env env;
+-    xmlrpc_env_init(&env);
+ 
+     va_list args;
+     va_start(args, format);
+diff --git a/src/lib/abrt_xmlrpc.h b/src/lib/abrt_xmlrpc.h
+index 3cb0e77..8f3d8bc 100644
+--- a/src/lib/abrt_xmlrpc.h
++++ b/src/lib/abrt_xmlrpc.h
+@@ -31,6 +31,8 @@
+ extern "C" {
+ #endif
+ 
++typedef void (*abrt_xmlrpc_destroy_fn)(void *);
++
+ struct abrt_xmlrpc {
+     xmlrpc_client *ax_client;
+     xmlrpc_server_info *ax_server_info;
+@@ -38,8 +40,12 @@ struct abrt_xmlrpc {
+ };
+ 
+ xmlrpc_value *abrt_xmlrpc_array_new(xmlrpc_env *env);
++void abrt_xmlrpc_array_append_string(xmlrpc_env *env, xmlrpc_value *array, const char *value);
+ 
+ xmlrpc_value *abrt_xmlrpc_params_new(xmlrpc_env *env);
++void abrt_xmlrpc_params_add_string(xmlrpc_env *env, xmlrpc_value *params, const char *name, const char *value);
++void abrt_xmlrpc_params_add_array(xmlrpc_env *env, xmlrpc_value *params, const char *name, xmlrpc_value *value);
++void abrt_xmlrpc_params_add_int(xmlrpc_env *env, xmlrpc_value *params, const char *name, int value);
+ 
+ struct abrt_xmlrpc *abrt_xmlrpc_new_client(const char *url, int ssl_verify);
+ void abrt_xmlrpc_free_client(struct abrt_xmlrpc *ax);
+@@ -51,6 +57,12 @@ void abrt_xmlrpc_error(xmlrpc_env *env);
+ xmlrpc_value *abrt_xmlrpc_call(struct abrt_xmlrpc *ax,
+                                const char *method, const char *format, ...);
+ 
++xmlrpc_value *abrt_xmlrpc_call_params(xmlrpc_env *env, struct abrt_xmlrpc *ax,
++                               const char *method, xmlrpc_value *params);
++
++xmlrpc_value *abrt_xmlrpc_call_full(xmlrpc_env *enf, struct abrt_xmlrpc *ax,
++                                   const char *method, const char *format, ...);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/lib/configuration_files.c b/src/lib/configuration_files.c
+index 9ca2d5a..0d92fb0 100644
+--- a/src/lib/configuration_files.c
++++ b/src/lib/configuration_files.c
+@@ -318,8 +318,22 @@ finalize:
+     return retval;
+ }
+ 
++const char *get_user_conf_base_dir(void)
++{
++    static char *base_dir = NULL;
++    if (base_dir == NULL)
++        base_dir = concat_path_file(g_get_user_config_dir(), "abrt/settings/");
++
++    return base_dir;
++}
++
+ bool load_conf_file_from_dirs(const char *base_name, const char *const *directories, map_string_t *settings, bool skipKeysWithoutValue)
+ {
++    return load_conf_file_from_dirs_ext(base_name, directories, NULL, settings, skipKeysWithoutValue);
++}
++
++bool load_conf_file_from_dirs_ext(const char *base_name, const char *const *directories, const int *dir_flags, map_string_t *settings, bool skipKeysWithoutValue)
++{
+     if (NULL == directories || NULL == *directories)
+     {
+         error_msg("No configuration directory specified");
+@@ -327,13 +341,20 @@ bool load_conf_file_from_dirs(const char *base_name, const char *const *director
+     }
+ 
+     bool result = true;
+-    for (const char *const *dir = directories; *dir != NULL; ++dir)
++    for (size_t i = 0; directories[i] != NULL; ++i)
+     {
+-        char *conf_file = concat_path_file(*dir, base_name);
++        char *conf_file = concat_path_file(directories[i], base_name);
+         if (!load_conf_file(conf_file, settings, skipKeysWithoutValue))
+         {
+-            perror_msg("Can't open '%s'", conf_file);
+-            result = false;
++            if (dir_flags && (dir_flags[i] & CONF_DIR_FLAG_OPTIONAL))
++            {
++                VERB1 log("Can't open '%s'", conf_file);
++            }
++            else
++            {
++                perror_msg("Can't open '%s'", conf_file);
++                result = false;
++            }
+         }
+         free(conf_file);
+     }
+diff --git a/src/lib/event_config.c b/src/lib/event_config.c
+index 6b442ad..0687606 100644
+--- a/src/lib/event_config.c
++++ b/src/lib/event_config.c
+@@ -67,6 +67,38 @@ void free_event_config(event_config_t *p)
+     free(p);
+ }
+ 
++bool ec_restricted_access_enabled(event_config_t *ec)
++{
++    if (!ec->ec_supports_restricted_access)
++    {
++        if (ec->ec_restricted_access_option != NULL)
++            log("Event '%s' does not support restricted access but has the option", ec->screen_name);
++
++        return false;
++    }
++
++    if (ec->ec_restricted_access_option == NULL)
++    {
++        VERB2 log("Event '%s' supports restricted access but is missing the option", ec->screen_name);
++        return false;
++    }
++
++    event_option_t *eo = get_event_option_from_list(ec->ec_restricted_access_option, ec->options);
++    if (eo == NULL)
++    {
++        log("Event '%s' supports restricted access but the option is not defined", ec->screen_name);
++        return false;
++    }
++
++    if (eo->eo_type != OPTION_TYPE_BOOL)
++    {
++        log("Restricted option '%s' of Event '%s' is not of 'bool' type",
++                    ec->ec_restricted_access_option, ec->screen_name);
++        return false;
++    }
++
++    return eo->eo_value != NULL && string_to_bool(eo->eo_value);
++}
+ 
+ static int cmp_event_option_name_with_string(gconstpointer a, gconstpointer b)
+ {
+diff --git a/src/lib/event_xml_parser.c b/src/lib/event_xml_parser.c
+index 1d8cc1f..547a954 100644
+--- a/src/lib/event_xml_parser.c
++++ b/src/lib/event_xml_parser.c
+@@ -31,6 +31,8 @@
+ #define NAME_ELEMENT            "name"
+ #define DEFAULT_VALUE_ELEMENT   "default-value"
+ #define MINIMAL_RATING_ELEMENT  "minimal-rating"
++#define SUPPORTS_RESTRICTED_ACCESS_ELEMENT "support-restricted-access"
++#define RESTRICTED_ACCESS_OPTION_ATTR "optionname"
+ 
+ #define REQUIRES_ELEMENT        "requires-items"
+ #define EXCL_BY_DEFAULT_ELEMENT "exclude-items-by-default"
+@@ -202,6 +204,20 @@ static void start_element(GMarkupParseContext *context,
+         free(parse_data->attribute_lang);
+         parse_data->attribute_lang = get_element_lang(parse_data, attribute_names, attribute_values);
+     }
++    else
++    if (strcmp(element_name, SUPPORTS_RESTRICTED_ACCESS_ELEMENT) == 0)
++    {
++        if ((     attribute_names[0] != NULL
++               && strcmp(attribute_names[0], RESTRICTED_ACCESS_OPTION_ATTR) != 0)
++            || attribute_names[1] != NULL)
++        {
++            error_msg("XML event configuration error: '%s' element misses attribute '%s'",
++                    SUPPORTS_RESTRICTED_ACCESS_ELEMENT, RESTRICTED_ACCESS_OPTION_ATTR);
++            return;
++        }
++
++        parse_data->event_config->ec_restricted_access_option = xstrdup(attribute_values[0]);
++    }
+ }
+ 
+ // Called for close tags </foo>
+@@ -436,6 +452,11 @@ static void text(GMarkupParseContext *context,
+             }
+             goto ret;
+         }
++        if (strcmp(inner_element, SUPPORTS_RESTRICTED_ACCESS_ELEMENT) == 0)
++        {
++            ui->ec_supports_restricted_access = string_to_bool(text_copy);
++            goto ret;
++        }
+     }
+ 
+  ret:
+diff --git a/src/lib/global_configuration.c b/src/lib/global_configuration.c
+new file mode 100644
+index 0000000..179ad44
+--- /dev/null
++++ b/src/lib/global_configuration.c
+@@ -0,0 +1,167 @@
++/*
++    Copyright (C) 2015  ABRT team
++    Copyright (C) 2015  RedHat Inc
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License along
++    with this program; if not, write to the Free Software Foundation, Inc.,
++    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++*/
++
++#include "global_configuration.h"
++#include "internal_libreport.h"
++
++#define OPT_NAME_SCRUBBED_VARIABLES "ScrubbedENVVariables"
++#define OPT_NAME_EXCLUDED_ELEMENTS "AlwaysExcludedElements"
++
++static const char *const s_recognized_options[] = {
++    OPT_NAME_SCRUBBED_VARIABLES,
++    OPT_NAME_EXCLUDED_ELEMENTS,
++    NULL,
++};
++
++static map_string_t *s_global_settings;
++
++int load_global_configuration(void)
++{
++    static const char *dirs[] = {
++        CONF_DIR,
++        NULL,
++        NULL,
++    };
++
++    static int dir_flags[] = {
++#if 0
++        CONF_DIR_FLAG_NONE,
++#else
++        /* jfilak: RHEL-6 do not use global configuration file */
++        CONF_DIR_FLAG_OPTIONAL,
++#endif
++        CONF_DIR_FLAG_OPTIONAL,
++        -1,
++    };
++
++    if (dirs[1] == NULL)
++        dirs[1] = get_user_conf_base_dir();
++
++    return load_global_configuration_from_dirs(dirs, dir_flags);
++}
++
++int load_global_configuration_from_dirs(const char *dirs[], int dir_flags[])
++{
++    if (s_global_settings == NULL)
++    {
++        s_global_settings = new_map_string();
++
++        int ret = load_conf_file_from_dirs_ext("libreport.conf", dirs, dir_flags, s_global_settings,
++                                               /*don't skip without value*/ false);
++        if (!ret)
++        {
++            error_msg("Failed to load libreport global configuration");
++            free_global_configuration();
++            return false;
++        }
++
++        map_string_iter_t iter;
++        init_map_string_iter(&iter, s_global_settings);
++        const char *key, *value;
++        while(next_map_string_iter(&iter, &key, &value))
++        {
++            /* Die to avoid security leaks in case where someone made a typo in a option name */
++            if (!is_in_string_list(key, (char **)s_recognized_options))
++            {
++                error_msg("libreport global configuration contains unrecognized option : '%s'", key);
++                free_global_configuration();
++                return false;
++            }
++        }
++    }
++    else
++    {
++        VERB1 log("libreport global configuration already loaded");
++    }
++
++    return true;
++}
++
++void free_global_configuration(void)
++{
++    if (s_global_settings != NULL)
++    {
++        free_map_string(s_global_settings);
++        s_global_settings = NULL;
++    }
++}
++
++static void assert_global_configuration_initialized(void)
++{
++    if (NULL == s_global_settings)
++    {
++        error_msg("libreport global configuration is not initialized");
++        abort();
++    }
++}
++
++#define get_helper(type, getter, name) \
++    ({ \
++    assert_global_configuration_initialized(); \
++    type opt; \
++    if (getter(s_global_settings, name, &opt)) \
++        /* Die to avoid security leaks in case where someone made a error */ \
++        error_msg_and_die("libreport global settings contains invalid data: '"name"'"); \
++    opt;\
++    })
++
++string_vector_ptr_t get_global_always_excluded_elements(void)
++{
++    assert_global_configuration_initialized();
++
++    char *env_exclude = getenv("EXCLUDE_FROM_REPORT");
++    const char *gc_exclude = get_map_string_item_or_NULL(s_global_settings, OPT_NAME_EXCLUDED_ELEMENTS);
++
++    if (env_exclude != NULL && gc_exclude == NULL)
++        return string_vector_new_from_string(env_exclude);
++
++    if (env_exclude == NULL && gc_exclude != NULL)
++        return string_vector_new_from_string(gc_exclude);
++
++    if (env_exclude == NULL && gc_exclude == NULL)
++        return string_vector_new_from_string(NULL);
++
++    char *joined_exclude = xasprintf("%s, %s", env_exclude, gc_exclude);
++    string_vector_ptr_t ret = string_vector_new_from_string(joined_exclude);
++    free(joined_exclude);
++
++    return ret;
++}
++
++int get_global_create_private_ticket(void)
++{
++    assert_global_configuration_initialized();
++
++    char *env_create_private = getenv(CREATE_PRIVATE_TICKET);
++
++    if (env_create_private == NULL)
++        return false;
++
++    return string_to_bool(env_create_private);
++}
++
++void set_global_create_private_ticket(int enabled, int flags/*unused - persistent*/)
++{
++    assert_global_configuration_initialized();
++
++    if (enabled)
++        xsetenv(CREATE_PRIVATE_TICKET, "1");
++    else
++        safe_unsetenv(CREATE_PRIVATE_TICKET);
++}
+diff --git a/src/plugins/Makefile.am b/src/plugins/Makefile.am
+index 16962d4..19c5c51 100644
+--- a/src/plugins/Makefile.am
++++ b/src/plugins/Makefile.am
+@@ -50,7 +50,7 @@ dist_eventsconf_DATA = \
+     uploader_event.conf
+ 
+ EXTRA_DIST = \
+-    report_Bugzilla.xml.in \
++    report_Bugzilla.xml.in.in \
+     report_Bugzilla.conf \
+     report_Logger.conf \
+     report_Logger.xml.in \
+diff --git a/src/plugins/report_Bugzilla.xml.in b/src/plugins/report_Bugzilla.xml.in
+deleted file mode 100644
+index bda60bc..0000000
+--- a/src/plugins/report_Bugzilla.xml.in
++++ /dev/null
+@@ -1,44 +0,0 @@
+-<?xml version="1.0" encoding="UTF-8" ?>
+-<event>
+-    <_name>Bugzilla</_name>
+-    <_description>Report to Bugzilla bug tracker</_description>
+-
+-    <requires-items>component,duphash,os_release</requires-items>
+-    <exclude-items-by-default>coredump,count,event_log,reported_to,vmcore</exclude-items-by-default>
+-    <exclude-items-always></exclude-items-always>
+-    <exclude-binary-items>no</exclude-binary-items>
+-    <include-items-by-default></include-items-by-default>
+-    <minimal-rating>3</minimal-rating>
+-
+-    <options>
+-        <option type="text" name="Bugzilla_BugzillaURL">
+-            <_label>Bugzilla URL</_label>
+-            <allow-empty>no</allow-empty>
+-            <_description>Address of Bugzilla server</_description>
+-            <default-value>https://bugzilla.redhat.com</default-value>
+-            <_note-html>You can create bugzilla.redhat.com account &lt;a href="https://bugzilla.redhat.com/createaccount.cgi"&gt;here&lt;/a&gt;</_note-html>
+-        </option>
+-        <option type="text" name="Bugzilla_Login">
+-            <_label>User name</_label>
+-            <allow-empty>no</allow-empty>
+-            <_description>Bugzilla account user name</_description>
+-        </option>
+-        <option type="password" name="Bugzilla_Password">
+-            <_label>Password</_label>
+-            <allow-empty>no</allow-empty>
+-            <_description>Bugzilla account password</_description>
+-        </option>
+-        <option type="bool" name="Bugzilla_SSLVerify">
+-            <_label>Verify SSL</_label>
+-            <_description>Check SSL key validity</_description>
+-            <default-value>yes</default-value>
+-        </option>
+-        <advanced-options>
+-            <option type="text" name="Bugzilla_OSRelease">
+-                <_label>OS release string</_label>
+-                <allow-empty>yes</allow-empty>
+-                <_note-html>Specify this only if you modified your /etc/system-release file</_note-html>
+-            </option>
+-        </advanced-options>
+-    </options>
+-</event>
+diff --git a/src/plugins/report_Bugzilla.xml.in.in b/src/plugins/report_Bugzilla.xml.in.in
+new file mode 100644
+index 0000000..184ca6e
+--- /dev/null
++++ b/src/plugins/report_Bugzilla.xml.in.in
+@@ -0,0 +1,57 @@
++<?xml version="1.0" encoding="UTF-8" ?>
++<event>
++    <_name>Bugzilla</_name>
++    <_description>Report to Bugzilla bug tracker</_description>
++
++    <requires-items>component,duphash,os_release</requires-items>
++    <exclude-items-by-default>coredump,count,event_log,reported_to,vmcore</exclude-items-by-default>
++    <exclude-items-always></exclude-items-always>
++    <exclude-binary-items>no</exclude-binary-items>
++    <include-items-by-default></include-items-by-default>
++    <minimal-rating>3</minimal-rating>
++
++    <support-restricted-access optionname="Bugzilla_CreatePrivate">yes</support-restricted-access>
++
++    <options>
++        <option type="text" name="Bugzilla_Login">
++            <_label>User name</_label>
++            <allow-empty>no</allow-empty>
++            <_description>Bugzilla account user name</_description>
++            <_note-html>You can create bugzilla.redhat.com account &lt;a href="https://bugzilla.redhat.com/createaccount.cgi"&gt;here&lt;/a&gt;</_note-html>
++        </option>
++        <option type="password" name="Bugzilla_Password">
++            <_label>Password</_label>
++            <allow-empty>no</allow-empty>
++            <_description>Bugzilla account password</_description>
++        </option>
++        <option type="bool" name="Bugzilla_CreatePrivate">
++            <_label>Restrict access</_label>
++            <_note-html>Restrict access to the created bugzilla ticket allowing only users from specified groups to view it (see advanced settings for more details)</_note-html>
++            <default-value>@RED_HAT_BUGZILLA_CREATE_PRIVATE@</default-value>
++        </option>
++        <advanced-options>
++            <option type="text" name="Bugzilla_PrivateGroups">
++                <_label>Groups</_label>
++                <allow-empty>yes</allow-empty>
++                <default-value>@RED_HAT_BUGZILLA_PRIVATE_GROUPS@</default-value>
++                <_note-html>Restrict the access to specified groups &lt;a href="https://github.com/abrt/abrt/wiki/FAQ#creating-private-bugzilla-tickets"&gt;?&lt;/a&gt;</_note-html>
++            </option>
++            <option type="text" name="Bugzilla_BugzillaURL">
++                <_label>Bugzilla URL</_label>
++                <allow-empty>no</allow-empty>
++                <_note-html>Address of Bugzilla server</_note-html>
++                <default-value>https://bugzilla.redhat.com</default-value>
++            </option>
++            <option type="bool" name="Bugzilla_SSLVerify">
++                <_label>Verify SSL</_label>
++                <_note-html>Check SSL key validity</_note-html>
++                <default-value>yes</default-value>
++            </option>
++            <option type="text" name="Bugzilla_OSRelease">
++                <_label>OS release string</_label>
++                <allow-empty>yes</allow-empty>
++                <_note-html>Specify this only if you modified your /etc/system-release file</_note-html>
++            </option>
++        </advanced-options>
++    </options>
++</event>
+diff --git a/src/plugins/reporter-bugzilla.c b/src/plugins/reporter-bugzilla.c
+index 1e1f109..9b2a73d 100644
+--- a/src/plugins/reporter-bugzilla.c
++++ b/src/plugins/reporter-bugzilla.c
+@@ -42,6 +42,26 @@ static void set_settings(struct bugzilla_struct *b, map_string_t *settings)
+ 
+     environ = getenv("Bugzilla_OSRelease");
+     b->b_release = environ ? environ : get_map_string_item_or_NULL(settings, "OSRelease");
++
++    b->b_create_private = get_global_create_private_ticket();
++
++    if (!b->b_create_private)
++    {
++        environ = getenv("Bugzilla_CreatePrivate");
++        b->b_create_private = string_to_bool(environ ? environ : get_map_string_item_or_empty(settings, "Bugzilla_CreatePrivate"));
++    }
++
++    environ = getenv("Bugzilla_PrivateGroups");
++    GList *groups = parse_list(environ ? environ : get_map_string_item_or_empty(settings, "Bugzilla_PrivateGroups"));
++    if (b->b_private_groups == NULL)
++    {
++        b->b_private_groups = groups;
++    }
++    else if (groups)
++    {
++        g_list_free_full(groups, free);
++        error_msg(_("Warning, private ticket groups already specified as cmdline argument, ignoring the env variable and configuration"));
++    }
+ }
+ 
+ int main(int argc, char **argv)
+@@ -61,7 +81,7 @@ int main(int argc, char **argv)
+     /* Can't keep these strings/structs static: _() doesn't support that */
+     const char *program_usage_string = _(
+         "\n"
+-        "& [-vbf] [-c CONFFILE] -d DIR\n"
++        "& [-vbf] [-g GROUP-NAME] [-c CONFFILE] -d DIR\n"
+         "or:\n"
+         "& [-v] [-c CONFFILE] [-d DIR] -t[ID] FILE...\n"
+         "\n"
+@@ -101,8 +121,12 @@ int main(int argc, char **argv)
+         OPT_t = 1 << 3,
+         OPT_b = 1 << 4,
+         OPT_f = 1 << 5,
++        OPT_h = 1 << 6,
++        OPT_g = 1 << 7,
+     };
+ 
++    INIT_BUGZILLA(rhbz);
++
+     char *ticket_no = NULL, *abrt_hash = NULL;
+     /* Keep enum above and order of options below in sync! */
+     struct options program_options[] = {
+@@ -113,11 +137,13 @@ int main(int argc, char **argv)
+         OPT_BOOL(     'b', NULL, NULL,                   _("When creating bug, attach binary files too")),
+         OPT_BOOL(     'f', NULL, NULL,                   _("Force reporting even if this problem is already reported")),
+         OPT_STRING(   'h', "duphash", &abrt_hash, "DUPHASH", _("Find BUG-ID according to DUPHASH")),
++        OPT_LIST(     'g', "group", &rhbz.b_private_groups , "GROUP"  , _("Restrict access to this group only")),
+         OPT_END()
+     };
+     unsigned opts = parse_opts(argc, argv, program_options, program_usage_string);
+     argv += optind;
+ 
++    load_global_configuration();
+     export_abrt_envvars(0);
+ 
+     map_string_t *settings = new_map_string();
+@@ -131,6 +157,25 @@ int main(int argc, char **argv)
+         VERB3 log("Loaded '%s'", fn);
+         conf_file = g_list_delete_link(conf_file, conf_file);
+     }
++    set_settings(&rhbz, settings);
++    /* either we got Bugzilla_CreatePrivate from settings or -g was specified on cmdline */
++    rhbz.b_create_private |= (opts & OPT_g);
++    VERB1 log("Create private bz ticket: '%s'", rhbz.b_create_private ? "YES": "NO");
++    if (g_verbose >= 1)
++    {
++        struct strbuf *buf = strbuf_new();
++
++        for (GList *g = rhbz.b_private_groups; g;)
++        {
++            strbuf_append_str(buf, g->data);
++            g = g_list_next(g);
++            if (g != NULL)
++                strbuf_append_str(buf, ", ");
++        }
++
++        log("Bug groups: '%s'", buf->buf);
++        strbuf_free(buf);
++    }
+ 
+     VERB1 log("Initializing XML-RPC library");
+     xmlrpc_env env;
+@@ -140,9 +185,6 @@ int main(int argc, char **argv)
+         abrt_xmlrpc_die(&env);
+     xmlrpc_env_clean(&env);
+ 
+-    INIT_BUGZILLA(rhbz);
+-    set_settings(&rhbz, settings);
+-
+     struct abrt_xmlrpc *client;
+     client = abrt_xmlrpc_new_client(rhbz.b_bugzilla_xmlrpc, rhbz.b_ssl_verify);
+ 
+@@ -308,11 +350,12 @@ int main(int argc, char **argv)
+     VERB3 log("Bugzilla has %i reports with same duphash '%s'",
+               all_bugs_size, duphash);
+ 
++    int existing_id = -1;
+     int bug_id = -1;
+     struct bug_info *bz = NULL;
+     if (all_bugs_size > 0)
+     {
+-        bug_id = rhbz_bug_id(all_bugs);
++        existing_id = bug_id = rhbz_bug_id(all_bugs);
+         xmlrpc_DECREF(all_bugs);
+         bz = rhbz_bug_info(client, bug_id);
+ 
+@@ -329,18 +372,48 @@ int main(int argc, char **argv)
+             all_bugs_size = rhbz_array_size(all_bugs);
+             if (all_bugs_size > 0)
+             {
+-                bug_id = rhbz_bug_id(all_bugs);
++                existing_id = bug_id = rhbz_bug_id(all_bugs);
+                 bz = rhbz_bug_info(client, bug_id);
+             }
+             xmlrpc_DECREF(all_bugs);
+         }
+     }
+ 
+-    if (all_bugs_size == 0)
++    if (existing_id < 0 || rhbz.b_create_private)
+     {
++        if (existing_id >= 0)
++        {
++            char *msg = xasprintf(_(
++            "You have requested to make your data accessible only to a "
++            "specific group and this bug is a duplicate of bug: "
++            "%s/%u"
++            " "
++            "In case of bug duplicates a new comment is added to the "
++            "original bug report but access to the comments cannot be "
++            "restricted to a specific group."
++            " "
++            "Would you like to open a new bug report and close it as "
++            "DUPLICATE of the original one?"
++            " "
++            "Otherwise, the bug reporting procedure will be terminated."),
++            rhbz.b_bugzilla_url, existing_id);
++
++            int r = ask_yes_no(msg);
++            free(msg);
++
++            if (r == 0)
++            {
++                log(_("Logging out"));
++                rhbz_logout(client);
++
++                exit(EXIT_CANCEL_BY_USER);
++            }
++        }
++
+         /* Create new bug */
+         log(_("Creating a new bug"));
+-        bug_id = rhbz_new_bug(client, problem_data, rhbz.b_release, bug_id);
++        bug_id = rhbz_new_bug(client, problem_data, rhbz.b_release, bug_id,
++                                rhbz.b_create_private, rhbz.b_private_groups);
+ 
+         log(_("Adding attachments to bug %i"), bug_id);
+         char bug_id_str[sizeof(int)*3 + 2];
+@@ -354,6 +427,13 @@ int main(int argc, char **argv)
+         bz = new_bug_info();
+         bz->bi_status = xstrdup("NEW");
+         bz->bi_id = bug_id;
++
++        if (existing_id >= 0)
++        {
++            log(_("Closing bug %i as duplicate of bug %i"), bug_id, existing_id);
++            rhbz_close_as_duplicate(client, bug_id, existing_id, RHBZ_NOMAIL_NOTIFY);
++        }
++
+         goto log_out;
+     }
+ 
+diff --git a/src/plugins/rhbz.c b/src/plugins/rhbz.c
+index 892dcf1..16abc40 100644
+--- a/src/plugins/rhbz.c
++++ b/src/plugins/rhbz.c
+@@ -309,6 +309,29 @@ void rhbz_login(struct abrt_xmlrpc *ax, struct bugzilla_struct *b)
+     xmlrpc_DECREF(result);
+ }
+ 
++void rhbz_close_as_duplicate(struct abrt_xmlrpc *ax, int bug_id,
++                        int duplicate_bug,
++                        int flags)
++{
++    func_entry();
++
++    const int nomail_notify = !!IS_NOMAIL_NOTIFY(flags);
++    xmlrpc_value *result = abrt_xmlrpc_call(ax, "Bug.update", "{s:i,s:s,s:s,s:i,s:i}",
++                              "ids", bug_id,
++                              "status", "CLOSED",
++                              "resolution", "DUPLICATE",
++                              "dupe_of", duplicate_bug,
++
++                /* Undocumented argument but it works with Red Hat Bugzilla version 4.2.4-7
++                 * and version 4.4.rc1.b02
++                 */
++                              "nomail", nomail_notify
++    );
++
++    if (result)
++        xmlrpc_DECREF(result);
++}
++
+ xmlrpc_value *rhbz_search_duphash(struct abrt_xmlrpc *ax, const char *component,
+                                   const char *product, const char *duphash)
+ {
+@@ -636,7 +659,9 @@ char *rhbz_get_backtrace_info(problem_data_t *problem_data, size_t max_text_size
+ /* suppress mail notify by {s:i} (nomail:1) (driven by flag) */
+ int rhbz_new_bug(struct abrt_xmlrpc *ax, problem_data_t *problem_data,
+                  const char *release,
+-                 int depend_on_bug)
++                 int depend_on_bug,
++                 bool private,
++                 GList *group)
+ {
+     func_entry();
+ 
+@@ -724,32 +749,52 @@ int rhbz_new_bug(struct abrt_xmlrpc *ax, problem_data_t *problem_data,
+     char *version = NULL;
+     parse_release_for_bz(release, &product, &version);
+ 
+-    xmlrpc_value* result = NULL;
+     char *summary = strbuf_free_nobuf(buf_summary);
+     char *status_whiteboard = xasprintf("abrt_hash:%s", duphash);
++
++    xmlrpc_env env;
++    xmlrpc_env_init(&env);
++
++    xmlrpc_value *params = abrt_xmlrpc_params_new(&env);
++
++    abrt_xmlrpc_params_add_string(&env, params, "product", product);
++    abrt_xmlrpc_params_add_string(&env, params, "component", component);
++    abrt_xmlrpc_params_add_string(&env, params, "version", version);
++    abrt_xmlrpc_params_add_string(&env, params, "summary", summary);
++    abrt_xmlrpc_params_add_string(&env, params, "description", full_dsc);
++    abrt_xmlrpc_params_add_string(&env, params, "status_whiteboard", status_whiteboard);
++
+     if (depend_on_bug > -1)
++        abrt_xmlrpc_params_add_int(&env, params, "dependson", depend_on_bug);
++
++    if(arch)
++        abrt_xmlrpc_params_add_string(&env, params, "platform", arch);
++
++    if (private)
+     {
+-        result = abrt_xmlrpc_call(ax, "Bug.create", "{s:s,s:s,s:s,s:s,s:s,s:s,s:s,s:i}",
+-                                  "product", product,
+-                                  "component", component,
+-                                  "version", version,
+-                                  "summary", summary,
+-                                  "description", full_dsc,
+-                                  "status_whiteboard", status_whiteboard,
+-                                  "platform", arch,
+-                                  "dependson", depend_on_bug);
+-    }
+-    else
+-    {
+-        result = abrt_xmlrpc_call(ax, "Bug.create", "{s:s,s:s,s:s,s:s,s:s,s:s,s:s}",
+-                                  "product", product,
+-                                  "component", component,
+-                                  "version", version,
+-                                  "summary", summary,
+-                                  "description", full_dsc,
+-                                  "status_whiteboard", status_whiteboard,
+-                                  "platform", arch);
++        if (group)
++        {
++            xmlrpc_value *xmlrpc_groups = abrt_xmlrpc_array_new(&env);
++
++            for (GList *l = group; l; l = l->next)
++                abrt_xmlrpc_array_append_string(&env, xmlrpc_groups, l->data);
++
++            abrt_xmlrpc_params_add_array(&env, params, "groups", xmlrpc_groups);
++
++            xmlrpc_DECREF(xmlrpc_groups);
++        }
++        else
++        {
++            error_msg(_("A private ticket creation has been requested, but no groups were specified"));
++            return -1;
++        }
+     }
++
++    xmlrpc_value* result = abrt_xmlrpc_call_params(&env, ax, "Bug.create", params);
++
++    xmlrpc_DECREF(params);
++    xmlrpc_env_clean(&env);
++
+     free(status_whiteboard);
+     free(product);
+     free(version);
+diff --git a/src/plugins/rhbz.h b/src/plugins/rhbz.h
+index 14b1855..a2841ae 100644
+--- a/src/plugins/rhbz.h
++++ b/src/plugins/rhbz.h
+@@ -69,6 +69,8 @@ struct bugzilla_struct {
+ 	const char *b_release;
+ 	char       *b_product;
+ 	int         b_ssl_verify;
++	int         b_create_private;
++	GList       *b_private_groups;
+ };
+ 
+ #define INIT_BUGZILLA(name)			\
+@@ -88,6 +90,9 @@ void *rhbz_bug_read_item(const char *memb, xmlrpc_value *xml, int flags);
+ 
+ void rhbz_logout(struct abrt_xmlrpc *ax);
+ 
++void rhbz_close_as_duplicate(struct abrt_xmlrpc *ax, int bug_id,
++                             int duplicate_bug, int flags);
++
+ xmlrpc_value *rhbz_search_duphash(struct abrt_xmlrpc *ax, const char *component,
+                                   const char *release, const char *duphash);
+ 
+@@ -98,8 +103,8 @@ unsigned rhbz_array_size(xmlrpc_value *xml);
+ int rhbz_bug_id(xmlrpc_value *xml);
+ 
+ int rhbz_new_bug(struct abrt_xmlrpc *ax, problem_data_t *problem_data,
+-                 const char *release,
+-                 int depend_on_bug);
++                 const char *release, int depend_on_bug, bool private,
++                 GList *group);
+ 
+ xmlrpc_value *rhbz_array_item_at(xmlrpc_value *xml, int pos);
+ 
+diff --git a/tests/Makefile.am b/tests/Makefile.am
+index 7be8d9a..47d532a 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -36,14 +36,21 @@ TESTSUITE_AT = \
+   make_description.at \
+   xfuncs.at \
+   ureport.at \
+-  dump_dir.at
++  dump_dir.at \
++  global_config.at \
++  event_config.at
++
++TESTSUITE_AT_IN = \
++  bugzilla_plugin.at
+ 
+ EXTRA_DIST += $(TESTSUITE_AT)
+ TESTSUITE = $(srcdir)/testsuite
+ MAINTAINERCLEANFILES = Makefile.in $(TESTSUITE)
+ check_DATA = atconfig atlocal $(TESTSUITE)
+ DISTCLEANFILES = atconfig
+-EXTRA_DIST += atlocal.in conf ureport ureport-rhts-credentials
++EXTRA_DIST += atlocal.in conf ureport ureport-rhts-credentials \
++			  helpers/testsuite.h helpers/testsuite_tools.h \
++			  bugzilla_plugin.at.in
+ 
+ atconfig: $(top_builddir)/config.status
+ 	(cd ${top_builddir} && ./config.status ${subdir}/atconfig)
+@@ -59,6 +66,6 @@ clean-local:
+ 	test ! -f '$(TESTSUITE)' || $(SHELL) '$(TESTSUITE)' --clean
+ 
+ AUTOTEST = $(AUTOM4TE) --language=autotest
+-$(TESTSUITE): $(TESTSUITE_AT) $(srcdir)/package.m4
++$(TESTSUITE): $(TESTSUITE_AT)  $(TESTSUITE_AT_IN) $(srcdir)/package.m4
+ 	$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
+ 	mv $@.tmp $@
+diff --git a/tests/atlocal.in b/tests/atlocal.in
+index 415e1f8..b385a2c 100644
+--- a/tests/atlocal.in
++++ b/tests/atlocal.in
+@@ -6,7 +6,7 @@ CC='@CC@'
+ LIBTOOL="$abs_top_builddir/libtool"
+ 
+ # We want no optimization.
+-CFLAGS="@O0CFLAGS@ -I$abs_top_builddir/src/include -I$abs_top_builddir/src/lib -I$abs_top_builddir/src/gtk-helpers -D_GNU_SOURCE @GLIB_CFLAGS@ @GTK_CFLAGS@ -DDEFAULT_DUMP_DIR_MODE=@DEFAULT_DUMP_DIR_MODE@"
++CFLAGS="@O0CFLAGS@ -I$abs_top_builddir/tests/helpers -I$abs_top_builddir/src/include -I$abs_top_builddir/src/lib -I$abs_top_builddir/src/gtk-helpers -D_GNU_SOURCE @GLIB_CFLAGS@ @GTK_CFLAGS@ -DDEFAULT_DUMP_DIR_MODE=@DEFAULT_DUMP_DIR_MODE@"
+ 
+ # Are special link options needed?
+ LDFLAGS="@LDFLAGS@"
+diff --git a/tests/bugzilla_plugin.at b/tests/bugzilla_plugin.at
+new file mode 100644
+index 0000000..0397bdb
+--- /dev/null
++++ b/tests/bugzilla_plugin.at
+@@ -0,0 +1,125 @@
++# -*- Autotest -*-
++
++AT_BANNER([Bugzilla])
++
++## ------------------- ##
++## report_Bugzilla_xml ##
++## ------------------- ##
++
++AT_TESTFUN([report_Bugzilla_xml],
++[[
++#include "testsuite.h"
++
++TS_MAIN
++{
++    event_config_t *conf = new_event_config();
++    load_event_description_from_file(conf, "../../../src/plugins/report_Bugzilla.xml");
++
++    TS_ASSERT_STRING_EQ(conf->screen_name, "Bugzilla", "Screen name");
++    TS_ASSERT_STRING_EQ(conf->description, "Report to Bugzilla bug tracker", "Description");
++
++    TS_ASSERT_STRING_EQ(conf->ec_creates_items, NULL, "Not-defined create items");
++
++    TS_ASSERT_STRING_EQ(conf->ec_requires_items, "component,duphash,os_release", "Correct required items");
++
++    TS_ASSERT_STRING_EQ(conf->ec_exclude_items_by_default, "coredump,count,event_log,reported_to,vmcore", "Correct excluded items by default");
++
++    TS_ASSERT_STRING_EQ(conf->ec_exclude_items_always, NULL, "Not-defined excluded items always");
++
++    TS_ASSERT_FALSE(conf->ec_exclude_binary_items);
++
++    TS_ASSERT_STRING_EQ(conf->ec_include_items_by_default, NULL, "Not-defined included items by default");
++
++    TS_ASSERT_SIGNED_EQ(conf->ec_minimal_rating, 3);
++
++#if 0
++    TS_ASSERT_FALSE(conf->ec_skip_review);
++
++    TS_ASSERT_FALSE(conf->ec_sending_sensitive_data);
++#endif
++
++    TS_ASSERT_TRUE(conf->ec_supports_restricted_access);
++
++    event_option_t options[10] = {
++        { .eo_value = NULL, .eo_label = (char *)"User name",
++          .eo_note_html = (char *)"You can create bugzilla.redhat.com account <a href=\"https://bugzilla.redhat.com/createaccount.cgi\">here</a>",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 0, .is_advanced = 0,
++        },
++        { .eo_value = NULL, .eo_label = (char *)"Password", .eo_note_html = NULL,
++          .eo_type = OPTION_TYPE_PASSWORD, .eo_allow_empty = 0, .is_advanced = 0,
++        },
++        { .eo_value = (char *)"no", .eo_label = (char *)"Restrict access",
++          .eo_note_html = (char *)"Restrict access to the created bugzilla ticket allowing only users from specified groups to view it (see advanced settings for more details)",
++          .eo_type = OPTION_TYPE_BOOL, .eo_allow_empty = 0, .is_advanced = 0,
++        },
++        { .eo_value = (char *)"fedora_contrib_private", .eo_label = (char *)"Groups",
++          .eo_note_html = (char *)"Restrict the access to specified groups <a href=\"https://github.com/abrt/abrt/wiki/FAQ#creating-private-bugzilla-tickets\">?</a>",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 1, .is_advanced = 1,
++        },
++        { .eo_value = (char *)"https://bugzilla.redhat.com", .eo_label = (char *)"Bugzilla URL",
++          .eo_note_html = (char *)"Address of Bugzilla server",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 0, .is_advanced = 1,
++        },
++        { .eo_value = (char *)"yes", .eo_label = (char *)"Verify SSL",
++          .eo_note_html = (char *)"Check SSL key validity",
++          .eo_type = OPTION_TYPE_BOOL, .eo_allow_empty = 0, .is_advanced = 1,
++        },
++        { .eo_value = NULL, .eo_label = (char *)"OS release string",
++          .eo_note_html = (char *)"Specify this only if you modified your /etc/system-release file",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 1, .is_advanced = 1,
++        },
++#if 0
++        { .eo_value = NULL, .eo_label = (char *)"Bugzilla product",
++          .eo_note_html = (char *)"Specify this only if you needed different product than specified in /etc/os-release",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 1, .is_advanced = 1,
++        },
++        { .eo_value = NULL, .eo_label = (char *)"Bugzilla product version",
++          .eo_note_html = (char *)"Specify this only if you needed different product version than specified in /etc/os-release",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 1, .is_advanced = 1,
++        },
++        { .eo_value = NULL, .eo_label = (char *)"HTTP Proxy",
++          .eo_note_html = (char *)"Sets the proxy server to use for HTTP",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 1, .is_advanced = 1,
++        },
++        { .eo_value = NULL, .eo_label = (char *)"HTTPS Proxy",
++          .eo_note_html = (char *)"Sets the proxy server to use for HTTPS",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 1, .is_advanced = 1,
++        },
++#endif
++    };
++
++    const char *option_names[] = {
++        "Bugzilla_Login",
++        "Bugzilla_Password",
++        "Bugzilla_CreatePrivate",
++        "Bugzilla_PrivateGroups",
++        "Bugzilla_BugzillaURL",
++        "Bugzilla_SSLVerify",
++        "Bugzilla_OSRelease",
++#if 0
++        "Bugzilla_Product",
++        "Bugzilla_ProductVersion",
++        "http_proxy",
++        "HTTPS_PROXY"
++#endif
++    };
++
++    for (unsigned i = 0; i < ARRAY_SIZE(option_names); ++i) {
++        event_option_t *eo = get_event_option_from_list(option_names[i], conf->options);
++        TS_ASSERT_PTR_IS_NOT_NULL_MESSAGE(eo, option_names[i]);
++
++        if (eo == NULL)
++            continue;
++
++        TS_ASSERT_STRING_EQ(eo->eo_value, options[i].eo_value, option_names[i]);
++        TS_ASSERT_STRING_EQ(eo->eo_label, options[i].eo_label, option_names[i]);
++        TS_ASSERT_STRING_EQ(eo->eo_note_html, options[i].eo_note_html, option_names[i]);
++        TS_ASSERT_SIGNED_OP_MESSAGE(eo->eo_type, ==, options[i].eo_type, option_names[i]);
++        TS_ASSERT_SIGNED_OP_MESSAGE(eo->eo_allow_empty, ==, options[i].eo_allow_empty, option_names[i]);
++        TS_ASSERT_SIGNED_OP_MESSAGE(eo->is_advanced, ==, options[i].is_advanced, option_names[i]);
++    }
++
++    free_event_config(conf);
++}
++TS_RETURN_MAIN
++]])
+diff --git a/tests/bugzilla_plugin.at.in b/tests/bugzilla_plugin.at.in
+new file mode 100644
+index 0000000..91b163c
+--- /dev/null
++++ b/tests/bugzilla_plugin.at.in
+@@ -0,0 +1,125 @@
++# -*- Autotest -*-
++
++AT_BANNER([Bugzilla])
++
++## ------------------- ##
++## report_Bugzilla_xml ##
++## ------------------- ##
++
++AT_TESTFUN([report_Bugzilla_xml],
++[[
++#include "testsuite.h"
++
++TS_MAIN
++{
++    event_config_t *conf = new_event_config();
++    load_event_description_from_file(conf, "../../../src/plugins/report_Bugzilla.xml");
++
++    TS_ASSERT_STRING_EQ(conf->screen_name, "Bugzilla", "Screen name");
++    TS_ASSERT_STRING_EQ(conf->description, "Report to Bugzilla bug tracker", "Description");
++
++    TS_ASSERT_STRING_EQ(conf->ec_creates_items, NULL, "Not-defined create items");
++
++    TS_ASSERT_STRING_EQ(conf->ec_requires_items, "component,duphash,os_release", "Correct required items");
++
++    TS_ASSERT_STRING_EQ(conf->ec_exclude_items_by_default, "coredump,count,event_log,reported_to,vmcore", "Correct excluded items by default");
++
++    TS_ASSERT_STRING_EQ(conf->ec_exclude_items_always, NULL, "Not-defined excluded items always");
++
++    TS_ASSERT_FALSE(conf->ec_exclude_binary_items);
++
++    TS_ASSERT_STRING_EQ(conf->ec_include_items_by_default, NULL, "Not-defined included items by default");
++
++    TS_ASSERT_SIGNED_EQ(conf->ec_minimal_rating, 3);
++
++#if 0
++    TS_ASSERT_FALSE(conf->ec_skip_review);
++
++    TS_ASSERT_FALSE(conf->ec_sending_sensitive_data);
++#endif
++
++    TS_ASSERT_TRUE(conf->ec_supports_restricted_access);
++
++    event_option_t options[10] = {
++        { .eo_value = NULL, .eo_label = (char *)"User name",
++          .eo_note_html = (char *)"You can create bugzilla.redhat.com account <a href=\"https://bugzilla.redhat.com/createaccount.cgi\">here</a>",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 0, .is_advanced = 0,
++        },
++        { .eo_value = NULL, .eo_label = (char *)"Password", .eo_note_html = NULL,
++          .eo_type = OPTION_TYPE_PASSWORD, .eo_allow_empty = 0, .is_advanced = 0,
++        },
++        { .eo_value = (char *)"@RED_HAT_BUGZILLA_CREATE_PRIVATE@", .eo_label = (char *)"Restrict access",
++          .eo_note_html = (char *)"Restrict access to the created bugzilla ticket allowing only users from specified groups to view it (see advanced settings for more details)",
++          .eo_type = OPTION_TYPE_BOOL, .eo_allow_empty = 0, .is_advanced = 0,
++        },
++        { .eo_value = (char *)"@RED_HAT_BUGZILLA_PRIVATE_GROUPS@", .eo_label = (char *)"Groups",
++          .eo_note_html = (char *)"Restrict the access to specified groups <a href=\"https://github.com/abrt/abrt/wiki/FAQ#creating-private-bugzilla-tickets\">?</a>",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 1, .is_advanced = 1,
++        },
++        { .eo_value = (char *)"https://bugzilla.redhat.com", .eo_label = (char *)"Bugzilla URL",
++          .eo_note_html = (char *)"Address of Bugzilla server",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 0, .is_advanced = 1,
++        },
++        { .eo_value = (char *)"yes", .eo_label = (char *)"Verify SSL",
++          .eo_note_html = (char *)"Check SSL key validity",
++          .eo_type = OPTION_TYPE_BOOL, .eo_allow_empty = 0, .is_advanced = 1,
++        },
++        { .eo_value = NULL, .eo_label = (char *)"OS release string",
++          .eo_note_html = (char *)"Specify this only if you modified your /etc/system-release file",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 1, .is_advanced = 1,
++        },
++#if 0
++        { .eo_value = NULL, .eo_label = (char *)"Bugzilla product",
++          .eo_note_html = (char *)"Specify this only if you needed different product than specified in /etc/os-release",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 1, .is_advanced = 1,
++        },
++        { .eo_value = NULL, .eo_label = (char *)"Bugzilla product version",
++          .eo_note_html = (char *)"Specify this only if you needed different product version than specified in /etc/os-release",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 1, .is_advanced = 1,
++        },
++        { .eo_value = NULL, .eo_label = (char *)"HTTP Proxy",
++          .eo_note_html = (char *)"Sets the proxy server to use for HTTP",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 1, .is_advanced = 1,
++        },
++        { .eo_value = NULL, .eo_label = (char *)"HTTPS Proxy",
++          .eo_note_html = (char *)"Sets the proxy server to use for HTTPS",
++          .eo_type = OPTION_TYPE_TEXT, .eo_allow_empty = 1, .is_advanced = 1,
++        },
++#endif
++    };
++
++    const char *option_names[] = {
++        "Bugzilla_Login",
++        "Bugzilla_Password",
++        "Bugzilla_CreatePrivate",
++        "Bugzilla_PrivateGroups",
++        "Bugzilla_BugzillaURL",
++        "Bugzilla_SSLVerify",
++        "Bugzilla_OSRelease",
++#if 0
++        "Bugzilla_Product",
++        "Bugzilla_ProductVersion",
++        "http_proxy",
++        "HTTPS_PROXY"
++#endif
++    };
++
++    for (unsigned i = 0; i < ARRAY_SIZE(option_names); ++i) {
++        event_option_t *eo = get_event_option_from_list(option_names[i], conf->options);
++        TS_ASSERT_PTR_IS_NOT_NULL_MESSAGE(eo, option_names[i]);
++
++        if (eo == NULL)
++            continue;
++
++        TS_ASSERT_STRING_EQ(eo->eo_value, options[i].eo_value, option_names[i]);
++        TS_ASSERT_STRING_EQ(eo->eo_label, options[i].eo_label, option_names[i]);
++        TS_ASSERT_STRING_EQ(eo->eo_note_html, options[i].eo_note_html, option_names[i]);
++        TS_ASSERT_SIGNED_OP_MESSAGE(eo->eo_type, ==, options[i].eo_type, option_names[i]);
++        TS_ASSERT_SIGNED_OP_MESSAGE(eo->eo_allow_empty, ==, options[i].eo_allow_empty, option_names[i]);
++        TS_ASSERT_SIGNED_OP_MESSAGE(eo->is_advanced, ==, options[i].is_advanced, option_names[i]);
++    }
++
++    free_event_config(conf);
++}
++TS_RETURN_MAIN
++]])
+diff --git a/tests/configuration_files.at b/tests/configuration_files.at
+index 7d6d2c4..cfa9f2e 100644
+--- a/tests/configuration_files.at
++++ b/tests/configuration_files.at
+@@ -321,6 +321,43 @@ int main(int argc, char **argv)
+ }
+ ]])
+ 
++## ---------------------------- ##
++## load_conf_file_from_dirs_ext ##
++## ---------------------------- ##
++
++AT_TESTFUN([load_conf_file_from_dirs_ext],
++[[
++#include "internal_libreport.h"
++
++#define CONF_NAME "file.conf"
++
++int main(void)
++{
++    g_verbose = 3;
++
++    {
++        const char *const dir_vec[] = {
++            "../../conf/second",
++            "/org/freedesktop/problems/invalid",
++            NULL,
++        };
++
++        int dir_flags_vec[] = {
++            CONF_DIR_FLAG_NONE,
++            CONF_DIR_FLAG_OPTIONAL,
++            -1,
++        };
++
++        map_string_t *settings = new_map_string();
++
++        assert(load_conf_file_from_dirs_ext(CONF_NAME, dir_vec, dir_flags_vec, settings, 0));
++
++        free_map_string(settings);
++    }
++}
++]])
++
++
+ 
+ ## ---------------##
+ ## save_conf_file ##
+@@ -429,9 +466,9 @@ int main(int argc, char **argv)
+         insert_map_string(first, xstrdup("state"), xstrdup("done"));
+ 
+         /* These commands must fail */
+-        assert(!save_conf_file("/foo/blah/file.conf", first));
+-        assert(!save_conf_file("../../../../../../../../../../../../../../../foo/blah/file.conf", first));
+-        assert(!save_conf_file("/root/file.conf", first));
++        assert(!save_conf_file("/proc/cpuinfo/foo/blah/file.conf", first));
++        assert(!save_conf_file("../../../../../../../../../../../../../../../proc/cpuinfo/foo/blah/file.conf", first));
++        assert(!save_conf_file("/proc/cpuinfo/root/file.conf", first));
+ 
+         char tmpdir[] = "/tmp/libreport_save_conf_file.XXXXXX";
+ 
+diff --git a/tests/event_config.at b/tests/event_config.at
+new file mode 100644
+index 0000000..b576392
+--- /dev/null
++++ b/tests/event_config.at
+@@ -0,0 +1,60 @@
++# -*- Autotest -*-
++
++AT_BANNER([Event config])
++
++## ----------------- ##
++## restricted_access ##
++## ----------------- ##
++
++AT_TESTFUN([restricted_access],
++[[
++
++#include "testsuite.h"
++
++TS_MAIN
++{
++    event_config_t *ect = new_event_config();
++
++    TS_ASSERT_FALSE(ect->ec_supports_restricted_access);
++    TS_ASSERT_PTR_IS_NULL(ect->ec_restricted_access_option);
++    TS_ASSERT_FALSE(ec_restricted_access_enabled(ect));
++
++    ect->ec_supports_restricted_access = true;
++
++    TS_ASSERT_PTR_IS_NULL(ect->ec_restricted_access_option);
++    TS_ASSERT_FALSE(ec_restricted_access_enabled(ect));
++
++    ect->ec_restricted_access_option = xstrdup("PrivateTicket");
++
++    TS_ASSERT_FALSE(ec_restricted_access_enabled(ect));
++
++    event_option_t *eot = new_event_option();
++    eot->eo_name = xstrdup("PrivateTicket");
++    eot->eo_value = NULL;
++
++    ect->options = g_list_prepend(ect->options, eot);
++
++    TS_ASSERT_FALSE(ec_restricted_access_enabled(ect));
++
++    eot->eo_type = OPTION_TYPE_BOOL;
++    eot->eo_value = xstrdup("no");
++
++    TS_ASSERT_FALSE(ec_restricted_access_enabled(ect));
++
++    free(eot->eo_value);
++    eot->eo_value = xstrdup("yes");
++
++    TS_ASSERT_TRUE(ec_restricted_access_enabled(ect));
++
++    eot->eo_type = OPTION_TYPE_NUMBER;
++
++    TS_ASSERT_FALSE(ec_restricted_access_enabled(ect));
++
++    ect->ec_supports_restricted_access = false;
++
++    TS_ASSERT_FALSE(ec_restricted_access_enabled(ect));
++
++    free_event_config(ect);
++}
++TS_RETURN_MAIN
++]])
+diff --git a/tests/global_config.at b/tests/global_config.at
+new file mode 100644
+index 0000000..9f83a80
+--- /dev/null
++++ b/tests/global_config.at
+@@ -0,0 +1,155 @@
++# -*- Autotest -*-
++
++AT_BANNER([global_config])
++
++## ------------------------ ##
++## always_excluded_elements ##
++## ------------------------ ##
++
++AT_TESTFUN([always_excluded_elements],
++[[
++#include "internal_libreport.h"
++#include <errno.h>
++#include <assert.h>
++
++int main(int argc, char **argv)
++{
++    g_verbose = 3;
++    char cwd_buf[PATH_MAX + 1];
++
++    static const char *dirs[] = {
++        NULL,
++        NULL,
++    };
++    dirs[0] = getcwd(cwd_buf, sizeof(cwd_buf));
++
++    static int dir_flags[] = {
++        CONF_DIR_FLAG_NONE,
++        -1,
++    };
++
++    unlink("libreport.conf");
++    FILE *lrf = fopen("libreport.conf", "wx");
++    assert(lrf != NULL);
++    fclose(lrf);
++
++    assert(load_global_configuration_from_dirs(dirs, dir_flags));
++
++    {
++        unsetenv("EXCLUDE_FROM_REPORT");
++        string_vector_ptr_t excluded = get_global_always_excluded_elements();
++
++        assert(excluded != NULL);
++        assert(excluded[0] == NULL);
++
++        string_vector_free(excluded);
++    }
++
++    {
++        setenv("EXCLUDE_FROM_REPORT", "hostname, environ, uid", 1);
++        string_vector_ptr_t excluded = get_global_always_excluded_elements();
++
++        assert(excluded != NULL);
++        assert(strcmp(excluded[0], "hostname") == 0);
++        assert(strcmp(excluded[1], "environ") == 0);
++        assert(strcmp(excluded[2], "uid") == 0);
++        assert(excluded[3] == NULL);
++
++        string_vector_free(excluded);
++    }
++
++    free_global_configuration();
++
++    unlink("libreport.conf");
++    lrf = fopen("libreport.conf", "wx");
++    assert(lrf != NULL);
++    fprintf(lrf, "AlwaysExcludedElements = maps, var_log_messages, proc_pid_status");
++    fclose(lrf);
++
++    assert(load_global_configuration_from_dirs(dirs, dir_flags));
++
++    {
++        unsetenv("EXCLUDE_FROM_REPORT");
++        string_vector_ptr_t excluded = get_global_always_excluded_elements();
++
++        assert(excluded != NULL);
++        assert(strcmp(excluded[0], "maps") == 0);
++        assert(strcmp(excluded[1], "var_log_messages") == 0);
++        assert(strcmp(excluded[2], "proc_pid_status") == 0);
++        assert(excluded[3] == NULL);
++
++        string_vector_free(excluded);
++    }
++
++    {
++        setenv("EXCLUDE_FROM_REPORT", "hostname, environ, uid", 1);
++        string_vector_ptr_t excluded = get_global_always_excluded_elements();
++
++        assert(excluded != NULL);
++        assert(strcmp(excluded[0], "hostname") == 0);
++        assert(strcmp(excluded[1], "environ") == 0);
++        assert(strcmp(excluded[2], "uid") == 0);
++        assert(strcmp(excluded[3], "maps") == 0);
++        assert(strcmp(excluded[4], "var_log_messages") == 0);
++        assert(strcmp(excluded[5], "proc_pid_status") == 0);
++        assert(excluded[6] == NULL);
++
++        string_vector_free(excluded);
++    }
++
++    unlink("libreport.conf");
++
++    return EXIT_SUCCESS;
++}
++]])
++
++
++## --------------------- ##
++## create_private_ticket ##
++## --------------------- ##
++
++AT_TESTFUN([create_private_ticket],
++[[
++#include "testsuite.h"
++
++TS_MAIN
++{
++    assert(load_global_configuration());
++
++    TS_ASSERT_FALSE_MESSAGE(get_global_create_private_ticket(), "False by default");
++
++    set_global_create_private_ticket(false, 0);
++
++    TS_ASSERT_FALSE_MESSAGE(get_global_create_private_ticket(), "Still false");
++
++    set_global_create_private_ticket(true, 0);
++
++    TS_ASSERT_TRUE_MESSAGE(get_global_create_private_ticket(), "Configuration accepted");
++    TS_ASSERT_STRING_EQ(getenv(CREATE_PRIVATE_TICKET), "1", "Correct ENVIRONMENT value");
++
++    set_global_create_private_ticket(true, 0);
++
++    TS_ASSERT_TRUE_MESSAGE(get_global_create_private_ticket(), "Configuration sanity");
++    TS_ASSERT_STRING_EQ(getenv(CREATE_PRIVATE_TICKET), "1", "Correct ENVIRONMENT value");
++
++    set_global_create_private_ticket(false, 0);
++
++    TS_ASSERT_FALSE_MESSAGE(get_global_create_private_ticket(), "Reverted back to False");
++    TS_ASSERT_STRING_NULL_OR_EMPTY(getenv(CREATE_PRIVATE_TICKET), "Correct ENVIRONMENT value");
++
++    xsetenv(CREATE_PRIVATE_TICKET, "1");
++
++    TS_ASSERT_TRUE_MESSAGE(get_global_create_private_ticket(), "Loaded from environment");
++
++    unsetenv(CREATE_PRIVATE_TICKET);
++
++    TS_ASSERT_FALSE_MESSAGE(get_global_create_private_ticket(), "Reflects environment");
++
++    xsetenv(CREATE_PRIVATE_TICKET, "0");
++
++    TS_ASSERT_FALSE_MESSAGE(get_global_create_private_ticket(), "Zero is false");
++
++    free_global_configuration();
++}
++TS_RETURN_MAIN
++]])
+diff --git a/tests/helpers/testsuite.h b/tests/helpers/testsuite.h
+new file mode 100644
+index 0000000..956dde7
+--- /dev/null
++++ b/tests/helpers/testsuite.h
+@@ -0,0 +1,297 @@
++/*
++    Copyright (C) 2015  ABRT team <crash-catcher@lists.fedorahosted.org>
++    Copyright (C) 2015  RedHat inc.
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License along
++    with this program; if not, write to the Free Software Foundation, Inc.,
++    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++
++    ----
++
++    libreport testsuite helpers
++
++    Feel free to add whatever macro you need but please try to keep this file
++    short and useful.
++
++    Bare in mind usability and print as much accurate log messages as possible:
++
++        Example 1:
++
++            int actual = 0;
++            int expected = 1;
++            TS_ASSERT_SIGNED_EQ(actual, expected)
++
++            ----
++
++            [ FAILED ] 12: Assert (actual == expected)
++                Actual  : 0
++                Expected: 1
++
++
++        Example 2:
++
++            int get_runtime_number() {
++                return 0;
++            }
++
++            TS_ASSERT_SIGNED_OP_MESSAGE(get_runtime_number(), 1, "Custom message")
++
++            ----
++
++            [ FAILED ] 3: Custom messages (get_runtime_number() >= 1)
++                Actual  : 0
++                Expected: 1
++
++    Note: the number right behind [ FAILED ] is line number where the failed
++          assert is located.
++*/
++#ifndef LIBREPORT_TESTSUITE_H
++#define LIBREPORT_TESTSUITE_H
++
++/* For g_verbose */
++#include "internal_libreport.h"
++
++/* For convenience */
++#include <assert.h>
++
++
++/* Number of failed asserts and other failures. Can be used a return value of
++ * the main function. */
++long g_testsuite_fails = 0;
++
++/* Number of successful asserts. For debugging purpose. */
++long g_testsuite_ok = 0;
++
++/* Enables additional log messages. */
++int g_testsuite_debug = 0;
++
++/* Can be used to change log messages destination. */
++FILE *g_testsuite_output_stream = 0;
++
++
++/*
++ * Test case definition
++ */
++
++#define TS_MAIN \
++    int main(int argc, char *argv[]) { g_verbose = 3; do
++
++#define TS_RETURN_MAIN \
++    while (0) ;\
++    return g_testsuite_fails; }
++
++
++/*
++ * Logging
++ */
++
++#define TS_PRINTF(format, ...) \
++    fprintf(g_testsuite_output_stream != NULL ? g_testsuite_output_stream : stderr, format, __VA_ARGS__)
++
++#define TS_DEBUG_PRINTF(format, ...) \
++    do { if (g_testsuite_debug) { TS_PRINTF(format, __VA_ARGS__); } } while (0)
++
++
++/*
++ * Handling of test results
++ */
++
++#define TS_SUCCESS(format, ...) \
++    do { \
++        TS_DEBUG_PRINTF("[   OK   ] %d: ", __LINE__); \
++        TS_DEBUG_PRINTF(format, __VA_ARGS__); \
++        ++g_testsuite_ok; \
++    } while (0)
++
++#define TS_FAILURE(format, ...) \
++    do { \
++        TS_PRINTF("[ FAILED ] %d: ", __LINE__); \
++        TS_PRINTF(format, __VA_ARGS__); \
++        ++g_testsuite_fails; \
++    } while (0)
++
++
++/*
++ * Logical conditions
++ */
++
++#define _TS_ASSERT_BOOLEAN(expression, expected, message) \
++    do { \
++        const int result = (expression); \
++        if (result == expected) { \
++            TS_SUCCESS("%s ("#expression" == %s)\n", message ? message : "Assert", expected ? "TRUE" : "FALSE"); \
++        }\
++        else { \
++            TS_FAILURE("%s ("#expression" == %s)\n", message ? message : "Assert", expected ? "TRUE" : "FALSE"); \
++        }\
++    } while(0)
++
++
++#define TS_ASSERT_TRUE_MESSAGE(expression, message) \
++    _TS_ASSERT_BOOLEAN(expression, 1, message)
++
++#define TS_ASSERT_TRUE(expression) \
++    TS_ASSERT_TRUE_MESSAGE(expression, NULL)
++
++#define TS_ASSERT_FALSE_MESSAGE(expression, message) \
++    _TS_ASSERT_BOOLEAN(expression, 0, message)
++
++#define TS_ASSERT_FALSE(expression) \
++    TS_ASSERT_FALSE_MESSAGE(expression, NULL)
++
++/*
++ * Testing of signed numbers
++ */
++
++#define TS_ASSERT_SIGNED_OP_MESSAGE(actual, operator, expected, message) \
++    do { \
++        long long l_ts_lhs = (actual); \
++        long long l_ts_rhs = (expected); \
++        if (l_ts_lhs operator l_ts_rhs) { \
++            TS_SUCCESS("%s ("#actual" "#operator" "#expected")\n\tActual  : %lld\n", message ? message : "Assert", l_ts_lhs); \
++        } \
++        else { \
++            TS_FAILURE("%s ("#actual" "#operator" "#expected")\n\tActual  : %lld\n\tExpected: %lld\n", message ? message : "Assert", l_ts_lhs, l_ts_rhs); \
++        } \
++    } while(0)
++
++#define TS_ASSERT_SIGNED_EQ(actual, expected) \
++    TS_ASSERT_SIGNED_OP_MESSAGE(actual, ==, expected, NULL)
++
++#define TS_ASSERT_SIGNED_GE(actual, expected) \
++    TS_ASSERT_SIGNED_OP_MESSAGE(actual, >=, expected, NULL)
++
++
++/*
++ * Testing of chars
++ */
++
++#define TS_ASSERT_CHAR_OP_MESSAGE(actual, operator, expected, message) \
++    do { \
++        char l_ts_lhs = (actual); \
++        char l_ts_rhs = (expected); \
++        if (l_ts_lhs operator l_ts_rhs) { \
++            TS_SUCCESS("%s ("#actual" "#operator" "#expected")\n\tActual  : %c\n", message ? message : "Assert", l_ts_lhs); \
++        } \
++        else { \
++            TS_FAILURE("%s ("#actual" "#operator" "#expected")\n\tActual  : %c\n\tExpected: %c\n", message ? message : "Assert", l_ts_lhs, l_ts_rhs); \
++        } \
++    } while(0)
++
++#define TS_ASSERT_CHAR_EQ_MESSAGE(actual, expected, message) \
++    TS_ASSERT_CHAR_OP_MESSAGE(actual, ==, expected, message)
++
++#define TS_ASSERT_CHAR_EQ(actual, expected) \
++    TS_ASSERT_CHAR_EQ_MESSAGE(actual, ==, expected, NULL)
++
++
++/*
++ * Testing of strings
++ */
++
++#define TS_ASSERT_STRING_EQ(actual, expected, message) \
++    do { \
++        const char *l_ts_lhs = (actual); \
++        const char *l_ts_rhs = (expected); \
++        if (l_ts_lhs == NULL && l_ts_rhs != NULL) { \
++            TS_FAILURE("%s ("#actual" == "#expected")\n\tActual  : NULL\n\tExpected: %p\n", message ? message : "Assert", l_ts_rhs); \
++        } \
++        else if (l_ts_lhs != NULL && l_ts_rhs == NULL) { \
++            TS_FAILURE("%s ("#actual" == "#expected")\n\tActual  : %s\n\tExpected: NULL\n", message ? message : "Assert", l_ts_lhs); \
++        } \
++        else if ((l_ts_rhs == NULL && l_ts_rhs == NULL)) { \
++            TS_SUCCESS("%s ("#actual" == "#expected")\n\tActual  : NULL\n", message ? message : "Assert"); \
++        } \
++        else if (strcmp(l_ts_lhs, l_ts_rhs) == 0) { \
++            TS_SUCCESS("%s ("#actual" == "#expected")\n\tActual  : %s\n", message ? message : "Assert", l_ts_lhs); \
++        } \
++        else { \
++            TS_FAILURE("%s ("#actual" == "#expected")\n\tActual  : %s\n\tExpected: %s\n", message ? message : "Assert", l_ts_lhs, l_ts_rhs); \
++        } \
++    } while(0)
++
++#define TS_ASSERT_STRING_BEGINS_WITH(actual, prefix, message) \
++    do { \
++        const char *l_ts_lhs = (actual); \
++        const char *l_ts_rhs = (prefix); \
++        if (l_ts_lhs == NULL && l_ts_rhs != NULL) { \
++            TS_FAILURE("%s ("#actual" begins with "#prefix")\n\tActual  : NULL\n\tExpected: %p\n", message ? message : "Assert", l_ts_rhs); \
++        } \
++        else if (l_ts_lhs != NULL && l_ts_rhs == NULL) { \
++            TS_FAILURE("%s ("#actual" begins with "#prefix")\n\tActual  : %s\n\tExpected: NULL\n", message ? message : "Assert", l_ts_lhs); \
++        } \
++        else if ((l_ts_rhs == NULL && l_ts_rhs == NULL)) { \
++            TS_SUCCESS("%s ("#actual" begins with "#prefix")\n\tActual  : NULL\n", message ? message : "Assert"); \
++        } \
++        else if (strncmp(l_ts_lhs, l_ts_rhs, strlen(l_ts_rhs)) == 0) { \
++            TS_SUCCESS("%s ("#actual" begins with "#prefix")\n\tActual  : %s\n", message ? message : "Assert", l_ts_lhs); \
++        } \
++        else { \
++            TS_FAILURE("%s ("#actual" begins with "#prefix")\n\tActual  : %s\n\tExpected: %s\n", message ? message : "Assert", l_ts_lhs, l_ts_rhs); \
++        } \
++    } while(0)
++
++#define TS_ASSERT_STRING_NULL_OR_EMPTY(actual, message) \
++    do { \
++        const char *l_ts_lhs = (actual); \
++        if (l_ts_lhs != NULL && l_ts_lhs[0] != '\0') { \
++            TS_FAILURE("%s ("#actual" is NULL or empty)\n\tActual  : %s\n", message ? message : "Assert", l_ts_lhs); \
++        } \
++        else if ((l_ts_lhs != NULL && l_ts_lhs[0] == '\0')) { \
++            TS_SUCCESS("%s ("#actual" is NULL or empty)\n\tActual  : is empty\n", message ? message : "Assert"); \
++        } \
++        else if (l_ts_lhs == NULL) { \
++            TS_SUCCESS("%s ("#actual" is NULL or empty)\n\tActual  : is NULL\n", message ? message : "Assert"); \
++        } \
++        else { \
++            TS_PRINTF("%s", "Invalid conditions in TS_ASSERT_STRING_NULL_OR_EMPTY"); \
++            abort(); \
++        } \
++    } while(0)
++
++/*
++ * Testing of pointers
++ */
++
++#define TS_ASSERT_PTR_OP_MESSAGE(actual, operator, expected, message) \
++    do { \
++        void *l_ts_lhs = (actual); \
++        void *l_ts_rhs = (expected); \
++        if (l_ts_lhs operator l_ts_rhs) { \
++            TS_SUCCESS("%s ("#actual" "#operator" "#expected")\n\tActual  : %p\n", message ? message : "Assert", l_ts_lhs); \
++        } \
++        else { \
++            TS_FAILURE("%s ("#actual" "#operator" "#expected")\n\tActual  : %p\n\tExpected: %p\n", message ? message : "Assert", l_ts_lhs, l_ts_rhs); \
++        } \
++    } while(0)
++
++
++#define TS_ASSERT_PTR_IS_NULL_MESSAGE(actual, message) \
++    TS_ASSERT_PTR_OP_MESSAGE(actual, ==, NULL, message);
++
++#define TS_ASSERT_PTR_IS_NULL(actual) \
++    TS_ASSERT_PTR_IS_NULL_MESSAGE(actual, NULL);
++
++
++#define TS_ASSERT_PTR_IS_NOT_NULL_MESSAGE(actual, message) \
++    TS_ASSERT_PTR_OP_MESSAGE(actual, !=, NULL, message);
++
++#define TS_ASSERT_PTR_IS_NOT_NULL(actual) \
++    TS_ASSERT_PTR_IS_NOT_NULL_MESSAGE(actual, NULL);
++
++
++#define TS_ASSERT_PTR_EQ(actual, expected) \
++    TS_ASSERT_PTR_OP_MESSAGE(actual, ==, expected, NULL);
++
++
++#endif/*LIBREPORT_TESTSUITE_H*/
+diff --git a/tests/helpers/testsuite_tools.h b/tests/helpers/testsuite_tools.h
+new file mode 100644
+index 0000000..ed3a557
+--- /dev/null
++++ b/tests/helpers/testsuite_tools.h
+@@ -0,0 +1,67 @@
++/*
++    Copyright (C) 2015  ABRT team <crash-catcher@lists.fedorahosted.org>
++    Copyright (C) 2015  RedHat inc.
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License along
++    with this program; if not, write to the Free Software Foundation, Inc.,
++    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++
++    ----
++
++    Helper functions
++*/
++
++#include "testsuite.h"
++
++/* Creates a new dump directory in a new temporary directory
++ */
++static struct dump_dir *testsuite_dump_dir_create(uid_t uid, mode_t mode, int ts_flags)
++{
++    char dump_dir_name[] = "/tmp/XXXXXX/dump_dir";
++
++    char *last_slash = strrchr(dump_dir_name, '/');
++    *last_slash = '\0';
++
++    if (mkdtemp(dump_dir_name) == NULL) {
++        perror("mkdtemp()");
++        abort();
++    }
++
++    fprintf(stdout, "Test temp directory: %s\n", dump_dir_name);
++    fflush(stdout);
++
++    *last_slash = '/';
++
++    struct dump_dir *dd = dd_create(dump_dir_name, uid, mode == (mode_t)-1 ? 0640 : mode);
++    assert(dd != NULL);
++
++    return dd;
++}
++
++/* Removes the dump directory in and the temporary directory
++ *
++ * See testsuite_dump_dir_create()
++ */
++static void testsuite_dump_dir_delete(struct dump_dir *dd)
++{
++    char *tmp_dir = xstrndup(dd->dd_dirname, strrchr(dd->dd_dirname, '/') - dd->dd_dirname);
++    assert(dd_delete(dd) == 0);
++
++    if(rmdir(tmp_dir) != 0)
++    {
++        perror("rmdir()");
++        abort();
++    }
++
++    free(tmp_dir);
++}
+diff --git a/tests/testsuite.at b/tests/testsuite.at
+index 898b286..04dbe3f 100644
+--- a/tests/testsuite.at
++++ b/tests/testsuite.at
+@@ -11,3 +11,6 @@ m4_include([reported_to.at])
+ m4_include([make_description.at])
+ m4_include([ureport.at])
+ m4_include([dump_dir.at])
++m4_include([event_config.at])
++m4_include([global_config.at])
++m4_include([bugzilla_plugin.at])
+-- 
+1.7.1
+

@@ -1,0 +1,245 @@
+From e7ec46f0165eadba4e734cffc48de73d9d8daf2d Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Tue, 5 Jun 2012 12:57:44 +0200
+Subject: [PATCH 40/53] track#552 : reporter-ureport : allows to
+ enable/disable SSL certificate checking
+
+Acked-by: Nikola Pajkovsky <npajkovs@redhat.com>
+Signed-off-by: Jakub Filak <jfilak@redhat.com>
+---
+ src/include/internal_libreport.h  |  3 ---
+ src/lib/Makefile.am               |  3 ++-
+ src/lib/json.c                    | 15 ++++++++-----
+ src/lib/ureport.h                 | 46 +++++++++++++++++++++++++++++++++++++++
+ src/plugins/report_uReport.xml.in |  5 +++++
+ src/plugins/ureport.c             | 29 ++++++++++++------------
+ 6 files changed, 77 insertions(+), 24 deletions(-)
+ create mode 100644 src/lib/ureport.h
+
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index d7b084c..0888267 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -798,9 +798,6 @@ void show_usage_and_die(const char *usage, const struct options *opt) NORETURN;
+  */
+ struct abrt_post_state;
+ 
+-#define post_ureport libreport_post_ureport
+-struct abrt_post_state *post_ureport(problem_data_t *pd, const char *ureport_url);
+-
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/lib/Makefile.am b/src/lib/Makefile.am
+index d286116..33e7f22 100644
+--- a/src/lib/Makefile.am
++++ b/src/lib/Makefile.am
+@@ -94,7 +94,8 @@ libabrt_dbus_la_LIBADD = \
+ libabrt_web_la_SOURCES = \
+     abrt_curl.h abrt_curl.c \
+     abrt_xmlrpc.h abrt_xmlrpc.c \
+-    proxies.h proxies.c json.c
++    proxies.h proxies.c \
++    ureport.h json.c
+ libabrt_web_la_CPPFLAGS = \
+     -Wall -Wwrite-strings -Werror \
+     -I$(srcdir)/../include \
+diff --git a/src/lib/json.c b/src/lib/json.c
+index a34cc7b..3fec49b 100644
+--- a/src/lib/json.c
++++ b/src/lib/json.c
+@@ -22,6 +22,7 @@
+ #include <btparser/core-backtrace.h>
+ 
+ #include "internal_libreport.h"
++#include "ureport.h"
+ #include "abrt_curl.h"
+ 
+ 
+@@ -250,12 +251,14 @@ char *new_json_ureport(problem_data_t *pd)
+     return j;
+ }
+ 
+-abrt_post_state_t *post_ureport(problem_data_t *pd, const char *ureport_url)
++struct abrt_post_state *post_ureport(problem_data_t *pd, struct ureport_server_config *config)
+ {
+-    abrt_post_state_t *post_state;
+-    post_state = new_abrt_post_state(ABRT_POST_WANT_BODY
+-                                     | ABRT_POST_WANT_SSL_VERIFY
+-                                     | ABRT_POST_WANT_ERROR_MSG);
++    int flags = ABRT_POST_WANT_BODY | ABRT_POST_WANT_ERROR_MSG;
++
++    if (config->ur_ssl_verify)
++        flags |= ABRT_POST_WANT_SSL_VERIFY;
++
++    abrt_post_state_t *post_state = new_abrt_post_state(flags);
+ 
+     static const char *headers[] = {
+         "Accept: application/json",
+@@ -265,7 +268,7 @@ abrt_post_state_t *post_ureport(problem_data_t *pd, const char *ureport_url)
+ 
+     char *json_ureport = new_json_ureport(pd);
+ 
+-    abrt_post_string_as_form_data(post_state, ureport_url, "application/json",
++    abrt_post_string_as_form_data(post_state, config->ur_url, "application/json",
+                      headers, json_ureport);
+ 
+     free(json_ureport);
+diff --git a/src/lib/ureport.h b/src/lib/ureport.h
+new file mode 100644
+index 0000000..b1b1d89
+--- /dev/null
++++ b/src/lib/ureport.h
+@@ -0,0 +1,46 @@
++/*
++    Copyright (C) 2012  ABRT team
++    Copyright (C) 2012  RedHat Inc
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License along
++    with this program; if not, write to the Free Software Foundation, Inc.,
++    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++*/
++#ifndef UREPORT_H_
++#define UREPORT_H_
++
++#include "problem_data.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*
++ * uReport server configuration
++ */
++struct ureport_server_config
++{
++    const char *ur_url; ///< Web service URL
++    bool ur_ssl_verify; ///< Verify HOST and PEER certificates
++};
++
++struct abrt_post_state;
++
++#define post_ureport libreport_post_ureport
++struct abrt_post_state *post_ureport(problem_data_t *pd, struct ureport_server_config *config);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/src/plugins/report_uReport.xml.in b/src/plugins/report_uReport.xml.in
+index 77b5880..988db55 100644
+--- a/src/plugins/report_uReport.xml.in
++++ b/src/plugins/report_uReport.xml.in
+@@ -13,5 +13,10 @@
+             <_description>Address of uReport webservice</_description>
+             <default-value>https://retrace.fedoraproject.org/faf/reports/new/</default-value>
+         </option>
++        <option type="bool" name="uReport_SSLVerify">
++            <_label>Verify SSL</_label>
++            <_description>Check SSL key validity</_description>
++            <default-value>yes</default-value>
++        </option>
+     </options>
+ </event>
+diff --git a/src/plugins/ureport.c b/src/plugins/ureport.c
+index 21dc58d..5ffcea3 100644
+--- a/src/plugins/ureport.c
++++ b/src/plugins/ureport.c
+@@ -19,17 +19,10 @@
+ 
+ #include <json/json.h>
+ #include "internal_libreport.h"
++#include "ureport.h"
+ #include "abrt_curl.h"
+ 
+ /*
+- * uReport server configuration
+- */
+-struct ureport_server_config
+-{
+-    const char *url; ///< Web service URL
+-};
+-
+-/*
+  * Loads uReport configuration from various sources.
+  *
+  * Replaces a value of an already configured option only if the
+@@ -42,7 +35,10 @@ static void load_ureport_server_config(struct ureport_server_config *config)
+     const char *environ;
+ 
+     environ = getenv("uReport_URL");
+-    config->url = environ ? environ : config->url;
++    config->ur_url = environ ? environ : config->ur_url;
++
++    environ = getenv("uReport_SSLVerify");
++    config->ur_ssl_verify = environ ? string_to_bool(environ) : config->ur_ssl_verify;
+ }
+ 
+ 
+@@ -93,19 +89,23 @@ int main(int argc, char **argv)
+     abrt_init(argv);
+ 
+     struct ureport_server_config config = {
+-        .url = "https://retrace.fedoraproject.org/faf/reports/new/",
++        .ur_url = "https://retrace.fedoraproject.org/faf/reports/new/",
++        .ur_ssl_verify = true,
+     };
+ 
++    bool insecure = !config.ur_ssl_verify;
+     const char *dump_dir_path = ".";
+     struct options program_options[] = {
+         OPT__VERBOSE(&g_verbose),
+         OPT__DUMP_DIR(&dump_dir_path),
+-        OPT_STRING('u', "url", &config.url, "URL", _("Specify url")),
++        OPT_STRING('u', "url", &config.ur_url, "URL", _("Specify url")),
++        OPT_BOOL('k', "insecure", &insecure,
++                          _("Allow insecure connection to ureport server")),
+         OPT_END(),
+     };
+ 
+     const char *program_usage_string = _(
+-        "& [-v] -d DIR\n"
++        "& [-v] [-u URL] [-k] -d DIR\n"
+         "\n"
+         "Upload micro report"
+     );
+@@ -115,6 +115,7 @@ int main(int argc, char **argv)
+     if (!dd)
+         xfunc_die();
+ 
++    config.ur_ssl_verify = !insecure;
+     load_ureport_server_config(&config);
+ 
+     problem_data_t *pd = create_problem_data_from_dump_dir(dd);
+@@ -123,7 +124,7 @@ int main(int argc, char **argv)
+         xfunc_die(); /* create_problem_data_for_reporting already emitted error msg */
+ 
+     abrt_post_state_t *post_state = NULL;
+-    post_state = post_ureport(pd, config.url);
++    post_state = post_ureport(pd, &config);
+     free_problem_data(pd);
+ 
+     if (post_state->http_resp_code != 200)
+@@ -131,7 +132,7 @@ int main(int argc, char **argv)
+         char *errmsg = post_state->curl_error_msg;
+         if (errmsg && *errmsg)
+         {
+-            error_msg("%s '%s'", errmsg, config.url);
++            error_msg("%s '%s'", errmsg, config.ur_url);
+             free_abrt_post_state(post_state);
+             return 1;
+         }
+-- 
+1.7.11.2
+

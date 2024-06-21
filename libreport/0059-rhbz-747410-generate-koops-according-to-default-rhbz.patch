@@ -1,0 +1,166 @@
+From f8769a7cc3ad0347c8babc60d27c590527223b3f Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Mon, 27 Aug 2012 16:58:57 +0200
+Subject: [PATCH 59/62] rhbz#747410: generate koops according to default rhbz
+ template
+
+- see rhbz#846389
+
+Signed-off-by: Jakub Filak <jfilak@redhat.com>
+---
+ src/include/internal_libreport.h |  2 --
+ src/lib/make_descr.c             | 19 -----------
+ src/plugins/rhbz.c               | 69 +++++++++++++++++-----------------------
+ 3 files changed, 30 insertions(+), 60 deletions(-)
+
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index 0d6d3a4..5711bcb 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -587,8 +587,6 @@ char *make_description_item_multiline(const char *name, const char* content);
+ char* make_description_bz(problem_data_t *problem_data, unsigned max_text_size);
+ #define make_description_logger libreport_make_description_logger
+ char* make_description_logger(problem_data_t *problem_data, unsigned max_text_size);
+-#define make_description_koops libreport_make_description_koops
+-char* make_description_koops(problem_data_t *problem_data, unsigned max_text_size);
+ //UNUSED
+ //#define make_description_mailx libreport_make_description_mailx
+ //char* make_description_mailx(problem_data_t *problem_data);
+diff --git a/src/lib/make_descr.c b/src/lib/make_descr.c
+index 99e0ad0..4ff23da 100644
+--- a/src/lib/make_descr.c
++++ b/src/lib/make_descr.c
+@@ -298,22 +298,3 @@ char* make_description_logger(problem_data_t *problem_data, unsigned max_text_si
+                 MAKEDESC_SHOW_FILES | MAKEDESC_SHOW_MULTILINE
+     );
+ }
+-
+-/* Items we want to include to bz */
+-static const char *const whitelisted_items[] = {
+-    FILENAME_CMDLINE,
+-    FILENAME_BACKTRACE,
+-    NULL
+-};
+-
+-char* make_description_koops(problem_data_t *problem_data, unsigned max_text_size)
+-{
+-    return make_description(
+-                problem_data,
+-                (char**)whitelisted_items,
+-                max_text_size,
+-                MAKEDESC_SHOW_FILES
+-                | MAKEDESC_SHOW_MULTILINE
+-                | MAKEDESC_WHITELIST
+-    );
+-}
+diff --git a/src/plugins/rhbz.c b/src/plugins/rhbz.c
+index bfb5d18..b3d4a8f 100644
+--- a/src/plugins/rhbz.c
++++ b/src/plugins/rhbz.c
+@@ -581,15 +581,20 @@ int rhbz_new_bug(struct abrt_xmlrpc *ax, problem_data_t *problem_data,
+                                                                 FILENAME_ANALYZER);
+     const char *tainted_short = get_problem_item_content_or_NULL(problem_data,
+                                                                 FILENAME_TAINTED_SHORT);
++    const char *comment      = get_problem_item_content_or_NULL(problem_data,
++                                                            FILENAME_COMMENT);
+ 
+     struct strbuf *buf_summary = strbuf_new();
++
++    const bool kerneloops = analyzer && strcmp(analyzer, "Kerneloops") == 0;
++
+     if (analyzer && strcmp(analyzer, "libreport") == 0)
+     {
+         strbuf_append_str(buf_summary, reason);
+     }
+     else
+     {
+-        if (analyzer && !strcmp(analyzer, "Kerneloops"))
++        if (kerneloops)
+             strbuf_append_str(buf_summary, "[abrt]");
+         else
+             strbuf_append_strf(buf_summary, "[abrt] %s", package);
+@@ -600,50 +605,35 @@ int rhbz_new_bug(struct abrt_xmlrpc *ax, problem_data_t *problem_data,
+         if (reason)
+             strbuf_append_strf(buf_summary, ": %s", reason);
+ 
+-        if (tainted_short && analyzer
+-            && (strcmp(analyzer, "Kerneloops") == 0))
+-        {
++        if (tainted_short)
+             strbuf_append_strf(buf_summary, ": TAINTED %s", tainted_short);
+-        }
+     }
+-    char *status_whiteboard = xasprintf("abrt_hash:%s", duphash);
+ 
+-    char *full_dsc = NULL;
+-    if (analyzer && !strcmp(analyzer, "Kerneloops"))
++    /* Generating of a description according to the RH bugzilla default format:
++     * https://bugzilla.redhat.com/enter_bug.cgi?product=Fedora
++     */
++    struct strbuf *tmp_full_dsc = strbuf_new();
++    if (comment)
++        strbuf_append_strf(tmp_full_dsc, "Description of problem:\n%s\n\n", comment);
++
++    /* the package file always contains 'kernel' string in case of kerneloops */
++    /* it doesn't make sense to mess up a description with this useless information */
++    if (package && !kerneloops)
++        strbuf_append_strf(tmp_full_dsc, "Version-Release number of selected component:\n%s\n\n", package);
++
++    char *bz_dsc = make_description(problem_data, (char**)g_additional_info_files,
++                                    CD_TEXT_ATT_SIZE_BZ, MAKEDESC_SHOW_MULTILINE | MAKEDESC_WHITELIST);
++    strbuf_append_strf(tmp_full_dsc, "Additional info:\nlibreport version: "VERSION"\n%s\n", bz_dsc);
++    free(bz_dsc);
++
++    char *backtrace = rhbz_get_backtrace_info(problem_data, CD_TEXT_ATT_SIZE_BZ);
++    if (backtrace)
+     {
+-        char *bz_dsc = make_description_koops(problem_data, CD_TEXT_ATT_SIZE_BZ);
+-        full_dsc = xasprintf("libreport version: "VERSION"\n%s", bz_dsc);
+-        free(bz_dsc);
++        strbuf_append_str(tmp_full_dsc, backtrace);
++        free(backtrace);
+     }
+-    else
+-    {
+-        /* Generating of a description according to the RH bugzilla default format:
+-         * https://bugzilla.redhat.com/enter_bug.cgi?product=Fedora
+-         */
+-        struct strbuf *tmp_full_dsc = strbuf_new();
+ 
+-        const char *comment      = get_problem_item_content_or_NULL(problem_data,
+-                                                                FILENAME_COMMENT);
+-        if (comment)
+-            strbuf_append_strf(tmp_full_dsc, "Description of problem:\n%s\n\n", comment);
+-
+-        if (package)
+-            strbuf_append_strf(tmp_full_dsc, "Version-Release number of selected component:\n%s\n\n", package);
+-
+-        char *bz_dsc = make_description(problem_data, (char**)g_additional_info_files,
+-                CD_TEXT_ATT_SIZE_BZ, MAKEDESC_SHOW_MULTILINE | MAKEDESC_WHITELIST);
+-        strbuf_append_strf(tmp_full_dsc, "Additional info:\nlibreport version: "VERSION"\n%s\n", bz_dsc);
+-        free(bz_dsc);
+-
+-        char *backtrace = rhbz_get_backtrace_info(problem_data, CD_TEXT_ATT_SIZE_BZ);
+-        if (backtrace)
+-        {
+-            strbuf_append_str(tmp_full_dsc, backtrace);
+-            free(backtrace);
+-        }
+-
+-        full_dsc = strbuf_free_nobuf(tmp_full_dsc);
+-    }
++    char *full_dsc = strbuf_free_nobuf(tmp_full_dsc);
+ 
+     char *product = NULL;
+     char *version = NULL;
+@@ -651,6 +641,7 @@ int rhbz_new_bug(struct abrt_xmlrpc *ax, problem_data_t *problem_data,
+ 
+     xmlrpc_value* result = NULL;
+     char *summary = strbuf_free_nobuf(buf_summary);
++    char *status_whiteboard = xasprintf("abrt_hash:%s", duphash);
+     if (depend_on_bug > -1)
+     {
+         result = abrt_xmlrpc_call(ax, "Bug.create", "({s:s,s:s,s:s,s:s,s:s,s:s,s:s,s:i})",
+-- 
+1.7.11.4
+

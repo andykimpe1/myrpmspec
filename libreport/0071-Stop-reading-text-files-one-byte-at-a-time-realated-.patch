@@ -1,0 +1,47 @@
+From 87dee5578bff3a335fbaa5827e27da5c12ca4958 Mon Sep 17 00:00:00 2001
+From: Jiri Moskovcak <jmoskovc@redhat.com>
+Date: Wed, 16 Jan 2013 13:05:39 +0100
+Subject: [PATCH 71/71] Stop reading text files one byte at a time - realated
+ to rhbz#812283
+
+Signed-off-by: Denys Vlasenko <vda.linux@googlemail.com>
+---
+ src/lib/dump_dir.c | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/src/lib/dump_dir.c b/src/lib/dump_dir.c
+index 77c59e2..b905893 100644
+--- a/src/lib/dump_dir.c
++++ b/src/lib/dump_dir.c
+@@ -653,10 +653,17 @@ static char *load_text_file(const char *path, unsigned flags)
+         return (flags & DD_LOAD_TEXT_RETURN_NULL_ON_FAILURE ? NULL : xstrdup(""));
+     }
+ 
++    /* Why? Because half a million read syscalls of one byte each isn't fun.
++     * FILE-based IO buffers reads.
++     */
++    FILE *fp = fdopen(fd, "r");
++    if (!fp)
++        die_out_of_memory();
++
+     struct strbuf *buf_content = strbuf_new();
+     int oneline = 0;
+-    char ch;
+-    while (safe_read(fd, &ch, 1) > 0)
++    int ch;
++    while ((ch = fgetc(fp)) != EOF)
+     {
+ //TODO? \r -> \n?
+ //TODO? strip trailing spaces/tabs?
+@@ -667,7 +674,7 @@ static char *load_text_file(const char *path, unsigned flags)
+         if (isspace(ch) || ch >= ' ') /* used !iscntrl, but it failed on unicode */
+             strbuf_append_char(buf_content, ch);
+     }
+-    close(fd);
++    fclose(fp); /* this also closes fd */
+ 
+     char last = oneline != 0 ? buf_content->buf[buf_content->len - 1] : 0;
+     if (last == '\n')
+-- 
+1.8.0.1
+

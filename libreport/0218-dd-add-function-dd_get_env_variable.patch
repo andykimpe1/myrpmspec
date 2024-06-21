@@ -1,0 +1,145 @@
+From 412218633e38bc7b91843cb49d6c9fdcdf149da3 Mon Sep 17 00:00:00 2001
+From: Matej Habrnal <mhabrnal@redhat.com>
+Date: Wed, 12 Oct 2016 16:01:08 +0200
+Subject: [PATCH] dd: add function dd_get_env_variable()
+
+Also add a related function dd_get_env_variable().
+The dd_get_env_variable() returns value of environment variable with given
+name.
+
+Related to #1324586
+
+Signed-off-by: Matej Habrnal <mhabrnal@redhat.com>
+---
+ src/include/dump_dir.h           |   11 +++++++
+ src/include/internal_libreport.h |    2 +
+ src/lib/dump_dir.c               |   12 +++++++
+ src/lib/get_cmdline.c            |   60 ++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 85 insertions(+), 0 deletions(-)
+
+diff --git a/src/include/dump_dir.h b/src/include/dump_dir.h
+index 821ff37..a2ae3b1 100644
+--- a/src/include/dump_dir.h
++++ b/src/include/dump_dir.h
+@@ -91,6 +91,17 @@ int dd_get_next_file(struct dump_dir *dd, char **short_name, char **full_name);
+ 
+ char* dd_load_text_ext(const struct dump_dir *dd, const char *name, unsigned flags);
+ char* dd_load_text(const struct dump_dir *dd, const char *name);
++
++/* Returns value of environment variable with given name.
++ *
++ * @param dd Dump directory
++ * @param name Variables's name
++ * @param value Return value.
++ * @return 0 no success, or negative value if an error occurred (-ENOENT if the
++ * given dd does not support environment variables).
++ */
++int dd_get_env_variable(struct dump_dir *dd, const char *name, char **value);
++
+ void dd_save_text(struct dump_dir *dd, const char *name, const char *data);
+ void dd_save_binary(struct dump_dir *dd, const char *name, const char *data, unsigned size);
+ /* Deletes an item from dump directory
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index 361ff23..bff91a0 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -597,6 +597,8 @@ struct strbuf *strbuf_prepend_strfv(struct strbuf *strbuf,
+ char* get_cmdline(pid_t pid);
+ #define get_environ libreport_get_environ
+ char* get_environ(pid_t pid);
++#define get_env_variable_ext libreport_get_env_variable_ext
++int get_env_variable_ext(int fd, char delim, const char *name, char **value);
+ 
+ /* Takes ptr to time_t, or NULL if you want to use current time.
+  * Returns "YYYY-MM-DD-hh:mm:ss" string.
+diff --git a/src/lib/dump_dir.c b/src/lib/dump_dir.c
+index 338e174..9a1fbd7 100644
+--- a/src/lib/dump_dir.c
++++ b/src/lib/dump_dir.c
+@@ -1378,3 +1378,15 @@ finito:
+ 
+     return result;
+ }
++
++int dd_get_env_variable(struct dump_dir *dd, const char *name, char **value)
++{
++    const int fd = openat(dd->dd_fd, FILENAME_ENVIRON, O_RDONLY | O_NOFOLLOW);
++    if (fd < 0)
++        return -errno;
++
++    const int r  = get_env_variable_ext(fd, '\n', name, value);
++    close(fd);
++    return r;
++}
++
+diff --git a/src/lib/get_cmdline.c b/src/lib/get_cmdline.c
+index 4f86fa2..a0c4a67 100644
+--- a/src/lib/get_cmdline.c
++++ b/src/lib/get_cmdline.c
+@@ -148,3 +148,63 @@ char* get_environ(pid_t pid)
+     sprintf(path, "/proc/%lu/environ", (long)pid);
+     return get_escaped(path, '\n');
+ }
++
++int get_env_variable_ext(int fd, char delim, const char *name, char **value)
++{
++    int workfd = dup(fd);
++    if (workfd < 0)
++    {
++        perror_msg("dup()");
++        return -errno;
++    }
++
++    FILE *fenv = fdopen(workfd, "re");
++    if (fenv == NULL)
++    {
++        close(workfd);
++        perror_msg("fdopen()");
++        return -errno;
++    }
++
++    size_t len = strlen(name);
++    int c = 0;
++    while (c != EOF)
++    {
++        long i = 0;
++        /* Check variable name */
++        while ((c = fgetc(fenv)) != EOF && (i < len && c == name[i++]))
++            ;
++
++        if (c == EOF)
++            break;
++
++        const int skip = (c != '=' || name[i] != '\0');
++        i = 0;
++
++        /* Read to the end of variable entry */
++        while ((c = fgetc(fenv)) != EOF && c != delim)
++            ++i;
++
++        /* Go to the next entry if the read entry isn't the searched variable */
++        if (skip)
++            continue;
++
++        const int eof = c != EOF;
++        *value = xmalloc(i+1);
++
++        /* i+1 because we didn't count '\0'  */
++        if (fseek(fenv, -(i+eof), SEEK_CUR) < 0)
++            error_msg_and_die("Failed to seek");
++
++        if (fread(*value, 1, i, fenv) != i)
++            error_msg_and_die("Failed to read value");
++
++        (*value)[i] = '\0';
++
++        break;
++
++    }
++
++    fclose(fenv);
++    return 0;
++}
+-- 
+1.7.1
+

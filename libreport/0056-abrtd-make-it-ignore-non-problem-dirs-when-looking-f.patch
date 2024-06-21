@@ -1,0 +1,108 @@
+From 3f74a39f2bee037ee81ac2937b85f2141b3a83e5 Mon Sep 17 00:00:00 2001
+From: Denys Vlasenko <vda.linux@googlemail.com>
+Date: Mon, 13 Aug 2012 14:50:29 +0200
+Subject: [PATCH 56/56] abrtd: make it ignore non-problem dirs when looking
+ for a dir to delete. Closes rhbz#847291
+
+Signed-off-by: Denys Vlasenko <vda.linux@googlemail.com>
+---
+ src/lib/dirsize.c | 36 +++++++++++++++++++++++++++---------
+ 1 file changed, 27 insertions(+), 9 deletions(-)
+
+diff --git a/src/lib/dirsize.c b/src/lib/dirsize.c
+index 77dc443..9f0b1b2 100644
+--- a/src/lib/dirsize.c
++++ b/src/lib/dirsize.c
+@@ -34,8 +34,7 @@ double get_dirsize(const char *pPath)
+         char *dname = concat_path_file(pPath, ep->d_name);
+         if (lstat(dname, &statbuf) != 0)
+         {
+-            free(dname);
+-            continue;
++            goto next;
+         }
+         if (S_ISDIR(statbuf.st_mode))
+         {
+@@ -45,12 +44,22 @@ double get_dirsize(const char *pPath)
+         {
+             size += statbuf.st_size;
+         }
++ next:
+         free(dname);
+     }
+     closedir(dp);
+     return size;
+ }
+ 
++static bool this_is_a_dd(const char *dirname)
++{
++    struct dump_dir *dd = dd_opendir(dirname,
++                /*flags:*/ DD_OPEN_READONLY | DD_FAIL_QUIETLY_ENOENT | DD_FAIL_QUIETLY_EACCES
++    );
++    dd_close(dd);
++    return dd != NULL;
++}
++
+ double get_dirsize_find_largest_dir(
+ 		const char *pPath,
+ 		char **worst_dir,
+@@ -63,6 +72,7 @@ double get_dirsize_find_largest_dir(
+     if (dp == NULL)
+         return 0;
+ 
++    time_t cur_time = time(NULL);
+     struct dirent *ep;
+     struct stat statbuf;
+     double size = 0;
+@@ -74,8 +84,7 @@ double get_dirsize_find_largest_dir(
+         char *dname = concat_path_file(pPath, ep->d_name);
+         if (lstat(dname, &statbuf) != 0)
+         {
+-            free(dname);
+-            continue;
++            goto next;
+         }
+         if (S_ISDIR(statbuf.st_mode))
+         {
+@@ -85,17 +94,25 @@ double get_dirsize_find_largest_dir(
+             if (worst_dir && (!excluded || strcmp(excluded, ep->d_name) != 0))
+             {
+                 /* Calculate "weighted" size and age
+-                 * w = sz_kbytes * age_mins */
++                 * w = sz_kbytes * age_mins
++                 */
+                 sz /= 1024;
+-                long age = (time(NULL) - statbuf.st_mtime) / 60;
++                long age = (cur_time - statbuf.st_mtime) / 60;
+                 if (age > 0)
+                     sz *= age;
+ 
+                 if (sz > maxsz)
+                 {
+-                    maxsz = sz;
+-                    free(*worst_dir);
+-                    *worst_dir = xstrdup(ep->d_name);
++                    if (!this_is_a_dd(dname))
++                    {
++                        VERB1 log("'%s' isn't a problem directory, probably a stray directory?", dname);
++                    }
++                    else
++                    {
++                        maxsz = sz;
++                        free(*worst_dir);
++                        *worst_dir = xstrdup(ep->d_name);
++                    }
+                 }
+             }
+         }
+@@ -103,6 +120,7 @@ double get_dirsize_find_largest_dir(
+         {
+             size += statbuf.st_size;
+         }
++ next:
+         free(dname);
+     }
+     closedir(dp);
+-- 
+1.7.11.4
+

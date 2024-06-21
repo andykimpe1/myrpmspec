@@ -1,0 +1,221 @@
+From 1ff3912e84655d99ab1c7630ddc0384170942f59 Mon Sep 17 00:00:00 2001
+From: Denys Vlasenko <dvlasenk@redhat.com>
+Date: Wed, 12 Jun 2013 13:11:52 +0200
+Subject: [RHEL6 LIBREPORT PATCH 097/103] Fix bugs discoverent by Coverity.
+ rhbz#905051
+
+This is a partial backport of 93c6e6f9298928dcb140797d9fe8ff9038790423.
+
+Most bugs are either outright bogus (rhbz_array_size is never <0)
+or won't happen in practice (fstat won't fail on a file we just created
+ourselves). Nevertheless, one bug is real:
+
+if (flags & LIBREPORT_NOWAIT)...
+
+is WRONG, because LIBREPORT_NOWAIT constant is in fact 0!
+We must check for that bit this way:
+
+if (!(flags & LIBREPORT_WAIT))...
+
+Signed-off-by: Denys Vlasenko <dvlasenk@redhat.com>
+Signed-off-by: Jiri Moskovcak <jmoskovc@redhat.com>
+---
+ src/cli/cli-report.c            |  9 ++++-----
+ src/gui-wizard-gtk/wizard.c     | 18 ++++++++++--------
+ src/lib/dump_dir.c              | 14 ++++++++++++--
+ src/lib/report.c                |  2 +-
+ src/plugins/reporter-bugzilla.c |  4 ++--
+ src/plugins/rhbz.c              | 12 ++++++------
+ src/plugins/rhbz.h              |  2 +-
+ 7 files changed, 36 insertions(+), 25 deletions(-)
+
+diff --git a/src/cli/cli-report.c b/src/cli/cli-report.c
+index 1e13a38..0e36150 100644
+--- a/src/cli/cli-report.c
++++ b/src/cli/cli-report.c
+@@ -333,11 +333,10 @@ static int run_report_editor(problem_data_t *problem_data)
+         return 2;
+     }
+ 
+-    fseek(fp, 0, SEEK_END);
+-    unsigned long size = ftell(fp);
+-    fseek(fp, 0, SEEK_SET);
+-
+-    char *text = (char*)xmalloc(size + 1);
++    off_t size = fstat_st_size_or_die(fileno(fp));
++    if (size > INT_MAX/4)
++           size = INT_MAX/4; /* paranoia */
++    char *text = xmalloc(size + 1);
+     if (fread(text, 1, size, fp) != size)
+     {
+         error_msg("Can't read '%s'", filename);
+diff --git a/src/gui-wizard-gtk/wizard.c b/src/gui-wizard-gtk/wizard.c
+index 57365bd..4820546 100644
+--- a/src/gui-wizard-gtk/wizard.c
++++ b/src/gui-wizard-gtk/wizard.c
+@@ -1092,14 +1092,16 @@ static void append_item_to_ls_details(gpointer name, gpointer value, gpointer da
+     {
+         struct stat statbuf;
+         statbuf.st_size = 0;
+-        stat(item->content, &statbuf);
+-        stats->filesize += statbuf.st_size;
+-        char *msg = xasprintf(_("(binary file, %llu bytes)"), (long long)statbuf.st_size);
+-        gtk_list_store_set(g_ls_details, &iter,
+-                              DETAIL_COLUMN_NAME, (char *)name,
+-                              DETAIL_COLUMN_VALUE, msg,
+-                              -1);
+-        free(msg);
++        if (stat(item->content, &statbuf) == 0)
++        {
++            stats->filesize += statbuf.st_size;
++            char *msg = xasprintf(_("(binary file, %llu bytes)"), (long long)statbuf.st_size);
++            gtk_list_store_set(g_ls_details, &iter,
++                                  DETAIL_COLUMN_NAME, (char *)name,
++                                  DETAIL_COLUMN_VALUE, msg,
++                                  -1);
++            free(msg);
++        }
+     }
+ 
+     int cur_value;
+diff --git a/src/lib/dump_dir.c b/src/lib/dump_dir.c
+index f2e7376..e1af555 100644
+--- a/src/lib/dump_dir.c
++++ b/src/lib/dump_dir.c
+@@ -287,7 +287,8 @@ struct dump_dir *dd_opendir(const char *dir, int flags)
+     dir = dd->dd_dirname = rm_trailing_slashes(dir);
+ 
+     struct stat stat_buf;
+-    stat(dir, &stat_buf);
++    if (stat(dir, &stat_buf) != 0)
++        goto cant_access;
+     /* & 0666 should remove the executable bit */
+     dd->mode = (stat_buf.st_mode & 0666);
+ 
+@@ -331,7 +332,10 @@ struct dump_dir *dd_opendir(const char *dir, int flags)
+         else
+         {
+             if (!(flags & DD_FAIL_QUIETLY_EACCES))
++            {
++ cant_access:
+                 perror_msg("Can't access '%s'", dir);
++            }
+         }
+         dd_close(dd);
+         return NULL;
+@@ -549,7 +553,13 @@ void dd_sanitize_mode_and_owner(struct dump_dir *dd)
+         if (lstat(full_path, &statbuf) == 0 && S_ISREG(statbuf.st_mode))
+         {
+             if ((statbuf.st_mode & 0777) != dd->mode)
+-                chmod(full_path, dd->mode);
++            {
++                if (chmod(full_path, dd->mode) != 0)
++                {
++                    perror_msg("Can't change '%s' mode to 0%o", full_path,
++                            (unsigned)dd->mode);
++                }
++            }
+             if (statbuf.st_uid != dd->dd_uid || statbuf.st_gid != dd->dd_gid)
+             {
+                 if (lchown(full_path, dd->dd_uid, dd->dd_gid) != 0)
+diff --git a/src/lib/report.c b/src/lib/report.c
+index 9e1d601..7b7deab 100644
+--- a/src/lib/report.c
++++ b/src/lib/report.c
+@@ -175,7 +175,7 @@ int report_problem_in_memory(problem_data_t *pd, int flags)
+     dd_close(dd);
+     VERB2 log("Temp problem dir: '%s'", dir_name);
+ 
+-    if (flags & LIBREPORT_NOWAIT)
++    if (!(flags & LIBREPORT_WAIT))
+         flags |= LIBREPORT_DEL_DIR;
+     result = report_problem_in_dir(dir_name, flags);
+ 
+diff --git a/src/plugins/reporter-bugzilla.c b/src/plugins/reporter-bugzilla.c
+index 7bde348..9374505 100644
+--- a/src/plugins/reporter-bugzilla.c
++++ b/src/plugins/reporter-bugzilla.c
+@@ -165,7 +165,7 @@ int main(int argc, char **argv)
+         xmlrpc_value *all_bugs = rhbz_get_member("bugs", result);
+         xmlrpc_DECREF(result);
+ 
+-        int all_bugs_size = rhbz_array_size(all_bugs);
++        unsigned all_bugs_size = rhbz_array_size(all_bugs);
+         if (all_bugs_size > 0)
+         {
+             int bug_id = rhbz_bug_id(all_bugs);
+@@ -302,7 +302,7 @@ int main(int argc, char **argv)
+     if (!all_bugs)
+         error_msg_and_die(_("Missing mandatory member 'bugs'"));
+ 
+-    int all_bugs_size = rhbz_array_size(all_bugs);
++    unsigned all_bugs_size = rhbz_array_size(all_bugs);
+     // When someone clones bug it has same duphash, so we can find more than 1.
+     // Need to be checked if component is same.
+     VERB3 log("Bugzilla has %i reports with same duphash '%s'",
+diff --git a/src/plugins/rhbz.c b/src/plugins/rhbz.c
+index 359c15a..300c5c8 100644
+--- a/src/plugins/rhbz.c
++++ b/src/plugins/rhbz.c
+@@ -154,11 +154,11 @@ static GList *parse_comments(xmlrpc_value *result_xml)
+     if (!comments_memb)
+         return NULL;
+ 
+-    int comments_memb_size = rhbz_array_size(comments_memb);
++    unsigned comments_memb_size = rhbz_array_size(comments_memb);
+ 
+     xmlrpc_env env;
+     xmlrpc_env_init(&env);
+-    for (int i = 0; i < comments_memb_size; ++i)
++    for (unsigned i = 0; i < comments_memb_size; ++i)
+     {
+         xmlrpc_value* item = NULL;
+         xmlrpc_array_read_item(&env, comments_memb, i, &item);
+@@ -312,14 +312,14 @@ xmlrpc_value *rhbz_get_member(const char *member, xmlrpc_value *xml)
+  * value. So it is usually not worth checking *envP.
+  * die or return size of array
+  */
+-int rhbz_array_size(xmlrpc_value *xml)
++unsigned rhbz_array_size(xmlrpc_value *xml)
+ {
+     func_entry();
+ 
+     xmlrpc_env env;
+     xmlrpc_env_init(&env);
+ 
+-    int size = xmlrpc_array_size(&env, xml);
++    unsigned size = xmlrpc_array_size(&env, xml);
+     if (env.fault_occurred)
+         abrt_xmlrpc_die(&env);
+ 
+@@ -419,12 +419,12 @@ GList *rhbz_bug_cc(xmlrpc_value* result_xml)
+     if (!cc_member)
+         return NULL;
+ 
+-    int array_size = rhbz_array_size(cc_member);
++    unsigned array_size = rhbz_array_size(cc_member);
+ 
+     VERB3 log("count members on cc %i", array_size);
+     GList *cc_list = NULL;
+ 
+-    for (int i = 0; i < array_size; ++i)
++    for (unsigned i = 0; i < array_size; ++i)
+     {
+         xmlrpc_value* item = NULL;
+         xmlrpc_array_read_item(&env, cc_member, i, &item);
+diff --git a/src/plugins/rhbz.h b/src/plugins/rhbz.h
+index 10c37bc..585b23e 100644
+--- a/src/plugins/rhbz.h
++++ b/src/plugins/rhbz.h
+@@ -93,7 +93,7 @@ xmlrpc_value *rhbz_search_duphash(struct abrt_xmlrpc *ax, const char *component,
+ 
+ xmlrpc_value *rhbz_get_member(const char *member, xmlrpc_value *xml);
+ 
+-int rhbz_array_size(xmlrpc_value *xml);
++unsigned rhbz_array_size(xmlrpc_value *xml);
+ 
+ int rhbz_bug_id(xmlrpc_value *xml);
+ 
+-- 
+1.8.3.1
+

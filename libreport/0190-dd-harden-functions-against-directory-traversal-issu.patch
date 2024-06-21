@@ -1,0 +1,95 @@
+From 2d7c4ec9adc5e1ca851f4dfe796aadb8f5da1ef4 Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Thu, 23 Apr 2015 13:30:15 +0200
+Subject: [LIBREPORT PATCH] dd: harden functions against directory traversal
+ issues
+
+Test correctness of all accessed dump dir files in all dd* functions.
+Before this commit, the callers were allowed to pass strings like
+"../../etc/shadow" in the filename argument of all dd* functions.
+
+Related: #1214457
+
+Signed-off-by: Jakub Filak <jfilak@redhat.com>
+---
+ src/lib/create_dump_dir.c |  2 +-
+ src/lib/dump_dir.c        | 22 ++++++++++++++++++++++
+ 2 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/src/lib/create_dump_dir.c b/src/lib/create_dump_dir.c
+index 137da12..28205ce 100644
+--- a/src/lib/create_dump_dir.c
++++ b/src/lib/create_dump_dir.c
+@@ -65,7 +65,7 @@ struct dump_dir *create_dump_dir_from_problem_data(problem_data_t *problem_data,
+     g_hash_table_iter_init(&iter, problem_data);
+     while (g_hash_table_iter_next(&iter, (void**)&name, (void**)&value))
+     {
+-        if (name[0] == '.' || strchr(name, '/'))
++        if (!str_is_correct_filename(name))
+         {
+             error_msg("Problem data field name contains disallowed chars: '%s'", name);
+             goto next;
+diff --git a/src/lib/dump_dir.c b/src/lib/dump_dir.c
+index d3d59f4..622e756 100644
+--- a/src/lib/dump_dir.c
++++ b/src/lib/dump_dir.c
+@@ -250,6 +250,9 @@ static inline struct dump_dir *dd_init(void)
+ 
+ int dd_exist(const struct dump_dir *dd, const char *path)
+ {
++    if (!str_is_correct_filename(path))
++        error_msg_and_die("Cannot test existence. '%s' is not a valid file name", path);
++
+     char *full_path = concat_path_file(dd->dd_dirname, path);
+     int ret = exist_file_dir(full_path);
+     free(full_path);
+@@ -800,6 +803,13 @@ char* dd_load_text_ext(const struct dump_dir *dd, const char *name, unsigned fla
+ //    if (!dd->locked)
+ //        error_msg_and_die("dump_dir is not opened"); /* bug */
+ 
++    if (!str_is_correct_filename(name))
++    {
++        error_msg("Cannot load text. '%s' is not a valid file name", name);
++        if (!(flags & DD_LOAD_TEXT_RETURN_NULL_ON_FAILURE))
++            xfunc_die();
++    }
++
+     /* Compat with old abrt dumps. Remove in abrt-2.1 */
+     if (strcmp(name, "release") == 0)
+         name = FILENAME_OS_RELEASE;
+@@ -821,6 +831,9 @@ void dd_save_text(struct dump_dir *dd, const char *name, const char *data)
+     if (!dd->locked)
+         error_msg_and_die("dump_dir is not opened"); /* bug */
+ 
++    if (!str_is_correct_filename(name))
++        error_msg_and_die("Cannot save text. '%s' is not a valid file name", name);
++
+     char *full_path = concat_path_file(dd->dd_dirname, name);
+     save_binary_file(full_path, data, strlen(data), dd->dd_uid, dd->dd_gid, dd->mode);
+     free(full_path);
+@@ -831,6 +844,9 @@ void dd_save_binary(struct dump_dir* dd, const char* name, const char* data, uns
+     if (!dd->locked)
+         error_msg_and_die("dump_dir is not opened"); /* bug */
+ 
++    if (!str_is_correct_filename(name))
++        error_msg_and_die("Cannot save binary. '%s' is not a valid file name", name);
++
+     char *full_path = concat_path_file(dd->dd_dirname, name);
+     save_binary_file(full_path, data, size, dd->dd_uid, dd->dd_gid, dd->mode);
+     free(full_path);
+@@ -839,6 +855,12 @@ void dd_save_binary(struct dump_dir* dd, const char* name, const char* data, uns
+ 
+ int dd_delete_item(struct dump_dir *dd, const char *name)
+ {
++    if (!dd->locked)
++        error_msg_and_die("dump_dir is not opened"); /* bug */
++
++    if (!str_is_correct_filename(name))
++        error_msg_and_die("Cannot delete item. '%s' is not a valid file name", name);
++
+     char *path = concat_path_file(dd->dd_dirname, name);
+     int res = unlink(path);
+ 
+-- 
+1.8.3.1
+

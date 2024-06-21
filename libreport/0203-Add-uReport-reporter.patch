@@ -1,0 +1,800 @@
+From 3c0ee3d4032f4717176b8582e3eea284e0a9bf8a Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Wed, 6 Jan 2016 10:14:14 +0100
+Subject: [PATCH] Add uReport reporter
+
+- Disable reporting to multiple destinations (who uses this functionality?)
+- Add a new reporting destination called "Submit anonymous report"
+- Make it more obvious that "New Support case" requires interaction with
+  Red Hat Support
+
+Related: #1258474
+---
+ po/POTFILES.in                       |    2 +-
+ src/gui-wizard-gtk/main.c            |    1 -
+ src/gui-wizard-gtk/wizard.c          |  283 +++++++++++++++++-----------------
+ src/include/event_config.h           |    1 +
+ src/lib/event_xml_parser.c           |    6 +
+ src/plugins/Makefile.am              |    4 +-
+ src/plugins/report_RHTSupport.xml.in |   16 +-
+ src/plugins/report_uReport.xml.in    |   51 ++++++
+ src/plugins/submit_uReport.xml.in    |   46 ------
+ 10 files changed, 214 insertions(+), 198 deletions(-)
+ create mode 100644 src/plugins/report_uReport.xml.in
+ delete mode 100644 src/plugins/submit_uReport.xml.in
+
+diff --git a/po/POTFILES.in b/po/POTFILES.in
+index a7760d0..16a938e 100644
+--- a/po/POTFILES.in
++++ b/po/POTFILES.in
+@@ -29,7 +29,7 @@ src/plugins/report_RHTSupport.xml.in
+ src/plugins/report_RHTSupportAttach.xml.in
+ src/plugins/report_Tarball.xml.in
+ src/plugins/report_Uploader.xml.in
+-src/plugins/submit_uReport.xml.in
++src/plugins/report_uReport.xml.in
+ src/plugins/reporter-bugzilla.c
+ src/plugins/reporter-kerneloops.c
+ src/plugins/reporter-mailx.c
+diff --git a/src/gui-wizard-gtk/main.c b/src/gui-wizard-gtk/main.c
+index 81c6b09..12f9dfc 100644
+--- a/src/gui-wizard-gtk/main.c
++++ b/src/gui-wizard-gtk/main.c
+@@ -152,7 +152,6 @@ int main(int argc, char **argv)
+     g_custom_logger = &show_error_as_msgbox;
+ 
+     reload_problem_data_from_dump_dir();
+-
+     update_gui_state_from_problem_data();
+ 
+     /* Enter main loop */
+diff --git a/src/gui-wizard-gtk/wizard.c b/src/gui-wizard-gtk/wizard.c
+index 40d4293..a430df3 100644
+--- a/src/gui-wizard-gtk/wizard.c
++++ b/src/gui-wizard-gtk/wizard.c
+@@ -43,6 +43,7 @@ static GtkAssistant *g_assistant;
+ static char *g_analyze_event_selected;
+ static unsigned g_collect_events_selected_count = 0;
+ static char *g_reporter_events_selected;
++static char *g_reporter_events_executed;
+ static unsigned g_black_event_count = 0;
+ 
+ static pid_t g_event_child_pid = 0;
+@@ -64,7 +65,6 @@ static GtkTextView *g_tv_collect_log;
+ static GtkBox *g_box_reporters;
+ /* List of event_gui_data's */
+ static GList *g_list_reporters;
+-static GList *g_list_selected_reporters;
+ static GtkLabel *g_lbl_report_log;
+ static GtkTextView *g_tv_report_log;
+ static GtkProgressBar *g_pb_report;
+@@ -229,6 +229,7 @@ typedef struct
+     const gchar *title;
+     GtkAssistantPageType type;
+     GtkWidget *page_widget;
++    int page_no;
+ } page_obj_t;
+ 
+ static page_obj_t pages[NUM_PAGES];
+@@ -270,15 +271,15 @@ static void init_pages()
+      * Therefore we want to know reporters _before_ we go to bt page
+      */
+     init_page(&pages[6], PAGE_REPORTER_SELECTOR  , _("Select reporter")       , GTK_ASSISTANT_PAGE_CONTENT );
+-    init_page(&pages[7], PAGE_EDIT_BACKTRACE     , _("Review the data")  , GTK_ASSISTANT_PAGE_CONTENT );
++    init_page(&pages[7], PAGE_EDIT_BACKTRACE     , _("Review the data")       , GTK_ASSISTANT_PAGE_CONTENT );
+     init_page(&pages[8], PAGE_REVIEW_DATA        , _("Confirm data to report"), GTK_ASSISTANT_PAGE_CONFIRM );
+     /* Was GTK_ASSISTANT_PAGE_PROGRESS, but we want to allow returning to it */
+     init_page(&pages[9], PAGE_REPORT_PROGRESS    , _("Reporting")             , GTK_ASSISTANT_PAGE_INTRO   );
+-    init_page(&pages[10], PAGE_REPORT_DONE        , _("Reporting done")        , GTK_ASSISTANT_PAGE_CONTENT );
++    init_page(&pages[10], PAGE_REPORT_DONE        , _("Reporting done")       , GTK_ASSISTANT_PAGE_CONTENT );
+     /* We prevent user from reaching this page, as SUMMARY can't be navigated away
+      * (must be always closed) and we don't want that
+      */
+-    init_page(&pages[11], PAGE_NOT_SHOWN          , ""                      , GTK_ASSISTANT_PAGE_SUMMARY );
++    init_page(&pages[11], PAGE_NOT_SHOWN          , ""                        , GTK_ASSISTANT_PAGE_SUMMARY );
+ }
+ 
+ static void wrap_fixer(GtkWidget *widget, gpointer data_unused)
+@@ -778,13 +779,25 @@ static void analyze_rb_was_toggled(GtkButton *button, gpointer user_data)
+     }
+ }
+ 
++static void update_list_of_reporters(void)
++{
++    /* Update "list of reporters" label */
++    if (g_reporter_events_selected == NULL)
++    {
++        gtk_label_set_text(g_lbl_reporters, "<not available>");
++        return;
++    }
++
++    event_config_t *cfg = get_event_config(g_reporter_events_selected);
++    if (cfg && cfg->screen_name)
++        gtk_label_set_text(g_lbl_reporters, cfg->screen_name);
++    else
++        gtk_label_set_text(g_lbl_reporters, g_reporter_events_selected);
++}
++
+ static void report_tb_was_toggled(GtkButton *button, gpointer user_data)
+ {
+     char *event_name = (char *)user_data;
+-    struct strbuf *reporters_strbuf = strbuf_new();
+-    struct strbuf *reporters_event_strbuf = strbuf_new();
+-    char * reporters_string;
+-
+     /* if ((button && user_data)
+      * prevents sigsegv which would happen when call from
+      * line 990: ((void (*)(GtkButton*, gpointer*))func)(NULL, NULL);
+@@ -793,8 +806,8 @@ static void report_tb_was_toggled(GtkButton *button, gpointer user_data)
+     if ((button && user_data)
+         && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(button)) == TRUE)
+     {
+-        if (g_list_find_custom(g_list_selected_reporters, event_name, (GCompareFunc)g_strcmp0) == NULL)
+-            g_list_selected_reporters = g_list_prepend(g_list_selected_reporters, xstrdup(event_name));
++        free(g_reporter_events_selected);
++        g_reporter_events_selected = xstrdup(event_name);
+ 
+         /* check only if it wasn't toggeld by update_event_checkboxes
+            i.e: when user clicks "regenerate backtrace"
+@@ -808,47 +821,9 @@ static void report_tb_was_toggled(GtkButton *button, gpointer user_data)
+                 show_event_opt_error_dialog(event_name);
+             }
+         }
+-
+-    }
+-    else
+-    {
+-        GList *l = g_list_find_custom(g_list_selected_reporters, event_name, (GCompareFunc)g_strcmp0);
+-        if (l)
+-        {
+-            char *data = l->data;
+-            g_list_selected_reporters = g_list_remove(g_list_selected_reporters, data);
+-            free(data);
+-        }
+     }
+ 
+-    gtk_assistant_set_page_complete(g_assistant,
+-                pages[PAGENO_REPORTER_SELECTOR].page_widget,
+-                g_list_selected_reporters != NULL /* true if at least one checkbox is active */
+-    );
+-
+-    /* Update "list of reporters" label */
+-    free(g_reporter_events_selected);
+-    GList *li = g_list_selected_reporters;
+-    while (li != NULL)
+-    {
+-        event_config_t *cfg = get_event_config(li->data);
+-        strbuf_append_strf(reporters_event_strbuf,
+-                            "%s%s",
+-                            (reporters_event_strbuf->len != 0 ? ", " : ""),
+-                            (li->data ? li->data : "")
+-                            );
+-
+-        strbuf_append_strf(reporters_strbuf,
+-                            "%s%s",
+-                            (reporters_strbuf->len != 0 ? ", " : ""),
+-                            (cfg->screen_name ? cfg->screen_name : li->data)
+-                            );
+-        li = g_list_next(li);
+-    }
+-    g_reporter_events_selected = strbuf_free_nobuf(reporters_event_strbuf);
+-    reporters_string = strbuf_free_nobuf(reporters_strbuf);
+-    gtk_label_set_text(g_lbl_reporters, reporters_string);
+-    free(reporters_string); //we can, gtk copies the string
++    update_list_of_reporters();
+ }
+ 
+ static void collect_tb_was_toggled(GtkButton *button_unused, gpointer user_data_unused)
+@@ -876,6 +851,11 @@ static void collect_tb_was_toggled(GtkButton *button_unused, gpointer user_data_
+     /* The page is complete even if no checkbox is checked. */
+ }
+ 
++enum {
++    EB_RADIO     = 0x1,
++    EB_MANDATORY = 0x2,
++};
++
+ /* event_name contains "EVENT1\nEVENT2\nEVENT3\n".
+  * Add new {radio/check}buttons to GtkBox for each EVENTn (type depends on bool radio).
+  * Remember them in GList **p_event_list (list of event_gui_data_t's).
+@@ -886,7 +866,7 @@ static event_gui_data_t *add_event_buttons(GtkBox *box,
+                 GList **p_event_list,
+                 char *event_name,
+                 GCallback func,
+-                bool radio)
++                int flags)
+ {
+     //VERB2 log("removing all buttons from box %p", box);
+     gtk_container_foreach(GTK_CONTAINER(box), &remove_child_widget, NULL);
+@@ -894,6 +874,7 @@ static event_gui_data_t *add_event_buttons(GtkBox *box,
+     g_list_free(*p_event_list);
+     *p_event_list = NULL;
+ 
++    const bool radio = (flags & EB_RADIO);
+     if (radio)
+         g_black_event_count = 0;
+ 
+@@ -991,7 +972,7 @@ static event_gui_data_t *add_event_buttons(GtkBox *box,
+         gtk_box_pack_start(box, button, /*expand*/ false, /*fill*/ false, /*padding*/ 0);
+     }
+ 
+-    if (radio)
++    if (!(flags & EB_MANDATORY))
+     {
+         const char *msg_proceed_to_reporting = _("Go to next step");
+         GtkWidget *button = radio
+@@ -1213,10 +1194,11 @@ static void update_ls_details_checkboxes()
+  * data stored in events_gui_data list. Parameter func is the callback function
+  * passed to the checkboxes.
+  */
+-static void update_event_checkboxes(GList **events_gui_data,
++static event_gui_data_t *update_event_checkboxes(GList **events_gui_data,
+                 GtkBox *box,
+                 char *events,
+-                GCallback func)
++                GCallback func,
++                int flags)
+ {
+ 
+     /* Remember names of selected events */
+@@ -1232,13 +1214,9 @@ static void update_event_checkboxes(GList **events_gui_data,
+         }
+     }
+ 
+-
+-
+-    /* Delete old checkboxes and create new ones */
+-    add_event_buttons(box, events_gui_data,
+-                events, /*callback:*/ func,
+-                /*radio:*/ false
+-    );
++    /* Delete old buttons and create new ones */
++    event_gui_data_t *active_button = add_event_buttons(box, events_gui_data,
++                                        events, /*callback:*/ func, flags);
+ 
+     /* Re-select new events which were selected before we deleted them */
+     GList *li_new = *events_gui_data;
+@@ -1260,6 +1238,8 @@ static void update_event_checkboxes(GList **events_gui_data,
+     /* Update readiness state of event selector page
+      * and eventually the "list of reporters" label */
+     ((void (*)(GtkButton*, gpointer*))func)(NULL, NULL);
++
++    return active_button;
+ }
+ 
+ void update_gui_state_from_problem_data(void)
+@@ -1291,7 +1271,7 @@ void update_gui_state_from_problem_data(void)
+     /* Update analyze radio buttons */
+     event_gui_data_t *active_button = add_event_buttons(g_box_analyzers, &g_list_analyzers,
+                 g_analyze_events, G_CALLBACK(analyze_rb_was_toggled),
+-                /*radio:*/ true
++                EB_RADIO
+     );
+     /* Update the value of currently selected analyzer */
+     free(g_analyze_event_selected);
+@@ -1303,12 +1283,21 @@ void update_gui_state_from_problem_data(void)
+     VERB2 log("g_analyze_event_selected='%s'", g_analyze_event_selected);
+ 
+     /* Update reporter checkboxes */
+-    update_event_checkboxes(&g_list_reporters, g_box_reporters, g_report_events,
+-                    G_CALLBACK(report_tb_was_toggled));
++    active_button = update_event_checkboxes(&g_list_reporters, g_box_reporters,
++                    g_report_events, G_CALLBACK(report_tb_was_toggled),
++                    EB_RADIO | EB_MANDATORY);
++
++    /* Update the value of currently selected reporter */
++    if (g_reporter_events_selected == NULL && active_button != NULL)
++    {
++        g_reporter_events_selected = xstrdup(active_button->event_name);
++        update_list_of_reporters();
++    }
++    VERB2 log("g_reporter_events_selected='%s'", g_reporter_events_selected);
+ 
+     /* Update collector checkboxes in a similar way */
+     update_event_checkboxes(&g_list_collectors, g_box_collectors, g_collect_events,
+-                    G_CALLBACK(collect_tb_was_toggled));
++                    G_CALLBACK(collect_tb_was_toggled), EB_MANDATORY);
+ 
+     /* We can't just do gtk_widget_show_all once in main:
+      * We created new widgets (buttons). Need to make them visible.
+@@ -1478,6 +1467,12 @@ static void on_btn_cancel_event(GtkButton *button)
+         kill(- g_event_child_pid, SIGTERM);
+ }
+ 
++static bool event_need_review(const char *event_name)
++{
++    event_config_t *event_cfg = get_event_config(event_name);
++    return !event_cfg || !event_cfg->ec_skip_review;
++}
++
+ static gboolean consume_cmd_output(GIOChannel *source, GIOCondition condition, gpointer data)
+ {
+     struct analyze_event_data *evd = data;
+@@ -1897,6 +1892,27 @@ static void start_event_run(const char *event_name,
+     gtk_widget_set_sensitive(GTK_WIDGET(g_box_assist_nav), false);
+ }
+ 
++static void start_reporting_event_run(void)
++{
++    if (g_reporter_events_selected == NULL)
++        return;
++
++    free(g_reporter_events_executed);
++    g_reporter_events_executed = g_reporter_events_selected;
++    g_reporter_events_selected = NULL;
++
++    start_event_run(g_reporter_events_executed,
++            NULL,
++            pages[PAGENO_REPORT_PROGRESS].page_widget,
++            g_tv_report_log,
++            g_lbl_report_log,
++            _("Reporting..."),
++            _("Reporting failed. You can try another reporter if available."),
++            _("Reporting finished. You can proceed to the next step.")
++    );
++}
++
++
+ 
+ /* Backtrace checkbox handling */
+ 
+@@ -1934,14 +1950,14 @@ static void on_sensitive_ticket_clicked_cb(GtkWidget *button, gpointer user_data
+ 
+ static void on_privacy_info_btn(GtkWidget *button, gpointer user_data)
+ {
+-    for (GList *r = g_list_selected_reporters; r; r = g_list_next(r))
+-    {
+-        event_config_t *cfg = get_event_config(r->data);
+-        if (cfg == NULL || !cfg->ec_supports_restricted_access)
+-            continue;
++    if (g_reporter_events_selected == NULL)
++        return;
+ 
+-        show_event_config_dialog(r->data, GTK_WINDOW(g_top_most_window));
+-    }
++    event_config_t *cfg = get_event_config(g_reporter_events_selected);
++    if (cfg == NULL || !cfg->ec_supports_restricted_access)
++         return;
++
++    show_event_config_dialog(g_reporter_events_selected, GTK_WINDOW(g_top_most_window));
+ }
+ 
+ static void private_ticket_creation_warning(int flags)
+@@ -2014,21 +2030,18 @@ static void check_bt_rating_and_allow_send(void)
+                 send = false;
+             }
+ 
+-            GList *li = g_list_selected_reporters;
+-            while (li != NULL)
++            if (g_reporter_events_selected)
+             {
+                 /* need to obey the highest minimal rating of all selected reporters
+                  * FIXME: check this when selecting the reporter and allow select
+                  * only usable ones
+                  */
+-                event_config_t *cfg = get_event_config((const char *)li->data);
+-                if (cfg->ec_minimal_rating > minimal_rating)
++                event_config_t *cfg = get_event_config(g_reporter_events_selected);
++                if (cfg && cfg->ec_minimal_rating > minimal_rating)
+                 {
+                     minimal_rating = cfg->ec_minimal_rating;
+-                    VERB1 log("%s reporter sets the minimal rating to: %i", (const char *)li->data, minimal_rating);
++                    VERB1 log("%s reporter sets the minimal rating to: %i", g_reporter_events_selected, minimal_rating);
+                 }
+-
+-                li = g_list_next(li);
+             };
+ 
+             if (rating == minimal_rating) /* bt is usable, but not complete, so show a warning */
+@@ -2101,7 +2114,7 @@ static void on_btn_refresh_clicked(GtkButton *button)
+     update_gui_state_from_problem_data();
+ 
+     /* Change page to analyzer selector - let user play with them */
+-    gtk_assistant_set_current_page(g_assistant, PAGENO_ANALYZE_SELECTOR);
++    gtk_assistant_set_current_page(g_assistant, pages[PAGENO_ANALYZE_SELECTOR].page_no);
+ }
+ 
+ 
+@@ -2134,32 +2147,7 @@ static void next_page(GtkAssistant *assistant, gpointer user_data)
+     }
+ 
+     if (added_pages[page_no]->name == PAGE_REVIEW_DATA)
+-    {
+-        GList *reporters = NULL;
+-        GList *li = g_list_reporters;
+-        for (; li; li = li->next)
+-        {
+-            event_gui_data_t *event_gui_data = li->data;
+-            if (gtk_toggle_button_get_active(event_gui_data->toggle_button) == TRUE)
+-            {
+-                reporters = g_list_append(reporters, event_gui_data->event_name);
+-            }
+-        }
+-        if (reporters)
+-        {
+-            char *first_event_name = reporters->data;
+-            reporters = g_list_remove(reporters, reporters->data);
+-            start_event_run(first_event_name,
+-                    reporters,
+-                    pages[PAGENO_REPORT_PROGRESS].page_widget,
+-                    g_tv_report_log,
+-                    g_lbl_report_log,
+-                    _("Reporting..."),
+-                    _("Reporting failed. You can try another reporter if available."),
+-                    _("Reporting finished. You can proceed to the next step.")
+-            );
+-        }
+-    }
++        start_reporting_event_run();
+ 
+     /* Run 'collect' events. */
+     if (added_pages[page_no]->name == PAGE_COLLECT_SELECTOR)
+@@ -2331,9 +2319,9 @@ static void update_private_ticket_creation_warning_for_selected_event(void)
+     int local = 0;
+     int local_supported = 0;
+ 
+-    for (GList *r = g_list_selected_reporters; r != NULL; r = g_list_next(r))
++    if (g_reporter_events_selected)
+     {
+-        event_config_t *cfg = get_event_config(r->data);
++        event_config_t *cfg = get_event_config(g_reporter_events_selected);
+ 
+         local_supported = cfg != NULL && cfg->ec_supports_restricted_access;
+         local = local_supported && ec_restricted_access_enabled(cfg);
+@@ -2376,6 +2364,9 @@ static void on_page_prepare(GtkAssistant *assistant, GtkWidget *page, gpointer u
+     {
+         g_active_pb = g_pb_report;
+         g_active_lbl = g_lbl_report_log;
++
++        if (g_reporter_events_selected != NULL && !event_need_review(g_reporter_events_selected))
++            start_reporting_event_run();
+     }
+ 
+     if (pages[PAGENO_EDIT_BACKTRACE].page_widget == page)
+@@ -2424,76 +2415,89 @@ static void on_page_prepare(GtkAssistant *assistant, GtkWidget *page, gpointer u
+         on_comment_changed(gtk_text_view_get_buffer(g_tv_comment), NULL);
+     }
+     //log_ready_state();
+-}
+ 
+-static gint select_next_page_no(gint current_page_no, gpointer data)
+-{
+-    if (g_report_only)
++    if (pages[PAGENO_REPORTER_SELECTOR].page_widget == page)
+     {
+-        /* In only-report mode, we only need to wrap back at the end */
+-        GtkWidget *page = gtk_assistant_get_nth_page(g_assistant, current_page_no);
+-        if (page == pages[PAGENO_REPORT_DONE].page_widget)
+-            current_page_no = 0;
+-        else
+-            current_page_no++;
+-        VERB2 log("%s: selected page #%d", __func__, current_page_no);
+-        return current_page_no;
++        gtk_assistant_set_page_complete(g_assistant,
++                    pages[PAGENO_REPORTER_SELECTOR].page_widget,
++                    /*Radio buttons used == always selected*/TRUE
++        );
+     }
++}
+ 
++static gint select_next_page_no(gint current_page_no, gpointer data)
++{
+  again:
+     current_page_no++;
+ 
+-    switch (current_page_no)
+-    {
+ #if 0
+-    case PAGENO_EDIT_COMMENT:
++    if (pages[PAGENO_EDIT_COMMENT].page_no == current_page_no)
++    {
+         if (get_problem_item_content_or_NULL(g_cd, FILENAME_COMMENT))
+             goto again; /* no comment, skip this page */
+-        break;
++    }
+ #endif
+ 
+-    case PAGENO_EDIT_BACKTRACE:
+-        /* There are plenty of other files that need to be reviewed and edited! */
+-        break;
++    if (pages[PAGENO_EDIT_BACKTRACE].page_no == current_page_no)
++    {
++        if (g_reporter_events_selected != NULL && !event_need_review(g_reporter_events_selected))
++        {
++            current_page_no = pages[PAGENO_REPORT_PROGRESS].page_no-1;
++
++            gtk_assistant_set_page_complete(g_assistant,
++                                    pages[PAGENO_EDIT_BACKTRACE].page_widget,
++                                    TRUE);
+ 
+-    case PAGENO_ANALYZE_SELECTOR:
++            gtk_assistant_set_page_complete(g_assistant,
++                                    pages[PAGENO_REVIEW_DATA].page_widget,
++                                    TRUE);
++            goto again;
++        }
++    }
++
++    if (pages[PAGENO_ANALYZE_SELECTOR].page_no == current_page_no)
++    {
+         if (!g_analyze_events[0] || g_black_event_count == 0)
+         {
+             /* skip analyze selector page and analyze log page */
+-            current_page_no = PAGENO_COLLECT_SELECTOR-1;
++            current_page_no = pages[PAGENO_COLLECT_SELECTOR].page_no-1;
+             goto again;
+         }
+-        break;
++    }
+ 
+-    case PAGENO_ANALYZE_PROGRESS:
++    if (pages[PAGENO_ANALYZE_PROGRESS].page_no == current_page_no)
++    {
+         VERB2 log("%s: ANALYZE_PROGRESS: g_analyze_event_selected:'%s'",
+                         __func__, g_analyze_event_selected);
+         if (!g_analyze_event_selected || !g_analyze_event_selected[0])
+             goto again; /* skip this page */
+-        break;
++    }
+ 
+-    case PAGENO_COLLECT_SELECTOR:
++    if (pages[PAGENO_COLLECT_SELECTOR].page_no == current_page_no)
++    {
+         /* skip collection if there are no applicable events */
+         if (!g_collect_events[0])
+         {
+-            current_page_no = PAGENO_REPORTER_SELECTOR-1;
++            current_page_no = pages[PAGENO_REPORTER_SELECTOR].page_no-1;
+             goto again;
+         }
+-        break;
++    }
+ 
+-    case PAGENO_COLLECT_PROGRESS:
++    if (pages[PAGENO_COLLECT_PROGRESS].page_no == current_page_no)
++    {
+         /* skip progress page if no events were chosen */
+         if (g_collect_events_selected_count == 0)
+         {
+-            current_page_no = PAGENO_REPORTER_SELECTOR-1;
++            current_page_no = pages[PAGENO_REPORTER_SELECTOR].page_no-1;
+             goto again;
+         }
+-        break;
++    }
+ 
+-    case PAGENO_NOT_SHOWN:
++    if (pages[PAGENO_NOT_SHOWN].page_no == current_page_no)
++    {
+         /* No! this would SEGV (infinitely recurse into select_next_page_no) */
+         /*gtk_assistant_commit(g_assistant);*/
+-        current_page_no = PAGENO_ANALYZE_SELECTOR-1;
++        current_page_no = pages[PAGENO_ANALYZE_SELECTOR].page_no-1;
+         goto again;
+     }
+ 
+@@ -2807,6 +2811,7 @@ static void add_pages()
+         GtkWidget *page = GTK_WIDGET(gtk_builder_get_object(builder, page_names[i]));
+ 
+         pages[i].page_widget = page;
++        pages[i].page_no = page_no;
+         added_pages[page_no++] = &pages[i];
+ 
+         gtk_assistant_append_page(g_assistant, page);
+diff --git a/src/include/event_config.h b/src/include/event_config.h
+index 54c7829..356fc59 100644
+--- a/src/include/event_config.h
++++ b/src/include/event_config.h
+@@ -78,6 +78,7 @@ typedef struct
+     char *ec_exclude_items_always;
+     bool  ec_exclude_binary_items;
+     long  ec_minimal_rating;
++    bool  ec_skip_review;
+     bool  ec_supports_restricted_access;
+     char *ec_restricted_access_option;
+ 
+diff --git a/src/lib/event_xml_parser.c b/src/lib/event_xml_parser.c
+index 547a954..dc222c5 100644
+--- a/src/lib/event_xml_parser.c
++++ b/src/lib/event_xml_parser.c
+@@ -31,6 +31,7 @@
+ #define NAME_ELEMENT            "name"
+ #define DEFAULT_VALUE_ELEMENT   "default-value"
+ #define MINIMAL_RATING_ELEMENT  "minimal-rating"
++#define GUI_REVIEW_ELEMENTS     "gui-review-elements"
+ #define SUPPORTS_RESTRICTED_ACCESS_ELEMENT "support-restricted-access"
+ #define RESTRICTED_ACCESS_OPTION_ATTR "optionname"
+ 
+@@ -452,6 +453,11 @@ static void text(GMarkupParseContext *context,
+             }
+             goto ret;
+         }
++        if (strcmp(inner_element, GUI_REVIEW_ELEMENTS) == 0)
++        {
++            ui->ec_skip_review = !string_to_bool(text_copy);
++            goto ret;
++        }
+         if (strcmp(inner_element, SUPPORTS_RESTRICTED_ACCESS_ELEMENT) == 0)
+         {
+             ui->ec_supports_restricted_access = string_to_bool(text_copy);
+diff --git a/src/plugins/Makefile.am b/src/plugins/Makefile.am
+index 19c5c51..5f9421e 100644
+--- a/src/plugins/Makefile.am
++++ b/src/plugins/Makefile.am
+@@ -35,7 +35,7 @@ dist_events_DATA = \
+     report_Tarball.xml \
+     report_Uploader.xml \
+     report_Uploader.conf \
+-    submit_uReport.xml
++    report_uReport.xml
+ 
+ @INTLTOOL_XML_RULE@
+ 
+@@ -60,7 +60,7 @@ EXTRA_DIST = \
+     report_Kerneloops.xml.in \
+     report_Tarball.xml.in \
+     report_Uploader.xml.in \
+-    submit_uReport.xml.in
++    report_uReport.xml.in
+ 
+ $(DESTDIR)/$(DEBUG_INFO_DIR):
+ 	$(mkdir_p) '$@'
+diff --git a/src/plugins/report_RHTSupport.xml.in b/src/plugins/report_RHTSupport.xml.in
+index 416af7c..5e76fd5 100644
+--- a/src/plugins/report_RHTSupport.xml.in
++++ b/src/plugins/report_RHTSupport.xml.in
+@@ -1,7 +1,7 @@
+ <?xml version="1.0" encoding="UTF-8" ?>
+ <event>
+-    <_name>New Red Hat Support case</_name>
+-    <_description>Create new Red Hat Support case</_description>
++    <_name>Ask Red Hat Support for help</_name>
++    <_description>Create new Red Hat Support case - I would like to be contacted by Red Hat Support</_description>
+ 
+     <requires-items>package</requires-items>
+     <exclude-items-by-default>count,event_log,vmcore</exclude-items-by-default>
+@@ -11,7 +11,7 @@
+     <minimal-rating>0</minimal-rating>
+ 
+     <options>
+-        <import-event-options event="submit_uReport"/>
++        <import-event-options event="report_uReport"/>
+ 
+         <option type="text" name="RHTSupport_Login">
+             <_label>Username</_label>
+@@ -23,11 +23,6 @@
+             <_description>Red Hat customer password</_description>
+             <allow-empty>no</allow-empty>
+         </option>
+-        <option type="bool" name="RHTSupport_SSLVerify">
+-            <_label>Verify SSL</_label>
+-            <_description>Check SSL key validity</_description>
+-            <default-value>yes</default-value>
+-        </option>
+         <advanced-options>
+             <option type="bool" name="RHTSupport_SubmitUReport">
+                 <_label>Submit uReport</_label>
+@@ -40,6 +35,11 @@
+                 <_description>Address of the Red Hat support portal</_description>
+                 <default-value>https://api.access.redhat.com/rs</default-value>
+             </option>
++            <option type="bool" name="RHTSupport_SSLVerify">
++                <_label>Verify SSL</_label>
++                <_description>Check SSL key validity</_description>
++                <default-value>yes</default-value>
++            </option>
+             <option type="text" name="http_proxy">
+                 <_label>HTTP Proxy</_label>
+                 <allow-empty>yes</allow-empty>
+diff --git a/src/plugins/report_uReport.xml.in b/src/plugins/report_uReport.xml.in
+new file mode 100644
+index 0000000..9d79cb2
+--- /dev/null
++++ b/src/plugins/report_uReport.xml.in
+@@ -0,0 +1,51 @@
++<?xml version="1.0" encoding="UTF-8" ?>
++<event>
++    <_name>Submit anonymous crash report</_name>
++    <_description>Submit anonymous crash report - I do not want to be contacted by Red Hat Support</_description>
++
++    <requires-items>analyzer,reason,executable,pkg_epoch,pkg_name,pkg_version,pkg_release,pkg_arch,os_release,architecture,core_backtrace</requires-items>
++    <gui-review-elements>no</gui-review-elements>
++    <minimal-rating>0</minimal-rating>
++
++    <options>
++        <!--
++        <import-event-options event="watch_Bugzilla"/>
++        -->
++
++        <option type="text" name="uReport_URL">
++            <_label>uReport Server URL</_label>
++            <allow-empty>no</allow-empty>
++            <_description>Address of uReport webservice</_description>
++            <default-value>http://bug-report.itos.redhat.com</default-value>
++        </option>
++        <!--
++        <option type="bool" name="uReport_WatchReportedBugs">
++            <_label>Watch already reported bugs</_label>
++            <_note-html>Adds your Bugzilla login to CC List of already reported bugs.</_note-html>
++            <default-value>yes</default-value>
++        </option>
++        -->
++        <option type="text" name="uReport_ContactEmail">
++            <_label>Contact email address</_label>
++            <allow-empty>yes</allow-empty>
++            <_description>Email address that can be used by ABRT server to inform you about news and updates</_description>
++        </option>
++        <advanced-options>
++            <option type="bool" name="uReport_SSLVerify">
++                <_label>Verify SSL</_label>
++                <_description>Check SSL key validity</_description>
++                <default-value>yes</default-value>
++            </option>
++            <option type="text" name="http_proxy">
++                <_label>HTTP Proxy</_label>
++                <allow-empty>yes</allow-empty>
++                <_note-html>Sets the proxy server to use for HTTP</_note-html>
++            </option>
++            <option type="text" name="HTTPS_PROXY">
++                <_label>HTTPS Proxy</_label>
++                <allow-empty>yes</allow-empty>
++                <_note-html>Sets the proxy server to use for HTTPS</_note-html>
++            </option>
++        </advanced-options>
++    </options>
++</event>
+diff --git a/src/plugins/submit_uReport.xml.in b/src/plugins/submit_uReport.xml.in
+deleted file mode 100644
+index 1aadeaf..0000000
+--- a/src/plugins/submit_uReport.xml.in
++++ /dev/null
+@@ -1,46 +0,0 @@
+-<?xml version="1.0" encoding="UTF-8" ?>
+-<event>
+-    <_name>uReport</_name>
+-    <_description>Sends micro-reports to ABRT server</_description>
+-
+-    <requires-items>analyzer,reason,executable,pkg_epoch,pkg_name,pkg_version,pkg_release,pkg_arch,os_release,architecture,core_backtrace</requires-items>
+-    <gui-review-elements>no</gui-review-elements>
+-
+-    <options>
+-        <import-event-options event="watch_Bugzilla"/>
+-
+-        <option type="text" name="uReport_URL">
+-            <_label>uReport Server URL</_label>
+-            <allow-empty>no</allow-empty>
+-            <_description>Address of uReport webservice</_description>
+-            <default-value>http://bug-report.itos.redhat.com</default-value>
+-        </option>
+-        <option type="bool" name="uReport_WatchReportedBugs">
+-            <_label>Watch already reported bugs</_label>
+-            <_note-html>Adds your Bugzilla login to CC List of already reported bugs.</_note-html>
+-            <default-value>yes</default-value>
+-        </option>
+-        <option type="text" name="uReport_ContactEmail">
+-            <_label>Contact email address</_label>
+-            <allow-empty>yes</allow-empty>
+-            <_description>Email address that can be used by ABRT server to inform you about news and updates</_description>
+-        </option>
+-        <option type="bool" name="uReport_SSLVerify">
+-            <_label>Verify SSL</_label>
+-            <_description>Check SSL key validity</_description>
+-            <default-value>yes</default-value>
+-        </option>
+-        <advanced-options>
+-            <option type="text" name="http_proxy">
+-                <_label>HTTP Proxy</_label>
+-                <allow-empty>yes</allow-empty>
+-                <_note-html>Sets the proxy server to use for HTTP</_note-html>
+-            </option>
+-            <option type="text" name="HTTPS_PROXY">
+-                <_label>HTTPS Proxy</_label>
+-                <allow-empty>yes</allow-empty>
+-                <_note-html>Sets the proxy server to use for HTTPS</_note-html>
+-            </option>
+-        </advanced-options>
+-    </options>
+-</event>
+-- 
+1.7.1
+

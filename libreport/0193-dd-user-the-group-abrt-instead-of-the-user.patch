@@ -1,0 +1,196 @@
+From 48858b8a1b7799cebbc4666a8ad21b645d94441f Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Thu, 21 May 2015 10:20:34 +0200
+Subject: [LIBREPORT PATCH] dd: user the group abrt instead of the user
+
+Switch from "abrt:user" to "user:abrt".
+
+Having abrt the owner of dump directories exposes abrtd to root escalations.
+abrtd passes root's uid to libreport functions supposing libreport creates the
+dump directory owned by root, but libreport uses abrt as the owner and root's
+gid for group.
+
+Having user writable directories in /var/spool does not seem to an issue any
+more:
+https://bugzilla.redhat.com/show_bug.cgi?id=1213408
+
+Related: #1211835
+
+Signed-off-by: Jakub Filak <jfilak@redhat.com>
+---
+ configure.ac        |  7 ++++++
+ src/lib/Makefile.am |  1 +
+ src/lib/abrt_sock.c | 70 ++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ src/lib/dump_dir.c  | 22 +++++++++++++++--
+ 4 files changed, 97 insertions(+), 3 deletions(-)
+
+diff --git a/configure.ac b/configure.ac
+index f436341..56bb4d6 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -128,6 +128,13 @@ AC_PATH_PROG(AUGPARSE, augparse, no)
+     [exit 1]
+ [fi]
+ 
++DUMP_DIR_OWNED_BY_USER=1
++AC_ARG_ENABLE([userownsdumpdir],
++              [AC_HELP_STRING([--enable-userownsdumpdir],
++                              [Configure abrt to be owner of dump directories (default: user owns dump dir)])],
++              [DUMP_DIR_OWNED_BY_USER=0])
++AC_SUBST(DUMP_DIR_OWNED_BY_USER)
++
+ AC_SUBST(CONF_DIR)
+ AC_SUBST(VAR_RUN)
+ AC_SUBST(PLUGINS_CONF_DIR)
+diff --git a/src/lib/Makefile.am b/src/lib/Makefile.am
+index d991518..d77913e 100644
+--- a/src/lib/Makefile.am
++++ b/src/lib/Makefile.am
+@@ -64,6 +64,7 @@ libreport_la_CPPFLAGS = \
+     -DCONF_DIR=\"$(CONF_DIR)\" \
+     -DEVENTS_DIR=\"$(EVENTS_DIR)\" \
+     -DBIN_DIR=\"$(bindir)\" \
++    -DDUMP_DIR_OWNED_BY_USER=$(DUMP_DIR_OWNED_BY_USER) \
+     $(JSON_C_CFLAGS) \
+     $(GLIB_CFLAGS) \
+     $(AUGEAS_CFLAGS) \
+diff --git a/src/lib/abrt_sock.c b/src/lib/abrt_sock.c
+index b595208..2ddb10b 100644
+--- a/src/lib/abrt_sock.c
++++ b/src/lib/abrt_sock.c
+@@ -48,7 +48,14 @@ static int connect_to_abrtd_and_call_DeleteDebugDump(const char *dump_dir_name)
+             /* "HTTP/1.1 200 " */
+             response[5] = '1';
+             response[7] = '1';
+-            result = strncmp(response, "HTTP/1.1 200 ", strlen("HTTP/1.1 200 "));
++            if (strncmp(response, "HTTP/1.1 ", strlen("HTTP/1.1 ")) == 0
++                    && isdigit(response[9])
++                    && isdigit(response[10])
++                    && isdigit(response[11])
++                    && response[12] == ' ')
++            {
++                result = (response[9] - '0') * 100 + (response[10] - '0') * 10 + (response[11] - '0');
++            }
+         }
+     }
+     else
+@@ -62,6 +69,10 @@ static int connect_to_abrtd_and_call_DeleteDebugDump(const char *dump_dir_name)
+ 
+ int delete_dump_dir_possibly_using_abrtd(const char *dump_dir_name)
+ {
++    /* The old schema "abrt:user" causes ABRT to move dump directories to
++     * user's home, so in the old schema we try to delete it ourselves first
++     * and then we try to use abrtd. */
++#if DUMP_DIR_OWNED_BY_USER == 0
+     /* Try to delete it ourselves */
+     struct dump_dir *dd = dd_opendir(dump_dir_name, DD_OPEN_READONLY);
+     if (dd)
+@@ -83,4 +94,61 @@ int delete_dump_dir_possibly_using_abrtd(const char *dump_dir_name)
+         error_msg(_("Can't delete: '%s'"), dump_dir_name);
+ 
+     return res;
++#else
++    VERB2 log("Deleting '%s' via abrtd", dump_dir_name);
++    const int res = connect_to_abrtd_and_call_DeleteDebugDump(dump_dir_name);
++    if (res == 200)
++    {
++        /*
++         * Deleted
++         */
++        return 0;
++    }
++
++    /*
++     * An error occurred but we can still try to delete it directly
++     */
++
++    /* Using NULL in order to easily detect a buggy error message */
++    const char *error_reason = NULL;
++    /* Used only for error messages */
++    char num_buf[sizeof(int)*3 + 1];
++
++    if (res < 0 || res == 400)
++    {
++        /*  -1 : an error in communication
++         * 400 : bad request or abrtd refused to delete the directory outside of the dump location
++         *
++         * Try to delete it ourselves
++         */
++        struct dump_dir *dd = dd_opendir(dump_dir_name, DD_OPEN_READONLY);
++        if (dd)
++        {
++            if (dd->locked) /* it is not readonly */
++                return dd_delete(dd);
++
++            error_reason = _("locked by another process");
++            dd_close(dd);
++        }
++    }
++    else
++    {
++        switch (res)
++        {
++            case 403:
++                error_reason = _("permission denied");
++                break;
++            case 404:
++                error_reason = _("not a problem directory");
++                break;
++            default:
++                snprintf(num_buf, sizeof(num_buf), "%d", res);
++                error_reason = num_buf;
++                break;
++        }
++    }
++
++    error_msg(_("Can't delete '%s': %s"), dump_dir_name, error_reason);
++    return 1;
++#endif
+ }
+diff --git a/src/lib/dump_dir.c b/src/lib/dump_dir.c
+index 43623d5..e38cb01 100644
+--- a/src/lib/dump_dir.c
++++ b/src/lib/dump_dir.c
+@@ -593,19 +593,37 @@ struct dump_dir *dd_create_skeleton(const char *dir, uid_t uid, mode_t mode, int
+     {
+         /* Get ABRT's user id */
+         dd->dd_uid = 0;
++        dd->dd_gid = 0;
++
++#if DUMP_DIR_OWNED_BY_USER > 0
++        /* Check crashed application's uid */
++        struct passwd *pw = getpwuid(uid);
++        if (pw)
++            dd->dd_uid = pw->pw_uid;
++        else
++            error_msg("User %lu does not exist, using uid 0", (long)uid);
++
++        /* Get ABRT's group gid */
++        struct group *gr = getgrnam("abrt");
++        if (gr)
++            dd->dd_gid = gr->gr_gid;
++        else
++            error_msg("Group 'abrt' does not exist, using gid 0");
++#else
++        /* Get ABRT's user uid */
+         struct passwd *pw = getpwnam("abrt");
+         if (pw)
+             dd->dd_uid = pw->pw_uid;
+         else
+             error_msg("user 'abrt' does not exist, using uid 0");
+ 
+-        /* Get crashed application's group id */
+-        /*dd->dd_gid = 0; - dd_init did this already */
++        /* Get crashed application's gid */
+         pw = getpwuid(uid);
+         if (pw)
+             dd->dd_gid = pw->pw_gid;
+         else
+             error_msg("User %lu does not exist, using gid 0", (long)uid);
++#endif
+     }
+ 
+     return dd;
+-- 
+1.8.3.1
+

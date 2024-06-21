@@ -1,0 +1,421 @@
+From 1a23108a49a28435222dbdc0d404b466810ee2dc Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Wed, 7 May 2014 13:38:10 +0200
+Subject: [LIBREPORT PATCH] add type agnostic functions for map_string_t
+
+Closes #204
+
+Signed-off-by: Jakub Filak <jfilak@redhat.com>
+
+mmilata: fix asserts in unit test
+
+Conflicts:
+
+	tests/Makefile.am
+	tests/testsuite.at
+---
+ src/include/libreport_types.h |  28 ++++++
+ src/lib/abrt_types.c          | 101 ++++++++++++++++++++
+ tests/Makefile.am             |   3 +-
+ tests/libreport_types.at      | 210 ++++++++++++++++++++++++++++++++++++++++++
+ tests/testsuite.at            |   1 +
+ 5 files changed, 342 insertions(+), 1 deletion(-)
+ create mode 100644 tests/libreport_types.at
+
+diff --git a/src/include/libreport_types.h b/src/include/libreport_types.h
+index 23174a1..d61c2e7 100644
+--- a/src/include/libreport_types.h
++++ b/src/include/libreport_types.h
+@@ -21,6 +21,13 @@
+ 
+ #include <glib.h>
+ 
++typedef gchar **string_vector_ptr_t;
++
++#define string_vector_new_from_string libreport_string_vector_new_from_string
++string_vector_ptr_t string_vector_new_from_string(const char *vector);
++#define string_vector_free libreport_string_vector_free
++void string_vector_free(string_vector_ptr_t vector);
++
+ typedef GHashTable map_string_t;
+ #define new_map_string libreport_new_map_string
+ map_string_t *new_map_string(void);
+@@ -53,6 +60,27 @@ const char *get_map_string_item_or_NULL(map_string_t *ms, const char *key)
+     return (const char*)g_hash_table_lookup(ms, key);
+ }
+ 
++#define set_map_string_item_from_bool libreport_set_map_string_item_from_bool
++void set_map_string_item_from_bool(map_string_t *ms, const char *key, int value);
++#define try_get_map_string_item_as_bool libreport_try_get_map_string_item_as_bool
++int try_get_map_string_item_as_bool(map_string_t *ms, const char *key, int *value);
++
++#define set_map_string_item_from_int libreport_set_map_string_item_from_int
++void set_map_string_item_from_int(map_string_t *ms, const char *key, int value);
++#define try_get_map_string_item_as_int libreport_try_get_map_string_item_as_int
++int try_get_map_string_item_as_int(map_string_t *ms, const char *key, int *value);
++
++#define set_map_string_item_from_string libreport_set_map_string_item_from_string
++void set_map_string_item_from_string(map_string_t *ms, const char *key, const char *value);
++#define try_get_map_string_item_as_string libreport_try_get_map_string_item_as_string
++int try_get_map_string_item_as_string(map_string_t *ms, const char *key, char **value);
++
++#define set_map_string_item_from_string_vector libreport_set_map_string_item_from_string_vector
++void set_map_string_item_from_string_vector(map_string_t *ms, const char *key, string_vector_ptr_t value);
++#define try_get_map_string_item_as_string_vector libreport_try_get_map_string_item_as_string_vector
++int try_get_map_string_item_as_string_vector(map_string_t *ms, const char *key, string_vector_ptr_t *value);
++
++
+ typedef GHashTableIter map_string_iter_t;
+ #define init_map_string_iter libreport_init_map_string_iter
+ static inline
+diff --git a/src/lib/abrt_types.c b/src/lib/abrt_types.c
+index a255af6..aa9e6dd 100644
+--- a/src/lib/abrt_types.c
++++ b/src/lib/abrt_types.c
+@@ -35,3 +35,104 @@ const char *get_map_string_item_or_empty(map_string_t *ms, const char *key)
+     if (!v) v = "";
+     return v;
+ }
++
++string_vector_ptr_t string_vector_new_from_string(const char *value)
++{
++    return g_strsplit(value == NULL ? "" : value, ", ", /*all tokens*/0);
++}
++
++void string_vector_free(string_vector_ptr_t vector)
++{
++    g_strfreev(vector);
++}
++
++void set_map_string_item_from_bool(map_string_t *ms, const char *key, int value)
++{
++    const char *const raw_value = value ? "yes" : "no";
++    set_map_string_item_from_string(ms, key, raw_value);
++}
++
++#define GET_ITEM_OR_RETURN(val_name, conf, item_name)\
++    const char *const val_name = get_map_string_item_or_NULL(conf, item_name); \
++    if (val_name == NULL) \
++    { \
++        log("Option '%s' is not configured", item_name); \
++        return 0; \
++    }
++
++int try_get_map_string_item_as_bool(map_string_t *ms, const char *key, int *value)
++{
++    GET_ITEM_OR_RETURN(option, ms, key);
++
++    *value = string_to_bool(option);
++    return true;
++}
++
++void set_map_string_item_from_int(map_string_t *ms, const char *key, int value)
++{
++    char raw_value[sizeof(int)*3 + 1];
++    snprintf(raw_value, sizeof(raw_value), "%d", value);
++    set_map_string_item_from_string(ms, key, raw_value);
++}
++
++int try_get_map_string_item_as_int(map_string_t *ms, const char *key, int *value)
++{
++    GET_ITEM_OR_RETURN(option, ms, key);
++
++    char *endptr = NULL;
++    long raw_value = strtol(option, &endptr, 10);
++
++    /* Check for various possible errors */
++    if ((raw_value > INT_MAX || raw_value < INT_MIN)
++            || (errno != 0 && raw_value == 0)
++            || (endptr == option) /* empty */
++            || (endptr[0] != '\0') /* trailing non-digits */)
++    {
++        log("Value of option '%s' is not an integer", key);
++        return 0;
++    }
++
++    *value = (int)raw_value;
++    return 1;
++}
++
++void set_map_string_item_from_string(map_string_t *ms, const char *key, const char *value)
++{
++    replace_map_string_item(ms, xstrdup(key), xstrdup(value));
++}
++
++int try_get_map_string_item_as_string(map_string_t *ms, const char *key, char **value)
++{
++    GET_ITEM_OR_RETURN(option, ms, key);
++
++    char *dup = strdup(option);
++    if (dup == NULL)
++    {
++        log("Insufficient memory for value of option '%s'", key);
++        return 0;
++    }
++
++    *value = dup;
++    return 1;
++}
++
++void set_map_string_item_from_string_vector(map_string_t *ms, const char *key, string_vector_ptr_t value)
++{
++    if (value == NULL)
++    {
++        set_map_string_item_from_string(ms, key, "");
++        return;
++    }
++
++    gchar *opt_val = g_strjoinv(", ", (gchar **)value);
++    set_map_string_item_from_string(ms, key, opt_val);
++    g_free(opt_val);
++}
++
++int try_get_map_string_item_as_string_vector(map_string_t *ms, const char *key, string_vector_ptr_t *value)
++{
++    GET_ITEM_OR_RETURN(option, ms, key);
++
++    *value = string_vector_new_from_string(option);
++    return 1;
++}
+diff --git a/tests/Makefile.am b/tests/Makefile.am
+index 20c77f0..ab019f6 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -30,7 +30,8 @@ TESTSUITE_AT = \
+   strbuf.at \
+   osrelease.at \
+   taghyperlinks.at \
+-  configuration_files.at
++  configuration_files.at \
++  libreport_types.at
+ 
+ EXTRA_DIST += $(TESTSUITE_AT)
+ TESTSUITE = $(srcdir)/testsuite
+diff --git a/tests/libreport_types.at b/tests/libreport_types.at
+new file mode 100644
+index 0000000..bc11eea
+--- /dev/null
++++ b/tests/libreport_types.at
+@@ -0,0 +1,210 @@
++# -*- Autotest -*-
++
++AT_BANNER([libreport types])
++
++## ------------- ##
++## string_vector ##
++## ------------- ##
++
++AT_TESTFUN([string_vector],
++[[
++#include "internal_libreport.h"
++#include <assert.h>
++
++int main(int argc, char **argv)
++{
++    g_verbose = 3;
++
++    const char *const raw_value = "foo, blah, bang";
++    string_vector_ptr_t vector = string_vector_new_from_string(raw_value);
++
++    assert(strcmp("foo", vector[0]) == 0 || !"The first item");
++    assert(strcmp("blah", vector[1]) == 0 || !"The second item");
++    assert(strcmp("bang", vector[2]) == 0 || !"The third item");
++    assert(NULL == vector[3] || !"NULL-terminated");
++
++    string_vector_free(vector);
++
++    vector = string_vector_new_from_string(NULL);
++    assert(NULL == vector[0] || !"NULL-terminated");
++
++    string_vector_free(vector);
++
++    vector = string_vector_new_from_string("");
++    assert(NULL == vector[0] || !"NULL-terminated");
++
++    string_vector_free(vector);
++}
++]])
++
++## ----------------------------------- ##
++## map_string_get_set_as_various_types ##
++## ----------------------------------- ##
++
++AT_TESTFUN([map_string_get_set_as_various_types],
++[[
++#include "internal_libreport.h"
++#include <assert.h>
++
++int main(int argc, char **argv)
++{
++    g_verbose = 3;
++
++    {
++        const char *const key = "my_bool";
++        map_string_t *map = new_map_string();
++
++        int retval = 0;
++
++        assert(!try_get_map_string_item_as_bool(map, key, &retval) || !"Returns bool(0) even if option does not exist");
++        assert(retval == 0 || !"Modifies bool(0) return value on failure");
++
++        retval = 1;
++
++        assert(!try_get_map_string_item_as_bool(map, key, &retval) || !"Returns bool(1) even if option does not exist");
++        assert(retval == 1 || !"Modifies bool(1) return value on failure");
++
++        set_map_string_item_from_bool(map, key, 1);
++        assert(get_map_string_item_or_NULL(map, key) || !"Set bool(1)");
++        assert(strcmp("yes", get_map_string_item_or_NULL(map, key)) == 0 || !"Invalid string repr for bool(1)");
++        assert(try_get_map_string_item_as_bool(map, key, &retval) || !"Failed to return bool(1)");
++        assert(retval || !"Failed to convert 'yes' to bool(1)");
++
++        set_map_string_item_from_bool(map, key, 0);
++        assert(get_map_string_item_or_NULL(map, key) || !"Set bool(0)");
++        assert(strcmp("no", get_map_string_item_or_NULL(map, key)) == 0 || !"Invalid string repr for bool(0)");
++        retval = 1;
++        assert(try_get_map_string_item_as_bool(map, key, &retval) || !"Failed to return bool(0)");
++        assert(!retval || !"Failed to convert 'no' to bool(0)");
++
++        replace_map_string_item(map, xstrdup(key), xstrdup("foo"));
++        retval = 1;
++        assert(try_get_map_string_item_as_bool(map, key, &retval) || !"Can not convert a random string to bool(0)");
++        assert(!retval || !"Failed to convert a random string to bool(0)");
++
++        free_map_string(map);
++    }
++
++    {
++        const char *const key = "my_int";
++        map_string_t *map = new_map_string();
++
++        int retval = INT_MIN;
++
++        assert(!try_get_map_string_item_as_int(map, key, &retval) || !"Returns INT_MIN even if option does not exist");
++        assert(retval == INT_MIN || !"Modifies INT_MIN value on failure");
++
++        retval = INT_MAX;
++
++        assert(!try_get_map_string_item_as_int(map, key, &retval) || !"Returns INT_MAX even if option does not exist");
++        assert(retval == INT_MAX || !"Modifies INT_MAX value on failure");
++
++        set_map_string_item_from_int(map, key, 12345);
++        assert(get_map_string_item_or_NULL(map, key) || !"Set int(12345)");
++        assert(strcmp("12345", get_map_string_item_or_NULL(map, key)) == 0 || !"Invalid string repr for int(12345)");
++        assert(try_get_map_string_item_as_int(map, key, &retval) || !"Failed to return int(12345)");
++        assert(12345 == retval || !"Failed to convert '12345' to int(12345)");
++
++        set_map_string_item_from_int(map, key, -12345);
++        assert(get_map_string_item_or_NULL(map, key) || !"Set int(-12345)");
++        assert(strcmp("-12345", get_map_string_item_or_NULL(map, key)) == 0 || !"Invalid string repr for int(-12345)");
++        assert(try_get_map_string_item_as_int(map, key, &retval) || !"Failed to return int(-12345)");
++        assert(-12345 == retval || !"Failed to convert '-12345' to int(-12345)");
++
++        set_map_string_item_from_int(map, key, INT_MAX);
++        assert(try_get_map_string_item_as_int(map, key, &retval) || !"Cannot return INT_MAX");
++        assert(retval == INT_MAX || !"Garbled INT_MAX");
++
++        set_map_string_item_from_int(map, key, INT_MIN);
++        assert(try_get_map_string_item_as_int(map, key, &retval) || !"Cannot return INT_MIN");
++        assert(retval == INT_MIN || !"Garbled INT_MIN");
++
++        retval = 69;
++        replace_map_string_item(map, xstrdup(key), xstrdup(""));
++        assert(!try_get_map_string_item_as_int(map, key, &retval) || !"Converts '' to number");
++        assert(retval == 69 || !"Modifies int(69) on ''");
++
++        replace_map_string_item(map, xstrdup(key), xstrdup("foo"));
++        assert(!try_get_map_string_item_as_int(map, key, &retval) || !"Converts 'foo' to number");
++        assert(retval == 69 || !"Modifies int(69) on 'foo'");
++
++        replace_map_string_item(map, xstrdup(key), xstrdup("777foo"));
++        assert(!try_get_map_string_item_as_int(map, key, &retval) || !"Converts '777foo' to number");
++        assert(retval == 69 || !"Modifies int(69) on '777foo'");
++
++                                                 /*0123456789ABCDEF*/
++        replace_map_string_item(map, xstrdup(key), xstrdup("7777777777777777"));
++        assert(!try_get_map_string_item_as_int(map, key, &retval) || !"Converts '7777777777777777' to number");
++        assert(retval == 69 || !"Modifies int(69) on '7777777777777777'");
++
++        free_map_string(map);
++    }
++
++    {
++        const char *const key = "my_string";
++        map_string_t *map = new_map_string();
++
++        char *retval = NULL;
++
++        assert(!try_get_map_string_item_as_string(map, key, &retval) || !"Returns string(NULL) even if option does not exist");
++        assert(retval == NULL || !"Modifies string(NULL) return value on failure");
++
++        char *bck = xstrdup("test");
++        retval = bck;
++
++        assert(!try_get_map_string_item_as_string(map, key, &retval) || !"Returns string('test') even if option does not exist");
++        assert(retval == bck || !"Modifies string('test') return value on failure");
++
++        retval = xstrdup(bck);
++        set_map_string_item_from_string(map, key, bck);
++
++        free(bck);
++        bck = retval;
++        retval = NULL;
++
++        assert(try_get_map_string_item_as_string(map, key, &retval) || !"Cannot return string('test')");
++        assert(NULL != retval || !"The return value is not assigned to the return variable");
++        assert(strcmp(bck, retval) == 0 || !"Garbled string('test') after freeing the original pointer");
++
++        free(bck);
++        free(retval);
++
++        bck = xstrdup(key);
++
++        set_map_string_item_from_string(map, bck, "test");
++        free(bck);
++
++        assert(try_get_map_string_item_as_string(map, key, &retval) || !"Cannot find key string('my_string') after freeing original key");
++        assert(NULL != retval || !"The return value is not assigned to the return variable");
++        assert(strcmp(bck, retval) == 0 || !"Garbled string('test') after freeing the original key value");
++
++        /* TODO: try to store really big string */
++
++        free_map_string(map);
++    }
++
++    {
++        const char *const key = "my_string_vector";
++        map_string_t *map = new_map_string();
++
++        string_vector_ptr_t retval = NULL;
++
++        assert(!try_get_map_string_item_as_string_vector(map, key, &retval) || !"Returns string_vector(NULL) even if option does not exist");
++        assert(retval == NULL || !"Modifies string_vector(NULL) return value on failure");
++
++        const char *const raw_value = "foo, blah, bang";
++        string_vector_ptr_t vector = string_vector_new_from_string(raw_value);
++
++        set_map_string_item_from_string_vector(map, key, vector);
++
++        assert(get_map_string_item_or_NULL(map, key) || !"Set string_vector('foo, blah, bang')");
++        assert(strcmp(raw_value, get_map_string_item_or_NULL(map, key)) == 0 || !"Invalid string repr for string_vector('foo, blah, bang')");
++        assert(try_get_map_string_item_as_string_vector(map, key, &retval) || !"Failed to return string_vector('foo, blah, bang')");
++        assert(retval || !"Failed to convert 'foo, blah, bang' to string_vector('foo, blah, bang')");
++
++        string_vector_free(vector);
++
++        free_map_string(map);
++    }
++}
++]])
+diff --git a/tests/testsuite.at b/tests/testsuite.at
+index 30208fe..647e42b 100644
+--- a/tests/testsuite.at
++++ b/tests/testsuite.at
+@@ -5,3 +5,4 @@ m4_include([strbuf.at])
+ m4_include([osrelease.at])
+ m4_include([taghyperlinks.at])
+ m4_include([configuration_files.at])
++m4_include([libreport_types.at])
+-- 
+1.8.3.1
+

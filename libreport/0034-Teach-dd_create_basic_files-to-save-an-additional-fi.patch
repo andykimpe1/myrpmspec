@@ -1,0 +1,86 @@
+From 26c37044146653d295690354b3c2cef2a8307a3e Mon Sep 17 00:00:00 2001
+From: Denys Vlasenko <vda.linux@googlemail.com>
+Date: Tue, 29 May 2012 15:54:44 +0200
+Subject: [PATCH 34/53] Teach dd_create_basic_files to save an additional file
+
+If we are chrooted and /etc/system-release exists, save it as
+anotehr problem dir element.
+
+Signed-off-by: Denys Vlasenko <vda.linux@googlemail.com>
+---
+ src/include/dump_dir.h           |  2 +-
+ src/include/internal_libreport.h |  1 +
+ src/lib/create_dump_dir.c        |  2 +-
+ src/lib/dump_dir.c               | 11 ++++++++++-
+ 4 files changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/src/include/dump_dir.h b/src/include/dump_dir.h
+index fbd13b6..f8d2931 100644
+--- a/src/include/dump_dir.h
++++ b/src/include/dump_dir.h
+@@ -53,7 +53,7 @@ struct dump_dir *dd_opendir(const char *dir, int flags);
+  */
+ struct dump_dir *dd_create(const char *dir, uid_t uid, mode_t mode);
+ 
+-void dd_create_basic_files(struct dump_dir *dd, uid_t uid);
++void dd_create_basic_files(struct dump_dir *dd, uid_t uid, const char *chroot_dir);
+ int dd_exist(const struct dump_dir *dd, const char *path);
+ void dd_sanitize_mode_and_owner(struct dump_dir *dd);
+ 
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index c76d882..d7b084c 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -686,6 +686,7 @@ bool make_dir_recursive(char *dir, mode_t dir_mode);
+ #define FILENAME_KERNEL       "kernel"
+ // From /etc/system-release or /etc/redhat-release
+ #define FILENAME_OS_RELEASE   "os_release"
++#define FILENAME_OS_RELEASE_IN_ROOTDIR "os_release_in_rootdir"
+ // Filled by <what?>
+ #define FILENAME_PACKAGE      "package"
+ #define FILENAME_COMPONENT    "component"
+diff --git a/src/lib/create_dump_dir.c b/src/lib/create_dump_dir.c
+index 42fbc7d..137da12 100644
+--- a/src/lib/create_dump_dir.c
++++ b/src/lib/create_dump_dir.c
+@@ -84,7 +84,7 @@ struct dump_dir *create_dump_dir_from_problem_data(problem_data_t *problem_data,
+      * reporting from anaconda where we can't read /etc/{system,redhat}-release
+      * and os_release is taken from anaconda
+     */
+-    dd_create_basic_files(dd, (uid_t)-1L);
++    dd_create_basic_files(dd, (uid_t)-1L, NULL);
+ 
+     return dd;
+ }
+diff --git a/src/lib/dump_dir.c b/src/lib/dump_dir.c
+index b4aad7e..74ef8c5 100644
+--- a/src/lib/dump_dir.c
++++ b/src/lib/dump_dir.c
+@@ -459,7 +459,7 @@ struct dump_dir *dd_create(const char *dir, uid_t uid, mode_t mode)
+     return dd;
+ }
+ 
+-void dd_create_basic_files(struct dump_dir *dd, uid_t uid)
++void dd_create_basic_files(struct dump_dir *dd, uid_t uid, const char *chroot_dir)
+ {
+     char long_str[sizeof(long) * 3 + 2];
+ 
+@@ -495,6 +495,15 @@ void dd_create_basic_files(struct dump_dir *dd, uid_t uid)
+         if (!release)
+             release = load_text_file("/etc/redhat-release", /*flags:*/ 0);
+         dd_save_text(dd, FILENAME_OS_RELEASE, release);
++        if (chroot_dir)
++        {
++            free(release);
++            char *chrooted_name = concat_path_file(chroot_dir, "/etc/system-release");
++            release = load_text_file(chrooted_name, /*flags:*/ 0);
++            free(chrooted_name);
++            if (release[0])
++                dd_save_text(dd, FILENAME_OS_RELEASE_IN_ROOTDIR, release);
++        }
+     }
+     free(release);
+ }
+-- 
+1.7.11.2
+

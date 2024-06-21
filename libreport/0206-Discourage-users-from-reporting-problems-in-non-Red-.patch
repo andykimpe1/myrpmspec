@@ -1,0 +1,90 @@
+From c4743664b959dd1090063ca483acda9f3e40d4ef Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Wed, 13 Jan 2016 17:28:18 +0100
+Subject: [PATCH] Discourage users from reporting problems in non Red Hat stuff
+
+Related: #1258474
+---
+ src/include/internal_libreport.h  |    6 ++++++
+ src/plugins/reporter-rhtsupport.c |   32 ++++++++++++++++++++++++++++++--
+ 2 files changed, 36 insertions(+), 2 deletions(-)
+
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index dc0953d..3d03427 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -801,6 +801,12 @@ bool uid_in_group(uid_t uid, gid_t gid);
+ #define FILENAME_PKG_VERSION   "pkg_version"
+ #define FILENAME_PKG_RELEASE   "pkg_release"
+ #define FILENAME_PKG_ARCH      "pkg_arch"
++
++/* RHEL packages - Red Hat, Inc. */
++#define FILENAME_PKG_VENDOR    "pkg_vendor"
++/* RHEL keys - https://access.redhat.com/security/team/key */
++#define FILENAME_PKG_FINGERPRINT "pkg_fingerprint"
++
+ #define FILENAME_USERNAME      "username"
+ #define FILENAME_ABRT_VERSION  "abrt_version"
+ 
+diff --git a/src/plugins/reporter-rhtsupport.c b/src/plugins/reporter-rhtsupport.c
+index 351e4b8..ab5c0f0 100644
+--- a/src/plugins/reporter-rhtsupport.c
++++ b/src/plugins/reporter-rhtsupport.c
+@@ -637,8 +637,10 @@ int main(int argc, char **argv)
+     const char *function;
+     const char *reason;
+     const char *package;
++    const char *executable;
+     const char *release;
+     const char *count;
++    const char *vendor;
+ 
+     count = get_problem_item_content_or_NULL(problem_data, FILENAME_COUNT);
+     if (count != NULL
+@@ -655,15 +657,41 @@ int main(int argc, char **argv)
+             exit(EXIT_CANCEL_BY_USER);
+     }
+ 
++    package  = get_problem_item_content_or_NULL(problem_data, FILENAME_PACKAGE);
++    vendor = get_problem_item_content_or_NULL(problem_data, FILENAME_PKG_VENDOR);
++    if (package && vendor && strcmp(vendor, "Red Hat, Inc.") != 0)
++    {
++        char *message = xasprintf(
++            _("The crashed program was released by '%s'. "
++              "Would you like to report the problem to Red Hat Support?"),
++              vendor);
++        int r = ask_yes_no(message);
++        free(message);
++        if (!r)
++            exit(EXIT_CANCEL_BY_USER);
++    }
++
++    executable  = get_problem_item_content_or_NULL(problem_data, FILENAME_EXECUTABLE);
++    if (!package)
++    {
++        char *message = xasprintf(
++            _("The program '%s' does not appear to be provided by Red Hat. "
++              "Would you like to report the problem to Red Hat Support?"),
++              executable);
++        int r = ask_yes_no(message);
++        free(message);
++        if (!r)
++            exit(EXIT_CANCEL_BY_USER);
++    }
++
+     release  = get_problem_item_content_or_NULL(problem_data, FILENAME_OS_RELEASE);
+     if (!release) /* Old dump dir format compat. Remove in abrt-2.1 */
+         release = get_problem_item_content_or_NULL(problem_data, "release");
+-    package  = get_problem_item_content_or_NULL(problem_data, FILENAME_PACKAGE);
+     reason   = get_problem_item_content_or_NULL(problem_data, FILENAME_REASON);
+     function = get_problem_item_content_or_NULL(problem_data, FILENAME_CRASH_FUNCTION);
+     {
+         struct strbuf *buf_summary = strbuf_new();
+-        strbuf_append_strf(buf_summary, "[abrt] %s", package);
++        strbuf_append_strf(buf_summary, "[abrt] %s", package ? package : executable);
+         if (function && strlen(function) < 30)
+             strbuf_append_strf(buf_summary, ": %s", function);
+         if (reason)
+-- 
+1.7.1
+

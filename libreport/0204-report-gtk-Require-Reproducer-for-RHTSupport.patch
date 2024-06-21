@@ -1,0 +1,800 @@
+From 727fac26478450c122304cada11c82dd39c39786 Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Tue, 12 Jan 2016 15:07:34 +0100
+Subject: [PATCH] report-gtk: Require Reproducer for RHTSupport
+
+- Introduce a new event configuration option to mark events that
+  needs good reproducer or comprehensive description. I decided
+  to go this way because there are events like uReport or e-mail
+  that can have Comment but do not need to be so strict.
+  (We can use the new option for Bugzilla in future).
+- Add problem description policies based on problem reproducibility
+  * unknow reproducer -> detailed description of circumstances
+  * known reproducer -> description of circumstances + steps
+  * recurrent problem -> steps
+
+Related: #1258474
+---
+ src/gui-wizard-gtk/wizard.c          |  258 +++++++++++++++++++++++++++++++---
+ src/gui-wizard-gtk/wizard.glade      |  155 +++++++++++++++++----
+ src/include/event_config.h           |    1 +
+ src/include/internal_libreport.h     |    3 +
+ src/include/problem_data.h           |   11 ++
+ src/lib/event_xml_parser.c           |    6 +
+ src/lib/problem_data.c               |   36 +++++
+ src/plugins/report_RHTSupport.xml.in |    1 +
+ 8 files changed, 426 insertions(+), 45 deletions(-)
+
+diff --git a/src/gui-wizard-gtk/wizard.c b/src/gui-wizard-gtk/wizard.c
+index a430df3..1fcb826 100644
+--- a/src/gui-wizard-gtk/wizard.c
++++ b/src/gui-wizard-gtk/wizard.c
+@@ -77,6 +77,14 @@ static GtkLabel *g_lbl_cd_reason;
+ static GtkTextView *g_tv_comment;
+ static GtkEventBox *g_eb_comment;
+ static GtkCheckButton *g_cb_no_comment;
++static GtkBox *g_vb_simple_details;
++
++static GtkComboBoxEntry *g_cmb_reproducible;
++static GtkTextView *g_tv_steps;
++static GtkListStore *g_ls_reproducible;
++static GtkLabel *g_lbl_complex_details_hint;
++static GtkBox *g_vb_complex_details;
++
+ static GtkWidget *g_widget_warnings_area;
+ static GtkBox *g_box_warning_labels;
+ static GtkToggleButton *g_tb_approve_bt;
+@@ -175,12 +183,12 @@ static gint pb_pulse_speed = 150;
+  */
+ enum {
+     PAGENO_SUMMARY,
+-    PAGENO_EDIT_COMMENT,
+     PAGENO_ANALYZE_SELECTOR,
+     PAGENO_ANALYZE_PROGRESS,
+     PAGENO_COLLECT_SELECTOR,
+     PAGENO_COLLECT_PROGRESS,
+     PAGENO_REPORTER_SELECTOR,
++    PAGENO_EDIT_COMMENT,
+     PAGENO_EDIT_BACKTRACE,
+     PAGENO_REVIEW_DATA,
+     PAGENO_REPORT_PROGRESS,
+@@ -194,12 +202,12 @@ enum {
+  * instead of strcmp.
+  */
+ static const gchar PAGE_SUMMARY[]            = "page_0";
+-static const gchar PAGE_EDIT_COMMENT[]       = "page_1";
+ static const gchar PAGE_ANALYZE_SELECTOR[]   = "page_2";
+ static const gchar PAGE_ANALYZE_PROGRESS[]   = "page_3";
+ static const gchar PAGE_COLLECT_SELECTOR[]   = "page_4";
+ static const gchar PAGE_COLLECT_PROGRESS[]   = "page_5";
+ static const gchar PAGE_REPORTER_SELECTOR[]  = "page_6_report";
++static const gchar PAGE_EDIT_COMMENT[]       = "page_70_report";
+ static const gchar PAGE_EDIT_BACKTRACE[]     = "page_7_report";
+ static const gchar PAGE_REVIEW_DATA[]        = "page_8_report";
+ static const gchar PAGE_REPORT_PROGRESS[]    = "page_9_report";
+@@ -209,12 +217,12 @@ static const gchar PAGE_NOT_SHOWN[]          = "page_11_report";
+ static const gchar *const page_names[] =
+ {
+     PAGE_SUMMARY,
+-    PAGE_EDIT_COMMENT,
+     PAGE_ANALYZE_SELECTOR,
+     PAGE_ANALYZE_PROGRESS,
+     PAGE_COLLECT_SELECTOR,
+     PAGE_COLLECT_PROGRESS,
+     PAGE_REPORTER_SELECTOR,
++    PAGE_EDIT_COMMENT,
+     PAGE_EDIT_BACKTRACE,
+     PAGE_REVIEW_DATA,
+     PAGE_REPORT_PROGRESS,
+@@ -223,6 +231,18 @@ static const gchar *const page_names[] =
+     NULL
+ };
+ 
++#define LS_REPRODUCIBLE "ls_reproducible"
++static const gchar *misc_widgets[] =
++{
++    LS_REPRODUCIBLE,
++    NULL
++};
++
++enum {
++    LS_REPRODUCIBLE_COL_LABEL,
++    LS_REPRODUCIBLE_COL_VALUE,
++};
++
+ typedef struct
+ {
+     const gchar *name;
+@@ -262,15 +282,15 @@ static void init_pages()
+      */
+     /* glade element name     , on-screen text          , type */
+     init_page(&pages[0], PAGE_SUMMARY            , _("Problem description")   , GTK_ASSISTANT_PAGE_CONTENT );
+-    init_page(&pages[1], PAGE_EDIT_COMMENT,_("Provide additional information"), GTK_ASSISTANT_PAGE_CONTENT );
+-    init_page(&pages[2], PAGE_ANALYZE_SELECTOR   , _("Select analyzer")       , GTK_ASSISTANT_PAGE_CONFIRM );
+-    init_page(&pages[3], PAGE_ANALYZE_PROGRESS   , _("Analyzing")             , GTK_ASSISTANT_PAGE_INTRO   );
+-    init_page(&pages[4], PAGE_COLLECT_SELECTOR   , _("Select collector")      , GTK_ASSISTANT_PAGE_CONFIRM );
+-    init_page(&pages[5], PAGE_COLLECT_PROGRESS   , _("Collecting")            , GTK_ASSISTANT_PAGE_INTRO   );
++    init_page(&pages[1], PAGE_ANALYZE_SELECTOR   , _("Select analyzer")       , GTK_ASSISTANT_PAGE_CONFIRM );
++    init_page(&pages[2], PAGE_ANALYZE_PROGRESS   , _("Analyzing")             , GTK_ASSISTANT_PAGE_INTRO   );
++    init_page(&pages[3], PAGE_COLLECT_SELECTOR   , _("Select collector")      , GTK_ASSISTANT_PAGE_CONFIRM );
++    init_page(&pages[4], PAGE_COLLECT_PROGRESS   , _("Collecting")            , GTK_ASSISTANT_PAGE_INTRO   );
+     /* Some reporters don't need backtrace, we can skip bt page for them.
+      * Therefore we want to know reporters _before_ we go to bt page
+      */
+-    init_page(&pages[6], PAGE_REPORTER_SELECTOR  , _("Select reporter")       , GTK_ASSISTANT_PAGE_CONTENT );
++    init_page(&pages[5], PAGE_REPORTER_SELECTOR  , _("Select reporter")       , GTK_ASSISTANT_PAGE_CONTENT );
++    init_page(&pages[6], PAGE_EDIT_COMMENT,_("Provide additional information"), GTK_ASSISTANT_PAGE_CONTENT );
+     init_page(&pages[7], PAGE_EDIT_BACKTRACE     , _("Review the data")       , GTK_ASSISTANT_PAGE_CONTENT );
+     init_page(&pages[8], PAGE_REVIEW_DATA        , _("Confirm data to report"), GTK_ASSISTANT_PAGE_CONFIRM );
+     /* Was GTK_ASSISTANT_PAGE_PROGRESS, but we want to allow returning to it */
+@@ -1242,6 +1262,51 @@ static event_gui_data_t *update_event_checkboxes(GList **events_gui_data,
+     return active_button;
+ }
+ 
++static bool isdigit_str(const char *str)
++{
++    do
++    {
++        if (*str < '0' || *str > '9') return false;
++        str++;
++    } while (*str);
++    return true;
++}
++
++static void update_reproducible_hints(void)
++{
++    int reproducible = gtk_combo_box_get_active(GTK_COMBO_BOX(g_cmb_reproducible));
++    switch(reproducible)
++    {
++        case -1:
++            return;
++
++        case PROBLEM_REPRODUCIBLE_UNKNOWN:
++            gtk_label_set_text(g_lbl_complex_details_hint,
++                    _("Since crashes without a known reproducer can be "
++                      "difficult to diagnose, please provide a comprehensive "
++                      "description of the problem you have encountered."));
++            break;
++
++        case PROBLEM_REPRODUCIBLE_YES:
++            gtk_label_set_text(g_lbl_complex_details_hint,
++                    _("Please provide a short description of the problem and "
++                      "please include the steps you have used to reproduce "
++                      "the problem."));
++            break;
++
++        case PROBLEM_REPRODUCIBLE_RECURRENT:
++            gtk_label_set_text(g_lbl_complex_details_hint,
++                    _("Please provide the steps you have used to reproduce the "
++                      "problem"));
++            break;
++
++        default:
++            error_msg("BUG: %s:%s:%d: forgotten 'how reproducible' value",
++                        __FILE__, __func__, __LINE__);
++            break;
++    }
++}
++
+ void update_gui_state_from_problem_data(void)
+ {
+     update_window_title();
+@@ -1267,6 +1332,7 @@ void update_gui_state_from_problem_data(void)
+     free(msg);
+ 
+     load_text_to_text_view(g_tv_comment, FILENAME_COMMENT);
++    load_text_to_text_view(g_tv_steps, FILENAME_REPRODUCER);
+ 
+     /* Update analyze radio buttons */
+     event_gui_data_t *active_button = add_event_buttons(g_box_analyzers, &g_list_analyzers,
+@@ -1308,6 +1374,38 @@ void update_gui_state_from_problem_data(void)
+         gtk_widget_show(GTK_WIDGET(g_btn_refresh));
+     else
+         gtk_widget_hide(GTK_WIDGET(g_btn_refresh));
++
++    /* Update Reproducible */
++    /* Try to get the old value */
++    const int reproducible = get_problem_data_reproducible(g_cd);
++    if (reproducible > -1)
++    {
++        gtk_combo_box_set_active(GTK_COMBO_BOX(g_cmb_reproducible), reproducible);
++        goto reproducible_done;
++    }
++
++    /* OK, no old value.
++     * Try to guess the reproducibility from the number of occurrences */
++    const char *count_str = get_problem_item_content_or_NULL(g_cd, FILENAME_COUNT);
++    if (   count_str == NULL
++        || strcmp(count_str, "0") == 0
++        || strcmp(count_str, "1") == 0
++        || strcmp(count_str, "2") == 0
++        || !isdigit_str(count_str))
++    {
++        gtk_combo_box_set_active(GTK_COMBO_BOX(g_cmb_reproducible), PROBLEM_REPRODUCIBLE_UNKNOWN);
++    }
++    else
++    {
++        int count = xatoi(count_str);
++        if (count < 5)
++            gtk_combo_box_set_active(GTK_COMBO_BOX(g_cmb_reproducible), PROBLEM_REPRODUCIBLE_YES);
++        else
++            gtk_combo_box_set_active(GTK_COMBO_BOX(g_cmb_reproducible), PROBLEM_REPRODUCIBLE_RECURRENT);
++    }
++
++reproducible_done:
++    update_reproducible_hints();
+ }
+ 
+ 
+@@ -1473,6 +1571,12 @@ static bool event_need_review(const char *event_name)
+     return !event_cfg || !event_cfg->ec_skip_review;
+ }
+ 
++static bool event_requires_details(const char *event_name)
++{
++    event_config_t *cfg = get_event_config(event_name);
++    return cfg != NULL && cfg->ec_requires_details;
++}
++
+ static gboolean consume_cmd_output(GIOChannel *source, GIOCondition condition, gpointer data)
+ {
+     struct analyze_event_data *evd = data;
+@@ -2077,18 +2181,53 @@ static void toggle_eb_comment(void)
+     if (pages[PAGENO_EDIT_COMMENT].page_widget == NULL)
+         return;
+ 
+-    bool good =
+-        gtk_text_buffer_get_char_count(gtk_text_view_get_buffer(g_tv_comment)) >= 10
+-        || gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_cb_no_comment));
++    bool complex_details = g_reporter_events_selected
++                           && event_requires_details(g_reporter_events_selected);
++    bool good = false;
++    if (complex_details)
++    {
++        int reproducible = gtk_combo_box_get_active(GTK_COMBO_BOX(g_cmb_reproducible));
++        const int comment_chars = gtk_text_buffer_get_char_count(gtk_text_view_get_buffer(g_tv_comment));
++        const int steps_chars = gtk_text_buffer_get_char_count(gtk_text_view_get_buffer(g_tv_steps));
++        const int steps_lines = steps_chars == 0 ? 0 : gtk_text_buffer_get_line_count(gtk_text_view_get_buffer(g_tv_steps));
++        switch(reproducible)
++        {
++            case -1:
++                VERB1 log("Uninitialized 'How reproducible' combobox");
++                break;
+ 
+-    /* Allow next page only when the comment has at least 10 chars */
+-    gtk_assistant_set_page_complete(g_assistant, pages[PAGENO_EDIT_COMMENT].page_widget, good);
++            case PROBLEM_REPRODUCIBLE_UNKNOWN:
++                good = comment_chars + (steps_chars * 2) >= 20;
++                break;
+ 
+-    /* And show the eventbox with label */
+-    if (good)
+-        gtk_widget_hide(GTK_WIDGET(g_eb_comment));
++            case PROBLEM_REPRODUCIBLE_YES:
++                good = comment_chars >= 10 && steps_lines;
++                break;
++
++            case PROBLEM_REPRODUCIBLE_RECURRENT:
++                good = comment_chars >= 10 || steps_lines;
++                break;
++
++            default:
++                error_msg("BUG: %s:%s:%d: forgotten 'how reproducible' value",
++                            __FILE__, __func__, __LINE__);
++                break;
++        }
++    }
+     else
+-        gtk_widget_show(GTK_WIDGET(g_eb_comment));
++    {
++        good = gtk_text_buffer_get_char_count(gtk_text_view_get_buffer(g_tv_comment)) >= 10
++               || gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g_cb_no_comment));
++
++        /* And show the eventbox with label */
++        if (good)
++            gtk_widget_hide(GTK_WIDGET(g_eb_comment));
++        else
++            gtk_widget_show(GTK_WIDGET(g_eb_comment));
++    }
++
++    /* Allow next page only when the comment has at least 10 chars */
++    gtk_assistant_set_page_complete(g_assistant, pages[PAGENO_EDIT_COMMENT].page_widget, good);
+ }
+ 
+ static void on_comment_changed(GtkTextBuffer *buffer, gpointer user_data)
+@@ -2101,6 +2240,10 @@ static void on_no_comment_toggled(GtkToggleButton *togglebutton, gpointer user_d
+     toggle_eb_comment();
+ }
+ 
++static void on_steps_changed(GtkTextBuffer *buffer, gpointer user_data)
++{
++    toggle_eb_comment();
++}
+ 
+ /* Refresh button handling */
+ 
+@@ -2381,6 +2524,26 @@ static void on_page_prepare(GtkAssistant *assistant, GtkWidget *page, gpointer u
+     /* Save text fields if changed */
+     save_items_from_notepad();
+     save_text_from_text_view(g_tv_comment, FILENAME_COMMENT);
++    save_text_from_text_view(g_tv_steps, FILENAME_REPRODUCER);
++
++    int reproducible = gtk_combo_box_get_active(GTK_COMBO_BOX(g_cmb_reproducible));
++    if (reproducible > -1)
++    {
++        const char *reproducible_str = get_problem_data_reproducible_name(reproducible);
++        if (reproducible_str != NULL)
++        {
++            struct dump_dir *dd = dd_opendir(g_dump_dir_name, DD_OPEN_READONLY);
++            dd = steal_if_needed(dd);
++            if (dd && dd->locked)
++            {
++                dd_save_text(dd, FILENAME_REPRODUCIBLE, reproducible_str);
++            }
++            else
++                error_msg(_("Failed to save file '%s'"), FILENAME_REPRODUCIBLE);
++
++            dd_close(dd);
++        }
++    }
+ 
+     reload_problem_data_from_dump_dir();
+     update_gui_state_from_problem_data();
+@@ -2412,6 +2575,12 @@ static void on_page_prepare(GtkAssistant *assistant, GtkWidget *page, gpointer u
+ 
+     if (pages[PAGENO_EDIT_COMMENT].page_widget == page)
+     {
++        bool complex_details = g_reporter_events_selected
++                               && event_requires_details(g_reporter_events_selected);
++
++        gtk_widget_set_visible(GTK_WIDGET(g_vb_simple_details), !complex_details);
++        gtk_widget_set_visible(GTK_WIDGET(g_vb_complex_details), complex_details);
++
+         on_comment_changed(gtk_text_view_get_buffer(g_tv_comment), NULL);
+     }
+     //log_ready_state();
+@@ -2497,7 +2666,10 @@ static gint select_next_page_no(gint current_page_no, gpointer data)
+     {
+         /* No! this would SEGV (infinitely recurse into select_next_page_no) */
+         /*gtk_assistant_commit(g_assistant);*/
+-        current_page_no = pages[PAGENO_ANALYZE_SELECTOR].page_no-1;
++        gtk_assistant_set_page_complete(g_assistant,
++                    pages[PAGENO_REPORTER_SELECTOR].page_widget,
++                    /*Radio buttons used == always selected*/FALSE);
++        current_page_no = pages[PAGENO_REPORTER_SELECTOR].page_no-1;
+         goto again;
+     }
+ 
+@@ -2759,6 +2931,11 @@ static gint on_key_press_event_in_item_list(GtkTreeView *treeview, GdkEventKey *
+     return FALSE;
+ }
+ 
++static void on_reproducible_changed(GtkComboBox *widget, gpointer user_data)
++{
++    update_reproducible_hints();
++    toggle_eb_comment();
++}
+ 
+ /* Initialization */
+ 
+@@ -2770,6 +2947,14 @@ static void add_pages()
+     GError *error = NULL;
+     if (!g_glade_file)
+     {
++        /* load additional widgets from glade */
++        gtk_builder_add_objects_from_string(builder,
++                WIZARD_GLADE_CONTENTS, sizeof(WIZARD_GLADE_CONTENTS) - 1,
++                (gchar**)misc_widgets,
++                &error);
++        if (error != NULL)
++            error_msg_and_die("Error loading glade data: %s", error->message);
++
+         /* Load UI from internal string */
+         gtk_builder_add_objects_from_string(builder,
+                 WIZARD_GLADE_CONTENTS, sizeof(WIZARD_GLADE_CONTENTS) - 1,
+@@ -2781,6 +2966,11 @@ static void add_pages()
+     else
+     {
+         /* -g FILE: load IU from it */
++        /* load additional widgets from glade */
++        gtk_builder_add_objects_from_file(builder, g_glade_file, (gchar**)misc_widgets, &error);
++        if (error != NULL)
++            error_msg_and_die("Can't load %s: %s", g_glade_file, error->message);
++
+         gtk_builder_add_objects_from_file(builder, g_glade_file, (gchar**)page_names, &error);
+         if (error != NULL)
+             error_msg_and_die("Can't load %s: %s", g_glade_file, error->message);
+@@ -2804,6 +2994,7 @@ static void add_pages()
+         {
+             if (g_report_only && (strncmp(delim + 1, "report", strlen("report"))) != 0)
+             {
++                pages[i].page_no = -1;
+                 pages[i].page_widget = NULL;
+                 continue;
+             }
+@@ -2867,6 +3058,12 @@ static void add_pages()
+     g_sens_ticket          = GTK_WIDGET(       gtk_builder_get_object(builder, "sens_ticket"));
+     g_sens_ticket_cb       = GTK_TOGGLE_BUTTON(gtk_builder_get_object(builder, "sens_ticket_cb"));
+     g_privacy_info_btn     = GTK_BUTTON(       gtk_builder_get_object(builder, "privacy_info_btn"));
++    g_vb_simple_details     = GTK_BOX(          gtk_builder_get_object(builder, "vb_simple_details"));
++    g_cmb_reproducible     = GTK_COMBO_BOX_ENTRY(gtk_builder_get_object(builder, "cmb_reproducible"));
++    g_tv_steps             = GTK_TEXT_VIEW(    gtk_builder_get_object(builder, "tv_steps"));
++    g_ls_reproducible      = GTK_LIST_STORE(   gtk_builder_get_object(builder, LS_REPRODUCIBLE));
++    g_vb_complex_details   = GTK_BOX(          gtk_builder_get_object(builder, "vb_complex_details"));
++    g_lbl_complex_details_hint = GTK_LABEL(    gtk_builder_get_object(builder, "lbl_complex_details_hint"));
+ 
+     gtk_widget_hide(g_sens_ticket);
+     g_signal_connect(g_sens_ticket_cb, "toggled", G_CALLBACK(on_sensitive_ticket_clicked_cb), NULL);
+@@ -2941,6 +3138,28 @@ static void add_pages()
+     gtk_widget_modify_bg(GTK_WIDGET(g_eb_comment), GTK_STATE_NORMAL, &color);
+ 
+     g_signal_connect(g_tv_details, "key-press-event", G_CALLBACK(on_key_press_event_in_item_list), NULL);
++
++    GtkTreeIter iter;
++
++    gtk_list_store_append(g_ls_reproducible, &iter);
++    gtk_list_store_set(g_ls_reproducible, &iter,
++       LS_REPRODUCIBLE_COL_LABEL, _("I have experienced this problem for the first time"),
++       LS_REPRODUCIBLE_COL_VALUE, PROBLEM_REPRODUCIBLE_UNKNOWN,
++       -1);
++
++    gtk_list_store_append(g_ls_reproducible, &iter);
++    gtk_list_store_set(g_ls_reproducible, &iter,
++       LS_REPRODUCIBLE_COL_LABEL, _("I can reproduce this problem"),
++       LS_REPRODUCIBLE_COL_VALUE, PROBLEM_REPRODUCIBLE_YES,
++       -1);
++
++    gtk_list_store_append(g_ls_reproducible, &iter);
++    gtk_list_store_set(g_ls_reproducible, &iter,
++       LS_REPRODUCIBLE_COL_LABEL, _("This problem occurs repeatedly"),
++       LS_REPRODUCIBLE_COL_VALUE, PROBLEM_REPRODUCIBLE_RECURRENT,
++       -1);
++
++    g_signal_connect(g_cmb_reproducible, "changed", G_CALLBACK(on_reproducible_changed), NULL);
+ }
+ 
+ static void create_details_treeview(void)
+@@ -3025,6 +3244,7 @@ void create_assistant(void)
+     g_signal_connect(g_tb_approve_bt, "toggled", G_CALLBACK(on_bt_approve_toggle), NULL);
+     g_signal_connect(g_btn_refresh, "clicked", G_CALLBACK(on_btn_refresh_clicked), NULL);
+     g_signal_connect(gtk_text_view_get_buffer(g_tv_comment), "changed", G_CALLBACK(on_comment_changed), NULL);
++    g_signal_connect(gtk_text_view_get_buffer(g_tv_steps),   "changed", G_CALLBACK(on_steps_changed),   NULL);
+ 
+     g_signal_connect(g_btn_add_file, "clicked", G_CALLBACK(on_btn_add_file), NULL);
+ 
+diff --git a/src/gui-wizard-gtk/wizard.glade b/src/gui-wizard-gtk/wizard.glade
+index 3ea5ee7..9344fa4 100644
+--- a/src/gui-wizard-gtk/wizard.glade
++++ b/src/gui-wizard-gtk/wizard.glade
+@@ -2,6 +2,14 @@
+ <interface>
+   <requires lib="gtk+" version="2.16"/>
+   <!-- interface-naming-policy toplevel-contextual -->
++  <object class="GtkListStore" id="ls_reproducible">
++    <columns>
++      <!-- column-name label -->
++      <column type="gchararray"/>
++      <!-- column-name value -->
++      <column type="guint"/>
++    </columns>
++  </object>
+   <object class="GtkWindow" id="window0">
+     <child>
+       <object class="GtkVBox" id="page_0">
+@@ -71,16 +79,17 @@
+   </object>
+   <object class="GtkWindow" id="window1">
+     <child>
+-      <object class="GtkVBox" id="page_1">
++      <object class="GtkVBox" id="page_70_report">
+         <property name="visible">True</property>
+         <property name="border_width">10</property>
++        <property name="orientation">vertical</property>
+         <property name="spacing">3</property>
+         <child>
+           <object class="GtkLabel" id="label1">
+             <property name="visible">True</property>
+             <property name="xalign">0</property>
+             <property name="yalign">0</property>
+-            <property name="label" translatable="yes">How did this problem happen (step-by-step)? How can it be reproduced? Any additional comments useful for diagnosing the problem? Please use English if possible.</property>
++            <property name="label" translatable="yes">How did this problem happen? Any additional comments useful for diagnosing the problem? Please use English if possible.</property>
+             <property name="wrap">True</property>
+           </object>
+           <packing>
+@@ -106,13 +115,82 @@
+           </packing>
+         </child>
+         <child>
+-          <object class="GtkEventBox" id="eb_comment">
++          <object class="GtkVBox" id="vb_complex_details">
++            <property name="no_show_all">True</property>
++            <property name="orientation">vertical</property>
++            <child>
++              <object class="GtkLabel" id="lbl_reproducbile">
++                <property name="visible">True</property>
++                <property name="xalign">0</property>
++                <property name="label" translatable="yes">How reproducible is this problem?</property>
++              </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="padding">8</property>
++                <property name="position">0</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkComboBoxEntry" id="cmb_reproducible">
++                <property name="visible">True</property>
++                <property name="editing_canceled">True</property>
++                <property name="model">ls_reproducible</property>
++                <property name="text_column">0</property>
++              </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="position">1</property>
++              </packing>
++            </child>
+             <child>
+-              <object class="GtkLabel" id="label5">
++              <object class="GtkLabel" id="lbl_steps">
+                 <property name="visible">True</property>
+-                <property name="label" translatable="yes">You need to fill the how to before you can proceed...</property>
+-                <property name="single_line_mode">True</property>
++                <property name="xalign">0</property>
++                <property name="yalign">0</property>
++                <property name="label" translatable="yes">How it can be reproduced (one step per line)?</property>
+               </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="padding">8</property>
++                <property name="position">2</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkScrolledWindow" id="sw_steps">
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="shadow_type">out</property>
++                <child>
++                  <object class="GtkTextView" id="tv_steps">
++                    <property name="visible">True</property>
++                    <property name="can_focus">True</property>
++                  </object>
++                </child>
++              </object>
++              <packing>
++                <property name="position">3</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkEventBox" id="eb_complex_details">
++                <property name="visible">True</property>
++                <child>
++                  <object class="GtkLabel" id="lbl_complex_details_hint">
++                    <property name="visible">True</property>
++                    <property name="xalign">0</property>
++                    <property name="yalign">0</property>
++                    <property name="label" translatable="yes">Please add a comprehensive description of the problem you have. This is a very long place holder.</property>
++                    <property name="wrap">True</property>
++                    <attributes>
++                      <attribute name="weight" value="bold"/>
++                    </attributes>
++                  </object>
++                </child>
++              </object>
++              <packing>
++                <property name="padding">12</property>
++                <property name="position">4</property>
++              </packing>
+             </child>
+           </object>
+           <packing>
+@@ -121,33 +199,58 @@
+           </packing>
+         </child>
+         <child>
+-          <object class="GtkLabel" id="label3">
++          <object class="GtkVBox" id="vb_simple_details">
+             <property name="visible">True</property>
+-            <property name="xalign">0</property>
+-            <property name="yalign">0</property>
+-            <property name="label" translatable="yes">&lt;b&gt;Your comments are not private.&lt;/b&gt; They may be included into publicly visible problem reports.</property>
+-            <property name="use_markup">True</property>
+-            <property name="wrap">True</property>
++            <property name="orientation">vertical</property>
++            <child>
++              <object class="GtkEventBox" id="eb_comment">
++                <child>
++                  <object class="GtkLabel" id="label5">
++                    <property name="visible">True</property>
++                    <property name="label" translatable="yes">You need to fill the how to before you can proceed...</property>
++                    <property name="single_line_mode">True</property>
++                  </object>
++                </child>
++              </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="position">0</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkLabel" id="label3">
++                <property name="visible">True</property>
++                <property name="xalign">0</property>
++                <property name="yalign">0</property>
++                <property name="label" translatable="yes">&lt;b&gt;Your comments are not private.&lt;/b&gt; They may be included into publicly visible problem reports.</property>
++                <property name="use_markup">True</property>
++                <property name="wrap">True</property>
++              </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="position">1</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkCheckButton" id="cb_no_comment">
++                <property name="label" translatable="yes">I don't know what caused this problem</property>
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="receives_default">False</property>
++                <property name="xalign">0</property>
++                <property name="draw_indicator">True</property>
++              </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="position">2</property>
++              </packing>
++            </child>
+           </object>
+           <packing>
+             <property name="expand">False</property>
+             <property name="position">3</property>
+           </packing>
+         </child>
+-        <child>
+-          <object class="GtkCheckButton" id="cb_no_comment">
+-            <property name="label" translatable="yes">I don't know what caused this problem</property>
+-            <property name="visible">True</property>
+-            <property name="can_focus">True</property>
+-            <property name="receives_default">False</property>
+-            <property name="xalign">0</property>
+-            <property name="draw_indicator">True</property>
+-          </object>
+-          <packing>
+-            <property name="expand">False</property>
+-            <property name="position">4</property>
+-          </packing>
+-        </child>
+       </object>
+     </child>
+   </object>
+diff --git a/src/include/event_config.h b/src/include/event_config.h
+index 356fc59..7323765 100644
+--- a/src/include/event_config.h
++++ b/src/include/event_config.h
+@@ -81,6 +81,7 @@ typedef struct
+     bool  ec_skip_review;
+     bool  ec_supports_restricted_access;
+     char *ec_restricted_access_option;
++    bool  ec_requires_details;
+ 
+     GList *options;
+ } event_config_t;
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index 71ea454..dc0953d 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -804,6 +804,9 @@ bool uid_in_group(uid_t uid, gid_t gid);
+ #define FILENAME_USERNAME      "username"
+ #define FILENAME_ABRT_VERSION  "abrt_version"
+ 
++#define FILENAME_REPRODUCIBLE  "reproducible"
++#define FILENAME_REPRODUCER    "reproducer"
++
+ // Not stored as files, added "on the fly":
+ #define CD_DUMPDIR            "Directory"
+ 
+diff --git a/src/include/problem_data.h b/src/include/problem_data.h
+index 3140ff5..c269ebb 100644
+--- a/src/include/problem_data.h
++++ b/src/include/problem_data.h
+@@ -92,6 +92,17 @@ problem_data_t *create_problem_data_for_reporting(const char *dump_dir_name);
+ 
+ struct dump_dir *create_dump_dir_from_problem_data(problem_data_t *problem_data, const char *base_dir_name);
+ 
++enum {
++    PROBLEM_REPRODUCIBLE_UNKNOWN,
++    PROBLEM_REPRODUCIBLE_YES,
++    PROBLEM_REPRODUCIBLE_RECURRENT,
++
++    _PROBLEM_REPRODUCIBLE_MAX_,
++};
++
++int get_problem_data_reproducible(problem_data_t *problem_data);
++const char *get_problem_data_reproducible_name(int reproducible);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/lib/event_xml_parser.c b/src/lib/event_xml_parser.c
+index dc222c5..3fed9ba 100644
+--- a/src/lib/event_xml_parser.c
++++ b/src/lib/event_xml_parser.c
+@@ -34,6 +34,7 @@
+ #define GUI_REVIEW_ELEMENTS     "gui-review-elements"
+ #define SUPPORTS_RESTRICTED_ACCESS_ELEMENT "support-restricted-access"
+ #define RESTRICTED_ACCESS_OPTION_ATTR "optionname"
++#define REQUIRES_DETAILS        "requires-details"
+ 
+ #define REQUIRES_ELEMENT        "requires-items"
+ #define EXCL_BY_DEFAULT_ELEMENT "exclude-items-by-default"
+@@ -463,6 +464,11 @@ static void text(GMarkupParseContext *context,
+             ui->ec_supports_restricted_access = string_to_bool(text_copy);
+             goto ret;
+         }
++        if (strcmp(inner_element, REQUIRES_DETAILS) == 0)
++        {
++            ui->ec_requires_details = string_to_bool(text_copy);
++            goto ret;
++        }
+     }
+ 
+  ret:
+diff --git a/src/lib/problem_data.c b/src/lib/problem_data.c
+index b7b228c..8aa2ed9 100644
+--- a/src/lib/problem_data.c
++++ b/src/lib/problem_data.c
+@@ -493,3 +493,39 @@ gint cmp_problem_data(gconstpointer a, gconstpointer b, gpointer filename)
+ 
+     return 1;
+ }
++
++static const gchar const* reproducible_names[_PROBLEM_REPRODUCIBLE_MAX_] =
++{
++    "Not sure how to reproduce the problem",
++    "The problem is reproducible",
++    "The problem occurs regularly",
++};
++
++int get_problem_data_reproducible(problem_data_t *problem_data)
++{
++    const char *reproducible_str = get_problem_item_content_or_NULL(problem_data, FILENAME_REPRODUCIBLE);
++    if (reproducible_str == NULL)
++    {
++        VERB2 log("Cannot return Reproducible type: missing "FILENAME_REPRODUCIBLE);
++        return -1;
++    }
++
++    for (int i = 0; i < _PROBLEM_REPRODUCIBLE_MAX_; ++i)
++        if (strcmp(reproducible_str, reproducible_names[i]) == 0)
++            return i;
++
++    error_msg("Cannot return Reproducible type: invalid format of '%s'", FILENAME_REPRODUCIBLE);
++    return -1;
++}
++
++const char *get_problem_data_reproducible_name(int reproducible)
++{
++    if (reproducible < 0 || reproducible >= _PROBLEM_REPRODUCIBLE_MAX_)
++    {
++        error_msg("Cannot return Reproducible name: invalid code: %d", reproducible);
++        return NULL;
++    }
++
++    return reproducible_names[reproducible];
++}
++
+diff --git a/src/plugins/report_RHTSupport.xml.in b/src/plugins/report_RHTSupport.xml.in
+index 5e76fd5..0f19f13 100644
+--- a/src/plugins/report_RHTSupport.xml.in
++++ b/src/plugins/report_RHTSupport.xml.in
+@@ -4,6 +4,7 @@
+     <_description>Create new Red Hat Support case - I would like to be contacted by Red Hat Support</_description>
+ 
+     <requires-items>package</requires-items>
++    <requires-details>yes</requires-details>
+     <exclude-items-by-default>count,event_log,vmcore</exclude-items-by-default>
+     <exclude-items-always></exclude-items-always>
+     <exclude-binary-items>no</exclude-binary-items>
+-- 
+1.7.1
+

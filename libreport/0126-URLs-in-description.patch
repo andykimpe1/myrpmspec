@@ -1,0 +1,609 @@
+From b2cd2a466930e1c40a230e2214e2e04860c580f0 Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Tue, 13 May 2014 14:23:37 +0200
+Subject: [LIBREPORT PATCH] URLs in description
+
+---
+ src/include/dump_dir.h    |   8 +-
+ src/lib/make_descr.c      |   4 +-
+ tests/Makefile.am         |   4 +-
+ tests/make_description.at | 191 ++++++++++++++++++++++++++++
+ tests/reported_to.at      | 314 ++++++++++++++++++++++++++++++++++++++++++++++
+ tests/testsuite.at        |   2 +
+ 6 files changed, 519 insertions(+), 4 deletions(-)
+ create mode 100644 tests/make_description.at
+ create mode 100644 tests/reported_to.at
+
+diff --git a/src/include/dump_dir.h b/src/include/dump_dir.h
+index 432d04c..d93a0d9 100644
+--- a/src/include/dump_dir.h
++++ b/src/include/dump_dir.h
+@@ -25,6 +25,9 @@
+ #include <sys/types.h>
+ #include <dirent.h>
+ 
++/* Fore GList */
++#include <glib.h>
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+@@ -98,7 +101,10 @@ void free_report_result(struct report_result *result);
+ report_result_t *find_in_reported_to_data(const char *reported_to, const char *report_label);
+ #define find_in_reported_to libreport_find_in_reported_to
+ report_result_t *find_in_reported_to(struct dump_dir *dd, const char *prefix);
+-/* TODO: GList *read_entire_reported_to(dd); */
++#define read_entire_reported_to_data libreport_read_entire_reported_to_data
++GList *read_entire_reported_to_data(const char* reported_to);
++#define read_entire_reported_to libreport_read_entire_reported_to
++GList *read_entire_reported_to(struct dump_dir *dd);
+ 
+ 
+ void delete_dump_dir(const char *dirname);
+diff --git a/src/lib/make_descr.c b/src/lib/make_descr.c
+index 2316681..e4ae6d5 100644
+--- a/src/lib/make_descr.c
++++ b/src/lib/make_descr.c
+@@ -103,7 +103,7 @@ char *make_description(problem_data_t *problem_data, char **names_to_skip,
+     bool append_empty_line = !empty;
+     if (desc_flags & MAKEDESC_SHOW_URLS)
+     {
+-        const char *reported_to = problem_data_get_content_or_NULL(problem_data, FILENAME_REPORTED_TO);
++        const char *reported_to = get_problem_item_content_or_NULL(problem_data, FILENAME_REPORTED_TO);
+         if (reported_to != NULL)
+         {
+             GList *reports = read_entire_reported_to_data(reported_to);
+@@ -125,7 +125,7 @@ char *make_description(problem_data_t *problem_data, char **names_to_skip,
+                 strbuf_append_strf(buf_dsc, "%s: %*s%s\n", report->label, pad, "", report->url);
+             }
+ 
+-            g_list_free_full(reports, (GDestroyNotify)free_report_result);
++            list_free_with_free(reports);
+         }
+     }
+ 
+diff --git a/tests/Makefile.am b/tests/Makefile.am
+index ab019f6..fc49e2c 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -31,7 +31,9 @@ TESTSUITE_AT = \
+   osrelease.at \
+   taghyperlinks.at \
+   configuration_files.at \
+-  libreport_types.at
++  libreport_types.at \
++  reported_to.at \
++  make_description.at
+ 
+ EXTRA_DIST += $(TESTSUITE_AT)
+ TESTSUITE = $(srcdir)/testsuite
+diff --git a/tests/make_description.at b/tests/make_description.at
+new file mode 100644
+index 0000000..dd9dcef
+--- /dev/null
++++ b/tests/make_description.at
+@@ -0,0 +1,191 @@
++# -*- Autotest -*-
++
++AT_BANNER([make_description])
++
++## -------------- ##
++## flag_show_urls ##
++## -------------- ##
++
++AT_TESTFUN([flag_show_urls],
++[[
++#include "internal_libreport.h"
++#include <assert.h>
++
++int main(int argc, char **argv)
++{
++    g_verbose = 3;
++
++    problem_data_t *pd = new_problem_data();
++
++    char *description = make_description(pd, /*skipped names*/NULL, CD_MAX_TEXT_SIZE, MAKEDESC_SHOW_URLS);
++
++    assert(description != NULL || !"Returns NULL for empty problem data");
++    assert(description[0] == '\0' || !"Returns non-empty description for empty problem data");
++
++    free(description);
++
++    add_to_problem_data(pd, FILENAME_REPORTED_TO, "Bugzilla: URL=https://bugzilla.redhat.com/1000000\n");
++
++    description = make_description(pd, /*skipped names*/NULL, CD_MAX_TEXT_SIZE, MAKEDESC_SHOW_URLS);
++    char *expected = xasprintf("%s: %*s%s\n",
++            "Bugzilla", 14 - strlen("Bugzilla"), "", "https://bugzilla.redhat.com/1000000");
++
++    if (strcmp(expected, description) != 0)
++    {
++        printf("E:\n'%s'\n\nC:\n'%s'\n", expected, description);
++        assert(!"The description for a single Bugzilla URL do not matches the expected description");
++    }
++
++    free(description);
++    free(expected);
++    free_problem_data(pd);
++
++    pd = new_problem_data();
++
++    add_to_problem_data(pd,
++        FILENAME_REPORTED_TO,
++            "Bugzilla: URL=https://bugzilla.redhat.com/1000000\n"
++            "ABRT Server: BTHASH=81680083BIGBOOBS\n"
++            "RHTSupport: TIME=12345678 URL=https://access.redhat.com/home MSG=The world's best IT support\n"
++            "ABRT Server: URL=https://bug-report.itos.redhat.com\n");
++
++    description = make_description(pd, /*skipped names*/NULL, CD_MAX_TEXT_SIZE, MAKEDESC_SHOW_URLS);
++    expected = xasprintf("%s: %*s%s\n%s: %*s%s\n%s: %*s%s\n",
++            "Bugzilla",    14 - strlen("Bugzilla"),    "", "https://bugzilla.redhat.com/1000000",
++            "RHTSupport",  14 - strlen("RHTSupport"),  "", "https://access.redhat.com/home",
++            "ABRT Server", 14 - strlen("ABRT Server"), "", "https://bug-report.itos.redhat.com");
++
++    if (strcmp(expected, description) != 0)
++    {
++        printf("E:\n'%s'\n\nC:\n'%s'\n", expected, description);
++        assert(!"The description do not matches the expected description");
++    }
++
++    free(description);
++    free(expected);
++    free_problem_data(pd);
++
++    pd = new_problem_data();
++
++    add_to_problem_data(pd, FILENAME_REPORTED_TO, "ABRT Server: BTHASH=81680083BIGBOOBS\n");
++
++    description = make_description(pd, /*skipped names*/NULL, CD_MAX_TEXT_SIZE, MAKEDESC_SHOW_URLS);
++
++    assert(description != NULL || !"Returns NULL for non empty problem data");
++    assert(description[0] == '\0' || !"Returns non-empty description for problem data without any URL");
++
++    free(description);
++    free_problem_data(pd);
++
++    pd = new_problem_data();
++
++    const int list_flags = CD_FLAG_TXT | CD_FLAG_ISNOTEDITABLE | CD_FLAG_LIST;
++
++    add_to_problem_data_ext(pd, FILENAME_PACKAGE, "libreport", list_flags);
++    add_to_problem_data_ext(pd, FILENAME_EXECUTABLE, "/usr/bin/sh", list_flags);
++    add_to_problem_data_ext(pd, FILENAME_COUNT, "0", list_flags);
++
++    add_to_problem_data(pd,
++        FILENAME_REPORTED_TO,
++            "Bugzilla: URL=https://bugzilla.redhat.com/1000000\n"
++            "ABRT Server: BTHASH=81680083BIGBOOBS\n"
++            "RHTSupport: TIME=12345678 URL=https://access.redhat.com/home MSG=The world's best IT support\n"
++            "ABRT Server: URL=https://bug-report.itos.redhat.com\n");
++
++    description = make_description(pd, /*skipped names*/NULL, CD_MAX_TEXT_SIZE, MAKEDESC_SHOW_ONLY_LIST | MAKEDESC_SHOW_URLS);
++
++    expected = xasprintf(
++            "%s: %*s%s\n"
++            "%s: %*s%s\n"
++            "%s: %*s%s\n"
++            "\n"
++            "%s: %*s%s\n"
++            "%s: %*s%s\n"
++            "%s: %*s%s\n",
++            FILENAME_COUNT,      14 - strlen(FILENAME_COUNT),      "", "0",
++            FILENAME_EXECUTABLE, 14 - strlen(FILENAME_EXECUTABLE), "", "/usr/bin/sh",
++            FILENAME_PACKAGE,    14 - strlen(FILENAME_PACKAGE),    "", "libreport",
++            "Bugzilla",          14 - strlen("Bugzilla"),          "", "https://bugzilla.redhat.com/1000000",
++            "RHTSupport",        14 - strlen("RHTSupport"),        "", "https://access.redhat.com/home",
++            "ABRT Server",       14 - strlen("ABRT Server"),       "", "https://bug-report.itos.redhat.com");
++
++    if (strcmp(expected, description) != 0)
++    {
++        printf("E:\n'%s'\n\nC:\n'%s'\n", expected, description);
++        assert(!"The description do not matches the expected description");
++    }
++
++    free(expected);
++    free(description);
++
++    const char *const backtrace = "Extremely long backtrace which does not make sense";
++    add_to_problem_data(pd, FILENAME_BACKTRACE, backtrace);
++
++    description = make_description(pd, /*skipped names*/NULL, strlen(backtrace) - 1, MAKEDESC_SHOW_FILES | MAKEDESC_SHOW_URLS);
++
++    expected = xasprintf(
++            "%s: %*s%s\n"
++            "%s: %*s%s\n"
++            "%s: %*s%s\n"
++            "\n"
++            "%s: %*s%s\n"
++            "%s: %*s%s\n"
++            "%s: %*s%s\n"
++            "\n"
++            "%s: %*sText file, %llu bytes\n"
++            "%s: %*sText file, %llu bytes\n",
++            FILENAME_COUNT,      14 - strlen(FILENAME_COUNT),      "", "0",
++            FILENAME_EXECUTABLE, 14 - strlen(FILENAME_EXECUTABLE), "", "/usr/bin/sh",
++            FILENAME_PACKAGE,    14 - strlen(FILENAME_PACKAGE),    "", "libreport",
++            "Bugzilla",          14 - strlen("Bugzilla"),          "", "https://bugzilla.redhat.com/1000000",
++            "RHTSupport",        14 - strlen("RHTSupport"),        "", "https://access.redhat.com/home",
++            "ABRT Server",       14 - strlen("ABRT Server"),       "", "https://bug-report.itos.redhat.com",
++            FILENAME_BACKTRACE,  14 - strlen(FILENAME_BACKTRACE),  "", strlen(backtrace),
++            FILENAME_REPORTED_TO,14 - strlen(FILENAME_REPORTED_TO),"", strlen(get_problem_item_content_or_NULL(pd, FILENAME_REPORTED_TO))
++            );
++
++    if (strcmp(expected, description) != 0)
++    {
++        printf("E:\n'%s'\n\nC:\n'%s'\n", expected, description);
++        assert(!"The description do not matches the expected description");
++    }
++
++    free(expected);
++    free(description);
++    free_problem_data(pd);
++
++    /* SHOW_URLS DID NOT BREAK THE OLD BEHAVIOUR */
++    pd = new_problem_data();
++
++    add_to_problem_data_ext(pd, FILENAME_PACKAGE, "libreport", list_flags);
++    add_to_problem_data_ext(pd, FILENAME_EXECUTABLE, "/usr/bin/sh", list_flags);
++    add_to_problem_data_ext(pd, FILENAME_COUNT, "0", list_flags);
++    add_to_problem_data(pd, FILENAME_BACKTRACE, backtrace);
++
++    description = make_description(pd, /*skipped names*/NULL, strlen(backtrace) - 1, MAKEDESC_SHOW_FILES);
++
++    expected = xasprintf(
++            "%s: %*s%s\n"
++            "%s: %*s%s\n"
++            "%s: %*s%s\n"
++            "\n"
++            "%s: %*sText file, %llu bytes\n",
++            FILENAME_COUNT,      14 - strlen(FILENAME_COUNT),      "", "0",
++            FILENAME_EXECUTABLE, 14 - strlen(FILENAME_EXECUTABLE), "", "/usr/bin/sh",
++            FILENAME_PACKAGE,    14 - strlen(FILENAME_PACKAGE),    "", "libreport",
++            FILENAME_BACKTRACE,  14 - strlen(FILENAME_BACKTRACE),  "", strlen(backtrace)
++            );
++
++    if (strcmp(expected, description) != 0)
++    {
++        printf("E:\n'%s'\n\nC:\n'%s'\n", expected, description);
++        assert(!"The description do not matches the expected description");
++    }
++
++    free(expected);
++    free(description);
++    free_problem_data(pd);
++
++    return 0;
++}
++]])
+diff --git a/tests/reported_to.at b/tests/reported_to.at
+new file mode 100644
+index 0000000..8364d44
+--- /dev/null
++++ b/tests/reported_to.at
+@@ -0,0 +1,314 @@
++# -*- Autotest -*-
++
++AT_BANNER([reported_to])
++
++## -------------------- ##
++## add_reported_to_data ##
++## -------------------- ##
++
++AT_TESTFUN([add_reported_to_data],
++[[
++#include "internal_libreport.h"
++#include <assert.h>
++
++bool string_cmp(const char *orig, const char *other)
++{
++    if (strcmp(orig, other) == 0)
++        return true;
++
++    printf("'%s' != '%s'\n", orig, other);
++    return false;
++}
++
++int main(void)
++{
++    g_verbose=3;
++
++#define FIRST_LINE "Bugzilla: URL=https://goodluck.org"
++#define SECOND_LINE "ABRT Server: BTHASH=81680083BIGBOOBS"
++#define THIRD_LINE "RHTSupport: TIME=12345678 URL=https://access.redhat.com/home MSG=The world's best IT support"
++
++    char *reported_to = NULL;
++    assert(add_reported_to_data(&reported_to, FIRST_LINE) || !"Refused to add the first line");
++    assert(string_cmp(FIRST_LINE"\n", reported_to) || !"Failed to create reported_to from the line");
++
++    assert(add_reported_to_data(&reported_to, SECOND_LINE) || !"Refused to add the second line" );
++    assert(string_cmp(FIRST_LINE"\n"SECOND_LINE"\n", reported_to) || !"Failed to add the second line");
++
++    assert(add_reported_to_data(&reported_to, THIRD_LINE) || !"Refused to add the third line");
++    assert(string_cmp(FIRST_LINE"\n"SECOND_LINE"\n"THIRD_LINE"\n", reported_to) || !"Failed to add the third line");
++
++    assert(!add_reported_to_data(&reported_to, FIRST_LINE) || !"Added the first line again");
++    assert(string_cmp(FIRST_LINE"\n"SECOND_LINE"\n"THIRD_LINE"\n", reported_to) || !"Modified the reported_to text not adding the first again");
++
++    assert(!add_reported_to_data(&reported_to, SECOND_LINE) || !"Added the second line again");
++    assert(string_cmp(FIRST_LINE"\n"SECOND_LINE"\n"THIRD_LINE"\n", reported_to) || !"Modified the reported_to text not adding the second again");
++
++    assert(!add_reported_to_data(&reported_to, THIRD_LINE) || !"Added the third line again");
++    assert(string_cmp(FIRST_LINE"\n"SECOND_LINE"\n"THIRD_LINE"\n", reported_to) || !"Modified the reported_to text not adding the second again");
++
++    free(reported_to);
++
++    return 0;
++}
++]])
++
++## ---------------------- ##
++## parse_reported_to_data ##
++## ---------------------- ##
++
++AT_TESTFUN([parse_reported_to_data],
++[[
++#include "internal_libreport.h"
++#include <assert.h>
++
++bool parse_and_check(const char *reported_to, GList *expected)
++{
++    GList *reports = read_entire_reported_to_data(reported_to);
++
++    const unsigned expected_len = g_list_length(expected);
++    const unsigned current_len = g_list_length(expected);
++    if (expected_len != current_len)
++    {
++        printf("Expected %d != Current %d\n", expected_len, current_len);
++        goto finish;
++    }
++
++    bool res = false;
++    for(unsigned i = 0; i < expected_len; ++i)
++    {
++        report_result_t *e = (report_result_t *)g_list_nth_data(expected, i);
++        report_result_t *c = (report_result_t *)g_list_nth_data(reports, i);
++
++        printf("Reported to record %d\n", i);
++        if (strcmp(e->label, c->label) != 0)
++        {
++            printf("'%s' != '%s'\n", e->label, c->label);
++            goto finish;
++        }
++
++        if(!((e->url == NULL && c->url == NULL) || strcmp(e->url, c->url) == 0))
++        {
++            printf("'%s' != '%s'\n", e->url, c->url);
++            goto finish;
++        }
++
++        if(!((e->bthash == NULL && c->bthash == NULL) || (strcmp(e->bthash, c->bthash) == 0)))
++        {
++            printf("'%s' != '%s'\n", e->bthash, c->bthash);
++            goto finish;
++        }
++
++        if(!((e->msg == NULL && c->msg == NULL) || (strcmp(e->msg, c->msg) == 0)))
++        {
++            printf("'%s' != '%s'\n", e->msg, c->msg);
++            goto finish;
++        }
++    }
++    res = true;
++
++finish:
++    list_free_with_free(reports);
++    return res;
++}
++
++int main(void)
++{
++    g_verbose=3;
++
++#define FIRST_LINE "Bugzilla: URL=https://goodluck.org"
++    report_result_t first_result = {
++        .label = (char *)"Bugzilla",
++        .url   = (char *)"https://goodluck.org"
++    };
++
++#define SECOND_LINE "ABRT Server: BTHASH=81680083BIGBOOBS"
++    report_result_t second_result = {
++        .label = (char *)"ABRT Server",
++        .bthash = (char *)"81680083BIGBOOBS"
++    };
++
++#define THIRD_LINE "RHTSupport: TIME=12345678 URL=https://access.redhat.com/home MSG=The world's best IT support"
++    report_result_t third_result = {
++        .label = (char *)"RHTSupport",
++        .url = (char *)"https://access.redhat.com/home",
++        .msg = (char *)"The world's best IT support",
++    };
++
++    GList *expected = g_list_append(NULL, &first_result);
++    assert(parse_and_check(FIRST_LINE, expected));
++
++    expected = g_list_append(expected, &second_result);
++    assert(parse_and_check(FIRST_LINE"\n"SECOND_LINE, expected));
++
++    expected = g_list_append(expected, &third_result);
++    assert(parse_and_check(FIRST_LINE"\n"SECOND_LINE"\n"THIRD_LINE, expected));
++
++    g_list_free(expected);
++    expected = NULL;
++    expected = g_list_append(expected, &second_result);
++    assert(parse_and_check(SECOND_LINE, expected));
++
++    g_list_free(expected);
++    expected = NULL;
++    expected = g_list_append(expected, &third_result);
++    assert(parse_and_check(THIRD_LINE, expected));
++
++    g_list_free(expected);
++    expected = g_list_append(NULL, &first_result);
++    assert(parse_and_check("Bugzilla URL=worksfine", NULL));
++    assert(parse_and_check("Bugzilla URL=evenbetter\n"FIRST_LINE, expected));
++    assert(parse_and_check(": URL=thebest\n"FIRST_LINE, expected));
++
++    g_list_free(expected);
++
++    return 0;
++}
++]])
++
++## ------------------- ##
++## find_in_reported_to ##
++## ------------------- ##
++
++AT_TESTFUN([find_in_reported_to],
++[[
++#include "internal_libreport.h"
++#include <assert.h>
++
++bool report_result_cmp(const report_result_t *e, const report_result_t *c)
++{
++    if (strcmp(e->label, c->label) != 0)
++    {
++        printf("'%s' != '%s'\n", e->label, c->label);
++        return false;
++    }
++
++    if(!((e->url == NULL && c->url == NULL) || (strcmp(e->url, c->url) == 0)))
++    {
++        printf("'%s' != '%s'\n", e->url, c->url);
++        return false;
++    }
++
++    if(!((e->bthash == NULL && c->bthash == NULL) || (strcmp(e->bthash, c->bthash) == 0)))
++    {
++        printf("'%s' != '%s'\n", e->bthash, c->bthash);
++        return false;
++    }
++
++    if(!((e->msg == NULL && c->msg == NULL) || (strcmp(e->msg, c->msg) == 0)))
++    {
++        printf("'%s' != '%s'\n", e->msg, c->msg);
++        return false;
++    }
++
++    return true;
++}
++
++int main(void)
++{
++    g_verbose=3;
++
++#define FIRST_LINE "Bugzilla: URL=https://goodluck.org"
++    report_result_t first_result = {
++        .label = (char *)"Bugzilla",
++        .url   = (char *)"https://goodluck.org"
++    };
++
++#define SECOND_LINE "ABRT Server: BTHASH=81680083BIGBOOBS"
++    report_result_t second_result = {
++        .label  = (char *)"ABRT Server",
++        .bthash = (char *)"81680083BIGBOOBS"
++    };
++
++#define THIRD_LINE "RHTSupport: TIME=12345678 URL=https://access.redhat.com/home MSG=The world's best IT support"
++    report_result_t third_result = {
++        .label = (char *)"RHTSupport",
++        .url   = (char *)"https://access.redhat.com/home",
++        .msg   = (char *)"The world's best IT support",
++    };
++
++#define FOURTH_LINE "Bugzilla: URL=https://always.win"
++    report_result_t fourth_result = {
++        .label = (char *)"Bugzilla",
++        .url   = (char *)"https://always.win",
++    };
++
++#define FIFTH_LINE "ABRT Server: BTHASH=DEADBEAF"
++    report_result_t fifth_result = {
++        .label  = (char *)"ABRT Server",
++        .bthash = (char *)"DEADBEAF",
++    };
++
++#define SIXTH_LINE "RHTSupport: TIME=87654321 URL=https://bugzilla.redhat.com/ MSG=The world's biggest Bugzilla instance"
++    report_result_t sixth_result = {
++        .label = (char *)"RHTSupport",
++        .url   = (char *)"https://bugzilla.redhat.com/",
++        .msg   = (char *)"The world's biggest Bugzilla instance",
++    };
++
++    {
++        report_result_t *found = find_in_reported_to_data(FIRST_LINE, "Bugzilla");
++        assert(found != NULL || !"Failed to find Bugzilla");
++        assert(report_result_cmp(found, &first_result) || !"Failed to parse Bugzilla");
++        free_report_result(found);
++    }
++
++    {
++        report_result_t *found = find_in_reported_to_data(SECOND_LINE, "ABRT Server");
++        assert(found != NULL || !"Failed to find ABRT Server");
++        assert(report_result_cmp(found, &second_result) || !"Failed to parse ABRT Server");
++        free_report_result(found);
++    }
++
++    {
++        report_result_t *found = find_in_reported_to_data(THIRD_LINE, "RHTSupport");
++        assert(found != NULL || !"Failed to find RHTSupport");
++        assert(report_result_cmp(found, &third_result) || !"Failed to parse RHTSupport");
++        free_report_result(found);
++    }
++
++    {
++        report_result_t *found = find_in_reported_to_data(FIRST_LINE"\n"FOURTH_LINE, "Bugzilla");
++        assert(found != NULL || !"Failed to find the latest Bugzilla");
++        assert(report_result_cmp(found, &fourth_result) || !"Failed to parse the latest Bugzilla");
++        free_report_result(found);
++    }
++
++    {
++        report_result_t *found = find_in_reported_to_data(SECOND_LINE"\n"FIFTH_LINE, "ABRT Server");
++        assert(found != NULL || !"Failed to find the latest ABRT Server");
++        assert(report_result_cmp(found, &fifth_result) || !"Failed to parse the latest ABRT Server");
++        free_report_result(found);
++    }
++
++    {
++        report_result_t *found = find_in_reported_to_data(THIRD_LINE"\n"SIXTH_LINE, "RHTSupport");
++        assert(found != NULL || !"Failed to find the RHTSupport");
++        assert(report_result_cmp(found, &sixth_result) || !"Failed to parse the latest RHTSupport");
++        free_report_result(found);
++    }
++
++    {
++        report_result_t *found = find_in_reported_to_data(FIRST_LINE"\n"SECOND_LINE"\n"THIRD_LINE"\n"FOURTH_LINE"\n"FIFTH_LINE"\n"SIXTH_LINE, "Bugzilla");
++        assert(found != NULL || !"Failed to find the latest Bugzilla from huge file");
++        assert(report_result_cmp(found, &fourth_result) || !"Failed to parse the latest Bugzilla from huge file");
++        free_report_result(found);
++    }
++
++    {
++        report_result_t *found = find_in_reported_to_data(FIRST_LINE"\n"SECOND_LINE"\n"THIRD_LINE"\n"FOURTH_LINE"\n"FIFTH_LINE"\n"SIXTH_LINE, "ABRT Server");
++        assert(found != NULL || !"Failed to find the latest ABRT Server from huge file");
++        assert(report_result_cmp(found, &fifth_result) || !"Failed to parse the latest ABRT Server from huge file");
++        free_report_result(found);
++    }
++
++    {
++        report_result_t *found = find_in_reported_to_data(FIRST_LINE"\n"SECOND_LINE"\n"THIRD_LINE"\n"FOURTH_LINE"\n"FIFTH_LINE"\n"SIXTH_LINE, "RHTSupport");
++        assert(found != NULL || !"Failed to find the RHTSupport from huge file");
++        assert(report_result_cmp(found, &sixth_result) || !"Failed to parse the latest RHTSupport from huge file");
++        free_report_result(found);
++    }
++
++    return 0;
++}
++]])
+diff --git a/tests/testsuite.at b/tests/testsuite.at
+index 647e42b..5507a0f 100644
+--- a/tests/testsuite.at
++++ b/tests/testsuite.at
+@@ -6,3 +6,5 @@ m4_include([osrelease.at])
+ m4_include([taghyperlinks.at])
+ m4_include([configuration_files.at])
+ m4_include([libreport_types.at])
++m4_include([reported_to.at])
++m4_include([make_description.at])
+-- 
+1.8.3.1
+

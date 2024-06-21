@@ -1,0 +1,108 @@
+From ebb7fcf3217c7d75e14527a26bd48f55cb53efc8 Mon Sep 17 00:00:00 2001
+From: Denys Vlasenko <dvlasenk@redhat.com>
+Date: Wed, 27 Mar 2013 13:02:56 +0100
+Subject: [RHEL6 LIBREPORT PATCH 76/94] fread_with_reporting: make progress
+ indicator less noisy
+
+Instead of a message every ~16 seconds, back off exponentially.
+
+Signed-off-by: Denys Vlasenko <dvlasenk@redhat.com>
+Signed-off-by: Jiri Moskovcak <jmoskovc@redhat.com>
+---
+ src/include/internal_libreport.h |  4 ++++
+ src/lib/abrt_curl.c              | 25 +++++++++++++++++++------
+ src/lib/xfuncs.c                 | 16 ++++++++++++++++
+ 3 files changed, 39 insertions(+), 6 deletions(-)
+
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index f2be160..e15bcad 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -348,6 +348,10 @@ ssize_t xsendto(int s, const void *buf, size_t len,
+ 
+ #define xstat libreport_xstat
+ void xstat(const char *name, struct stat *stat_buf);
++#define fstat_st_size_or_die libreport_fstat_st_size_or_die
++off_t fstat_st_size_or_die(int fd);
++#define stat_st_size_or_die libreport_stat_st_size_or_die
++off_t stat_st_size_or_die(const char *filename);
+ 
+ #define xopen3 libreport_xopen3
+ int xopen3(const char *pathname, int flags, int mode);
+diff --git a/src/lib/abrt_curl.c b/src/lib/abrt_curl.c
+index 1ae773d..6ddb79f 100644
+--- a/src/lib/abrt_curl.c
++++ b/src/lib/abrt_curl.c
+@@ -193,23 +193,36 @@ save_headers(void *buffer_pv, size_t count, size_t nmemb, void *ptr)
+ static size_t fread_with_reporting(void *ptr, size_t size, size_t nmemb, void *userdata)
+ {
+     static time_t last_t; // hack
++    static time_t report_interval;
+ 
+     FILE *fp = (FILE*)userdata;
++
++    off_t cur_pos = ftello(fp);
++    if (cur_pos == -1)
++        goto skip; /* paranoia */
++
+     time_t t = time(NULL);
+ 
+-    // Report current file position every 16 seconds
+-    if (!(t & 0xf) && last_t != t)
++    if (cur_pos == 0) /* first call */
++    {
++        last_t = t;
++        report_interval = 15;
++    }
++
++    /* Report current file position after 15 seconds,
++     * then after 30 seconds, then after 60 seconds and so on.
++     */
++    if ((t - last_t) >= report_interval)
+     {
+         last_t = t;
+-        off_t cur_pos = ftello(fp);
+-        fseeko(fp, 0, SEEK_END);
+-        off_t sz = ftello(fp);
+-        fseeko(fp, cur_pos, SEEK_SET);
++        report_interval *= 2;
++        off_t sz = fstat_st_size_or_die(fileno(fp));
+         log(_("Uploaded: %llu of %llu kbytes"),
+                 (unsigned long long)cur_pos / 1024,
+                 (unsigned long long)sz / 1024);
+     }
+ 
++ skip:
+     return fread(ptr, size, nmemb, fp);
+ }
+ 
+diff --git a/src/lib/xfuncs.c b/src/lib/xfuncs.c
+index 88ae0bc..d7810ba 100644
+--- a/src/lib/xfuncs.c
++++ b/src/lib/xfuncs.c
+@@ -278,6 +278,22 @@ void xstat(const char *name, struct stat *stat_buf)
+         perror_msg_and_die("Can't stat '%s'", name);
+ }
+ 
++off_t fstat_st_size_or_die(int fd)
++{
++    struct stat statbuf;
++    if (fstat(fd, &statbuf))
++        perror_msg_and_die("Can't stat");
++    return statbuf.st_size;
++}
++
++off_t stat_st_size_or_die(const char *filename)
++{
++    struct stat statbuf;
++    if (stat(filename, &statbuf))
++        perror_msg_and_die("Can't stat '%s'", filename);
++    return statbuf.st_size;
++}
++
+ // Die if we can't open a file and return a fd
+ int xopen3(const char *pathname, int flags, int mode)
+ {
+-- 
+1.8.2.1
+

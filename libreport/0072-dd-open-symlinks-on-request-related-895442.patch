@@ -1,0 +1,64 @@
+From 6dd0ec16260283e5e61a13296b1352acfd60b61a Mon Sep 17 00:00:00 2001
+From: Jiri Moskovcak <jmoskovc@redhat.com>
+Date: Fri, 18 Jan 2013 09:40:00 +0100
+Subject: [PATCH 72/72] dd: open symlinks on request related #895442
+
+- /etc/system-release is symlink
+- closes trac#951
+
+Signed-off-by: Jakub Filak <jfilak@redhat.com>
+---
+ src/include/dump_dir.h | 4 +++-
+ src/lib/dump_dir.c     | 8 ++++----
+ 2 files changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/src/include/dump_dir.h b/src/include/dump_dir.h
+index f8d2931..8f34f2f 100644
+--- a/src/include/dump_dir.h
++++ b/src/include/dump_dir.h
+@@ -32,7 +32,9 @@ extern "C" {
+ enum {
+     DD_FAIL_QUIETLY_ENOENT = (1 << 0),
+     DD_FAIL_QUIETLY_EACCES = (1 << 1),
+-    DD_OPEN_READONLY = (1 << 2),
++    /* Open symlinks. dd_* funcs don't open symlinks by default */
++    DD_OPEN_FOLLOW = (1 << 2),
++    DD_OPEN_READONLY = (1 << 3),
+ };
+ 
+ struct dump_dir {
+diff --git a/src/lib/dump_dir.c b/src/lib/dump_dir.c
+index b905893..d271145 100644
+--- a/src/lib/dump_dir.c
++++ b/src/lib/dump_dir.c
+@@ -491,15 +491,15 @@ void dd_create_basic_files(struct dump_dir *dd, uid_t uid, const char *chroot_di
+     if (!release)
+     {
+         release = load_text_file("/etc/system-release",
+-                DD_LOAD_TEXT_RETURN_NULL_ON_FAILURE);
++                DD_LOAD_TEXT_RETURN_NULL_ON_FAILURE | DD_OPEN_FOLLOW);
+         if (!release)
+-            release = load_text_file("/etc/redhat-release", /*flags:*/ 0);
++            release = load_text_file("/etc/redhat-release", DD_OPEN_FOLLOW);
+         dd_save_text(dd, FILENAME_OS_RELEASE, release);
+         if (chroot_dir)
+         {
+             free(release);
+             char *chrooted_name = concat_path_file(chroot_dir, "/etc/system-release");
+-            release = load_text_file(chrooted_name, /*flags:*/ 0);
++            release = load_text_file(chrooted_name, DD_OPEN_FOLLOW);
+             free(chrooted_name);
+             if (release[0])
+                 dd_save_text(dd, FILENAME_OS_RELEASE_IN_ROOTDIR, release);
+@@ -645,7 +645,7 @@ int dd_delete(struct dump_dir *dd)
+ 
+ static char *load_text_file(const char *path, unsigned flags)
+ {
+-    int fd = open(path, O_RDONLY | O_NOFOLLOW);
++    int fd = open(path, O_RDONLY | ((flags & DD_OPEN_FOLLOW) ? 0 : O_NOFOLLOW));
+     if (fd == -1)
+     {
+         if (!(flags & DD_FAIL_QUIETLY_ENOENT))
+-- 
+1.8.0.2
+

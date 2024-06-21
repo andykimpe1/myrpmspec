@@ -1,0 +1,352 @@
+From 0fb92976200bc8078e5cafcb25508e1ea774a2bb Mon Sep 17 00:00:00 2001
+From: Denys Vlasenko <dvlasenk@redhat.com>
+Date: Wed, 27 Mar 2013 13:03:04 +0100
+Subject: [RHEL6 LIBREPORT PATCH 84/94] reporter-rhtsupport: upload file to
+ BigFileURL if it is large
+
+This patch adds BigFileURL and BigSizeMB parameters.
+
+If uploaded DIR is bigger than BigSizeMB, then it is not attached
+to the case, but uploaded to BigFileURL, then a comment is added
+to the case with the URL of uploaded file.
+
+Signed-off-by: Denys Vlasenko <dvlasenk@redhat.com>
+Signed-off-by: Jiri Moskovcak <jmoskovc@redhat.com>
+---
+ src/plugins/abrt_rh_support.c     | 159 ++++++++++++++++++++++++++++++++++++++
+ src/plugins/abrt_rh_support.h     |   7 ++
+ src/plugins/reporter-rhtsupport.c |  84 +++++++++++++++-----
+ src/plugins/rhtsupport.conf       |   4 +
+ 4 files changed, 233 insertions(+), 21 deletions(-)
+
+diff --git a/src/plugins/abrt_rh_support.c b/src/plugins/abrt_rh_support.c
+index 2b5739f..adebcc3 100644
+--- a/src/plugins/abrt_rh_support.c
++++ b/src/plugins/abrt_rh_support.c
+@@ -424,6 +424,165 @@ create_new_case(const char* base_url,
+ }
+ 
+ //
++// Add case comment
++//
++// $ curl -X POST -H 'Content-Type: application/xml' --data
++//  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
++//   <comment xmlns="http://www.redhat.com/gss/strata">
++//   <text>Test comment!  This can contain lots of information, etc.</text>
++//   </comment>'
++//   https://api.access.redhat.com/rs/cases/NNNNNNN/comments
++//
++static char*
++make_comment_data(const char *comment_text)
++{
++    char *retval;
++    xmlTextWriterPtr writer;
++    xmlBufferPtr buf;
++
++    buf = xxmlBufferCreate();
++    writer = xxmlNewTextWriterMemory(buf);
++
++    xxmlTextWriterStartDocument(writer, NULL, "UTF-8", "yes");
++    xxmlTextWriterStartElement(writer, "comment");
++    xxmlTextWriterWriteAttribute(writer, "xmlns",
++                                   "http://www.redhat.com/gss/strata");
++
++    xxmlTextWriterWriteElement(writer, "text", comment_text);
++
++    xxmlTextWriterEndDocument(writer);
++    retval = xstrdup((const char*)buf->content);
++    xmlFreeTextWriter(writer);
++    xmlBufferFree(buf);
++    return retval;
++}
++
++static rhts_result_t*
++post_comment_to_url(const char *url,
++                const char *username,
++                const char *password,
++                bool ssl_verify,
++                const char **additional_headers,
++                const char *comment_text)
++{
++    rhts_result_t *result = xzalloc(sizeof(*result));
++    char *url_copy = NULL;
++
++    char *xml = make_comment_data(comment_text);
++
++    int redirect_count = 0;
++    char *errmsg;
++    abrt_post_state_t *post_state;
++
++ redirect:
++    post_state = new_abrt_post_state(0
++            + ABRT_POST_WANT_HEADERS
++            + ABRT_POST_WANT_BODY
++            + ABRT_POST_WANT_ERROR_MSG
++            + (ssl_verify ? ABRT_POST_WANT_SSL_VERIFY : 0)
++    );
++    post_state->username = username;
++    post_state->password = password;
++
++    abrt_post_string(post_state, url, "application/xml", additional_headers, xml);
++
++    char *location = find_header_in_abrt_post_state(post_state, "Location:");
++
++    switch (post_state->http_resp_code)
++    {
++    case 404:
++        /* Not strictly necessary (default branch would deal with it too),
++         * but makes this typical error less cryptic:
++         * instead of returning html-encoded body, we show short concise message,
++         * and show offending URL (typos in which is a typical cause) */
++        result->error = -1;
++        result->msg = xasprintf("Error in HTTP POST, "
++                        "HTTP code: 404 (Not found), URL:'%s'", url);
++        break;
++
++    case 301: /* "301 Moved Permanently" (for example, used to move http:// to https://) */
++    case 302: /* "302 Found" (just in case) */
++    case 305: /* "305 Use Proxy" */
++        if (++redirect_count < 10 && location)
++        {
++            free(url_copy);
++            url = url_copy = xstrdup(location);
++            free_abrt_post_state(post_state);
++            goto redirect;
++        }
++        /* fall through */
++
++    default:
++        result->error = -1;
++        errmsg = post_state->curl_error_msg;
++        if (errmsg && errmsg[0])
++        {
++            result->msg = xasprintf(_("Error in comment creation: %s"), errmsg);
++        }
++        else
++        {
++            errmsg = find_header_in_abrt_post_state(post_state, "Strata-Message:");
++            if (!errmsg)
++                errmsg = post_state->body;
++            if (errmsg && errmsg[0])
++                result->msg = xasprintf(_("Error in comment creation, HTTP code: %d, server says: '%s'"),
++                        post_state->http_resp_code, errmsg);
++            else
++                result->msg = xasprintf(_("Error in comment creation, HTTP code: %d"),
++                        post_state->http_resp_code);
++        }
++        break;
++
++    case 200:
++    case 201:
++        /* Created successfully */
++        result->url = xstrdup(location); /* note: xstrdup(NULL) returns NULL */
++    } /* switch (HTTP code) */
++
++    result->http_resp_code = post_state->http_resp_code;
++    result->body = post_state->body;
++    post_state->body = NULL;
++
++    free_abrt_post_state(post_state);
++    free(xml);
++    free(url_copy);
++    return result;
++}
++
++rhts_result_t*
++add_comment_to_case(const char* base_url,
++                const char* username,
++                const char* password,
++                bool ssl_verify,
++                const char* comment_text)
++{
++    char *url = concat_path_file(base_url, "comments");
++    rhts_result_t *result = post_comment_to_url(url,
++                username,
++                password,
++                ssl_verify,
++    // NB! text_plain_header here was causing error 404 instead of 201 (Created)!
++    // NULL makes curl use "Accept: */*" instead and creation works.
++    // Likely a bug on the server!
++                (const char **) NULL, //text_plain_header,
++                comment_text
++    );
++    free(url);
++
++    if (!result->error && !result->url)
++    {
++        /* Creation returned valid code, but no location */
++        result->error = -1;
++        free(result->msg);
++        result->msg = xasprintf(_("Error in comment creation: no Location URL, HTTP code: %d"),
++                result->http_resp_code
++        );
++    }
++
++    return result;
++}
++
++//
+ // Attach file to case
+ //
+ static rhts_result_t*
+diff --git a/src/plugins/abrt_rh_support.h b/src/plugins/abrt_rh_support.h
+index a20d3a1..22b6d79 100644
+--- a/src/plugins/abrt_rh_support.h
++++ b/src/plugins/abrt_rh_support.h
+@@ -70,6 +70,13 @@ create_new_case(const char* baseURL,
+ );
+ 
+ rhts_result_t*
++add_comment_to_case(const char* base_url,
++                const char* username,
++                const char* password,
++                bool ssl_verify,
++                const char* comment_text);
++
++rhts_result_t*
+ attach_file_to_case(const char* baseURL,
+                 const char* username,
+                 const char* password,
+diff --git a/src/plugins/reporter-rhtsupport.c b/src/plugins/reporter-rhtsupport.c
+index 1a542ee..1c6b763 100644
+--- a/src/plugins/reporter-rhtsupport.c
++++ b/src/plugins/reporter-rhtsupport.c
+@@ -164,6 +164,15 @@ int create_tarball(const char *tempfile, problem_data_t *problem_data)
+     return 1; /* failure */
+ }
+ 
++static
++char *get_param_string(const char *name, map_string_h *settings, const char *dflt)
++{
++    char *envname = xasprintf("RHTSupport_%s", name);
++    const char *envvar = getenv(envname);
++    free(envname);
++    return xstrdup(envvar ? envvar : (get_map_string_item_or_NULL(settings, name) ? : dflt));
++}
++
+ int main(int argc, char **argv)
+ {
+     abrt_init(argv);
+@@ -190,7 +199,8 @@ int main(int argc, char **argv)
+         "\n"
+         "If not specified, CONFFILE defaults to "CONF_DIR"/plugins/rhtsupport.conf\n"
+         "Its lines should have 'PARAM = VALUE' format.\n"
+-        "Recognized string parameters: URL, Login, Password.\n"
++        "Recognized string parameters: URL, Login, Password, BigFileURL.\n"
++        "Recognized numeric parameter: BigSizeMB.\n"
+         "Recognized boolean parameter (VALUE should be 1/0, yes/no): SSLVerify.\n"
+         "Parameters can be overridden via $RHTSupport_PARAM environment variables.\n"
+         "\n"
+@@ -234,21 +244,22 @@ int main(int argc, char **argv)
+         VERB3 log("Loaded '%s'", fn);
+         conf_file = g_list_remove(conf_file, fn);
+     }
+-    char* envvar;
+-    char *url;
+-    char *login;
+-    char *password;
+-    bool ssl_verify;
+-    envvar = getenv("RHTSupport_URL");
+-    url = xstrdup(envvar ? envvar : (get_map_string_item_or_NULL(settings, "URL") ? : "https://api.access.redhat.com/rs"));
+-    envvar = getenv("RHTSupport_Login");
+-    login = xstrdup(envvar ? envvar : get_map_string_item_or_empty(settings, "Login"));
+-    envvar = getenv("RHTSupport_Password");
+-    password = xstrdup(envvar ? envvar : get_map_string_item_or_empty(settings, "Password"));
+-    envvar = getenv("RHTSupport_SSLVerify");
+-    ssl_verify = string_to_bool(envvar ? envvar : get_map_string_item_or_empty(settings, "SSLVerify"));
++    char *url      = get_param_string("URL"       , settings, "https://api.access.redhat.com/rs");
++    char *login    = get_param_string("Login"     , settings, "");
++    char *password = get_param_string("Password"  , settings, "");
++    char *bigurl   = get_param_string("BigFileURL", settings, "ftp://dropbox.redhat.com/incoming/");
+     if (!login[0] || !password[0])
+         error_msg_and_die(_("Empty RHTS login or password"));
++    char* envvar;
++    envvar = getenv("RHTSupport_SSLVerify");
++    bool ssl_verify = string_to_bool(
++                envvar ? envvar : (get_map_string_item_or_NULL(settings, "SSLVerify") ? : "1")
++    );
++    envvar = getenv("RHTSupport_BigSizeMB");
++    unsigned bigsize = xatoi_positive(
++                /* RH has a 250m limit for web attachments (as of 2013) */
++                envvar ? envvar : (get_map_string_item_or_NULL(settings, "BigSizeMB") ? : "200")
++    );
+     free_map_string(settings);
+ 
+     VERB1 log("Initializing XML-RPC library");
+@@ -383,6 +394,7 @@ int main(int argc, char **argv)
+     if (tempfile_size <= QUERY_HINTS_IF_SMALLER_THAN)
+     {
+         /* Check for hints and show them if we have something */
++        log(_("Checking for hints"));
+         result = get_rhts_hints(url,
+                 login,
+                 password,
+@@ -487,13 +499,43 @@ int main(int argc, char **argv)
+         result = NULL;
+     }
+ 
+-    /* Attach the tarball of -d DIR */
+-    result_atch = attach_file_to_case(url,
+-             login,
+-             password,
+-             ssl_verify,
+-            tempfile
+-    );
++    char *remote_filename = NULL;
++    if (bigsize != 0 && tempfile_size / (1024*1024) >= bigsize)
++    {
++        /* Upload tarball of -d DIR to "big file" FTP */
++        /* log(_("Uploading problem data to '%s'"), bigurl); - upload_file does this */
++        remote_filename = upload_file(bigurl, tempfile);
++    }
++    if (remote_filename)
++    {
++        log(_("Adding comment to case '%s'"), url);
++        /*
++         * Do not translate message below - it goes
++         * to a server where *other people* will read it.
++         */
++        char *comment_text = xasprintf(
++            "Problem data was uploaded to %s",
++            remote_filename
++        );
++        free(remote_filename);
++        result_atch = add_comment_to_case(url,
++                login, password,
++                ssl_verify,
++                comment_text
++        );
++        free(comment_text);
++    }
++    else
++    {
++        /* Attach the tarball of -d DIR */
++        log(_("Attaching problem data to case '%s'"), url);
++        result_atch = attach_file_to_case(url,
++                login, password,
++                ssl_verify,
++                tempfile
++
++        );
++    }
+     if (result_atch->error)
+     {
+         if (!(opts & OPT_t))
+diff --git a/src/plugins/rhtsupport.conf b/src/plugins/rhtsupport.conf
+index af3cde8..325be92 100644
+--- a/src/plugins/rhtsupport.conf
++++ b/src/plugins/rhtsupport.conf
+@@ -8,6 +8,10 @@
+ # URL=
+ # Login=
+ # Password=
++# BigFileURL=
++#
++# Integer parameter:
++# BigSizeMB=
+ #
+ # Boolean parameter:
+ # SSLVerify=
+-- 
+1.8.2.1
+

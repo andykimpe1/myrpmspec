@@ -1,0 +1,48 @@
+From 1476f5111426d40067f8a1bc65d1075254971ef2 Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Mon, 4 Feb 2013 10:56:06 +0100
+Subject: [LIBREPORT PATCH] dd_sanitize: don't sanitize symlinks
+
+- related to rhbz#887866
+
+Signed-off-by: Jakub Filak <jfilak@redhat.com>
+---
+ src/lib/dump_dir.c | 21 ++++++++++++++++++---
+ 1 file changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/src/lib/dump_dir.c b/src/lib/dump_dir.c
+index 7291f8e..5e853ea 100644
+--- a/src/lib/dump_dir.c
++++ b/src/lib/dump_dir.c
+@@ -554,10 +554,25 @@ void dd_sanitize_mode_and_owner(struct dump_dir *dd)
+         {
+             if ((statbuf.st_mode & 0777) != dd->mode)
+             {
+-                if (chmod(full_path, dd->mode) != 0)
++                /* We open the file only for fchmod()
++                 *
++                 * We use fchmod() because chmod() changes the permissions of
++                 * the file specified whose pathname is given in path, which
++                 * is dereferenced if it is a symbolic link.
++                 */
++                int fd = open(full_path, O_RDONLY | O_NOFOLLOW, dd->mode);
++                if (fd >= 0)
+                 {
+-                    perror_msg("Can't change '%s' mode to 0%o", full_path,
+-                            (unsigned)dd->mode);
++                    if (fchmod(fd, dd->mode) != 0)
++                    {
++                        perror_msg("Can't change '%s' mode to 0%o", full_path,
++                                   (unsigned)dd->mode);
++                    }
++                    close(fd);
++                }
++                else
++                {
++                    perror_msg("Can't open regular file '%s'", full_path);
+                 }
+             }
+             if (statbuf.st_uid != dd->dd_uid || statbuf.st_gid != dd->dd_gid)
+-- 
+1.8.3.1
+

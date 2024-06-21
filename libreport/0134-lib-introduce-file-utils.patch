@@ -1,0 +1,275 @@
+From 39e2e6c413aedb44e1703c2b39422e9bb3fd6f28 Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Wed, 18 Feb 2015 10:52:13 +0100
+Subject: [LIBREPORT PATCH] lib: introduce file utils
+
+---
+ src/include/Makefile.am          |   1 +
+ src/include/file_obj.h           |  34 +++++++++++++
+ src/include/internal_libreport.h |   9 ++++
+ src/lib/Makefile.am              |   5 +-
+ src/lib/file_list.c              | 100 +++++++++++++++++++++++++++++++++++++++
+ src/lib/file_obj.c               |  48 +++++++++++++++++++
+ 6 files changed, 196 insertions(+), 1 deletion(-)
+ create mode 100644 src/include/file_obj.h
+ create mode 100644 src/lib/file_list.c
+ create mode 100644 src/lib/file_obj.c
+
+diff --git a/src/include/Makefile.am b/src/include/Makefile.am
+index 36b151f..54e1320 100644
+--- a/src/include/Makefile.am
++++ b/src/include/Makefile.am
+@@ -8,5 +8,6 @@ libreport_include_HEADERS = \
+     report.h \
+     run_event.h \
+     \
++    file_obj.h \
+     internal_libreport.h \
+     internal_abrt_dbus.h
+diff --git a/src/include/file_obj.h b/src/include/file_obj.h
+new file mode 100644
+index 0000000..e00cb0b
+--- /dev/null
++++ b/src/include/file_obj.h
+@@ -0,0 +1,34 @@
++/*
++    Copyright (C) 2010  ABRT team
++    Copyright (C) 2010  RedHat Inc
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License along
++    with this program; if not, write to the Free Software Foundation, Inc.,
++    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++*/
++
++typedef struct file_obj
++{
++    /* just the filename without the path and extension
++     * so it can be used as event name
++     * e.g:
++     *    if fullpath is: /foo/bar/report_Bugzilla.xml
++     *    then filename is: report_Bugzilla
++     */
++    char *filename;
++    char *fullpath; //the full path with extension
++} file_obj_t;
++
++void free_file_obj(file_obj_t *f);
++const char *fo_get_fullpath(file_obj_t *fo);
++const char *fo_get_filename(file_obj_t *fo);
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index 59076a1..6184bcd 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -92,6 +92,7 @@ int vdprintf(int d, const char *format, va_list ap);
+ #include "problem_data.h"
+ #include "report.h"
+ #include "run_event.h"
++#include "file_obj.h"
+ #include "libreport_types.h"
+ 
+ #ifdef __cplusplus
+@@ -631,6 +632,14 @@ void set_user_setting(const char *name, const char *value);
+ const char *get_user_setting(const char *name);
+ #define load_forbidden_words libreport_load_forbidden_words
+ GList *load_forbidden_words();
++#define  get_file_list libreport_get_file_list
++GList *get_file_list(const char *path, const char *ext);
++#define free_file_list libreport_free_file_list
++void free_file_list(GList *filelist);
++#define new_file_obj libreport_new_file_obj
++file_obj_t *new_file_obj(const char* fullpath, const char* filename);
++#define free_file_obj libreport_free_file_obj
++void free_file_obj(file_obj_t *f);
+ 
+ /* Connect to abrtd over unix domain socket, issue DELETE command */
+ int delete_dump_dir_possibly_using_abrtd(const char *dump_dir_name);
+diff --git a/src/lib/Makefile.am b/src/lib/Makefile.am
+index 7ef8116..9a3006f 100644
+--- a/src/lib/Makefile.am
++++ b/src/lib/Makefile.am
+@@ -49,7 +49,10 @@ libreport_la_SOURCES = \
+     user_settings.c \
+     client.c \
+     reported_to.c \
+-    utf8.c
++    utf8.c \
++    file_list.c \
++    file_obj.c
++
+ libreport_la_CPPFLAGS = \
+     -Wall -Wwrite-strings -Werror \
+     -I$(srcdir)/../include \
+diff --git a/src/lib/file_list.c b/src/lib/file_list.c
+new file mode 100644
+index 0000000..509f0d8
+--- /dev/null
++++ b/src/lib/file_list.c
+@@ -0,0 +1,100 @@
++/*
++    Copyright (C) 2011  ABRT Team
++    Copyright (C) 2011  RedHat inc.
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License along
++    with this program; if not, write to the Free Software Foundation, Inc.,
++    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++*/
++
++#include "internal_libreport.h"
++
++GList *get_file_list(const char *path, const char *ext_filter)
++{
++    /* Load .$ext files */
++    DIR *dir;
++    dir = opendir(path);
++    if (!dir)
++        return NULL;
++
++    GList *files = NULL;
++    struct dirent *dent;
++    while ((dent = readdir(dir)) != NULL)
++    {
++        /* skip . and .. */
++        if (strcmp(dent->d_name, ".") == 0 || strcmp(dent->d_name, "..") == 0)
++            continue;
++        char *fullname = concat_path_file(path, dent->d_name);
++        char *ext = NULL;
++
++        if (ext_filter)
++        {
++            ext = strrchr(dent->d_name, '.');
++            if (!ext)
++                continue;
++            if (ext_filter && strcmp(ext + 1, ext_filter) != 0)
++                continue;
++            *ext = '\0';
++        }
++
++//TODO: get rid of special handling of symlinks
++        struct stat buf;
++        if (0 != lstat(fullname, &buf))
++            goto next;
++
++        if (S_ISLNK(buf.st_mode))
++        {
++            GError *error = NULL;
++            gchar *link = g_file_read_link(fullname, &error);
++            if (error != NULL)
++            {
++                error_msg("Error reading symlink '%s': %s", fullname, error->message);
++                goto next;
++            }
++
++            gchar *target = g_path_get_basename(link);
++            VERB3 log("Symlink '%s' is pointing to '%s'", link, target);
++            if (ext_filter)
++            {
++                char *ext = strrchr(target, '.');
++
++                if (!ext || 0 != strcmp(ext + 1, ext_filter))
++                {
++                    error_msg("Invalid event symlink '%s': expected it to"
++                              " point to another '%s' file", fullname, ext_filter);
++                    goto next;
++                }
++                *ext = '\0';
++            }
++            free(fullname);
++            fullname = concat_path_file(path, target);
++            files = g_list_prepend(files, new_file_obj(fullname, target));
++            g_free(link);
++            g_free(target);
++
++            goto next;
++        }
++
++        file_obj_t *file = new_file_obj(fullname, dent->d_name);
++        files = g_list_prepend(files, file);
++ next:
++        free(fullname);
++    }
++    closedir(dir);
++    return files;
++}
++
++void free_file_list(GList *filelist)
++{
++    g_list_free_full(filelist, (GDestroyNotify)free_file_obj);
++}
+diff --git a/src/lib/file_obj.c b/src/lib/file_obj.c
+new file mode 100644
+index 0000000..bbb5b9f
+--- /dev/null
++++ b/src/lib/file_obj.c
+@@ -0,0 +1,48 @@
++/*
++    Copyright (C) 2011  ABRT Team
++    Copyright (C) 2011  RedHat inc.
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License along
++    with this program; if not, write to the Free Software Foundation, Inc.,
++    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++*/
++
++#include "internal_libreport.h"
++
++file_obj_t *new_file_obj(const char* fullpath, const char* filename)
++{
++    file_obj_t *file = xmalloc(sizeof(file_obj_t));
++    file->fullpath = xstrdup(fullpath);
++    file->filename = xstrdup(filename);
++    return file;
++}
++
++void free_file_obj(file_obj_t *f)
++{
++    if (f == NULL)
++        return
++
++    free(f->fullpath);
++    free(f->filename);
++    free(f);
++}
++
++const char *fo_get_fullpath(file_obj_t *fo)
++{
++    return fo->fullpath;
++}
++
++const char *fo_get_filename(file_obj_t *fo)
++{
++    return fo->filename;
++}
+\ No newline at end of file
+-- 
+1.8.3.1
+

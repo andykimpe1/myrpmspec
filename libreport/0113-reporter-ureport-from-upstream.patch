@@ -1,0 +1,1920 @@
+From 0bcef495a262a3d2e468f8020953276e385cfa51 Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Wed, 30 Apr 2014 16:22:35 +0200
+Subject: [LIBREPORT PATCH] reporter-ureport from upstream
+
+---
+ configure.ac                      |   2 +
+ doc/Makefile.am                   |   2 +
+ doc/reporter-ureport.txt          | 108 +++++++
+ doc/ureport.conf.txt              |  18 ++
+ po/Makefile.in.in                 |  13 +-
+ po/POTFILES.in                    |   3 +
+ src/include/dump_dir.h            |   6 +
+ src/include/internal_libreport.h  |   9 +
+ src/lib/Makefile.am               |   7 +-
+ src/lib/abrt_curl.h               |   2 +
+ src/lib/dump_dir.c                |  92 +-----
+ src/lib/hash_sha1.c               |  19 ++
+ src/lib/json.c                    | 275 ++++-------------
+ src/lib/reported_to.c             | 186 +++++++++++
+ src/lib/ureport.h                 |  21 +-
+ src/plugins/Makefile.am           |  23 +-
+ src/plugins/report_uReport.xml.in |  21 +-
+ src/plugins/ureport.c             | 634 +++++++++++++++++++++++++++++++++-----
+ src/plugins/ureport.conf          |  18 ++
+ 19 files changed, 1060 insertions(+), 399 deletions(-)
+ create mode 100644 doc/reporter-ureport.txt
+ create mode 100644 doc/ureport.conf.txt
+ create mode 100644 src/lib/reported_to.c
+ create mode 100644 src/plugins/ureport.conf
+
+diff --git a/configure.ac b/configure.ac
+index b485421..1bd596a 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -87,6 +87,8 @@ PKG_CHECK_MODULES([PROXY], [libproxy-1.0], [
+     AC_DEFINE([HAVE_PROXY], [1], [Use libproxy])
+ ], [:])
+ 
++PKG_CHECK_MODULES([JSON_C], [json])
++
+ PKG_PROG_PKG_CONFIG
+ 
+ AC_CHECK_HEADER([libtar.h], [],
+diff --git a/doc/Makefile.am b/doc/Makefile.am
+index 542fe4c..39093b1 100644
+--- a/doc/Makefile.am
++++ b/doc/Makefile.am
+@@ -15,10 +15,12 @@ MAN1_TXT += reporter-mailx.txt
+ MAN1_TXT += reporter-print.txt
+ MAN1_TXT += reporter-rhtsupport.txt
+ MAN1_TXT += reporter-upload.txt
++MAN1_TXT += reporter-ureport.txt
+ MAN1_TXT += report.txt
+ 
+ MAN5_TXT =
+ MAN5_TXT += report_event.conf.txt
++MAN5_TXT += ureport.conf.txt
+ 
+ # Manual pages are generated from .txt via Docbook
+ man1_MANS = ${MAN1_TXT:%.txt=%.1}
+diff --git a/doc/reporter-ureport.txt b/doc/reporter-ureport.txt
+new file mode 100644
+index 0000000..54823ae
+--- /dev/null
++++ b/doc/reporter-ureport.txt
+@@ -0,0 +1,108 @@
++reporter-ureport(1)
++=================
++
++NAME
++----
++reporter-ureport - Reports ABRT problems in format of micro report
++
++SYNOPSIS
++--------
++'reporter-ureport' [-v] [-c CONFFILE] [-u URL] [-k] [-A -a bthash -B -b bug-id -E -e email] [-r] [-d DIR]
++
++DESCRIPTION
++-----------
++The tool reads problem directory DIR, assembles an micro report from the loaded
++problem data and sends the micro report to uReport server for updating
++statistics and fast analysis. The results of the analysis are stored in problem
++data in form of problems elements. 'reporter-ureport' updates 'reported_to'
++
++Configuration file
++~~~~~~~~~~~~~~~~~~
++If not specified, CONFFILE defaults to /etc/libreport/plugins/ureport.conf.
++Configuration file lines should have 'PARAM = VALUE' format. The parameters are:
++
++'URL'::
++   Base sever HTTP(S) address.
++
++'SSLVerify'::
++   Use no/false/off/0 to disable verification of server's SSL certificate. (default: yes)
++
++'SSLClientAuth'::
++   If this option is set, client-side SSL certificate is used to authenticate
++   to the server so that it knows which machine it came from. Possible values
++   are:
++
++   'rhsm';;
++      Uses the system certificate that is used for Red Hat subscription management.
++
++   'puppet';;
++      Uses the certificate that is used by the Puppet configuration management tool.
++
++   '<cert_path>:<key_path>';;
++      Manually supply paths to certificate and the corresponding key in PEM format.
++
++'ContactEmail'::
++   Email address attached to a bthash on the server.
++
++Parameters can be overridden via $uReport_PARAM environment variables.
++
++OPTIONS
++-------
++-c FILE::
++   Path to configuration file
++
++-a, --attach BTHASH::
++   bthash of uReport to attach (conflicts with -A)
++
++-A, --attach-rt::
++   Attach to a bthash from reported_to (conflicts with -a)
++
++-b, --bug-id NUM::
++   Attach RHBZ bug (requires -a)
++
++-B, --bug-id-rt::
++   Attach last RHBZ bug from reported_to (requires -a|-A, conflicts with -b)
++
++-e, --email EMAIL::
++   Contact e-mail address (requires -a|-A, conflicts with -E)
++
++-E, --email-env::
++   Contact e-mail address from environment (requires -a|-A, conflicts with -e)
++
++-d, --problem-dir DIR::
++   Path to problem directory.
++
++-k, --insecure::
++   Allow insecure connection to ureport server
++
++-t, --auth SOURCE::
++   Enables client authentication. See 'SSLClientAuth' configuration file
++   option for list of possible values.
++
++-v::
++   Be more verbose. Can be given multiple times.
++
++-u, --url URL::
++   Specify server URL
++
++ENVIRONMENT VARIABLES
++---------------------
++Environment variables take precedence over values provided in
++the configuration file.
++
++'uReport_URL'::
++   Base sever HTTP(S) address.
++
++'uReport_SSLVerify'::
++   Use yes/true/on/1 to verify server's SSL certificate. (default: yes)
++
++'uReport_ContactEmail'::
++   Email address attached to a bthash on the server.
++
++SEE ALSO
++--------
++ureport.conf(5)
++
++AUTHORS
++-------
++* ABRT team
+diff --git a/doc/ureport.conf.txt b/doc/ureport.conf.txt
+new file mode 100644
+index 0000000..83b3a48
+--- /dev/null
++++ b/doc/ureport.conf.txt
+@@ -0,0 +1,18 @@
++ureport.conf(5)
++===============
++
++NAME
++----
++ureport.conf - configuration file for libreport.
++
++DESCRIPTION
++-----------
++This configuration file provides default configuration for 'reporter-ureport'.
++
++SEE ALSO
++--------
++reporter-ureport(1)
++
++AUTHOR
++------
++* ABRT team
+diff --git a/po/Makefile.in.in b/po/Makefile.in.in
+index 06a8cfe..cc8a222 100644
+--- a/po/Makefile.in.in
++++ b/po/Makefile.in.in
+@@ -49,8 +49,8 @@ MSGFMT = @MSGFMT@
+ XGETTEXT = @XGETTEXT@
+ INTLTOOL_UPDATE = @INTLTOOL_UPDATE@
+ INTLTOOL_EXTRACT = @INTLTOOL_EXTRACT@
+-MSGMERGE = INTLTOOL_EXTRACT="$(INTLTOOL_EXTRACT)" XGETTEXT="$(XGETTEXT)" srcdir=$(srcdir) $(INTLTOOL_UPDATE) --gettext-package $(GETTEXT_PACKAGE) --dist
+-GENPOT   = INTLTOOL_EXTRACT="$(INTLTOOL_EXTRACT)" XGETTEXT="$(XGETTEXT)" srcdir=$(srcdir) $(INTLTOOL_UPDATE) --gettext-package $(GETTEXT_PACKAGE) --pot
++MSGMERGE = INTLTOOL_EXTRACT=$(INTLTOOL_EXTRACT) srcdir=$(srcdir) $(INTLTOOL_UPDATE) --gettext-package $(GETTEXT_PACKAGE) --dist
++GENPOT   = INTLTOOL_EXTRACT=$(INTLTOOL_EXTRACT) srcdir=$(srcdir) $(INTLTOOL_UPDATE) --gettext-package $(GETTEXT_PACKAGE) --pot
+ 
+ ALL_LINGUAS = @ALL_LINGUAS@
+ 
+@@ -73,20 +73,15 @@ CATALOGS=$(shell LINGUAS="$(USE_LINGUAS)"; for lang in $$LINGUAS; do printf "$$l
+ .SUFFIXES:
+ .SUFFIXES: .po .pox .gmo .mo .msg .cat
+ 
+-AM_DEFAULT_VERBOSITY = @AM_DEFAULT_VERBOSITY@
+-INTLTOOL_V_MSGFMT = $(INTLTOOL__v_MSGFMT_$(V))
+-INTLTOOL__v_MSGFMT_= $(INTLTOOL__v_MSGFMT_$(AM_DEFAULT_VERBOSITY))
+-INTLTOOL__v_MSGFMT_0 = @echo "  MSGFMT" $@;
+-
+ .po.pox:
+ 	$(MAKE) $(GETTEXT_PACKAGE).pot
+ 	$(MSGMERGE) $< $(GETTEXT_PACKAGE).pot -o $*.pox
+ 
+ .po.mo:
+-	$(INTLTOOL_V_MSGFMT)$(MSGFMT) -o $@ $<
++	$(MSGFMT) -o $@ $<
+ 
+ .po.gmo:
+-	$(INTLTOOL_V_MSGFMT)file=`echo $* | sed 's,.*/,,'`.gmo \
++	file=`echo $* | sed 's,.*/,,'`.gmo \
+ 	  && rm -f $$file && $(GMSGFMT) -o $$file $<
+ 
+ .po.cat:
+diff --git a/po/POTFILES.in b/po/POTFILES.in
+index b4e84fd..61c9c85 100644
+--- a/po/POTFILES.in
++++ b/po/POTFILES.in
+@@ -15,6 +15,7 @@ src/lib/event_config.c
+ src/lib/parse_options.c
+ src/lib/abrt_curl.c
+ src/lib/client.c
++src/lib/json.c
+ src/lib/run_event.c
+ src/lib/problem_data.c
+ src/plugins/abrt_rh_support.c
+@@ -27,6 +28,7 @@ src/plugins/report_RHTSupport.xml.in
+ src/plugins/report_RHTSupportAttach.xml.in
+ src/plugins/report_Tarball.xml.in
+ src/plugins/report_Uploader.xml.in
++src/plugins/report_uReport.xml.in
+ src/plugins/reporter-bugzilla.c
+ src/plugins/reporter-kerneloops.c
+ src/plugins/reporter-mailx.c
+@@ -35,4 +37,5 @@ src/plugins/reporter-rhtsupport.c
+ src/plugins/reporter-rhtsupport-parse.c
+ src/plugins/reporter-upload.c
+ src/plugins/rhbz.c
++src/plugins/ureport.c
+ src/report-newt/report-newt.c
+diff --git a/src/include/dump_dir.h b/src/include/dump_dir.h
+index 05c1413..432d04c 100644
+--- a/src/include/dump_dir.h
++++ b/src/include/dump_dir.h
+@@ -78,11 +78,15 @@ int dd_delete(struct dump_dir *dd);
+ 
+ 
+ /* reported_to handling */
++#define add_reported_to_data libreport_add_reported_to_data
++int add_reported_to_data(char **reported_to, const char *line);
+ #define add_reported_to libreport_add_reported_to
+ void add_reported_to(struct dump_dir *dd, const char *line);
+ struct report_result {
++    char *label;
+     char *url;
+     char *msg;
++    char *bthash;
+     /* char *whole_line; */
+     /* time_t timestamp; */
+     /* ^^^ if you add more fields, don't forget to update free_report_result() */
+@@ -90,6 +94,8 @@ struct report_result {
+ typedef struct report_result report_result_t;
+ #define free_report_result libreport_free_report_result
+ void free_report_result(struct report_result *result);
++#define find_in_reported_to_data libreport_find_in_reported_to_data
++report_result_t *find_in_reported_to_data(const char *reported_to, const char *report_label);
+ #define find_in_reported_to libreport_find_in_reported_to
+ report_result_t *find_in_reported_to(struct dump_dir *dd, const char *prefix);
+ /* TODO: GList *read_entire_reported_to(dd); */
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index 036032f..f76c25b 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -194,6 +194,11 @@ void sha1_hash(sha1_ctx_t *ctx, const void *buffer, size_t len);
+ #define sha1_end libreport_sha1_end
+ void sha1_end(sha1_ctx_t *ctx, void *resbuf);
+ 
++/* Helpers to hash a string: */
++#define str_to_sha1 libreport_str_to_sha1
++const uint8_t *str_to_sha1(uint8_t result[SHA1_RESULT_LEN], const char *str);
++#define str_to_sha1str libreport_str_to_sha1str
++const char    *str_to_sha1str(char result[SHA1_RESULT_LEN*2 + 1], const char *str);
+ 
+ #define xatou libreport_xatou
+ unsigned xatou(const char *numstr);
+@@ -420,6 +425,10 @@ extern int logmode;
+ #define xfunc_error_retval libreport_xfunc_error_retval
+ extern int xfunc_error_retval;
+ 
++/* A few magic exit codes */
++#define EXIT_CANCEL_BY_USER 69
++#define EXIT_STOP_EVENT_RUN 70
++
+ /* Verbosity level */
+ #define g_verbose libreport_g_verbose
+ extern int g_verbose;
+diff --git a/src/lib/Makefile.am b/src/lib/Makefile.am
+index 2d08fee..dc35e1d 100644
+--- a/src/lib/Makefile.am
++++ b/src/lib/Makefile.am
+@@ -48,6 +48,7 @@ libreport_la_SOURCES = \
+     make_dir_recursive.c \
+     user_settings.c \
+     client.c \
++    reported_to.c \
+     utf8.c
+ libreport_la_CPPFLAGS = \
+     -Wall -Wwrite-strings -Werror \
+@@ -94,7 +95,7 @@ libabrt_dbus_la_LIBADD = \
+ libabrt_web_la_SOURCES = \
+     abrt_curl.h abrt_curl.c \
+     abrt_xmlrpc.h abrt_xmlrpc.c \
+-    proxies.h proxies.c \
++    proxies.h proxies.c json.c \
+     ureport.h
+ libabrt_web_la_CPPFLAGS = \
+     -Wall -Wwrite-strings -Werror \
+@@ -110,7 +111,7 @@ libabrt_web_la_CPPFLAGS = \
+     $(LIBXML_CFLAGS) \
+     $(XMLRPC_CFLAGS) $(XMLRPC_CLIENT_CFLAGS) \
+     $(JSON_C_CFLAGS) \
+-    $(BTPARSER_CFLAGS) \
++    $(SATYR_CFLAGS) \
+     -D_GNU_SOURCE
+ libabrt_web_la_LDFLAGS = \
+     -version-info 0:1:0
+@@ -120,7 +121,7 @@ libabrt_web_la_LIBADD = \
+     $(PROXY_LIBS) \
+     $(LIBXML_LIBS) \
+     $(JSON_C_LIBS) \
+-    $(BTPARSER_LIBS) \
++    $(SATYR_LIBS) \
+     $(XMLRPC_LIBS) $(XMLRPC_CLIENT_LIBS) \
+     libreport.la
+ 
+diff --git a/src/lib/abrt_curl.h b/src/lib/abrt_curl.h
+index 68ed09e..e35afe1 100644
+--- a/src/lib/abrt_curl.h
++++ b/src/lib/abrt_curl.h
+@@ -35,6 +35,8 @@ typedef struct abrt_post_state {
+     int         flags;
+     const char  *username;
+     const char  *password;
++    const char  *client_cert_path;
++    const char  *client_key_path;
+     /* Results of POST transaction: */
+     int         http_resp_code;
+     /* cast from CURLcode enum.
+diff --git a/src/lib/dump_dir.c b/src/lib/dump_dir.c
+index 93734c5..7291f8e 100644
+--- a/src/lib/dump_dir.c
++++ b/src/lib/dump_dir.c
+@@ -856,102 +856,20 @@ void add_reported_to(struct dump_dir *dd, const char *line)
+         error_msg_and_die("dump_dir is not opened"); /* bug */
+ 
+     char *reported_to = dd_load_text_ext(dd, FILENAME_REPORTED_TO, DD_FAIL_QUIETLY_ENOENT | DD_LOAD_TEXT_RETURN_NULL_ON_FAILURE);
+-    if (reported_to)
+-    {
+-        unsigned len_line = strlen(line);
+-        char *p = reported_to;
+-        while (*p)
+-        {
+-            if (strncmp(p, line, len_line) == 0 && (p[len_line] == '\n' || p[len_line] == '\0'))
+-                goto ret;
+-            p = strchrnul(p, '\n');
+-            if (!*p)
+-                break;
+-            p++;
+-        }
+-        if (p != reported_to && p[-1] != '\n')
+-            reported_to = append_to_malloced_string(reported_to, "\n");
+-        reported_to = append_to_malloced_string(reported_to, line);
+-        reported_to = append_to_malloced_string(reported_to, "\n");
+-    }
+-    else
+-        reported_to = xasprintf("%s\n", line);
+-    dd_save_text(dd, FILENAME_REPORTED_TO, reported_to);
+- ret:
+-    free(reported_to);
+-}
++    if (add_reported_to_data(&reported_to, line))
++        dd_save_text(dd, FILENAME_REPORTED_TO, reported_to);
+ 
+-void free_report_result(struct report_result *result)
+-{
+-    if (!result)
+-        return;
+-    free(result->url);
+-    free(result->msg);
+-    free(result);
+-}
+-
+-static report_result_t *parse_reported_line(const char *line)
+-{
+-    report_result_t *result = xzalloc(sizeof(*result));
+-
+-    //result->whole_line = xstrdup(line);
+-    for (;;)
+-    {
+-        line = skip_whitespace(line);
+-        if (!*line)
+-            break;
+-        const char *end = skip_non_whitespace(line);
+-        if (strncmp(line, "MSG=", 4) == 0)
+-        {
+-            result->msg = xstrdup(line + 4);
+-            /* MSG=... eats entire line: exiting the loop */
+-            break;
+-        }
+-        if (strncmp(line, "URL=", 4) == 0)
+-        {
+-            free(result->url);
+-            result->url = xstrndup(line + 4, end - (line + 4));
+-        }
+-        //else
+-        //if (strncmp(line, "TIME=", 5) == 0)
+-        //{
+-        //    free(result->time);
+-        //    result->time = foo(line + 5, end - (line + 5));
+-        //}
+-        //...
+-        line = end;
+-        continue;
+-    }
+-
+-    return result;
++    free(reported_to);
+ }
+ 
+ report_result_t *find_in_reported_to(struct dump_dir *dd, const char *prefix)
+ {
+     char *reported_to = dd_load_text_ext(dd, FILENAME_REPORTED_TO,
+-                DD_FAIL_QUIETLY_ENOENT | DD_LOAD_TEXT_RETURN_NULL_ON_FAILURE);
++            DD_FAIL_QUIETLY_ENOENT | DD_LOAD_TEXT_RETURN_NULL_ON_FAILURE);
+     if (!reported_to)
+         return NULL;
+ 
+-    /* Find *last* (most recent) line with this prefix */
+-    unsigned prefix_len = strlen(prefix);
+-    char *found = NULL;
+-    char *p = reported_to;
+-    while (*p)
+-    {
+-        if (strncmp(p, prefix, prefix_len) == 0)
+-            found = p + prefix_len;
+-        p = strchrnul(p, '\n');
+-        if (*p)
+-        {
+-            *p = '\0'; /* EOL marker for parse_reported_line() below */
+-            p++;
+-        }
+-    }
+-
+-    report_result_t *result = NULL;
+-    if (found)
+-        result = parse_reported_line(found);
++    report_result_t *result = find_in_reported_to_data(reported_to, prefix);
+ 
+     free(reported_to);
+     return result;
+diff --git a/src/lib/hash_sha1.c b/src/lib/hash_sha1.c
+index f8f85d1..4a604c0 100644
+--- a/src/lib/hash_sha1.c
++++ b/src/lib/hash_sha1.c
+@@ -224,3 +224,22 @@ static void common64_end(sha1_ctx_t *ctx, int swap_needed)
+ 		bufpos = 0;
+ 	}
+ }
++
++/* Utility helpers */
++
++const uint8_t *str_to_sha1(uint8_t hash_bytes[SHA1_RESULT_LEN], const char *str)
++{
++    sha1_ctx_t sha1ctx;
++    sha1_begin(&sha1ctx);
++    sha1_hash(&sha1ctx, str, strlen(str));
++    sha1_end(&sha1ctx, hash_bytes);
++    return hash_bytes;
++}
++
++const char *str_to_sha1str(char result[SHA1_RESULT_LEN*2 + 1], const char *str)
++{
++    uint8_t hash_bytes[SHA1_RESULT_LEN];
++    str_to_sha1(hash_bytes, str);
++    bin2hex(result, (void*)hash_bytes, SHA1_RESULT_LEN)[0] = '\0';
++    return result;
++}
+diff --git a/src/lib/json.c b/src/lib/json.c
+index 3fec49b..314085b 100644
+--- a/src/lib/json.c
++++ b/src/lib/json.c
+@@ -18,52 +18,15 @@
+ */
+ 
+ #include <json/json.h>
+-#include <btparser/thread.h>
+-#include <btparser/core-backtrace.h>
++
++#include <satyr/abrt.h>
++#include <satyr/report.h>
+ 
+ #include "internal_libreport.h"
+ #include "ureport.h"
+ #include "abrt_curl.h"
+ 
+ 
+-/* on success 1 returned, on error zero is returned and appropriate value
+- * is returned as third argument. You should never read third argument when
+- * function fails
+- *
+- * json-c library doesn't have any json_object_new_long,
+- * thus we have to use only int
+- */
+-static int get_pd_int_item(problem_data_t *pd, const char *key, int *result)
+-{
+-    if (!pd || !key)
+-        return 0;
+-
+-    const char *pd_item = get_problem_item_content_or_NULL(pd, key);
+-    if (!pd_item)
+-    {
+-        VERB1 log("warning: '%s' is not an item in problem directory", key);
+-        return 0;
+-    }
+-
+-    errno = 0;
+-    char *e;
+-    long i = strtol(pd_item, &e, 10);
+-    if (errno || pd_item == e || *e != '\0' || (int) i != i)
+-        return 0;
+-
+-    *result = i;
+-    return 1;
+-}
+-
+-static void ureport_add_int(struct json_object *ur, const char *key, int i)
+-{
+-    struct json_object *jint = json_object_new_int(i);
+-    if (!jint)
+-        die_out_of_memory();
+-
+-    json_object_object_add(ur, key, jint);
+-}
+-
+ static void ureport_add_str(struct json_object *ur, const char *key,
+                             const char *s)
+ {
+@@ -74,204 +37,100 @@ static void ureport_add_str(struct json_object *ur, const char *key,
+     json_object_object_add(ur, key, jstring);
+ }
+ 
+-static void ureport_add_os(struct json_object *ur, problem_data_t *pd)
++char *ureport_from_dump_dir(const char *dump_dir_path)
+ {
+-    const char *pd_item = get_problem_item_content_or_NULL(pd, FILENAME_OS_RELEASE);
+-    if (!pd_item)
+-        return;
+-
+-    struct json_object *jobject = json_object_new_object();
+-    if (!jobject)
+-        die_out_of_memory();
++    char *error_message;
++    struct sr_report *report = sr_abrt_report_from_dir(dump_dir_path,
++                                                       &error_message);
+ 
+-    char *name, *version;
+-    parse_release_for_rhts(pd_item, &name, &version);
++    if (!report)
++        error_msg_and_die("%s", error_message);
+ 
+-    ureport_add_str(jobject, "name", name);
+-    ureport_add_str(jobject, "version", version);
++    char *json_ureport = sr_report_to_json(report);
++    sr_report_free(report);
+ 
+-    free(name);
+-    free(version);
+-
+-    json_object_object_add(ur, "os", jobject);
++    return json_ureport;
+ }
+ 
+-static void ureport_add_type(struct json_object *ur, problem_data_t *pd)
++char *new_json_attachment(const char *bthash, const char *type, const char *data)
+ {
+-    const char *pd_item = get_problem_item_content_or_NULL(pd, FILENAME_ANALYZER);
+-    if (!pd_item)
+-        return;
+-
+-    if (!strcmp(pd_item, "CCpp"))
+-        ureport_add_str(ur, "type", "USERSPACE");
+-    if (!strcmp(pd_item, "Python"))
+-        ureport_add_str(ur, "type", "PYTHON");
+-    if (!strcmp(pd_item, "Kerneloops"))
+-        ureport_add_str(ur, "type", "KERNELOOPS");
+-}
+-
+-static void ureport_add_core_backtrace(struct json_object *ur, problem_data_t *pd)
+-{
+-    const char *pd_item = get_problem_item_content_or_NULL(pd, FILENAME_CORE_BACKTRACE);
+-    if (!pd_item)
+-        return;
+-
+-    struct btp_thread *core_bt = btp_load_core_backtrace(pd_item);
+-    if (!core_bt)
+-        return;
+-
+-    struct json_object *jarray = json_object_new_array();
+-    if (!jarray)
++    struct json_object *attachment = json_object_new_object();
++    if (!attachment)
+         die_out_of_memory();
+ 
+-    struct btp_frame *frame;
+-    unsigned frame_nr = 0;
+-    for (frame = core_bt->frames; frame; frame = frame->next)
+-    {
+-        struct frame_aux *aux = frame->user_data;
+-
+-        struct json_object *item = json_object_new_object();
+-        if (!item)
+-            die_out_of_memory();
+-
+-        if (aux->filename)
+-            ureport_add_str(item, "path", aux->filename);
+-
+-        if (frame->function_name)
+-            ureport_add_str(item, "funcname", frame->function_name);
+-
+-        if (aux->build_id)
+-            ureport_add_str(item, "buildid", aux->build_id);
+-
+-        if (aux->fingerprint)
+-            ureport_add_str(item, "funchash", aux->fingerprint);
+-
+-        if ((uintmax_t)frame->address)
+-            ureport_add_int(item, "offset", (uintmax_t)frame->address);
+-
+-        ureport_add_int(item, "frame", frame_nr++);
+-        ureport_add_int(item, "thread", 0);
+-
++    ureport_add_str(attachment, "bthash", bthash);
++    ureport_add_str(attachment, "type", type);
++    ureport_add_str(attachment, "data", data);
+ 
+-        json_object_array_add(jarray, item);
+-    }
+-
+-    btp_thread_free(core_bt);
++    char *result = xstrdup(json_object_to_json_string(attachment));
++    json_object_put(attachment);
+ 
+-    json_object_object_add(ur, FILENAME_CORE_BACKTRACE, jarray);
++    return result;
+ }
+ 
+-static void ureport_add_item_str(struct json_object *ur, problem_data_t *pd,
+-                                 const char *key, const char *rename)
++struct abrt_post_state *post_ureport(const char *json, struct ureport_server_config *config)
+ {
+-        const char *pd_item = get_problem_item_content_or_NULL(pd, key);
+-        if (!pd_item)
+-            return;
+ 
+-        ureport_add_str(ur, (rename) ?: key, pd_item);
+-}
+-
+-static void ureport_add_item_int(struct json_object *ur, problem_data_t *pd,
+-                                 const char *key, const char *rename)
+-{
+-    int nr;
+-    int stat = get_pd_int_item(pd, key, &nr);
+-    if (!stat)
+-        return;
++    int flags = ABRT_POST_WANT_BODY | ABRT_POST_WANT_ERROR_MSG;
+ 
+-    ureport_add_int(ur, (rename) ?: rename, nr);
+-}
++    if (config->ur_ssl_verify)
++        flags |= ABRT_POST_WANT_SSL_VERIFY;
+ 
+-static void ureport_add_pkg(struct json_object *ur, problem_data_t *pd)
+-{
+-    struct json_object *jobject = json_object_new_object();
+-    if (!jobject)
+-        die_out_of_memory();
++    struct abrt_post_state *post_state = new_abrt_post_state(flags);
+ 
+-    ureport_add_item_int(jobject, pd, FILENAME_PKG_EPOCH, "epoch");
+-    ureport_add_item_str(jobject, pd, FILENAME_PKG_NAME, "name");
+-    ureport_add_item_str(jobject, pd, FILENAME_PKG_VERSION, "version");
+-    ureport_add_item_str(jobject, pd, FILENAME_PKG_RELEASE, "release");
+-    ureport_add_item_str(jobject, pd, FILENAME_PKG_ARCH, "architecture");
++    if (config->ur_client_cert && config->ur_client_key)
++    {
++        post_state->client_cert_path = config->ur_client_cert;
++        post_state->client_key_path = config->ur_client_key;
++    }
+ 
+-    json_object_object_add(ur, "installed_package", jobject);
+-}
++    static const char *headers[] = {
++        "Accept: application/json",
++        "Connection: close",
++        NULL,
++    };
+ 
+-static void ureport_add_related_pkgs(struct json_object *ur, problem_data_t *pd)
+-{
+-    // TODO: populate this field
+-    struct json_object *jobject = json_object_new_array();
+-    json_object_object_add(ur, "related_packages", jobject);
+-}
++    abrt_post_string_as_form_data(post_state, config->ur_url, "application/json",
++                     (const char **)headers, json);
++
++    /* Client authentication failed. Try again without client auth.
++     * CURLE_SSL_CONNECT_ERROR - cert not found/server doesnt trust the CA
++     * CURLE_SSL_CERTPROBLEM - malformed certificate/no permission
++     */
++    if ((post_state->curl_result == CURLE_SSL_CONNECT_ERROR
++         || post_state->curl_result == CURLE_SSL_CERTPROBLEM)
++            && config->ur_client_cert && config->ur_client_key)
++    {
++        log(_("Authentication failed. Retrying unauthenticated."));
++        free_abrt_post_state(post_state);
++        post_state = new_abrt_post_state(flags);
+ 
+-static void ureport_add_reporter(struct json_object *ur, const char *name, const char *version)
+-{
+-    struct json_object *jobject = json_object_new_object();
+-    if (!jobject)
+-        die_out_of_memory();
++        abrt_post_string_as_form_data(post_state, config->ur_url, "application/json",
++                         (const char **)headers, json);
+ 
+-    ureport_add_str(jobject, "name", name);
+-    ureport_add_str(jobject, "version", version);
++    }
+ 
+-    json_object_object_add(ur, "reporter", jobject);
++    return post_state;
+ }
+ 
+-char *new_json_ureport(problem_data_t *pd)
++struct abrt_post_state *ureport_attach_rhbz(const char *bthash, int rhbz_bug_id,
++                                       struct ureport_server_config *config)
+ {
+-    struct json_object *ureport = json_object_new_object();
+-    if (!ureport)
+-        die_out_of_memory();
+-
+-    ureport_add_item_str(ureport, pd, "user_type", NULL);
+-    ureport_add_item_int(ureport, pd, "uptime", NULL);
+-
+-   /* mandatory, but not in problem-dir
+-    *
+-    * ureport_add_item_int(ureport, pd, "crash_thread", NULL);
+-    */
+-    ureport_add_int(ureport, "crash_thread", 0);
+-
+-    ureport_add_item_str(ureport, pd, FILENAME_ARCHITECTURE, NULL);
+-    ureport_add_item_str(ureport, pd, FILENAME_EXECUTABLE, NULL);
+-    ureport_add_item_str(ureport, pd, FILENAME_REASON, NULL);
+-    ureport_add_item_str(ureport, pd, FILENAME_COMPONENT, NULL);
++    char *str_bug_id = xasprintf("%d", rhbz_bug_id);
++    char *json_attachment = new_json_attachment(bthash, "RHBZ", str_bug_id);
++    struct abrt_post_state *post_state = post_ureport(json_attachment, config);
++    free(str_bug_id);
++    free(json_attachment);
+ 
+-    ureport_add_type(ureport, pd);
+-
+-    ureport_add_pkg(ureport, pd);
+-    ureport_add_related_pkgs(ureport, pd);
+-    ureport_add_os(ureport, pd);
+-
+-    ureport_add_core_backtrace(ureport, pd);
+-    ureport_add_reporter(ureport, "ABRT", VERSION);
+-
+-    char *j = xstrdup(json_object_to_json_string(ureport));
+-    json_object_put(ureport);
+-
+-    return j;
++    return post_state;
+ }
+ 
+-struct abrt_post_state *post_ureport(problem_data_t *pd, struct ureport_server_config *config)
++struct abrt_post_state *ureport_attach_email(const char *bthash, const char *email,
++                                       struct ureport_server_config *config)
+ {
+-    int flags = ABRT_POST_WANT_BODY | ABRT_POST_WANT_ERROR_MSG;
+-
+-    if (config->ur_ssl_verify)
+-        flags |= ABRT_POST_WANT_SSL_VERIFY;
+-
+-    abrt_post_state_t *post_state = new_abrt_post_state(flags);
+-
+-    static const char *headers[] = {
+-        "Accept: application/json",
+-        "Connection: close",
+-        NULL,
+-    };
+-
+-    char *json_ureport = new_json_ureport(pd);
+-
+-    abrt_post_string_as_form_data(post_state, config->ur_url, "application/json",
+-                     headers, json_ureport);
+-
+-    free(json_ureport);
++    char *json_attachment = new_json_attachment(bthash, "email", email);
++    struct abrt_post_state *post_state = post_ureport(json_attachment, config);
++    free(json_attachment);
+ 
+     return post_state;
+ }
+diff --git a/src/lib/reported_to.c b/src/lib/reported_to.c
+new file mode 100644
+index 0000000..98dbbc7
+--- /dev/null
++++ b/src/lib/reported_to.c
+@@ -0,0 +1,186 @@
++/*
++    Copyright (C) 2013  ABRT Team
++    Copyright (C) 2013  RedHat inc.
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License along
++    with this program; if not, write to the Free Software Foundation, Inc.,
++    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++*/
++#include "dump_dir.h"
++#include "internal_libreport.h"
++
++int add_reported_to_data(char **reported_to, const char *line)
++{
++    if (*reported_to)
++    {
++        unsigned len_line = strlen(line);
++        char *p = *reported_to;
++        while (*p)
++        {
++            if (strncmp(p, line, len_line) == 0 && (p[len_line] == '\n' || p[len_line] == '\0'))
++                return 0;
++            p = strchrnul(p, '\n');
++            if (!*p)
++                break;
++            p++;
++        }
++        if (p != *reported_to && p[-1] != '\n')
++            *reported_to = append_to_malloced_string(*reported_to, "\n");
++        *reported_to = append_to_malloced_string(*reported_to, line);
++        *reported_to = append_to_malloced_string(*reported_to, "\n");
++    }
++    else
++        *reported_to = xasprintf("%s\n", line);
++
++    return 1;
++}
++
++void free_report_result(struct report_result *result)
++{
++    if (!result)
++        return;
++    free(result->label);
++    free(result->url);
++    free(result->msg);
++    free(result->bthash);
++    free(result);
++}
++
++static report_result_t *parse_reported_line(const char *line, size_t label_len)
++{
++    report_result_t *result = xzalloc(sizeof(*result));
++    result->label = xstrndup(line, label_len);
++
++    /* +1 -> : */
++    line += (label_len + 1);
++
++    //result->whole_line = xstrdup(line);
++    for (;;)
++    {
++        for(;;)
++        {
++            if (!*line || *line == '\n')
++                goto line_done;
++            if (!isspace(*line))
++                break;
++            ++line;
++        }
++
++        const char *end = skip_non_whitespace(line);
++        if (prefixcmp(line, "MSG=") == 0)
++        {
++            /* MSG=... eats entire line: exiting the loop */
++            end = strchrnul(end, '\n');
++            result->msg = xstrndup(line + 4, end - (line + 4));
++            break;
++        }
++        if (prefixcmp(line, "URL=") == 0)
++        {
++            free(result->url);
++            result->url = xstrndup(line + 4, end - (line + 4));
++        }
++        if (prefixcmp(line, "BTHASH=") == 0)
++        {
++            free(result->bthash);
++            result->bthash = xstrndup(line + 7, end - (line + 7));
++        }
++        //else
++        //if (strncmp(line, "TIME=", 5) == 0)
++        //{
++        //    free(result->time);
++        //    result->time = foo(line + 5, end - (line + 5));
++        //}
++        //...
++        line = end;
++        continue;
++    }
++line_done:
++
++    return result;
++}
++
++typedef void (* foreach_reported_to_line_cb_type)(const char *record_line, size_t label_len, void *user_data);
++
++static void foreach_reported_to_line(const char *reported_to, foreach_reported_to_line_cb_type callback, void *user_data)
++{
++    const char *p = reported_to;
++    unsigned lineno = 0;
++    while (*p)
++    {
++        ++lineno;
++
++        const char *record = p;
++        const char *record_label_end = strchrnul(p, ':');
++        const size_t label_len = record_label_end - p;
++        const char *record_end = strchrnul(p, '\n');
++
++        p = record_end + (record_end[0] != '\0');
++
++        if (label_len == 0 || record_label_end[0] == '\0' || record_end < record_label_end)
++        {
++            VERB1 log("Miss formatted 'reported_to' record on line %d", lineno);
++            continue;
++        }
++
++        callback(record, label_len, user_data);
++    }
++}
++
++static void read_entire_reported_to_cb(const char *record_line, size_t label_len, void *user_data)
++{
++    GList **result = (GList **)user_data;
++    report_result_t *report = parse_reported_line(record_line, label_len);
++    *result = g_list_prepend(*result, report);
++}
++
++GList *read_entire_reported_to_data(const char *reported_to)
++{
++    GList *result = NULL;
++    foreach_reported_to_line(reported_to, read_entire_reported_to_cb, &result);
++    return g_list_reverse(result);
++}
++
++struct find_in_cb_data
++{
++    const char *label;
++    size_t label_len;
++    const char *found;
++    size_t found_label_len;
++};
++
++static void find_in_reported_to_cb(const char *record_line, size_t label_len, void *user_data)
++{
++    struct find_in_cb_data *search_args = (struct find_in_cb_data *)user_data;
++    if (label_len == search_args->label_len && strncmp(search_args->label, record_line, label_len) == 0)
++    {
++        search_args->found = record_line;
++        search_args->found_label_len = label_len;
++    }
++}
++
++report_result_t *find_in_reported_to_data(const char *reported_to, const char *report_label)
++{
++    struct find_in_cb_data searched;
++    searched.label = report_label;
++    searched.label_len = strlen(report_label);
++    searched.found = NULL;
++    searched.found_label_len = 0;
++
++    foreach_reported_to_line(reported_to, find_in_reported_to_cb, &searched);
++
++    report_result_t *result = NULL;
++    if (searched.found)
++        result = parse_reported_line(searched.found, searched.found_label_len);
++
++    return result;
++}
+diff --git a/src/lib/ureport.h b/src/lib/ureport.h
+index b1b1d89..fb13c6d 100644
+--- a/src/lib/ureport.h
++++ b/src/lib/ureport.h
+@@ -30,14 +30,29 @@ extern "C" {
+  */
+ struct ureport_server_config
+ {
+-    const char *ur_url; ///< Web service URL
+-    bool ur_ssl_verify; ///< Verify HOST and PEER certificates
++    const char *ur_url;   ///< Web service URL
++    bool ur_ssl_verify;   ///< Verify HOST and PEER certificates
++    char *ur_client_cert; ///< Path to certificate used for client
++                          ///< authentication (or NULL)
++    char *ur_client_key;  ///< Private key for the certificate
+ };
+ 
+ struct abrt_post_state;
+ 
+ #define post_ureport libreport_post_ureport
+-struct abrt_post_state *post_ureport(problem_data_t *pd, struct ureport_server_config *config);
++struct abrt_post_state *post_ureport(const char *json_ureport,
++                                struct ureport_server_config *config);
++
++#define ureport_attach_rhbz libreport_ureport_attach_rhbz
++struct abrt_post_state *ureport_attach_rhbz(const char *bthash, int rhbz_bug_id,
++                                       struct ureport_server_config *config);
++
++#define ureport_attach_email libreport_ureport_attach_email
++struct abrt_post_state *ureport_attach_email(const char *bthash, const char *email,
++                                        struct ureport_server_config *config);
++
++#define ureport_from_dump_dir libreport_ureport_from_dump_dir
++char *ureport_from_dump_dir(const char *dump_dir_path);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/src/plugins/Makefile.am b/src/plugins/Makefile.am
+index 5a85e6f..5cea2b6 100644
+--- a/src/plugins/Makefile.am
++++ b/src/plugins/Makefile.am
+@@ -7,6 +7,7 @@ bin_PROGRAMS = \
+     reporter-upload \
+     reporter-mailx \
+     reporter-print \
++    reporter-ureport \
+     report
+ 
+ pluginsconfdir = $(PLUGINS_CONF_DIR)
+@@ -16,7 +17,8 @@ reportpluginsconfdir = $(REPORT_PLUGINS_CONF_DIR)
+ dist_reportpluginsconf_DATA = \
+     bugzilla.conf \
+     rhtsupport.conf \
+-    mailx.conf
++    mailx.conf \
++    ureport.conf
+ 
+ eventsdir = $(EVENTS_DIR)
+ 
+@@ -30,7 +32,8 @@ dist_events_DATA = \
+     report_RHTSupportAttach.xml \
+     report_Kerneloops.xml \
+     report_Tarball.xml \
+-    report_Uploader.xml
++    report_Uploader.xml \
++    report_uReport.xml
+ 
+ @INTLTOOL_XML_RULE@
+ 
+@@ -54,7 +57,8 @@ EXTRA_DIST = \
+     report_RHTSupportAttach.xml.in \
+     report_Kerneloops.xml.in \
+     report_Tarball.xml.in \
+-    report_Uploader.xml.in
++    report_Uploader.xml.in \
++    report_uReport.xml.in
+ 
+ $(DESTDIR)/$(DEBUG_INFO_DIR):
+ 	$(mkdir_p) '$@'
+@@ -206,4 +210,17 @@ report_CPPFLAGS = \
+ report_LDADD = \
+     ../lib/libreport.la
+ 
++reporter_ureport_SOURCES = \
++    ureport.c
++reporter_ureport_CPPFLAGS = \
++    -I$(srcdir)/../include \
++    -I$(srcdir)/../lib \
++    $(GLIB_CFLAGS) \
++    $(LIBREPORT_CFLAGS) \
++    -DPLUGINS_CONF_DIR=\"$(REPORT_PLUGINS_CONF_DIR)\" \
++    -D_GNU_SOURCE
++reporter_ureport_LDADD = \
++    ../lib/libabrt_web.la \
++    ../lib/libreport.la
++
+ DEFS = -DLOCALEDIR=\"$(localedir)\" @DEFS@
+diff --git a/src/plugins/report_uReport.xml.in b/src/plugins/report_uReport.xml.in
+index 988db55..a02f484 100644
+--- a/src/plugins/report_uReport.xml.in
++++ b/src/plugins/report_uReport.xml.in
+@@ -7,16 +7,35 @@
+     <gui-review-elements>no</gui-review-elements>
+ 
+     <options>
++        <import-event-options event="watch_Bugzilla"/>
++
+         <option type="text" name="uReport_URL">
+             <_label>uReport Server URL</_label>
+             <allow-empty>no</allow-empty>
+             <_description>Address of uReport webservice</_description>
+-            <default-value>https://retrace.fedoraproject.org/faf/reports/new/</default-value>
++            <default-value>https://retrace.fedoraproject.org/faf</default-value>
++        </option>
++        <option type="bool" name="uReport_WatchReportedBugs">
++            <_label>Watch already reported bugs</_label>
++            <_note-html>Adds your Bugzilla login to CC List of already reported bugs.</_note-html>
++            <default-value>yes</default-value>
+         </option>
+         <option type="bool" name="uReport_SSLVerify">
+             <_label>Verify SSL</_label>
+             <_description>Check SSL key validity</_description>
+             <default-value>yes</default-value>
+         </option>
++        <advanced-options>
++            <option type="text" name="http_proxy">
++                <_label>HTTP Proxy</_label>
++                <allow-empty>yes</allow-empty>
++                <_note-html>Sets the proxy server to use for HTTP</_note-html>
++            </option>
++            <option type="text" name="HTTPS_PROXY">
++                <_label>HTTPS Proxy</_label>
++                <allow-empty>yes</allow-empty>
++                <_note-html>Sets the proxy server to use for HTTPS</_note-html>
++            </option>
++        </advanced-options>
+     </options>
+ </event>
+diff --git a/src/plugins/ureport.c b/src/plugins/ureport.c
+index 5ffcea3..249b24b 100644
+--- a/src/plugins/ureport.c
++++ b/src/plugins/ureport.c
+@@ -22,6 +22,79 @@
+ #include "ureport.h"
+ #include "abrt_curl.h"
+ 
++#define CONF_FILE_PATH PLUGINS_CONF_DIR"/ureport.conf"
++
++#define REPORT_URL_SFX "reports/new/"
++#define ATTACH_URL_SFX "reports/attach/"
++#define BTHASH_URL_SFX "reports/bthash/"
++
++#define RHSM_CERT_PATH "/etc/pki/consumer/cert.pem"
++#define RHSM_KEY_PATH "/etc/pki/consumer/key.pem"
++
++#define VALUE_FROM_CONF(opt, var, tr) do { const char *value = getenv("uReport_"opt); \
++        if (!value) { value = get_map_string_item_or_NULL(settings, opt); } if (value) { var = tr(value); } \
++    } while(0)
++
++static char *puppet_config_print(const char *key)
++{
++    char *command = xasprintf("puppet config print %s", key);
++    char *result = run_in_shell_and_save_output(0, command, NULL, NULL);
++    free(command);
++
++    /* run_in_shell_and_save_output always returns non-NULL */
++    if (result[0] != '/')
++        goto error;
++
++    char *newline = strchrnul(result, '\n');
++    if (!newline)
++        goto error;
++
++    *newline = '\0';
++    return result;
++error:
++    free(result);
++    error_msg_and_die("Unable to determine puppet %s path (puppet not installed?)", key);
++}
++
++static void parse_client_auth_paths(struct ureport_server_config *config, const char *client_auth)
++{
++    if (client_auth == NULL)
++        return;
++
++    if (strcmp(client_auth, "") == 0)
++    {
++        config->ur_client_cert = NULL;
++        config->ur_client_key = NULL;
++        VERB1 log("Not using client authentication");
++    }
++    else if (strcmp(client_auth, "rhsm") == 0)
++    {
++        config->ur_client_cert = xstrdup(RHSM_CERT_PATH);
++        config->ur_client_key = xstrdup(RHSM_KEY_PATH);
++    }
++    else if (strcmp(client_auth, "puppet") == 0)
++    {
++        config->ur_client_cert = puppet_config_print("hostcert");
++        config->ur_client_key = puppet_config_print("hostprivkey");
++    }
++    else
++    {
++        char *scratch = xstrdup(client_auth);
++        config->ur_client_cert = xstrdup(strtok(scratch, ":"));
++        config->ur_client_key = xstrdup(strtok(NULL, ":"));
++        free(scratch);
++
++        if (config->ur_client_cert == NULL || config->ur_client_key == NULL)
++            error_msg_and_die("Invalid client authentication specification");
++    }
++
++    if (config->ur_client_cert && config->ur_client_key)
++    {
++        VERB1 log("Using client certificate: %s", config->ur_client_cert);
++        VERB1 log("Using client private key: %s", config->ur_client_key);
++    }
++}
++
+ /*
+  * Loads uReport configuration from various sources.
+  *
+@@ -30,29 +103,152 @@
+  *
+  * @param config a server configuration to be populated
+  */
+-static void load_ureport_server_config(struct ureport_server_config *config)
++static void load_ureport_server_config(struct ureport_server_config *config, map_string_h *settings)
+ {
+-    const char *environ;
++    VALUE_FROM_CONF("URL", config->ur_url, (const char *));
++    VALUE_FROM_CONF("SSLVerify", config->ur_ssl_verify, string_to_bool);
++
++    const char *client_auth = NULL;
++    VALUE_FROM_CONF("SSLClientAuth", client_auth, (const char *));
++    parse_client_auth_paths(config, client_auth);
++}
+ 
+-    environ = getenv("uReport_URL");
+-    config->ur_url = environ ? environ : config->ur_url;
++struct ureport_server_response {
++    bool is_error;
++    char *value;
++    char *message;
++    char *bthash;
++    GList *reported_to_list;
++    char *solution;
++};
+ 
+-    environ = getenv("uReport_SSLVerify");
+-    config->ur_ssl_verify = environ ? string_to_bool(environ) : config->ur_ssl_verify;
++void free_ureport_server_response(struct ureport_server_response *resp)
++{
++    if (!resp)
++        return;
++
++    free(resp->solution);
++    list_free_with_free(resp->reported_to_list);
++    free(resp->bthash);
++    free(resp->message);
++    free(resp->value);
++    free(resp);
+ }
+ 
++static char *parse_solution_from_json_list(struct json_object *list, GList **reported_to)
++{
++    json_object *list_elem, *struct_elem;
++    const char *cause, *note, *url;
++    struct strbuf *solution_buf = strbuf_new();
++
++    const unsigned length = json_object_array_length(list);
++
++    const char *one_format = _("Your problem seems to be caused by %s\n\n%s\n");
++    if (length > 1)
++    {
++        strbuf_append_str(solution_buf, _("Your problem seems to be caused by one of the following:\n"));
++        one_format = "\n* %s\n\n%s\n";
++    }
++
++    bool empty = true;
++    for (unsigned i = 0; i < length; ++i)
++    {
++        list_elem = json_object_array_get_idx(list, i);
++        if (!list_elem)
++            continue;
++
++        if (!json_object_object_get_ex(list_elem, "cause", &struct_elem))
++            continue;
++
++        cause = json_object_get_string(struct_elem);
++            continue;
++
++        if (!json_object_object_get_ex(list_elem, "note", &struct_elem))
++            continue;
++
++        note = json_object_get_string(struct_elem);
++        if (!note)
++            continue;
+ 
+-enum response_type
++        empty = false;
++        strbuf_append_strf(solution_buf, one_format, cause, note);
++
++        if (!json_object_object_get_ex(list_elem, "url", &struct_elem))
++            continue;
++
++        url = json_object_get_string(struct_elem);
++        if (url)
++        {
++            char *reported_to_line = xasprintf("%s: URL=%s", cause, url);
++            *reported_to = g_list_append(*reported_to, reported_to_line);
++        }
++    }
++
++    if (empty)
++    {
++        strbuf_free(solution_buf);
++        return NULL;
++    }
++
++    return strbuf_free_nobuf(solution_buf);
++}
++
++/* reported_to json element should be a list of structures
++{ "reporter": "Bugzilla",
++  "type": "url",
++  "value": "https://bugzilla.redhat.com/show_bug.cgi?id=XYZ" } */
++static GList *parse_reported_to_from_json_list(struct json_object *list)
+ {
+-    UREPORT_SERVER_RESP_UNKNOWN_TYPE,
+-    UREPORT_SERVER_RESP_KNOWN,
+-    UREPORT_SERVER_RESP_ERROR,
+-};
++    int i;
++    json_object *list_elem, *struct_elem;
++    const char *reporter, *value, *type;
++    char *reported_to_line, *prefix;
++    GList *result = NULL;
+ 
+-struct ureport_server_response {
+-    enum response_type type;
+-    const char *value;
+-};
++    for (i = 0; i < json_object_array_length(list); ++i)
++    {
++        prefix = NULL;
++        list_elem = json_object_array_get_idx(list, i);
++        if (!list_elem)
++            continue;
++
++        if (!json_object_object_get_ex(list_elem, "reporter", &struct_elem))
++            continue;
++
++        reporter = json_object_get_string(struct_elem);
++        if (!reporter)
++            continue;
++
++        if (!json_object_object_get_ex(list_elem, "value", &struct_elem))
++            continue;
++
++        value = json_object_get_string(struct_elem);
++        if (!value)
++            continue;
++
++        if (!json_object_object_get_ex(list_elem, "type", &struct_elem))
++            continue;
++
++        type = json_object_get_string(struct_elem);
++        if (type)
++        {
++            if (strcasecmp("url", type) == 0)
++                prefix = xstrdup("URL=");
++            else if (strcasecmp("bthash", type) == 0)
++                prefix = xstrdup("BTHASH=");
++        }
++
++        if (!prefix)
++            prefix = xstrdup("");
++
++        reported_to_line = xasprintf("%s: %s%s", reporter, prefix, value);
++        free(prefix);
++
++        result = g_list_append(result, reported_to_line);
++    }
++
++    return result;
++}
+ 
+ /*
+  * Reponse samples:
+@@ -60,133 +256,401 @@ struct ureport_server_response {
+  * {"response":"true"}
+  * {"response":"false"}
+  */
+-static bool ureport_server_parse_json(json_object *json, struct ureport_server_response *out_response)
++static struct ureport_server_response *ureport_server_parse_json(json_object *json)
+ {
+-    json_object *obj = json_object_object_get(json, "error");
++    json_object *obj = NULL;
++    if (json_object_object_get_ex(json, "error", &obj))
++    {
++        struct ureport_server_response *out_response = xzalloc(sizeof(*out_response));
++        out_response->is_error = true;
++        /*
++         * Used to use json_object_to_json_string(obj), but it returns
++         * the string in quote marks (") - IOW, json-formatted string.
++         */
++        out_response->value = xstrdup(json_object_get_string(obj));
++        return out_response;
++    }
+ 
+-    if (obj)
++    if (json_object_object_get_ex(json, "result", &obj))
+     {
+-        out_response->type = UREPORT_SERVER_RESP_ERROR;
+-        out_response->value = json_object_to_json_string(obj);
+-        return true;
++        struct ureport_server_response *out_response = xzalloc(sizeof(*out_response));
++        out_response->value = xstrdup(json_object_get_string(obj));
++
++        json_object *message = NULL;
++        if (json_object_object_get_ex(json, "message", &message))
++            out_response->message = xstrdup(json_object_get_string(message));
++
++        json_object *bthash = NULL;
++        if (json_object_object_get_ex(json, "bthash", &bthash))
++            out_response->bthash = xstrdup(json_object_get_string(bthash));
++
++        json_object *reported_to_list = NULL;
++        if (json_object_object_get_ex(json, "reported_to", &reported_to_list))
++            out_response->reported_to_list = parse_reported_to_from_json_list(reported_to_list);
++
++        json_object *solutions = NULL;
++        if (json_object_object_get_ex(json, "solutions", &solutions))
++            out_response->solution = parse_solution_from_json_list(solutions, &(out_response->reported_to_list));
++
++        return out_response;
+     }
+ 
+-    obj = json_object_object_get(json, "result");
++    return NULL;
++}
+ 
+-    if (obj)
++static struct ureport_server_response *get_server_response(abrt_post_state_t *post_state, struct ureport_server_config *config)
++{
++    /* Previously, the condition here was (post_state->errmsg[0] != '\0')
++     * however when the server asks for optional client authentication and we do not have the certificates,
++     * then post_state->errmsg contains "NSS: client certificate not found (nickname not specified)" even though
++     * the request succeeded.
++     */
++    if (post_state->curl_result != CURLE_OK)
+     {
+-        out_response->type = UREPORT_SERVER_RESP_KNOWN;
+-        out_response->value = json_object_to_json_string(obj);
+-        return true;
++        error_msg(_("Failed to upload uReport to the server '%s' with curl: %s"), config->ur_url, post_state->errmsg);
++        return NULL;
+     }
+ 
+-    out_response->type = UREPORT_SERVER_RESP_UNKNOWN_TYPE;
+-    return false;
++    if (post_state->http_resp_code == 404)
++    {
++        error_msg(_("The URL '%s' does not exist (got error 404 from server)"), config->ur_url);
++        return NULL;
++    }
++
++    if (post_state->http_resp_code == 500)
++    {
++        error_msg(_("The server at '%s' encountered an internal error (got error 500)"), config->ur_url);
++        return NULL;
++    }
++
++    if (post_state->http_resp_code == 503)
++    {
++        error_msg(_("The server at '%s' currently can't handle the request (got error 503)"), config->ur_url);
++        return NULL;
++    }
++
++    if (post_state->http_resp_code != 202
++            && post_state->http_resp_code != 400
++            && post_state->http_resp_code != 413)
++    {
++        /* can't print better error message */
++        error_msg(_("Unexpected HTTP response from '%s': %d"), config->ur_url, post_state->http_resp_code);
++        VERB1 log("%s", post_state->body);
++        return NULL;
++    }
++
++    json_object *const json = json_tokener_parse(post_state->body);
++
++    if (is_error(json))
++    {
++        error_msg(_("Unable to parse response from ureport server at '%s'"), config->ur_url);
++        VERB1 log("%s", post_state->body);
++        json_object_put(json);
++        return NULL;
++    }
++
++    struct ureport_server_response *response = ureport_server_parse_json(json);
++    json_object_put(json);
++
++    if (!response)
++        error_msg(_("The response from '%s' has invalid format"), config->ur_url);
++    else if ((post_state->http_resp_code == 202 && response->is_error)
++                || (post_state->http_resp_code != 202 && !response->is_error))
++    {
++        /* HTTP CODE 202 means that call was successful but the response */
++        /* has an error message */
++        error_msg(_("Type mismatch has been detected in the response from '%s'"), config->ur_url);
++    }
++
++    return response;
++}
++
++typedef abrt_post_state_t *(*attach_handler)(const char *, void *, struct ureport_server_config *);
++
++static abrt_post_state_t *wrp_ureport_attach_rhbz(const char *ureport_hash, int *rhbz_bug,
++        struct ureport_server_config *config)
++{
++    return ureport_attach_rhbz(ureport_hash, *rhbz_bug, config);
++}
++
++static bool perform_attach(struct ureport_server_config *config, const char *ureport_hash,
++        attach_handler handler, void *args)
++{
++    char *dest_url = concat_path_file(config->ur_url, ATTACH_URL_SFX);
++    const char *old_url = config->ur_url;
++    config->ur_url = dest_url;
++    abrt_post_state_t *post_state = handler(ureport_hash, args, config);
++    config->ur_url = old_url;
++    free(dest_url);
++
++    struct ureport_server_response *resp = get_server_response(post_state, config);
++    free_abrt_post_state(post_state);
++    /* don't use str_bo_bool() because we require "true" string */
++    const int result = !resp || resp->is_error || strcmp(resp->value,"true") != 0;
++
++    if (resp && resp->is_error)
++    {
++        error_msg(_("The server at '%s' responded with an error: '%s'"), config->ur_url, resp->value);
++    }
++
++    free_ureport_server_response(resp);
++
++    return result;
+ }
+ 
+ int main(int argc, char **argv)
+ {
++    setlocale(LC_ALL, "");
++#if ENABLE_NLS
++    bindtextdomain(PACKAGE, LOCALEDIR);
++    textdomain(PACKAGE);
++#endif
++
+     abrt_init(argv);
+ 
+     struct ureport_server_config config = {
+-        .ur_url = "https://retrace.fedoraproject.org/faf/reports/new/",
++        .ur_url = NULL,
+         .ur_ssl_verify = true,
++        .ur_client_cert = NULL,
++        .ur_client_key = NULL,
+     };
+ 
++    enum {
++        OPT_v = 1 << 0,
++        OPT_d = 1 << 1,
++        OPT_u = 1 << 2,
++        OPT_k = 1 << 3,
++        OPT_t = 1 << 4,
++    };
++
++    int ret = 1; /* "failure" (for now) */
+     bool insecure = !config.ur_ssl_verify;
++    const char *conf_file = CONF_FILE_PATH;
++    const char *arg_server_url = NULL;
++    const char *client_auth = NULL;
+     const char *dump_dir_path = ".";
++    const char *ureport_hash = NULL;
++    bool ureport_hash_from_rt = false;
++    int rhbz_bug = -1;
++    bool rhbz_bug_from_rt = false;
++    const char *email_address = NULL;
++    bool email_address_from_env = false;
++    struct dump_dir *dd = NULL;
+     struct options program_options[] = {
+         OPT__VERBOSE(&g_verbose),
+         OPT__DUMP_DIR(&dump_dir_path),
+-        OPT_STRING('u', "url", &config.ur_url, "URL", _("Specify url")),
++        OPT_STRING('u', "url", &arg_server_url, "URL", _("Specify server URL")),
+         OPT_BOOL('k', "insecure", &insecure,
+                           _("Allow insecure connection to ureport server")),
++        OPT_STRING('t', "auth", &client_auth, "SOURCE", _("Use client authentication")),
++        OPT_STRING('c', NULL, &conf_file, "FILE", _("Configuration file")),
++        OPT_STRING('a', "attach", &ureport_hash, "BTHASH",
++                          _("bthash of uReport to attach (conflicts with -A)")),
++        OPT_BOOL('A', "attach-rt", &ureport_hash_from_rt,
++                          _("attach to a bthash from reported_to (conflicts with -a)")),
++        OPT_STRING('e', "email", &email_address, "EMAIL",
++                          _("contact e-mail address (requires -a|-A, conflicts with -E)")),
++        OPT_BOOL('E', "email-env", &email_address_from_env,
++                          _("contact e-mail address from environment or configuration file (requires -a|-A, conflicts with -e)")),
++        OPT_INTEGER('b', "bug-id", &rhbz_bug,
++                          _("attach RHBZ bug (requires -a|-A, conflicts with -B)")),
++        OPT_BOOL('B', "bug-id-rt", &rhbz_bug_from_rt,
++                          _("attach last RHBZ bug from reported_to (requires -a|-A, conflicts with -b)")),
+         OPT_END(),
+     };
+ 
+     const char *program_usage_string = _(
+-        "& [-v] [-u URL] [-k] -d DIR\n"
++        "& [-v] [-c FILE] [-u URL] [-k] [-t SOURCE] [-A -a bthash -B -b bug-id -E -e email] [-d DIR]\n"
++        "\n"
++        "Upload micro report or add an attachment to a micro report\n"
+         "\n"
+-        "Upload micro report"
++        "Reads the default configuration from "CONF_FILE_PATH
+     );
+ 
+-    parse_opts(argc, argv, program_options, program_usage_string);
+-    struct dump_dir *dd = dd_opendir(dump_dir_path, DD_OPEN_READONLY);
+-    if (!dd)
+-        xfunc_die();
++    unsigned opts = parse_opts(argc, argv, program_options, program_usage_string);
++
++    map_string_h *settings = new_map_string();
++    load_conf_file(conf_file, settings, /*skip key w/o values:*/ false);
+ 
+-    config.ur_ssl_verify = !insecure;
+-    load_ureport_server_config(&config);
++    load_ureport_server_config(&config, settings);
+ 
+-    problem_data_t *pd = create_problem_data_from_dump_dir(dd);
+-    dd_close(dd);
+-    if (!pd)
+-        xfunc_die(); /* create_problem_data_for_reporting already emitted error msg */
++    if (opts & OPT_u)
++        config.ur_url = arg_server_url;
++    if (opts & OPT_k)
++        config.ur_ssl_verify = !insecure;
++    if (opts & OPT_t)
++        parse_client_auth_paths(&config, client_auth);
++
++    if (!config.ur_url)
++        error_msg_and_die("You need to specify server URL");
+ 
+     abrt_post_state_t *post_state = NULL;
+-    post_state = post_ureport(pd, &config);
+-    free_problem_data(pd);
+ 
+-    if (post_state->http_resp_code != 200)
++    if (ureport_hash && ureport_hash_from_rt)
++        error_msg_and_die("You need to pass either -a bthash or -A");
++
++    if (rhbz_bug >= 0 && rhbz_bug_from_rt)
++        error_msg_and_die("You need to pass either -b bug-id or -B");
++
++    if (email_address && email_address_from_env)
++        error_msg_and_die("You need to pass either -e bthash or -E");
++
++    if (ureport_hash_from_rt || rhbz_bug_from_rt)
+     {
+-        char *errmsg = post_state->curl_error_msg;
+-        if (errmsg && *errmsg)
++        dd = dd_opendir(dump_dir_path, DD_OPEN_READONLY);
++        if (!dd)
++            xfunc_die();
++
++        if (ureport_hash_from_rt)
++        {
++            report_result_t *ureport_result = find_in_reported_to(dd, "uReport");
++
++            if (!ureport_result || !ureport_result->bthash)
++                error_msg_and_die(_("This problem does not have an uReport assigned."));
++
++            /* sorry, this will be leaked */
++            ureport_hash = xstrdup(ureport_result->bthash);
++
++            free_report_result(ureport_result);
++        }
++
++        if (rhbz_bug_from_rt)
+         {
+-            error_msg("%s '%s'", errmsg, config.ur_url);
+-            free_abrt_post_state(post_state);
+-            return 1;
++            report_result_t *bz_result = find_in_reported_to(dd, "Bugzilla");
++
++            if (!bz_result || !bz_result->url)
++                error_msg_and_die(_("This problem has not been reported to Bugzilla."));
++
++            char *bugid_ptr = strstr(bz_result->url, "show_bug.cgi?id=");
++            if (!bugid_ptr)
++                error_msg_and_die(_("Unable to find bug ID in bugzilla URL '%s'"), bz_result->url);
++            bugid_ptr += strlen("show_bug.cgi?id=");
++
++            /* we're just reading int, sscanf works fine */
++            if (sscanf(bugid_ptr, "%d", &rhbz_bug) != 1)
++                error_msg_and_die(_("Unable to parse bug ID from bugzilla URL '%s'"), bz_result->url);
++
++            free_report_result(bz_result);
+         }
++
++        dd_close(dd);
+     }
+ 
+-    int ret = 1; /* return 1 by default */
+-    json_object *const json = json_tokener_parse(post_state->body);
++    if (email_address_from_env)
++    {
++        VALUE_FROM_CONF("ContactEmail", email_address, (const char *));
+ 
+-    if (is_error(json))
++        if (!email_address)
++            error_msg_and_die(_("Neither environment variable 'uReport_ContactEmail' nor configuration option 'ContactEmail' is set"));
++    }
++
++    if (ureport_hash)
+     {
+-        error_msg("fatal: unable to parse response from ureport server");
+-        goto err;
++        if (rhbz_bug < 0 && !email_address)
++            error_msg_and_die(_("You need to specify bug ID, contact email or both"));
++
++        if (rhbz_bug >= 0)
++        {
++            if (perform_attach(&config, ureport_hash, (attach_handler)wrp_ureport_attach_rhbz, (void *)&rhbz_bug))
++                goto finalize;
++        }
++
++        if (email_address)
++        {
++            if (perform_attach(&config, ureport_hash, (attach_handler)ureport_attach_email, (void *)email_address))
++                goto finalize;
++        }
++
++        ret = 0;
++        goto finalize;
+     }
++    if (!ureport_hash && (rhbz_bug >= 0 || email_address))
++        error_msg_and_die(_("You need to specify bthash of the uReport to attach."));
+ 
+-    struct ureport_server_response response = {
+-        .type=UREPORT_SERVER_RESP_UNKNOWN_TYPE,
+-        .value=NULL,
+-    };
++    /* -b, -a nor -r were specified - upload uReport from dump_dir */
++    const char *server_url = config.ur_url;
++    char *dest_url = concat_path_file(config.ur_url, REPORT_URL_SFX);
++    config.ur_url = dest_url;
+ 
+-    const bool is_valid_response = ureport_server_parse_json(json, &response);
++    char *json_ureport = ureport_from_dump_dir(dump_dir_path);
++    if (!json_ureport)
++    {
++        error_msg(_("Not uploading an empty uReport"));
++        goto format_err;
++    }
+ 
+-    if (!is_valid_response)
++    post_state = post_ureport(json_ureport, &config);
++    free(json_ureport);
++
++    if (!post_state)
+     {
+-        error_msg("fatal: wrong format of response from ureport server");
++        error_msg(_("Failed on submitting the problem"));
+         goto format_err;
+     }
+ 
+-    switch (response.type)
+-    {
+-        case UREPORT_SERVER_RESP_KNOWN:
+-            VERB1 log("is known: %s", response.value);
+-            ret = 0;
+-            /* If a reported problem is not known then emit NEEDMORE */
+-            if (strcmp("true",response.value))
+-                log("NEEDMORE");
+-            break;
+-        case UREPORT_SERVER_RESP_ERROR:
+-            VERB1 log("server side error: %s", response.value);
+-            ret = 1; /* just to be sure */
+-            break;
+-        case UREPORT_SERVER_RESP_UNKNOWN_TYPE:
+-            error_msg("invalid server response: %s", response.value);
+-            ret = 1; /* just to be sure */
+-            break;
+-        default:
+-            error_msg("reporter internal error: missing handler for response type");
+-            ret = 1; /* just to be sure */
+-            break;
++    struct ureport_server_response *response = get_server_response(post_state, &config);
++
++    if (!response)
++        goto format_err;
++
++    if (!response->is_error)
++    {
++        VERB1 log("is known: %s", response->value);
++        ret = 0; /* "success" */
++
++        dd = dd_opendir(dump_dir_path, /* flags */ 0);
++        if (!dd)
++            xfunc_die();
++
++        if (response->bthash)
++        {
++            char *msg = xasprintf("uReport: BTHASH=%s", response->bthash);
++            add_reported_to(dd, msg);
++            free(msg);
++
++            char *bthash_url = concat_path_file(server_url, BTHASH_URL_SFX);
++            msg = xasprintf("ABRT Server: URL=%s%s", bthash_url, response->bthash);
++            add_reported_to(dd, msg);
++            free(msg);
++            free(bthash_url);
++        }
++
++        if (response->reported_to_list)
++        {
++            for (GList *e = response->reported_to_list; e; e = g_list_next(e))
++                add_reported_to(dd, e->data);
++        }
++
++        if (response->solution)
++            dd_save_text(dd, FILENAME_NOT_REPORTABLE, response->solution);
++
++        dd_close(dd);
++
++        /* If a reported problem is not known then emit NEEDMORE */
++        if (strcmp("true", response->value) == 0)
++        {
++            log(_("This problem has already been reported."));
++            if (response->message)
++                log(response->message);
++
++            ret = EXIT_STOP_EVENT_RUN;
++        }
+     }
++    else
++    {
++        error_msg(_("Server responded with an error: '%s'"), response->value);
++    }
++
++    free_ureport_server_response(response);
+ 
+ format_err:
+-    json_object_put(json);
+-err:
+     free_abrt_post_state(post_state);
++    free(dest_url);
++
++finalize:
++    free_map_string(settings);
++    free(config.ur_client_cert);
++    free(config.ur_client_key);
+ 
+     return ret;
+ }
+diff --git a/src/plugins/ureport.conf b/src/plugins/ureport.conf
+new file mode 100644
+index 0000000..b9be3c6
+--- /dev/null
++++ b/src/plugins/ureport.conf
+@@ -0,0 +1,18 @@
++# Base URL to uReport server
++URL = https://retrace.fedoraproject.org/faf
++
++# no means that ssl certificates will not be checked
++# SSLVerify = no
++
++# Contact email attached to an uploaded uReport if required
++# ContactEmail = foo@example.com
++
++# Client-side authentication
++# None (default):
++# SSLClientAuth =
++# Using RH subscription management certificate:
++# SSLClientAuth = rhsm
++# Using Puppet certificate:
++# SSLClientAuth = puppet
++# Using custom certificate:
++# SSLClientAuth = /path/to/cert.pem:/path/to/key.pem
+-- 
+1.8.3.1
+

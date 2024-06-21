@@ -1,0 +1,507 @@
+From aed271dce0b7763bdd181ec83155c122b9e6ab03 Mon Sep 17 00:00:00 2001
+From: Nikola Pajkovsky <npajkovs@redhat.com>
+Date: Wed, 9 May 2012 15:26:19 +0200
+Subject: [PATCH 18/53] ureport: ureport introduction
+
+Signed-off-by: Nikola Pajkovsky <npajkovs@redhat.com>
+---
+ .gitignore                       |   1 +
+ configure.ac                     |   1 +
+ po/Makefile.in.in                |  13 +-
+ src/include/internal_libreport.h |   3 +
+ src/lib/Makefile.am              |   6 +-
+ src/lib/json.c                   | 251 +++++++++++++++++++++++++++++++++++++++
+ src/plugins/Makefile.am          |  16 ++-
+ src/plugins/ureport.c            |  88 ++++++++++++++
+ 9 files changed, 388 insertions(+), 6 deletions(-)
+ create mode 100644 src/lib/json.c
+ create mode 100644 src/plugins/ureport.c
+
+diff --git a/configure.ac b/configure.ac
+index 851cc89..2d5dd25 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -76,6 +76,7 @@ PKG_CHECK_MODULES([CURL], [libcurl])
+ PKG_CHECK_MODULES([GNOME_KEYRING], [gnome-keyring-1])
+ PKG_CHECK_MODULES([JSON_C], [json])
+ PKG_CHECK_MODULES([RPM], [rpm])
++PKG_CHECK_MODULES([BTPARSER], [btparser])
+ 
+ # Just PKG_CHECK_MODULES([PYTHON], [python]) works only with python2.7+
+ # Below, if python is not found, we set up for python2.6 w/o checking:
+diff --git a/po/Makefile.in.in b/po/Makefile.in.in
+index cc8a222..06a8cfe 100644
+--- a/po/Makefile.in.in
++++ b/po/Makefile.in.in
+@@ -49,8 +49,8 @@ MSGFMT = @MSGFMT@
+ XGETTEXT = @XGETTEXT@
+ INTLTOOL_UPDATE = @INTLTOOL_UPDATE@
+ INTLTOOL_EXTRACT = @INTLTOOL_EXTRACT@
+-MSGMERGE = INTLTOOL_EXTRACT=$(INTLTOOL_EXTRACT) srcdir=$(srcdir) $(INTLTOOL_UPDATE) --gettext-package $(GETTEXT_PACKAGE) --dist
+-GENPOT   = INTLTOOL_EXTRACT=$(INTLTOOL_EXTRACT) srcdir=$(srcdir) $(INTLTOOL_UPDATE) --gettext-package $(GETTEXT_PACKAGE) --pot
++MSGMERGE = INTLTOOL_EXTRACT="$(INTLTOOL_EXTRACT)" XGETTEXT="$(XGETTEXT)" srcdir=$(srcdir) $(INTLTOOL_UPDATE) --gettext-package $(GETTEXT_PACKAGE) --dist
++GENPOT   = INTLTOOL_EXTRACT="$(INTLTOOL_EXTRACT)" XGETTEXT="$(XGETTEXT)" srcdir=$(srcdir) $(INTLTOOL_UPDATE) --gettext-package $(GETTEXT_PACKAGE) --pot
+ 
+ ALL_LINGUAS = @ALL_LINGUAS@
+ 
+@@ -73,15 +73,20 @@ CATALOGS=$(shell LINGUAS="$(USE_LINGUAS)"; for lang in $$LINGUAS; do printf "$$l
+ .SUFFIXES:
+ .SUFFIXES: .po .pox .gmo .mo .msg .cat
+ 
++AM_DEFAULT_VERBOSITY = @AM_DEFAULT_VERBOSITY@
++INTLTOOL_V_MSGFMT = $(INTLTOOL__v_MSGFMT_$(V))
++INTLTOOL__v_MSGFMT_= $(INTLTOOL__v_MSGFMT_$(AM_DEFAULT_VERBOSITY))
++INTLTOOL__v_MSGFMT_0 = @echo "  MSGFMT" $@;
++
+ .po.pox:
+ 	$(MAKE) $(GETTEXT_PACKAGE).pot
+ 	$(MSGMERGE) $< $(GETTEXT_PACKAGE).pot -o $*.pox
+ 
+ .po.mo:
+-	$(MSGFMT) -o $@ $<
++	$(INTLTOOL_V_MSGFMT)$(MSGFMT) -o $@ $<
+ 
+ .po.gmo:
+-	file=`echo $* | sed 's,.*/,,'`.gmo \
++	$(INTLTOOL_V_MSGFMT)file=`echo $* | sed 's,.*/,,'`.gmo \
+ 	  && rm -f $$file && $(GMSGFMT) -o $$file $<
+ 
+ .po.cat:
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index 42c94f7..21e8175 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -89,6 +89,7 @@ int vdprintf(int d, const char *format, va_list ap);
+ #include "problem_data.h"
+ #include "report.h"
+ #include "run_event.h"
++#include "abrt_curl.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -783,6 +784,8 @@ unsigned parse_opts(int argc, char **argv, const struct options *opt,
+ #define show_usage_and_die libreport_show_usage_and_die
+ void show_usage_and_die(const char *usage, const struct options *opt) NORETURN;
+ 
++#define post_ureport libreport_post_ureport
++abrt_post_state_t *post_ureport(problem_data_t *pd, const char *ureport_url);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/src/lib/Makefile.am b/src/lib/Makefile.am
+index cffabb2..6315591 100644
+--- a/src/lib/Makefile.am
++++ b/src/lib/Makefile.am
+@@ -94,7 +94,7 @@ libabrt_dbus_la_LIBADD = \
+ libabrt_web_la_SOURCES = \
+     abrt_curl.h abrt_curl.c \
+     abrt_xmlrpc.h abrt_xmlrpc.c \
+-    proxies.h proxies.c
++    proxies.h proxies.c json.c
+ libabrt_web_la_CPPFLAGS = \
+     -Wall -Wwrite-strings -Werror \
+     -I$(srcdir)/../include \
+@@ -109,6 +109,8 @@ libabrt_web_la_CPPFLAGS = \
+     $(LIBXML_CFLAGS) \
+     $(XMLRPC_CFLAGS) $(XMLRPC_CLIENT_CFLAGS) \
+     $(LIBREPORT_CFLAGS) \
++    $(JSON_C_CFLAGS) \
++    $(BTPARSER_CFLAGS) \
+     -D_GNU_SOURCE
+ libabrt_web_la_LDFLAGS = \
+     -version-info 0:1:0
+@@ -117,6 +119,8 @@ libabrt_web_la_LIBADD = \
+     $(CURL_LIBS) \
+     $(PROXY_LIBS) \
+     $(LIBXML_LIBS) \
++    $(JSON_C_LIBS) \
++    $(BTPARSER_LIBS) \
+     $(XMLRPC_LIBS) $(XMLRPC_CLIENT_LIBS)
+ 
+ $(DESTDIR)/$(DEBUG_DUMPS_DIR):
+diff --git a/src/lib/json.c b/src/lib/json.c
+new file mode 100644
+index 0000000..b451f83
+--- /dev/null
++++ b/src/lib/json.c
+@@ -0,0 +1,251 @@
++/*
++    Copyright (C) 2012  ABRT team
++    Copyright (C) 2012  RedHat Inc
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License along
++    with this program; if not, write to the Free Software Foundation, Inc.,
++    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++*/
++
++#include <json/json.h>
++#include <btparser/thread.h>
++#include <btparser/core-backtrace.h>
++
++#include "internal_libreport.h"
++#include "abrt_curl.h"
++
++
++/* on success 1 returned, on error zero is returned and appropriate value
++ * is returned as third argument. You should never read third argument when
++ * function fails
++ *
++ * json-c library doesn't have any json_object_new_long,
++ * thus we have to use only int
++ */
++static int get_pd_int_item(problem_data_t *pd, const char *key, int *result)
++{
++    if (!pd || !key)
++        return 0;
++
++    char *pd_item = get_problem_item_content_or_NULL(pd, key);
++    if (!pd_item)
++    {
++        VERB1 log("warning: '%s' is not an item in problem directory", key);
++        return 0;
++    }
++
++    int old_errno = errno;
++    errno = 0;
++    char *e;
++    long i = strtol(pd_item, &e, 10);
++    if (errno || pd_item == e || *e != '\0' || (int) i != i)
++        return 0;
++
++    *result = i;
++
++    errno = old_errno;
++    return 1;
++}
++
++static void ureport_add_int(struct json_object *ur, const char *key, int i)
++{
++    struct json_object *jint = json_object_new_int(i);
++    if (!jint)
++        return;
++
++    json_object_object_add(ur, key, jint);
++}
++
++static void ureport_add_str(struct json_object *ur, const char *key,
++                            const char *s)
++{
++    struct json_object *jstring = json_object_new_string(s);
++    if (!jstring)
++        return;
++
++    json_object_object_add(ur, key, jstring);
++}
++
++static void ureport_add_os(struct json_object *ur, problem_data_t *pd)
++{
++    struct json_object *jobject = json_object_new_object();
++
++    char *pd_item = get_problem_item_content_or_NULL(pd, FILENAME_OS_RELEASE);
++    if (!pd_item)
++        return;
++
++    char *name, *version;
++    parse_release_for_rhts(pd_item, &name, &version);
++
++    ureport_add_str(jobject, "name", name);
++    ureport_add_str(jobject, "version", version);
++
++    free(name);
++    free(version);
++
++    json_object_object_add(ur, "os", jobject);
++}
++
++static void ureport_add_type(struct json_object *ur, problem_data_t *pd)
++{
++    char *pd_item = get_problem_item_content_or_NULL(pd, FILENAME_ANALYZER);
++    if (!pd_item)
++        return;
++
++    const char type[] = "type";
++    if (!strcmp(pd_item, "CCpp"))
++        ureport_add_str(ur, type, "USERSPACE");
++    if (!strcmp(pd_item, "Python"))
++        ureport_add_str(ur, type, "PYTHON");
++    if (!strcmp(pd_item, "Kerneloops"))
++        ureport_add_str(ur, type, "KERNELOOPS");
++}
++
++static void ureport_add_core_backtrace(struct json_object *ur, problem_data_t *pd)
++{
++    char *pd_item = get_problem_item_content_or_NULL(pd, FILENAME_CORE_BACKTRACE);
++    if (!pd_item)
++        return;
++
++    struct json_object *jarray = json_object_new_array();
++    if (!jarray)
++        return;
++
++    struct btp_thread *core_bt = btp_load_core_backtrace(pd_item);
++    if (!core_bt)
++        return;
++
++    struct btp_frame *frame;
++    unsigned frame_nr = 0;
++    for (frame = core_bt->frames; frame; frame = frame->next)
++    {
++        struct frame_aux *aux = frame->user_data;
++
++        struct json_object *item = json_object_new_object();
++
++        if (aux->filename)
++            ureport_add_str(item, "path", aux->filename);
++
++        if (frame->function_name)
++            ureport_add_str(item, "funcname", frame->function_name);
++
++        if (aux->build_id)
++            ureport_add_str(item, "buildid", aux->build_id);
++
++        if (aux->fingerprint)
++            ureport_add_str(item, "funchash", aux->fingerprint);
++
++        if ((uintmax_t)frame->address)
++            ureport_add_int(item, "offset", (uintmax_t)frame->address);
++
++        ureport_add_int(item, "frame", frame_nr++);
++        ureport_add_int(item, "thread", 0);
++
++
++        json_object_array_add(jarray, item);
++    }
++
++    btp_thread_free(core_bt);
++
++    json_object_object_add(ur, FILENAME_CORE_BACKTRACE, jarray);
++}
++
++static void ureport_add_item_str(struct json_object *ur, problem_data_t *pd,
++                                 const char *key, const char *rename)
++{
++        char *pd_item = get_problem_item_content_or_NULL(pd, key);
++        if (!pd_item)
++            return;
++
++        ureport_add_str(ur, (rename) ?: key, pd_item);
++}
++
++static void ureport_add_item_int(struct json_object *ur, problem_data_t *pd,
++                                 const char *key, const char *rename)
++{
++    int nr;
++    int stat = get_pd_int_item(pd, key, &nr);
++    if (!stat)
++        return;
++
++    ureport_add_int(ur, (rename) ?: rename, nr);
++}
++
++static void ureport_add_pkg(struct json_object *ur, problem_data_t *pd)
++{
++    struct json_object *jobject = json_object_new_object();
++    if (!jobject)
++        return;
++
++    ureport_add_item_int(jobject, pd, FILENAME_PKG_EPOCH, "epoch");
++    ureport_add_item_str(jobject, pd, FILENAME_PKG_NAME, "name");
++    ureport_add_item_str(jobject, pd, FILENAME_PKG_VERSION, "version");
++    ureport_add_item_str(jobject, pd, FILENAME_PKG_RELEASE, "release");
++    ureport_add_item_str(jobject, pd, FILENAME_PKG_ARCH, "architecture");
++
++    json_object_object_add(ur, "installed_package", jobject);
++}
++
++char *new_json_ureport(problem_data_t *pd)
++{
++    struct json_object *ureport = json_object_new_object();
++
++    ureport_add_item_str(ureport, pd, "user_type", NULL);
++    ureport_add_item_int(ureport, pd, "uptime", NULL);
++
++   /* mandatory, but not in problem-dir
++    *
++    * ureport_add_item_int(ureport, pd, "crash_thread", NULL);
++    */
++    ureport_add_int(ureport, "crash_thread", 0);
++
++    ureport_add_item_str(ureport, pd, FILENAME_ARCHITECTURE, NULL);
++    ureport_add_item_str(ureport, pd, FILENAME_EXECUTABLE, NULL);
++    ureport_add_item_str(ureport, pd, FILENAME_REASON, NULL);
++    ureport_add_item_str(ureport, pd, FILENAME_COMPONENT, NULL);
++
++    ureport_add_type(ureport, pd);
++
++    ureport_add_pkg(ureport, pd);
++    ureport_add_os(ureport, pd);
++
++    ureport_add_core_backtrace(ureport, pd);
++
++    char *j = xstrdup(json_object_to_json_string(ureport));
++    json_object_put(ureport);
++
++    return j;
++}
++
++abrt_post_state_t *post_ureport(problem_data_t *pd, const char *ureport_url)
++{
++    abrt_post_state_t *post_state;
++    post_state = new_abrt_post_state(ABRT_POST_WANT_BODY
++                                     | ABRT_POST_WANT_SSL_VERIFY
++                                     | ABRT_POST_WANT_ERROR_MSG);
++
++    const char *headers[] = {
++        "Accept: text/plain",
++        "Connection: close",
++        NULL,
++    };
++
++    char *json_ureport = new_json_ureport(pd);
++
++    abrt_post_string(post_state, ureport_url, "application/json",
++                     headers, json_ureport);
++
++    free(json_ureport);
++
++    return post_state;
++}
+diff --git a/src/plugins/Makefile.am b/src/plugins/Makefile.am
+index 6514ff6..476a59d 100644
+--- a/src/plugins/Makefile.am
++++ b/src/plugins/Makefile.am
+@@ -8,7 +8,8 @@ bin_PROGRAMS = \
+     reporter-mailx \
+     reporter-print \
+     report \
+-    abrt-bodhi
++    abrt-bodhi \
++    reporter-ureport
+ 
+ pluginsconfdir = $(PLUGINS_CONF_DIR)
+ 
+@@ -218,4 +219,17 @@ abrt_bodhi_LDADD = \
+     ../lib/libreport.la \
+     ../lib/libabrt_web.la
+ 
++reporter_ureport_SOURCES = \
++    ureport.c
++reporter_ureport_CPPFLAGS = \
++    -I$(srcdir)/../include \
++    -I$(srcdir)/../lib \
++    $(GLIB_CFLAGS) \
++    $(LIBREPORT_CFLAGS) \
++    -D_GNU_SOURCE \
++    -Wall -Wwrite-strings -Werror
++reporter_ureport_LDADD = \
++    ../lib/libreport.la \
++    ../lib/libabrt_web.la
++
+ DEFS = -DLOCALEDIR=\"$(localedir)\" @DEFS@
+diff --git a/src/plugins/ureport.c b/src/plugins/ureport.c
+new file mode 100644
+index 0000000..f883e5c
+--- /dev/null
++++ b/src/plugins/ureport.c
+@@ -0,0 +1,88 @@
++/*
++    Copyright (C) 2012  ABRT Team
++    Copyright (C) 2012  RedHat inc.
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License along
++    with this program; if not, write to the Free Software Foundation, Inc.,
++    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++*/
++
++#include "internal_libreport.h"
++
++int main(int argc, char **argv)
++{
++    abrt_init(argv);
++
++    const char *dump_dir_path = ".", *url = "https://retrace.fedoraproject.org/faf/reports/new/";
++    struct options program_options[] = {
++        OPT__VERBOSE(&g_verbose),
++        OPT__DUMP_DIR(&dump_dir_path),
++        OPT_STRING('u', "url", &url, "URL", _("Specify url")),
++        OPT_END(),
++    };
++
++    const char *program_usage_string = _(
++        "& [-v] -d DIR\n"
++        "\n"
++        "Upload micro report"
++    );
++
++    parse_opts(argc, argv, program_options, program_usage_string);
++    struct dump_dir *dd = dd_opendir(dump_dir_path, DD_OPEN_READONLY);
++    if (!dd)
++        xfunc_die();
++
++    problem_data_t *pd = create_problem_data_from_dump_dir(dd);
++    dd_close(dd);
++    if (!pd)
++        xfunc_die(); /* create_problem_data_for_reporting already emitted error msg */
++
++    abrt_post_state_t *post_state = NULL;
++    post_state = post_ureport(pd, url);
++    free_problem_data(pd);
++
++    if (post_state->http_resp_code != 200)
++    {
++        char *errmsg = post_state->curl_error_msg;
++        if (errmsg && *errmsg)
++        {
++            error_msg("%s '%s'", errmsg, url);
++            free_abrt_post_state(post_state);
++            return 1;
++        }
++    }
++
++    char *line = strtok(post_state->body, "\n");
++    int ret = 0;
++    while (line)
++    {
++        if (!prefixcmp(line, "ERROR "))
++        {
++            ret = 1;
++            break;
++        }
++
++        if (!prefixcmp(line, "NEEDMORE"))
++        {
++            log("%s", line);
++            ret = 0;
++            break;
++        }
++
++        line = strtok(NULL, "\n");
++    }
++
++    free_abrt_post_state(post_state);
++
++    return ret;
++}
+-- 
+1.7.11.2
+

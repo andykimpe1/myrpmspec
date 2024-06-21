@@ -1,0 +1,378 @@
+From e505078269877d60de2818c77c999b8f0c113023 Mon Sep 17 00:00:00 2001
+From: Denys Vlasenko <dvlasenk@redhat.com>
+Date: Wed, 27 Mar 2013 13:03:01 +0100
+Subject: [RHEL6 LIBREPORT PATCH 81/94] reporter-upload: factor out HTTP PUT
+ upload
+
+This patch adds HTTP PUT upload support to post()
+helper function.
+
+This simplifies send_file() in reporter-upload.
+
+Signed-off-by: Denys Vlasenko <dvlasenk@redhat.com>
+Signed-off-by: Jiri Moskovcak <jmoskovc@redhat.com>
+---
+ src/lib/abrt_curl.c           | 86 ++++++++++++++++++++++++++--------------
+ src/lib/abrt_curl.h           | 11 +++++-
+ src/plugins/reporter-upload.c | 91 ++++++++++++-------------------------------
+ 3 files changed, 91 insertions(+), 97 deletions(-)
+
+diff --git a/src/lib/abrt_curl.c b/src/lib/abrt_curl.c
+index 6ddb79f..eafdb6e 100644
+--- a/src/lib/abrt_curl.c
++++ b/src/lib/abrt_curl.c
+@@ -280,7 +280,7 @@ abrt_post(abrt_post_state_t *state,
+         state = &localstate;
+     }
+ 
+-    state->http_resp_code = response_code = -1;
++    state->curl_result = state->http_resp_code = response_code = -1;
+ 
+     CURL *handle = xcurl_easy_init();
+ 
+@@ -292,7 +292,8 @@ abrt_post(abrt_post_state_t *state,
+     // Shut off the built-in progress meter completely
+     xcurl_easy_setopt_long(handle, CURLOPT_NOPROGRESS, 1);
+ 
+-    if (g_verbose >= 2) {
++    if (g_verbose >= 2)
++    {
+         // "Display a lot of verbose information about its operations.
+         // Very useful for libcurl and/or protocol debugging and understanding.
+         // The verbose information will be sent to stderr, or the stream set
+@@ -306,37 +307,61 @@ abrt_post(abrt_post_state_t *state,
+     xcurl_easy_setopt_ptr(handle, CURLOPT_URL, url);
+ 
+     // Auth if configured
+-    if (state->username) {
++    if (state->username)
++    {
+         // bitmask of allowed auth methods
+         xcurl_easy_setopt_long(handle, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+         xcurl_easy_setopt_ptr(handle, CURLOPT_USERNAME, state->username);
+         xcurl_easy_setopt_ptr(handle, CURLOPT_PASSWORD, (state->password ? state->password : ""));
+     }
+ 
+-    // Do a regular HTTP post. This also makes curl use
+-    // a "Content-Type: application/x-www-form-urlencoded" header.
+-    // (This is by far the most commonly used POST method).
+-    xcurl_easy_setopt_long(handle, CURLOPT_POST, 1);
+-    // Supply POST data...
+-    struct curl_httppost* post = NULL;
+-    struct curl_httppost* last = NULL;
+-    FILE* data_file = NULL;
+-    if (data_size == ABRT_POST_DATA_FROMFILE) {
++    if (data_size != ABRT_POST_DATA_FROMFILE_PUT)
++    {
++        // Do a HTTP POST. This also makes curl use
++        // a "Content-Type: application/x-www-form-urlencoded" header.
++        // (This is by far the most commonly used POST method).
++        xcurl_easy_setopt_long(handle, CURLOPT_POST, 1);
++    }
++    // else (only ABRT_POST_DATA_FROMFILE_PUT): do HTTP PUT.
++
++    struct curl_httppost *post = NULL;
++    struct curl_httppost *last = NULL;
++    FILE *data_file = NULL;
++    FILE *body_stream = NULL;
++    struct curl_slist *httpheader_list = NULL;
++
++    // Supply data...
++    if (data_size == ABRT_POST_DATA_FROMFILE
++     || data_size == ABRT_POST_DATA_FROMFILE_PUT
++    ) {
+         // ...from a file
+         data_file = fopen(data, "r");
+         if (!data_file)
+-//FIXME:
+-            perror_msg_and_die("Can't open '%s'", data);
++        {
++            perror_msg("Can't open '%s'", data);
++            goto ret; // return -1
++        }
++
+         xcurl_easy_setopt_ptr(handle, CURLOPT_READDATA, data_file);
+         // Want to use custom read function
+         xcurl_easy_setopt_ptr(handle, CURLOPT_READFUNCTION, (const void*)fread_with_reporting);
+-        // Without this, curl would send "Content-Length: -1"
+-        // servers don't like that: "413 Request Entity Too Large"
+         fseeko(data_file, 0, SEEK_END);
+         off_t sz = ftello(data_file);
+         fseeko(data_file, 0, SEEK_SET);
+-        xcurl_easy_setopt_off_t(handle, CURLOPT_POSTFIELDSIZE_LARGE, sz);
+-    } else if (data_size == ABRT_POST_DATA_FROMFILE_AS_FORM_DATA) {
++        if (data_size == ABRT_POST_DATA_FROMFILE)
++        {
++            // Without this, curl would send "Content-Length: -1"
++            // servers don't like that: "413 Request Entity Too Large"
++            xcurl_easy_setopt_off_t(handle, CURLOPT_POSTFIELDSIZE_LARGE, sz);
++        }
++        else
++        {
++            xcurl_easy_setopt_long(handle, CURLOPT_UPLOAD, 1);
++            xcurl_easy_setopt_off_t(handle, CURLOPT_INFILESIZE_LARGE, sz);
++        }
++    }
++    else if (data_size == ABRT_POST_DATA_FROMFILE_AS_FORM_DATA)
++    {
+         // ...from a file, in multipart/formdata format
+         const char *basename = strrchr(data, '/');
+         if (basename) basename++;
+@@ -352,8 +377,10 @@ abrt_post(abrt_post_state_t *state,
+ #else
+         data_file = fopen(data, "r");
+         if (!data_file)
+-//FIXME:
+-            perror_msg_and_die("Can't open '%s'", data);
++        {
++            perror_msg("Can't open '%s'", data);
++            goto ret; // return -1
++        }
+         // Want to use custom read function
+         xcurl_easy_setopt_ptr(handle, CURLOPT_READFUNCTION, (const void*)fread_with_reporting);
+         // Need to know file size
+@@ -375,10 +402,12 @@ abrt_post(abrt_post_state_t *state,
+ //FIXME:
+             error_msg_and_die("out of memory or read error (curl_formadd error code: %d)", (int)curlform_err);
+         xcurl_easy_setopt_ptr(handle, CURLOPT_HTTPPOST, post);
+-    } else if (data_size == ABRT_POST_DATA_STRING_AS_FORM_DATA) {
++    }
++    else if (data_size == ABRT_POST_DATA_STRING_AS_FORM_DATA)
++    {
+         CURLFORMcode curlform_err = curl_formadd(&post, &last,
+                         CURLFORM_PTRNAME, "file", // element name
+-                        // curl bug - missing filename 
++                        // curl bug - missing filename
+                         // http://curl.haxx.se/mail/lib-2011-07/0176.html
+                         // https://github.com/bagder/curl/commit/45d883d
+                         // fixed in curl-7.22.0~144
+@@ -393,8 +422,10 @@ abrt_post(abrt_post_state_t *state,
+         if (curlform_err != 0)
+             error_msg_and_die("out of memory or read error (curl_formadd error code: %d)", (int)curlform_err);
+         xcurl_easy_setopt_ptr(handle, CURLOPT_HTTPPOST, post);
+-    } else {
+-        // .. from a blob in memory
++    }
++    else
++    {
++        // ...from a blob in memory
+         xcurl_easy_setopt_ptr(handle, CURLOPT_POSTFIELDS, data);
+         // note1: if data_size == ABRT_POST_DATA_STRING == -1, curl will use strlen(data)
+         xcurl_easy_setopt_long(handle, CURLOPT_POSTFIELDSIZE, data_size);
+@@ -403,8 +434,6 @@ abrt_post(abrt_post_state_t *state,
+         // Not a big problem: memory blobs >4GB are very unlikely.
+     }
+ 
+-    struct curl_slist *httpheader_list = NULL;
+-
+     // Override "Content-Type:"
+     if (data_size != ABRT_POST_DATA_FROMFILE_AS_FORM_DATA
+         && data_size != ABRT_POST_DATA_STRING_AS_FORM_DATA)
+@@ -458,7 +487,6 @@ abrt_post(abrt_post_state_t *state,
+         xcurl_easy_setopt_ptr(handle, CURLOPT_HEADERFUNCTION, (void*)save_headers);
+         xcurl_easy_setopt_ptr(handle, CURLOPT_WRITEHEADER, state);
+     }
+-    FILE* body_stream = NULL;
+     if (state->flags & ABRT_POST_WANT_BODY)
+     {
+         body_stream = open_memstream(&state->body, &state->body_size);
+@@ -474,7 +502,7 @@ abrt_post(abrt_post_state_t *state,
+ 
+     // This is the place where everything happens.
+     // Here errors are not limited to "out of memory", can't just die.
+-    curl_err = curl_easy_perform_with_proxy(handle, url);
++    state->curl_result = curl_err = curl_easy_perform_with_proxy(handle, url);
+     if (curl_err)
+     {
+         VERB2 log("curl_easy_perform: error %d", (int)curl_err);
+@@ -495,7 +523,7 @@ abrt_post(abrt_post_state_t *state,
+     curl_err = curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &response_code);
+     die_if_curl_error(curl_err);
+     state->http_resp_code = response_code;
+-    VERB3 log("after curl_easy_perform: http code %ld body:'%s'", response_code, state->body);
++    VERB3 log("after curl_easy_perform: response_code:%ld body:'%s'", response_code, state->body);
+ 
+  ret:
+     curl_easy_cleanup(handle);
+diff --git a/src/lib/abrt_curl.h b/src/lib/abrt_curl.h
+index ca3c5b8..720602d 100644
+--- a/src/lib/abrt_curl.h
++++ b/src/lib/abrt_curl.h
+@@ -37,6 +37,12 @@ typedef struct abrt_post_state {
+     const char  *password;
+     /* Results of POST transaction: */
+     int         http_resp_code;
++    /* cast from CURLcode enum.
++     * 0 = success.
++     * -1 = curl_easy_perform wasn't even reached (file open error, etc).
++     * Else curl_easy_perform's error (which is positive, see curl/curl.h).
++     */
++    int         curl_result;
+     unsigned    header_cnt;
+     char        **headers;
+     char        *curl_error_msg;
+@@ -59,8 +65,9 @@ enum {
+     /* Must be -1! CURLOPT_POSTFIELDSIZE interprets -1 as "use strlen" */
+     ABRT_POST_DATA_STRING = -1,
+     ABRT_POST_DATA_FROMFILE = -2,
+-    ABRT_POST_DATA_FROMFILE_AS_FORM_DATA = -3,
+-    ABRT_POST_DATA_STRING_AS_FORM_DATA = -4,
++    ABRT_POST_DATA_FROMFILE_PUT = -3,
++    ABRT_POST_DATA_FROMFILE_AS_FORM_DATA = -4,
++    ABRT_POST_DATA_STRING_AS_FORM_DATA = -5,
+ };
+ int
+ abrt_post(abrt_post_state_t *state,
+diff --git a/src/plugins/reporter-upload.c b/src/plugins/reporter-upload.c
+index c844f72..bb9ee7f 100644
+--- a/src/plugins/reporter-upload.c
++++ b/src/plugins/reporter-upload.c
+@@ -20,59 +20,21 @@
+ #include "abrt_curl.h"
+ #include "internal_libreport.h"
+ 
+-//TODO: use this for better logging
+-#if 0
+-/* "read local data from a file" callback */
+-static size_t fread_with_reporting(void *ptr, size_t size, size_t nmemb, void *userdata)
+-{
+-    static time_t last_t; // hack
+-
+-    FILE *fp = (FILE*)userdata;
+-    time_t t = time(NULL);
+-
+-    // Report current file position every 16 seconds
+-    if (!(t & 0xf) && last_t != t)
+-    {
+-        last_t = t;
+-        off_t cur_pos = ftello(fp);
+-        fseeko(fp, 0, SEEK_END);
+-        off_t sz = ftello(fp);
+-        fseeko(fp, cur_pos, SEEK_SET);
+-        log(_("Uploaded: %llu of %llu kbytes"),
+-                (unsigned long long)cur_pos / 1024,
+-                (unsigned long long)sz / 1024);
+-    }
+-
+-    return fread(ptr, size, nmemb, fp);
+-}
+-#endif
+-
+ static int send_file(const char *url, const char *filename)
+ {
+-    FILE *fp = fopen(filename, "r");
+-    if (!fp)
+-    {
+-        perror_msg("Can't open '%s'", filename);
+-        return 1;
+-    }
+-
+     /* we don't want to print the whole url as it may contain password
+      * rhbz#856960
+      * there can be '@' in the login or password so let's try to find the
+      * first '@' from the end
+      */
+     const char *clean_url = strrchr(url, '@');
+-    if (clean_url != NULL)
++    if (clean_url)
+         clean_url++;
+     else
+         clean_url = url;
+ 
+-
+     log(_("Sending %s to %s"), filename, clean_url);
+ 
+-    struct stat stbuf;
+-    fstat(fileno(fp), &stbuf); /* never fails */
+-
+     char *whole_url;
+     unsigned len = strlen(url);
+     if (len > 0 && url[len-1] == '/')
+@@ -80,45 +42,41 @@ static int send_file(const char *url, const char *filename)
+     else
+         whole_url = xstrdup(url);
+ 
+-    CURL *curl = curl_easy_init();
+-    if (!curl)
++    abrt_post_state_t *state = new_abrt_post_state(ABRT_POST_WANT_ERROR_MSG);
++    abrt_post(state,
++                whole_url,
++                /*content_type:*/ "???",
++                /*additional_headers:*/ NULL,
++                /*data:*/ filename,
++                ABRT_POST_DATA_FROMFILE_PUT
++    );
++    free(whole_url);
++
++    int error = (state->curl_result != 0);
++    if (error)
+     {
+-        error_msg_and_die("Can't create curl handle");
++	if (state->curl_error_msg)
++            error_msg("Error while uploading: '%s'", state->curl_error_msg);
++        else
++            /* for example, when source file can't be opened */
++            error_msg("Error while uploading");
+     }
+-    /* Buffer[CURL_ERROR_SIZE] curl stores human readable error messages in.
+-     * This may be more helpful than just return code from curl_easy_perform.
+-     * curl will need it until curl_easy_cleanup. */
+-    char curl_err_msg[CURL_ERROR_SIZE];
+-    curl_err_msg[0] = '\0';
+-    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, curl_err_msg);
+-    /* enable uploading */
+-    curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+-    /* specify target */
+-    curl_easy_setopt(curl, CURLOPT_URL, whole_url);
+-    /* FILE handle: passed to the default callback, it will fread() it */
+-    curl_easy_setopt(curl, CURLOPT_READDATA, fp);
+-    curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, (curl_off_t)stbuf.st_size);
+-
+-    /* everything is done here; result 0 means success */
+-    CURLcode result = curl_easy_perform_with_proxy(curl, whole_url);
+-    free(whole_url);
+-    fclose(fp);
+-    if (result != 0)
+-        error_msg("Error while uploading: '%s'", curl_easy_strerror(result));
+     else
++    {
+         /* This ends up a "reporting status message" in abrtd */
+         log(_("Successfully sent %s to %s"), filename, clean_url);
++    }
+ 
+-    curl_easy_cleanup(curl);
++    free_abrt_post_state(state);
+ 
+-    return result;
++    return error;
+ }
+ 
+ static int create_and_upload_archive(
+                 const char *dump_dir_name,
+                 map_string_h *settings)
+ {
+-    int result = 0;
++    int result = 1; /* error */
+ 
+     pid_t child;
+     TAR* tar = NULL;
+@@ -127,7 +85,7 @@ static int create_and_upload_archive(
+ 
+     struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
+     if (!dd)
+-        exit(1); /* error msg is already logged by dd_opendir */
++        xfunc_die(); /* error msg is already logged by dd_opendir */
+ 
+     /* Gzipping e.g. 0.5gig coredump takes a while. Let client know what we are doing */
+     log(_("Compressing data"));
+@@ -230,6 +188,7 @@ static int create_and_upload_archive(
+     }
+     else
+     {
++        result = 0; /* success */
+         log(_("Archive is created: '%s'"), tempfile);
+         free(tempfile);
+         tempfile = NULL;
+-- 
+1.8.2.1
+

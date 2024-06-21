@@ -1,0 +1,100 @@
+From dfa808641e7f9c3001e7aa39102958e32dcf202c Mon Sep 17 00:00:00 2001
+From: Denys Vlasenko <dvlasenk@redhat.com>
+Date: Tue, 16 Apr 2013 17:50:22 +0200
+Subject: [RHEL6 LIBREPORT PATCH 90/94] reporter-rhtsupport: generate archive
+ name from problem dir name
+
+Signed-off-by: Denys Vlasenko <dvlasenk@redhat.com>
+Signed-off-by: Jakub Filak <jfilak@redhat.com>
+---
+ src/include/internal_libreport.h  | 12 +++++++++---
+ src/lib/concat_path_file.c        | 24 ++++++++++++++++++++++++
+ src/plugins/reporter-rhtsupport.c |  3 ++-
+ 3 files changed, 35 insertions(+), 4 deletions(-)
+
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index e15bcad..31c65b4 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -106,8 +106,6 @@ int suffixcmp(const char *str, const char *suffix);
+ char *strtrim(char *str);
+ #define strtrimch libreport_strtrimch
+ char *strtrimch(char *str, int ch);
+-#define concat_path_file libreport_concat_path_file
+-char *concat_path_file(const char *path, const char *filename);
+ #define append_to_malloced_string libreport_append_to_malloced_string
+ char *append_to_malloced_string(char *mstr, const char *append);
+ #define skip_whitespace libreport_skip_whitespace
+@@ -118,6 +116,15 @@ char* skip_non_whitespace(const char *s);
+ #define overlapping_strcpy libreport_overlapping_strcpy
+ void overlapping_strcpy(char *dst, const char *src);
+ 
++#define concat_path_file libreport_concat_path_file
++char *concat_path_file(const char *path, const char *filename);
++/*
++ * Used to construct a name in a different directory with the basename
++ * similar to the old name, if possible.
++ */
++#define concat_path_basename libreport_concat_path_basename
++char *concat_path_basename(const char *path, const char *filename);
++
+ /* A-la fgets, but malloced and of unlimited size */
+ #define xmalloc_fgets libreport_xmalloc_fgets
+ char *xmalloc_fgets(FILE *file);
+@@ -277,7 +284,6 @@ double get_dirsize_find_largest_dir(
+                 const char *excluded /* can be NULL */
+ );
+ 
+-
+ #define ndelay_on libreport_ndelay_on
+ int ndelay_on(int fd);
+ #define ndelay_off libreport_ndelay_off
+diff --git a/src/lib/concat_path_file.c b/src/lib/concat_path_file.c
+index 44965d0..39ae07a 100644
+--- a/src/lib/concat_path_file.c
++++ b/src/lib/concat_path_file.c
+@@ -33,3 +33,27 @@ char *concat_path_file(const char *path, const char *filename)
+ 		filename++;
+ 	return xasprintf("%s%s%s", path, (end != path && end[-1] != '/' ? "/" : ""), filename);
+ }
++
++char *concat_path_basename(const char *path, const char *filename)
++{
++    char *abspath = realpath(filename, NULL);
++    char *base = strrchr((abspath ? abspath : filename), '/');
++
++    /* If realpath failed and filename is malicious (say, "/foo/.."),
++     * we may end up tricked into doing some bad things. Don't allow that.
++     */
++    char buf[sizeof("tmp-"LIBREPORT_ISO_DATE_STRING_SAMPLE"-%lu")];
++    if (base && base[1] != '\0' && base[1] != '.')
++    {
++        /* We have a slash and it's not "foo/" or "foo/.<something>" */
++        base++;
++    }
++    else
++    {
++        sprintf(buf, "tmp-%s-%lu", iso_date_string(NULL), (long)getpid());
++        base = buf;
++    }
++    char *name = concat_path_file(path, base);
++    free(abspath);
++    return name;
++}
+diff --git a/src/plugins/reporter-rhtsupport.c b/src/plugins/reporter-rhtsupport.c
+index 6f22887..7aba6eb 100644
+--- a/src/plugins/reporter-rhtsupport.c
++++ b/src/plugins/reporter-rhtsupport.c
+@@ -406,7 +406,8 @@ int main(int argc, char **argv)
+     /* Starting from here, we must perform cleanup on errors
+      * (delete temp dir)
+      */
+-    tempfile = xasprintf("%s/tmp-%s-%lu.tar.gz", tmpdir_name, iso_date_string(NULL), (long)getpid());
++    tempfile = concat_path_basename(tmpdir_name, dump_dir_name);
++    tempfile = append_to_malloced_string(tempfile, ".tar.gz");
+     if (create_tarball(tempfile, problem_data) != 0)
+     {
+         errmsg = _("Can't create temporary file in /tmp");
+-- 
+1.8.2.1
+

@@ -1,0 +1,306 @@
+From f68f41b3e74a4058bbb7803998d7e20dcf2204cb Mon Sep 17 00:00:00 2001
+From: Matej Habrnal <mhabrnal@redhat.com>
+Date: Wed, 18 Nov 2015 17:23:32 +0100
+Subject: [PATCH] uploader: add possibility to set SSH keyfiles
+
+The SSH key files can be set by command line arguments -b (public key) and -r
+(private key) or in configuration file upload.conf or in environment variables.
+
+Related to rhbz#1261120
+
+Signed-off-by: Matej Habrnal <mhabrnal@redhat.com>
+---
+ doc/Makefile.am                    |  2 ++
+ doc/report_Uploader.conf.txt       | 31 +++++++++++++++++++++++++++++++
+ doc/reporter-upload.txt            | 30 +++++++++++++++++++++++++++++-
+ doc/upload.conf.txt                | 18 ++++++++++++++++++
+ src/plugins/Makefile.am            |  5 ++++-
+ src/plugins/report_Uploader.conf   |  8 ++++++++
+ src/plugins/report_Uploader.xml.in | 10 ++++++++++
+ src/plugins/reporter-upload.c      | 21 +++++++++++++++++++--
+ src/plugins/upload.conf            | 12 ++++++++++++
+ 9 files changed, 133 insertions(+), 4 deletions(-)
+ create mode 100644 doc/report_Uploader.conf.txt
+ create mode 100644 doc/upload.conf.txt
+ create mode 100644 src/plugins/report_Uploader.conf
+ create mode 100644 src/plugins/upload.conf
+
+diff --git a/doc/Makefile.am b/doc/Makefile.am
+index 39093b1..20a24d1 100644
+--- a/doc/Makefile.am
++++ b/doc/Makefile.am
+@@ -20,7 +20,9 @@ MAN1_TXT += report.txt
+ 
+ MAN5_TXT =
+ MAN5_TXT += report_event.conf.txt
++MAN5_TXT += report_Uploader.conf.txt
+ MAN5_TXT += ureport.conf.txt
++MAN5_TXT += upload.conf.txt
+ 
+ # Manual pages are generated from .txt via Docbook
+ man1_MANS = ${MAN1_TXT:%.txt=%.1}
+diff --git a/doc/report_Uploader.conf.txt b/doc/report_Uploader.conf.txt
+new file mode 100644
+index 0000000..79f492b
+--- /dev/null
++++ b/doc/report_Uploader.conf.txt
+@@ -0,0 +1,31 @@
++report_Uploader.conf(5)
++======================
++
++NAME
++----
++report_Uploader.conf - libreport's configuration file for 'report_Uploader' events.
++
++DESCRIPTION
++-----------
++This configuration file contains values for options defined in
++/etc/libreport/events/report_Uploader.xml and is placed in
++/etc/libreport/events/report_Uploader.conf.
++
++Configuration file lines should have 'PARAM = VALUE' format. The parameters are:
++
++'Upload_URL'::
++    The URL where should be the tarball uploaded
++
++'Upload_SSHPublicKey'::
++    Path to SSH public key file
++
++'Upload_SSHPrivateKey'::
++    Path to SSH private key file
++
++SEE ALSO
++--------
++report_event.conf(5), reporter-upload(1)
++
++AUTHOR
++------
++* ABRT team
+diff --git a/doc/reporter-upload.txt b/doc/reporter-upload.txt
+index 0e59bdb..1200982 100644
+--- a/doc/reporter-upload.txt
++++ b/doc/reporter-upload.txt
+@@ -7,7 +7,7 @@ reporter-upload - Uploads compressed tarball of problem directory.
+ 
+ SYNOPSIS
+ --------
+-'reporter-upload' [-c CONFFILE]... [ -d DIR ] [ -u URL ]
++'reporter-upload' [-c CONFFILE]... [-d DIR] [-u URL] [-b FILE] [-r FILE]
+ 
+ DESCRIPTION
+ -----------
+@@ -24,6 +24,12 @@ The options are:
+ 'URL'::
+         The URL where tarball should be uploaded.
+ 
++'SSHPublicKey'::
++        The SSH public key.
++
++'SSHPrivateKey'::
++        The SSH private key.
++
+ Integration with ABRT events
+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 'reporter-upload' can be used as a reporter, to allow users to upload
+@@ -59,6 +65,13 @@ OPTIONS
+    If URL ends with a slash, the archive name will be generated and appended
+    to URL; otherwise, URL will be used as full file name.
+ 
++-b::
++--pubkey FILE::
++   Set SSH public key file.
++
++-r::
++--key FILE::
++   Set SSH private key file.
+ 
+ ENVIRONMENT VARIABLES
+ ---------------------
+@@ -68,6 +81,21 @@ the configuration file.
+ 'Upload_URL'::
+    The URL where should be the tarball uploaded.
+ 
++'Upload_SSHPublicKey'::
++   Path to SSH public key file
++
++'Upload_SSHPrivateKey'::
++   Path to SSH private key file
++
++FILES
++-----
++/etc/libreport/plugins/upload.conf::
++    Configuration file.
++
++SEE ALSO
++--------
++uploader_event.conf(5), report_uploader.conf(5)
++
+ AUTHORS
+ -------
+ * ABRT team
+diff --git a/doc/upload.conf.txt b/doc/upload.conf.txt
+new file mode 100644
+index 0000000..de7b435
+--- /dev/null
++++ b/doc/upload.conf.txt
+@@ -0,0 +1,18 @@
++upload.conf(5)
++===============
++
++NAME
++----
++upload.conf - configuration file for libreport.
++
++DESCRIPTION
++-----------
++This configuration file provides default configuration for 'reporter-upload'.
++
++SEE ALSO
++--------
++reporter-upload(1)
++
++AUTHOR
++------
++* ABRT team
+diff --git a/src/plugins/Makefile.am b/src/plugins/Makefile.am
+index e9e626e..16962d4 100644
+--- a/src/plugins/Makefile.am
++++ b/src/plugins/Makefile.am
+@@ -18,7 +18,8 @@ dist_reportpluginsconf_DATA = \
+     bugzilla.conf \
+     rhtsupport.conf \
+     mailx.conf \
+-    ureport.conf
++    ureport.conf \
++    upload.conf
+ 
+ eventsdir = $(EVENTS_DIR)
+ 
+@@ -33,6 +34,7 @@ dist_events_DATA = \
+     report_Kerneloops.xml \
+     report_Tarball.xml \
+     report_Uploader.xml \
++    report_Uploader.conf \
+     submit_uReport.xml
+ 
+ @INTLTOOL_XML_RULE@
+@@ -118,6 +120,7 @@ reporter_upload_CPPFLAGS = \
+     -I$(srcdir)/../include \
+     -I$(srcdir)/../lib \
+     -DBIN_DIR=\"$(bindir)\" \
++    -DCONF_DIR=\"$(CONF_DIR)\" \
+     -DLOCALSTATEDIR='"$(localstatedir)"' \
+     -DDEBUG_DUMPS_DIR=\"$(DEBUG_DUMPS_DIR)\" \
+     -DDEBUG_INFO_DIR=\"$(DEBUG_INFO_DIR)\" \
+diff --git a/src/plugins/report_Uploader.conf b/src/plugins/report_Uploader.conf
+new file mode 100644
+index 0000000..cc33684
+--- /dev/null
++++ b/src/plugins/report_Uploader.conf
+@@ -0,0 +1,8 @@
++# The URL where should be the tarball uploaded
++#Upload_URL =
++
++# Path to SSH public key file
++#Upload_SSHPublicKey =
++
++# Path to SSH private key file
++#Upload_SSHPrivateKey =
+diff --git a/src/plugins/report_Uploader.xml.in b/src/plugins/report_Uploader.xml.in
+index c7febba..d95cc46 100644
+--- a/src/plugins/report_Uploader.xml.in
++++ b/src/plugins/report_Uploader.xml.in
+@@ -18,5 +18,15 @@
+             <_note-html>Examples: ftp://[user[:pass]@]host/dir/[file.tar.gz], scp://[user[:pass]@]host/dir/[file.tar.gz], file:///dir/[file.tar.gz]</_note-html>
+             <default-value></default-value>
+         </option>
++        <option type="text" name="Upload_SSHPublicKey">
++            <_label>SSH Public key file</_label>
++            <allow-empty>yes</allow-empty>
++            <_note-html>Use this field to specify SSH public keyfile</_note-html>
++        </option>
++        <option type="text" name="Upload_SSHPrivateKey">
++            <_label>SSH Private key file</_label>
++            <allow-empty>yes</allow-empty>
++            <_note-html>Use this field to specify SSH private keyfile</_note-html>
++        </option>
+     </options>
+ </event>
+diff --git a/src/plugins/reporter-upload.c b/src/plugins/reporter-upload.c
+index 1c61f13..c341969 100644
+--- a/src/plugins/reporter-upload.c
++++ b/src/plugins/reporter-upload.c
+@@ -176,12 +176,14 @@ int main(int argc, char **argv)
+ #endif
+ 
+     const char *dump_dir_name = ".";
+-    const char *conf_file = NULL;
++    const char *conf_file = CONF_DIR"/plugins/upload.conf";
+     const char *url = NULL;
++    const char *ssh_public_key = NULL;
++    const char *ssh_private_key = NULL;
+ 
+     /* Can't keep these strings/structs static: _() doesn't support that */
+     const char *program_usage_string = _(
+-        "& [-v] -d DIR [-c CONFFILE] [-u URL]\n"
++        "& [-v] -d DIR [-c CONFFILE] [-u URL] [-b FILE] [-r FILE]\n"
+         "\n"
+         "Uploads compressed tarball of problem directory DIR to URL.\n"
+         "If URL is not specified, creates tarball in /tmp and exits.\n"
+@@ -204,6 +206,8 @@ int main(int argc, char **argv)
+         OPT_d = 1 << 1,
+         OPT_c = 1 << 2,
+         OPT_u = 1 << 3,
++        OPT_b = 1 << 4,
++        OPT_r = 1 << 5,
+     };
+     /* Keep enum above and order of options below in sync! */
+     struct options program_options[] = {
+@@ -211,6 +215,8 @@ int main(int argc, char **argv)
+         OPT_STRING('d', NULL, &dump_dir_name, "DIR"     , _("Dump directory")),
+         OPT_STRING('c', NULL, &conf_file    , "CONFFILE", _("Config file")),
+         OPT_STRING('u', NULL, &url          , "URL"     , _("Base URL to upload to")),
++        OPT_STRING('b', "pubkey",  &ssh_public_key , "FILE" , _("SSH public key file")),
++        OPT_STRING('r', "key",     &ssh_private_key, "FILE" , _("SSH private key file")),
+         OPT_END()
+     };
+     /*unsigned opts =*/ parse_opts(argc, argv, program_options, program_usage_string);
+@@ -223,6 +229,17 @@ int main(int argc, char **argv)
+     if (conf_file)
+         load_conf_file(conf_file, settings, /*skip key w/o values:*/ true);
+ 
++     /* set SSH keys */
++    if (ssh_public_key)
++        set_map_string_item_from_string(settings, "SSHPublicKey", ssh_public_key);
++    else if (getenv("Upload_SSHPublicKey") != NULL)
++        set_map_string_item_from_string(settings, "SSHPublicKey", getenv("Upload_SSHPublicKey"));
++
++    if (ssh_private_key)
++        set_map_string_item_from_string(settings, "SSHPrivateKey", ssh_private_key);
++    else if (getenv("Upload_SSHPrivateKey") != NULL)
++        set_map_string_item_from_string(settings, "SSHPrivateKey", getenv("Upload_SSHPrivateKey"));
++
+     int result = create_and_upload_archive(dump_dir_name, settings);
+ 
+     free_map_string(settings);
+diff --git a/src/plugins/upload.conf b/src/plugins/upload.conf
+new file mode 100644
+index 0000000..f32a2a0
+--- /dev/null
++++ b/src/plugins/upload.conf
+@@ -0,0 +1,12 @@
++# reporter-upload configuration file
++# check man reporter-upload for more details
++
++#URL = scp://USERNAME:PASSWORD@SERVERNAME/var/spool/abrt-upload/
++#URL = ftp://USERNAME:PASSWORD@SERVERNAME/var/spool/abrt-upload/
++#URL = file:///var/spool/abrt-upload/
++
++# Specify SSH public key
++#SSHPublicKey =
++
++# Specify SSH private key
++#SSHPrivateKey =
+-- 
+2.6.3
+

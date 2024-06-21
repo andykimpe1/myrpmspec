@@ -1,0 +1,434 @@
+From 3a33abbac159f7e1c12c81fdbf295ec7cd69d45d Mon Sep 17 00:00:00 2001
+From: Jakub Filak <jfilak@redhat.com>
+Date: Tue, 6 May 2014 16:27:43 +0200
+Subject: [LIBREPORT PATCH] refactorize: map_string_t clean up
+
+libreport hides GHashTable behind map_string_t and adds some utility
+functions using map_string_t type. Programmer should use map_string_t
+instead of GHashTable but libreport calls some GHashTable functions
+directly. This patch adds wrappers for GHashTable functions and makes
+libreport using them.
+
+cherry-picked commit 68377aba10d9239e530755632f73910c113a2f31
+
+Signed-off-by: Jakub Filak <jfilak@redhat.com>
+---
+ src/include/Makefile.am           |  1 +
+ src/include/internal_libreport.h  | 22 ++----------
+ src/include/libreport_types.h     | 70 +++++++++++++++++++++++++++++++++++++++
+ src/include/problem_data.h        |  2 +-
+ src/lib/abrt_types.c              |  6 ++--
+ src/lib/event_config.c            | 12 +++----
+ src/lib/load_plugin_settings.c    |  4 +--
+ src/lib/user_settings.c           | 12 ++++---
+ src/plugins/reporter-bugzilla.c   |  4 +--
+ src/plugins/reporter-kerneloops.c |  4 +--
+ src/plugins/reporter-mailx.c      |  4 +--
+ src/plugins/reporter-rhtsupport.c |  4 +--
+ src/plugins/reporter-upload.c     |  6 ++--
+ src/plugins/ureport.c             |  4 +--
+ 14 files changed, 106 insertions(+), 49 deletions(-)
+ create mode 100644 src/include/libreport_types.h
+
+diff --git a/src/include/Makefile.am b/src/include/Makefile.am
+index b70dc5c..36b151f 100644
+--- a/src/include/Makefile.am
++++ b/src/include/Makefile.am
+@@ -1,5 +1,6 @@
+ libreport_includedir = $(includedir)/libreport
+ libreport_include_HEADERS = \
++    libreport_types.h \
+     client.h \
+     dump_dir.h \
+     event_config.h \
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index f76c25b..f8e998a 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -53,7 +53,6 @@
+ #endif
+ #include <pwd.h>
+ #include <grp.h>
+-#include <glib.h>
+ 
+ #ifdef HAVE_CONFIG_H
+ # include "config.h"
+@@ -93,6 +92,7 @@ int vdprintf(int d, const char *format, va_list ap);
+ #include "problem_data.h"
+ #include "report.h"
+ #include "run_event.h"
++#include "libreport_types.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -559,22 +559,6 @@ struct strbuf *strbuf_prepend_strf(struct strbuf *strbuf,
+ struct strbuf *strbuf_prepend_strfv(struct strbuf *strbuf,
+                                     const char *format, va_list p);
+ 
+-
+-/* TODO: rename to map_string_t */
+-typedef GHashTable map_string_h;
+-#define new_map_string libreport_new_map_string
+-map_string_h *new_map_string(void);
+-#define free_map_string libreport_free_map_string
+-void free_map_string(map_string_h *ms);
+-#define get_map_string_item_or_empty libreport_get_map_string_item_or_empty
+-const char *get_map_string_item_or_empty(map_string_h *ms, const char *key);
+-static inline
+-const char *get_map_string_item_or_NULL(map_string_h *ms, const char *key)
+-{
+-    return (const char*)g_hash_table_lookup(ms, key);
+-}
+-
+-
+ /* Returns command line of running program.
+  * Caller is responsible to free() the returned value.
+  * If the pid is not valid or command line can not be obtained,
+@@ -627,10 +611,10 @@ void parse_release_for_rhts(const char *pRelease, char **product, char **version
+  * @return if it success it returns true, otherwise it returns false.
+  */
+ #define load_conf_file libreport_load_conf_file
+-bool load_conf_file(const char *pPath, map_string_h *settings, bool skipKeysWithoutValue);
++bool load_conf_file(const char *pPath, map_string_t *settings, bool skipKeysWithoutValue);
+ 
+ #define save_conf_file libreport_save_conf_file
+-bool save_conf_file(const char *path, map_string_h *settings);
++bool save_conf_file(const char *path, map_string_t *settings);
+ #define save_user_settings libreport_save_user_settings
+ bool save_user_settings();
+ #define load_user_settings libreport_load_user_settings
+diff --git a/src/include/libreport_types.h b/src/include/libreport_types.h
+new file mode 100644
+index 0000000..23174a1
+--- /dev/null
++++ b/src/include/libreport_types.h
+@@ -0,0 +1,70 @@
++/*
++    Copyright (C) 2013  ABRT team
++    Copyright (C) 2013  RedHat Inc
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License along
++    with this program; if not, write to the Free Software Foundation, Inc.,
++    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++*/
++#ifndef LIBREPORT_TYPES_H_
++#define LIBREPORT_TYPES_H_
++
++#include <glib.h>
++
++typedef GHashTable map_string_t;
++#define new_map_string libreport_new_map_string
++map_string_t *new_map_string(void);
++#define free_map_string libreport_free_map_string
++void free_map_string(map_string_t *ms);
++#define insert_map_string_item libreport_insert_map_string_item
++static inline
++void insert_map_string(map_string_t *ms, char *key, char *value)
++{
++    g_hash_table_insert(ms, key, value);
++}
++#define replace_map_string_item libreport_replace_map_string_item
++static inline
++void replace_map_string_item(map_string_t *ms, char *key, char *value)
++{
++    g_hash_table_replace(ms, key, value);
++}
++#define remove_map_string_item libreport_remove_map_string_item
++static inline
++void remove_map_string_item(map_string_t *ms, const char *key)
++{
++    g_hash_table_remove(ms, key);
++}
++#define get_map_string_item_or_empty libreport_get_map_string_item_or_empty
++const char *get_map_string_item_or_empty(map_string_t *ms, const char *key);
++#define get_map_string_item_or_NULL libreport_get_map_string_item_or_NULL
++static inline
++const char *get_map_string_item_or_NULL(map_string_t *ms, const char *key)
++{
++    return (const char*)g_hash_table_lookup(ms, key);
++}
++
++typedef GHashTableIter map_string_iter_t;
++#define init_map_string_iter libreport_init_map_string_iter
++static inline
++void init_map_string_iter(map_string_iter_t *iter, map_string_t *ms)
++{
++    g_hash_table_iter_init(iter, ms);
++}
++#define next_map_string_iter libreport_next_map_string_iter
++static inline
++int next_map_string_iter(map_string_iter_t *iter, const char **key, const char **value)
++{
++    return g_hash_table_iter_next(iter, (gpointer *)key, (gpointer *)value);
++}
++
++#endif /* LIBREPORT_TYPES_H_ */
+diff --git a/src/include/problem_data.h b/src/include/problem_data.h
+index 14d1240..3140ff5 100644
+--- a/src/include/problem_data.h
++++ b/src/include/problem_data.h
+@@ -19,7 +19,7 @@
+ #ifndef LIBREPORT_PROBLEM_DATA_H_
+ #define LIBREPORT_PROBLEM_DATA_H_
+ 
+-#include <glib.h>
++#include "libreport_types.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+diff --git a/src/lib/abrt_types.c b/src/lib/abrt_types.c
+index 8dc4e36..a255af6 100644
+--- a/src/lib/abrt_types.c
++++ b/src/lib/abrt_types.c
+@@ -18,18 +18,18 @@
+ */
+ #include "internal_libreport.h"
+ 
+-map_string_h *new_map_string(void)
++map_string_t *new_map_string(void)
+ {
+     return g_hash_table_new_full(g_str_hash, g_str_equal, free, free);
+ }
+ 
+-void free_map_string(map_string_h *ms)
++void free_map_string(map_string_t *ms)
+ {
+     if (ms)
+         g_hash_table_destroy(ms);
+ }
+ 
+-const char *get_map_string_item_or_empty(map_string_h *ms, const char *key)
++const char *get_map_string_item_or_empty(map_string_t *ms, const char *key)
+ {
+     const char *v = (const char*)g_hash_table_lookup(ms, key);
+     if (!v) v = "";
+diff --git a/src/lib/event_config.c b/src/lib/event_config.c
+index d60d519..6b442ad 100644
+--- a/src/lib/event_config.c
++++ b/src/lib/event_config.c
+@@ -107,17 +107,17 @@ static void load_config_files(const char *dir_path)
+         if (new_config)
+             event_config = new_event_config();
+ 
+-        map_string_h *keys_and_values = new_map_string();
++        map_string_t *keys_and_values = new_map_string();
+ 
+         load_conf_file(fullname, keys_and_values, /*skipKeysWithoutValue:*/ false);
+         free(fullname);
+ 
+         /* Insert or replace every key/value from keys_and_values to event_config->option */
+-        GHashTableIter iter;
+-        char *name;
+-        char *value;
+-        g_hash_table_iter_init(&iter, keys_and_values);
+-        while (g_hash_table_iter_next(&iter, (void**)&name, (void**)&value))
++        map_string_iter_t iter;
++        const char *name;
++        const char *value;
++        init_map_string_iter(&iter, keys_and_values);
++        while (next_map_string_iter(&iter, &name, &value))
+         {
+             event_option_t *opt;
+             GList *elem = g_list_find_custom(event_config->options, name,
+diff --git a/src/lib/load_plugin_settings.c b/src/lib/load_plugin_settings.c
+index 83380ec..a322103 100644
+--- a/src/lib/load_plugin_settings.c
++++ b/src/lib/load_plugin_settings.c
+@@ -21,7 +21,7 @@
+ /* Returns false if open failed, else returns true.
+  * TODO: better error detection?
+  */
+-bool load_conf_file(const char *pPath, map_string_h *settings, bool skipKeysWithoutValue)
++bool load_conf_file(const char *pPath, map_string_t *settings, bool skipKeysWithoutValue)
+ {
+     FILE *fp = stdin;
+     if (strcmp(pPath, "-") != 0)
+@@ -97,7 +97,7 @@ bool load_conf_file(const char *pPath, map_string_h *settings, bool skipKeysWith
+         if (in_quote)
+             goto free_line;
+ 
+-        g_hash_table_replace(settings, xstrdup(line), xstrdup(value));
++        replace_map_string_item(settings, xstrdup(line), xstrdup(value));
+  free_line:
+         free(line);
+     }
+diff --git a/src/lib/user_settings.c b/src/lib/user_settings.c
+index d3469d2..01ec320 100644
+--- a/src/lib/user_settings.c
++++ b/src/lib/user_settings.c
+@@ -39,11 +39,13 @@ static bool create_parentdir(char *path)
+ }
+ 
+ /* Returns false if write failed */
+-bool save_conf_file(const char *path, map_string_h *settings)
++bool save_conf_file(const char *path, map_string_t *settings)
+ {
+     bool ret;
+-    char *temp_path, *name, *value;
+-    GHashTableIter iter;
++    char *temp_path;
++    const char *name;
++    const char *value;
++    map_string_iter_t iter;
+ 
+     ret = false;
+ 
+@@ -56,8 +58,8 @@ bool save_conf_file(const char *path, map_string_h *settings)
+     if (!out)
+         goto cleanup;
+ 
+-    g_hash_table_iter_init(&iter, settings);
+-    while (g_hash_table_iter_next(&iter, (void**)&name, (void**)&value))
++    init_map_string_iter(&iter, settings);
++    while (next_map_string_iter(&iter, &name, &value))
+         fprintf(out, "%s = \"%s\"\n", name, value);
+ 
+     fclose(out);
+diff --git a/src/plugins/reporter-bugzilla.c b/src/plugins/reporter-bugzilla.c
+index 9374505..1e1f109 100644
+--- a/src/plugins/reporter-bugzilla.c
++++ b/src/plugins/reporter-bugzilla.c
+@@ -23,7 +23,7 @@
+ 
+ #define XML_RPC_SUFFIX "/xmlrpc.cgi"
+ 
+-static void set_settings(struct bugzilla_struct *b, map_string_h *settings)
++static void set_settings(struct bugzilla_struct *b, map_string_t *settings)
+ {
+     const char *environ;
+ 
+@@ -120,7 +120,7 @@ int main(int argc, char **argv)
+ 
+     export_abrt_envvars(0);
+ 
+-    map_string_h *settings = new_map_string();
++    map_string_t *settings = new_map_string();
+     if (!conf_file)
+         conf_file = g_list_append(conf_file, (char*) CONF_DIR"/plugins/bugzilla.conf");
+     while (conf_file)
+diff --git a/src/plugins/reporter-kerneloops.c b/src/plugins/reporter-kerneloops.c
+index 81ab93e..792f20a 100644
+--- a/src/plugins/reporter-kerneloops.c
++++ b/src/plugins/reporter-kerneloops.c
+@@ -87,7 +87,7 @@ static CURLcode http_post_to_kerneloops_site(const char *url, const char *oopsda
+ 
+ static void report_to_kerneloops(
+                 const char *dump_dir_name,
+-                map_string_h *settings)
++                map_string_t *settings)
+ {
+     problem_data_t *problem_data = create_problem_data_for_reporting(dump_dir_name);
+     if (!problem_data)
+@@ -138,7 +138,7 @@ int main(int argc, char **argv)
+     textdomain(PACKAGE);
+ #endif
+ 
+-    map_string_h *settings = new_map_string();
++    map_string_t *settings = new_map_string();
+     const char *dump_dir_name = ".";
+     GList *conf_file = NULL;
+ 
+diff --git a/src/plugins/reporter-mailx.c b/src/plugins/reporter-mailx.c
+index 821a31d..6974f0e 100644
+--- a/src/plugins/reporter-mailx.c
++++ b/src/plugins/reporter-mailx.c
+@@ -55,7 +55,7 @@ static char** append_str_to_vector(char **vec, unsigned *size_p, const char *str
+ 
+ static void create_and_send_email(
+                 const char *dump_dir_name,
+-                map_string_h *settings,
++                map_string_t *settings,
+                 bool notify_only)
+ {
+     problem_data_t *problem_data = create_problem_data_for_reporting(dump_dir_name);
+@@ -178,7 +178,7 @@ int main(int argc, char **argv)
+ 
+     export_abrt_envvars(0);
+ 
+-    map_string_h *settings = new_map_string();
++    map_string_t *settings = new_map_string();
+     load_conf_file(conf_file, settings, /*skip key w/o values:*/ true);
+ 
+     create_and_send_email(dump_dir_name, settings, /*notify_only*/(opts & OPT_n));
+diff --git a/src/plugins/reporter-rhtsupport.c b/src/plugins/reporter-rhtsupport.c
+index 31f205d..9d85743 100644
+--- a/src/plugins/reporter-rhtsupport.c
++++ b/src/plugins/reporter-rhtsupport.c
+@@ -169,7 +169,7 @@ ret_clean:
+ }
+ 
+ static
+-char *get_param_string(const char *name, map_string_h *settings, const char *dflt)
++char *get_param_string(const char *name, map_string_t *settings, const char *dflt)
+ {
+     char *envname = xasprintf("RHTSupport_%s", name);
+     const char *envvar = getenv(envname);
+@@ -237,7 +237,7 @@ int main(int argc, char **argv)
+     export_abrt_envvars(0);
+ 
+     /* Parse config, extract necessary params */
+-    map_string_h *settings = new_map_string();
++    map_string_t *settings = new_map_string();
+     if (!conf_file)
+         conf_file = g_list_append(conf_file, (char*) CONF_DIR"/plugins/rhtsupport.conf");
+     while (conf_file)
+diff --git a/src/plugins/reporter-upload.c b/src/plugins/reporter-upload.c
+index d09944c..4bd12ef 100644
+--- a/src/plugins/reporter-upload.c
++++ b/src/plugins/reporter-upload.c
+@@ -22,7 +22,7 @@
+ 
+ static int create_and_upload_archive(
+                 const char *dump_dir_name,
+-                map_string_h *settings)
++                map_string_t *settings)
+ {
+     int result = 1; /* error */
+ 
+@@ -217,9 +217,9 @@ int main(int argc, char **argv)
+ 
+     export_abrt_envvars(0);
+ 
+-    map_string_h *settings = new_map_string();
++    map_string_t *settings = new_map_string();
+     if (url)
+-        g_hash_table_replace(settings, xstrdup("URL"), xstrdup(url));
++        replace_map_string_item(settings, xstrdup("URL"), xstrdup(url));
+     if (conf_file)
+         load_conf_file(conf_file, settings, /*skip key w/o values:*/ true);
+ 
+diff --git a/src/plugins/ureport.c b/src/plugins/ureport.c
+index 249b24b..a50df6e 100644
+--- a/src/plugins/ureport.c
++++ b/src/plugins/ureport.c
+@@ -103,7 +103,7 @@ static void parse_client_auth_paths(struct ureport_server_config *config, const
+  *
+  * @param config a server configuration to be populated
+  */
+-static void load_ureport_server_config(struct ureport_server_config *config, map_string_h *settings)
++static void load_ureport_server_config(struct ureport_server_config *config, map_string_t *settings)
+ {
+     VALUE_FROM_CONF("URL", config->ur_url, (const char *));
+     VALUE_FROM_CONF("SSLVerify", config->ur_ssl_verify, string_to_bool);
+@@ -469,7 +469,7 @@ int main(int argc, char **argv)
+ 
+     unsigned opts = parse_opts(argc, argv, program_options, program_usage_string);
+ 
+-    map_string_h *settings = new_map_string();
++    map_string_t *settings = new_map_string();
+     load_conf_file(conf_file, settings, /*skip key w/o values:*/ false);
+ 
+     load_ureport_server_config(&config, settings);
+-- 
+1.8.3.1
+

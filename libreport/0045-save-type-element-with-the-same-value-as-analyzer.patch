@@ -1,0 +1,98 @@
+From 0c474f1087505350e689207d217cee60169f0cc9 Mon Sep 17 00:00:00 2001
+From: Jiri Moskovcak <jmoskovc@redhat.com>
+Date: Thu, 12 Jul 2012 14:43:16 +0200
+Subject: [PATCH 45/53] save "type" element with the same value as "analyzer"
+
+Signed-off-by: Denys Vlasenko <vda.linux@googlemail.com>
+---
+ src/include/internal_libreport.h |  9 ++++++++-
+ src/lib/make_descr.c             |  1 +
+ src/lib/problem_data.c           | 17 ++++++++++-------
+ 3 files changed, 19 insertions(+), 8 deletions(-)
+
+diff --git a/src/include/internal_libreport.h b/src/include/internal_libreport.h
+index 0888267..cb140d4 100644
+--- a/src/include/internal_libreport.h
++++ b/src/include/internal_libreport.h
+@@ -662,7 +662,15 @@ bool make_dir_recursive(char *dir, mode_t dir_mode);
+ #define FILENAME_TIME         "time"        /* mandatory */
+ #define FILENAME_REASON       "reason"      /* mandatory? */
+ #define FILENAME_UID          "uid"         /* mandatory? */
++/*
++ * "analyzer" is to be gradually changed to "type":
++ * For now, we fetch and look at "analyzer" element,
++ * but we always save both "analyzer" and "type" (with same contents).
++ * By 2013, we switch to looking at "type". Then we will stop generating
++ * "analyzer" element.
++ */
+ #define FILENAME_ANALYZER     "analyzer"
++#define FILENAME_TYPE         "type"
+ #define FILENAME_EXECUTABLE   "executable"
+ #define FILENAME_PID          "pid"
+ #define FILENAME_PWD          "pwd"
+@@ -681,7 +689,6 @@ bool make_dir_recursive(char *dir, mode_t dir_mode);
+ // Name of the function where the application crashed.
+ // Optional.
+ #define FILENAME_CRASH_FUNCTION "crash_function"
+-// filled by CDebugDump::Create() (which also fills FILENAME_UID):
+ #define FILENAME_ARCHITECTURE "architecture"
+ #define FILENAME_KERNEL       "kernel"
+ // From /etc/system-release or /etc/redhat-release
+diff --git a/src/lib/make_descr.c b/src/lib/make_descr.c
+index 68133a2..21fa545 100644
+--- a/src/lib/make_descr.c
++++ b/src/lib/make_descr.c
+@@ -249,6 +249,7 @@ char* make_description_mailx(problem_data_t *problem_data)
+ static const char *const blacklisted_items[] = {
+     CD_DUMPDIR        ,
+     FILENAME_ANALYZER ,
++    FILENAME_TYPE     ,
+     FILENAME_COREDUMP ,
+     FILENAME_HOSTNAME ,
+     FILENAME_DUPHASH  ,
+diff --git a/src/lib/problem_data.c b/src/lib/problem_data.c
+index 6c40c58..4a45b6c 100644
+--- a/src/lib/problem_data.c
++++ b/src/lib/problem_data.c
+@@ -61,7 +61,11 @@ void add_basics_to_problem_data(problem_data_t *pd)
+ {
+     const char *analyzer = get_problem_item_content_or_NULL(pd, FILENAME_ANALYZER);
+     if (analyzer == NULL)
+-        add_to_problem_data(pd, FILENAME_ANALYZER, "libreport");
++    {
++        analyzer = "libreport";
++        add_to_problem_data(pd, FILENAME_ANALYZER, analyzer);
++    }
++    add_to_problem_data(pd, FILENAME_TYPE, analyzer);
+ 
+     /* If application didn't provide dupe hash, we generate it
+      * from all components, so we at least eliminate the exact same
+@@ -104,20 +108,19 @@ void add_basics_to_problem_data(problem_data_t *pd)
+         add_to_problem_data(pd, FILENAME_DUPHASH, hash_str);
+     }
+ 
+-    pid_t pid = getpid();
+     const char *executable = get_problem_item_content_or_NULL(pd, FILENAME_EXECUTABLE);
+-    if (executable == NULL && pid > 0)
++    if (executable == NULL)
+     {
+-        char buf[PATH_MAX+1];
+-        char *exe = xasprintf("/proc/%u/exe", pid);
++        char buf[PATH_MAX + 1];
++        char exe[sizeof("/proc/%u/exe") + sizeof(int)*3];
++        sprintf(exe, "/proc/%u/exe", (int)getpid());
+         ssize_t read = readlink(exe, buf, PATH_MAX);
+         if (read > 0)
+         {
+-            buf[read] = 0;
++            buf[read] = '\0';
+             VERB2 log("reporting initiated from: %s", buf);
+             add_to_problem_data(pd, FILENAME_EXECUTABLE, buf);
+         }
+-        free(exe);
+ 
+ //#ifdef WITH_RPM
+         /* FIXME: component should be taken from rpm using librpm
+-- 
+1.7.11.2
+
