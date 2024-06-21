@@ -1,0 +1,173 @@
+From 24fa6df5e1910269d86cb97bb5cef464fc3111ca Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Wed, 19 Mar 2014 12:54:22 +0100
+Subject: [PATCH] Added support for ECDH key exchange with key SSL_ecdh_curve
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This is port of following upstream commit to 1.31 version:
+
+commit e067e09bf0c6b5844693169af75ec93b22bfa660
+Author: Steffen Ullrich <Steffen_Ullrich@genua.de>
+Date:   Fri Oct 11 18:50:01 2013 +0200
+
+    1.955 - added support for ECDH key exchange with key SSL_ecdh_curve
+
+Signed-off-by: Petr Písař <ppisar@redhat.com>
+---
+ MANIFEST  |  1 +
+ SSL.pm    | 28 +++++++++++++++++++++++
+ t/ecdhe.t | 78 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 107 insertions(+)
+ create mode 100644 t/ecdhe.t
+
+diff --git a/MANIFEST b/MANIFEST
+index afed6c6..3d97511 100644
+--- a/MANIFEST
++++ b/MANIFEST
+@@ -41,5 +41,6 @@ t/auto_verify_hostname.t
+ t/inet6.t
+ t/testlib.pl
+ t/memleak_bad_handshake.t
++t/ecdhe.t
+ util/export_certs.pl
+ META.yml                                 Module meta-data (added by MakeMaker)
+diff --git a/SSL.pm b/SSL.pm
+index bcf098f..ad18f7a 100644
+--- a/SSL.pm
++++ b/SSL.pm
+@@ -1447,6 +1447,25 @@ sub new {
+ 			Net::SSLeay::DH_free( $dh );
+ 			$rv || return IO::Socket::SSL->error( "Failed to set DH from $f" );
+ 		}
++
++		if ( my $curve = $arg_hash->{SSL_ecdh_curve} ) {
++			return IO::Socket::SSL->error(
++				"ECDH curve needs Net::SSLeay>=1.56 and OpenSSL>=1.0")
++				if ! defined( &Net::SSLeay::CTX_set_tmp_ecdh );
++			if ( $curve !~ /^\d+$/ ) {
++				# name of curve, find NID
++				$curve = Net::SSLeay::OBJ_txt2nid($curve) 
++					|| return IO::Socket::SSL->error(
++					"cannot find NID for curve name '$curve'");
++			}
++			my $ecdh = Net::SSLeay::EC_KEY_new_by_curve_name($curve) or 
++				return IO::Socket::SSL->error(
++				"cannot create curve for NID $curve");
++			Net::SSLeay::CTX_set_tmp_ecdh($ctx,$ecdh) or
++				return IO::Socket::SSL->error(
++				"failed to set ECDH curve context");
++			Net::SSLeay::EC_KEY_free($ecdh);
++		}
+ 	}
+ 
+ 	my $verify_cb = $arg_hash->{SSL_verify_callback};
+@@ -1701,11 +1720,20 @@ for getting a X509* from a string).
+ 
+ If you want Diffie-Hellman key exchange you need to supply a suitable file here
+ or use the SSL_dh parameter. See dhparam command in openssl for more information.
++To create a server which provides perfect forward secrecy you need to either
++give the DH parameters or (better, because faster) the ECDH curve.
+ 
+ =item SSL_dh
+ 
+ Like SSL_dh_file, but instead of giving a file you use a preloaded or generated DH*.
+ 
++=item SSL_ecdh_curve
++
++If you want Elliptic Curve Diffie-Hellmann key exchange you need to supply the
++OID or NID of a suitable curve (like 'prime256v1') here.
++To create a server which provides perfect forward secrecy you need to either
++give the DH parameters or (better, because faster) the ECDH curve.
++
+ =item SSL_passwd_cb
+ 
+ If your private key is encrypted, you might not want the default password prompt from
+diff --git a/t/ecdhe.t b/t/ecdhe.t
+new file mode 100644
+index 0000000..40aed59
+--- /dev/null
++++ b/t/ecdhe.t
+@@ -0,0 +1,78 @@
++#!perl
++# Before `make install' is performed this script should be runnable with
++# `make test'. After `make install' it should work as `perl t/ecdhe.t'
++
++use strict;
++use warnings;
++use Net::SSLeay;
++use Socket;
++use IO::Socket::SSL;
++
++if ( grep { $^O =~m{$_} } qw( MacOS VOS vmesa riscos amigaos ) ) {
++    print "1..0 # Skipped: fork not implemented on this platform\n";
++    exit
++}
++
++if ( ! defined &Net::SSLeay::CTX_set_tmp_ecdh ) {
++    print "1..0 # Skipped: no support for ecdh with this openssl/Net::SSLeay\n";
++    exit
++}
++
++$|=1;
++print "1..4\n";
++
++# first create simple ssl-server
++my $ID = 'server';
++my $addr = '127.0.0.1';
++my $server = IO::Socket::SSL->new(
++    LocalAddr => $addr,
++    Listen => 2,
++    ReuseAddr => 1,
++    SSL_cert_file => "certs/server-cert.pem",
++    SSL_key_file  => "certs/server-key.pem",
++    SSL_ecdh_curve => 'prime256v1',
++) || do {
++    notok($!);
++    exit
++};
++ok("Server Initialization");
++
++# add server port to addr
++$addr.= ':'.(sockaddr_in( getsockname( $server )))[0];
++
++my $pid = fork();
++if ( !defined $pid ) {
++    die $!; # fork failed
++
++} elsif ( !$pid ) {    ###### Client
++
++    $ID = 'client';
++    close($server);
++    my $to_server = IO::Socket::SSL->new(
++	PeerAddr => $addr,
++	SSL_verify_mode => 0 ) || do {
++	notok( "connect failed: $SSL_ERROR" );
++	exit
++    };
++    ok( "client connected" );
++
++    my $cipher = $to_server->get_cipher();
++    if ( $cipher !~m/^ECDHE-/ ) {
++	notok("bad key exchange: $cipher");
++	exit;
++    }
++    ok("ecdh key exchange: $cipher");
++
++} else {                ###### Server
++
++    my $to_client = $server->accept || do {
++	notok( "accept failed: $SSL_ERROR" );
++	kill(9,$pid);
++	exit;
++    };
++    ok( "Server accepted" );
++    wait;
++}
++
++sub ok { print "ok # [$ID] @_\n"; }
++sub notok { print "not ok # [$ID] @_\n"; }
+-- 
+1.8.5.3
+
