@@ -1,0 +1,157 @@
+diff -up libproxy-0.3.0/src/modules/pacrunner_mozjs.c.esr17 libproxy-0.3.0/src/modules/pacrunner_mozjs.c
+--- libproxy-0.3.0/src/modules/pacrunner_mozjs.c.esr17	2009-08-14 15:00:33.000000000 -0400
++++ libproxy-0.3.0/src/modules/pacrunner_mozjs.c	2014-06-17 14:25:08.697948093 -0400
+@@ -53,12 +53,12 @@ typedef struct _pxMozillaPACRunnerModule
+ 	ctxStore *ctxs;
+ } pxMozillaPACRunnerModule;
+ 
+-static JSBool dnsResolve(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval) {
++static JSBool dnsResolve_(JSContext *cx, jsval hostname, jsval *vp) {
+ 	// Get hostname argument
+-	char *tmp = px_strdup(JS_GetStringBytes(JS_ValueToString(cx, argv[0])));
++	char *tmp = JS_EncodeString(cx, JS_ValueToString(cx, hostname));
+ 
+ 	// Set the default return value
+-	*rval = JSVAL_NULL;
++	JS_SET_RVAL(cx, vp, JSVAL_NULL);
+ 
+ 	// Look it up
+ 	struct addrinfo *info = NULL;
+@@ -66,37 +66,40 @@ static JSBool dnsResolve(JSContext *cx,
+ 		goto out;
+ 
+ 	// Allocate the IP address
+-	px_free(tmp);
+-	tmp = px_malloc0(INET6_ADDRSTRLEN+1);
++	JS_free(cx, tmp);
++	tmp = (char *) JS_malloc(cx, INET6_ADDRSTRLEN+1);
++	memset(tmp, 0, INET6_ADDRSTRLEN+1);
+ 
+ 	// Try for IPv4 and IPv6
+-	if (!inet_ntop(info->ai_family,
+-					&((struct sockaddr_in *) info->ai_addr)->sin_addr,
+-					tmp, INET_ADDRSTRLEN+1) > 0)
+-		if (!inet_ntop(info->ai_family,
+-						&((struct sockaddr_in6 *) info->ai_addr)->sin6_addr,
+-						tmp, INET6_ADDRSTRLEN+1) > 0)
+-			goto out;
++	if (getnameinfo(info->ai_addr, info->ai_addrlen,
++			tmp, INET6_ADDRSTRLEN+1,
++			NULL, 0,
++			NI_NUMERICHOST)) goto out;
+ 
+ 	// We succeeded
+-	*rval = STRING_TO_JSVAL(JS_NewString(cx, tmp, strlen(tmp)));
++	JS_SET_RVAL(cx, vp, STRING_TO_JSVAL(JS_NewStringCopyN(cx, tmp, strlen(tmp))));
+ 	tmp = NULL;
+ 
+-	out:
+-		if (info) freeaddrinfo(info);
+-		px_free(tmp);
+-		return true;
++ out:
++	if (info) freeaddrinfo(info);
++	JS_free(cx, tmp);
++	return true;
++}
++
++static JSBool dnsResolve(JSContext *cx, uint32_t argc, jsval *vp) {
++	jsval *argv = JS_ARGV(cx, vp);
++	return dnsResolve_(cx, argv[0], vp);
+ }
+ 
+-static JSBool myIpAddress(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval) {
+-	char *hostname = JS_malloc(cx, 1024);
++static JSBool myIpAddress(JSContext *cx, uint32_t argc, jsval *vp) {
++	char *hostname = (char *) JS_malloc(cx, 1024);
+ 	if (!gethostname(hostname, 1023)) {
+-		JSString *myhost = JS_NewString(cx, hostname, strlen(hostname));
++		JSString *myhost = JS_NewStringCopyN(cx, hostname, strlen(hostname));
+ 		jsval arg = STRING_TO_JSVAL(myhost);
+-		return dnsResolve(cx, obj, 1, &arg, rval);
++		return dnsResolve_(cx, arg, vp);
+ 	}
+-	px_free(hostname);
+-	*rval = JSVAL_NULL;
++	JS_free(cx, hostname);
++	JS_SET_RVAL(cx, vp, JSVAL_NULL);
+ 	return true;
+ }
+ 
+@@ -105,11 +108,19 @@ static void ctxs_free(ctxStore *self)
+ 	if (!self) return;
+ 	if (self->ctx) JS_DestroyContext(self->ctx);
+ 	if (self->run) JS_DestroyRuntime(self->run);
+-	if (self->cls) px_free(self->cls);
+ 	px_free(self->pac);
+ 	px_free(self);
+ }
+ 
++// Setup Javascript global class
++// This MUST be a static global
++static JSClass cls = {
++	"global", JSCLASS_GLOBAL_FLAGS,
++	JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
++	JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub,
++	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
++};
++
+ static ctxStore *ctxs_new(pxPAC *pac)
+ {
+ 	JSObject *global = NULL;
+@@ -118,23 +129,10 @@ static ctxStore *ctxs_new(pxPAC *pac)
+ 	// Create the basic context
+ 	ctxStore *self = px_malloc0(sizeof(ctxStore));
+ 
+-	// Setup Javascript global class
+-	self->cls     = px_malloc0(sizeof(JSClass));
+-	self->cls->name        = "global";
+-	self->cls->flags       = 0;
+-	self->cls->addProperty = JS_PropertyStub;
+-	self->cls->delProperty = JS_PropertyStub;
+-	self->cls->getProperty = JS_PropertyStub;
+-	self->cls->setProperty = JS_PropertyStub;
+-	self->cls->enumerate   = JS_EnumerateStub;
+-	self->cls->resolve     = JS_ResolveStub;
+-	self->cls->convert     = JS_ConvertStub;
+-	self->cls->finalize    = JS_FinalizeStub;
+-
+ 	// Initialize Javascript runtime environment
+ 	if (!(self->run = JS_NewRuntime(1024 * 1024)))                   goto error;
+ 	if (!(self->ctx = JS_NewContext(self->run, 1024 * 1024)))        goto error;
+-	if (!(global  = JS_NewObject(self->ctx, self->cls, NULL, NULL))) goto error;
++	if (!(global = JS_NewGlobalObject(self->ctx, &cls, NULL))) goto error;
+ 	JS_InitStandardClasses(self->ctx, global);
+ 
+ 	// Define Javascript functions
+@@ -196,22 +194,21 @@ _run(pxPACRunnerModule *self, pxPAC *pac
+ 	}
+ 
+ 	// Build arguments to the FindProxyForURL() function
+-	char *tmpurl  = px_strdup(px_url_to_string(url));
+-	char *tmphost = px_strdup(px_url_get_host(url));
++	char *tmpurl  = JS_strdup(ctxs->ctx, px_url_to_string(url));
++	char *tmphost = JS_strdup(ctxs->ctx, px_url_get_host(url));
+ 	jsval args[2] = {
+-		STRING_TO_JSVAL(JS_NewString(ctxs->ctx, tmpurl, strlen(tmpurl))),
+-		STRING_TO_JSVAL(JS_NewString(ctxs->ctx, tmphost, strlen(tmphost)))
++		STRING_TO_JSVAL(JS_NewStringCopyN(ctxs->ctx, tmpurl, strlen(tmpurl))),
++		STRING_TO_JSVAL(JS_NewStringCopyN(ctxs->ctx, tmphost, strlen(tmphost)))
+ 	};
+ 
+ 	// Find the proxy (call FindProxyForURL())
+ 	jsval rval;
+ 	JSBool result = JS_CallFunctionName(ctxs->ctx, JS_GetGlobalObject(ctxs->ctx), "FindProxyForURL", 2, args, &rval);
+ 	if (!result) return NULL;
+-	char *answer = px_strdup(JS_GetStringBytes(JS_ValueToString(ctxs->ctx, rval)));
+-	if (!answer || !strcmp(answer, "undefined")) {
+-		px_free(answer);
+-		return NULL;
+-	}
++	char *tmpanswer = JS_EncodeString(ctxs->ctx, JS_ValueToString(ctxs->ctx, rval));
++	if (!tmpanswer || !strcmp(tmpanswer, "undefined")) return NULL;
++	char *answer = px_strdup(tmpanswer);
++	JS_free(ctxs->ctx, tmpanswer);
+ 	return answer;
+ }
+ 
