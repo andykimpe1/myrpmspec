@@ -1,0 +1,2631 @@
+diff --git a/configure.ac b/configure.ac
+index 6914f3f..5ccebe5 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -21,6 +21,8 @@
+ if test $KRB5_CONFIG = : ; then
+ 	AC_MSG_ERROR(krb5-config not found)
+ fi
++KRB5_BINDIR=`dirname $KRB5_CONFIG`
++AC_SUBST(KRB5_BINDIR)
+ 
+ AC_ARG_WITH(os-distribution,
+ [AC_HELP_STRING([--with-os-distribution="Super Duper Linux"],[Override the default OS distribution name in man pages. (default is "Red Hat Linux")])],
+@@ -33,6 +33,7 @@ AC_ARG_WITH(os-distribution,
+ 	    OS_DISTRIBUTION="Red Hat Linux")
+ AC_SUBST(OS_DISTRIBUTION)
+ 
++KRB4_BINDIR=
+ AC_ARG_WITH(krb4,
+ AC_HELP_STRING(--with-krb4[=AUTO],[Provide Kerberos IV support if possible.]),
+ 	    krb4=$withval,
+@@ -41,8 +56,10 @@ if test x$krb4 != xno ; then
+ 	else
+ 		AC_MSG_RESULT(Using krb4 provided by $KRB4_CONFIG.)
+ 		krb4=yes
++		KRB4_BINDIR=`dirname $KRB4_CONFIG`
+ 	fi
+ fi
++AC_SUBST(KRB4_BINDIR)
+ if test x$krb4 != xno ; then
+ 	MAN_KRB4=""
+ 	NO_MAN_KRB4=".\\\" "
+@@ -51,6 +68,30 @@ else
+ 	MAN_KRB4=".\\\" "
+ 	NO_MAN_KRB4=""
+ fi
++AM_CONDITIONAL(V4,[test "x$krb4" = xyes])
++
++AC_PATH_PROG(KRB5KDC,krb5kdc,:,[${KRB5_BINDIR}:${KRB5_BINDIR}/../sbin:${KRB5_BINDIR}/../libexec])
++if test x$KRB5KDC = x: ; then
++	unset ac_cv_path_KRB5KDC
++	AC_PATH_PROG(KRB5KDC,kdc,:,[${KRB5_BINDIR}:${KRB5_BINDIR}/../sbin:${KRB5_BINDIR}/../libexec])
++fi
++AC_PATH_PROG(KRB524D,krb524d,:,[${KRB5_BINDIR}:${KRB5_BINDIR}/../sbin:${KRB5_BINDIR}/../libexec])
++AC_PATH_PROG(KADMIND,kadmind,:,[${KRB5_BINDIR}:${KRB5_BINDIR}/../sbin:${KRB5_BINDIR}/../libexec])
++AC_PATH_PROG(KADMIN,kadmin,:,[${KRB5_BINDIR}:${KRB5_BINDIR}/../sbin:${KRB5_BINDIR}/../libexec])
++if test x$KADMIN != x: ; then
++	KADMINMAYBELOCAL="$KADMIN --local"
++else
++	KADMINMAYBELOCAL=":"
++fi
++AC_PATH_PROG(KADMINLOCAL,kadmin.local,$KADMINMAYBELOCAL,[${KRB5_BINDIR}:${KRB5_BINDIR}/../sbin:${KRB5_BINDIR}/../libexec])
++AM_CONDITIONAL(KRB5KDC,[test x$KRB5KDC != x: ])
++AM_CONDITIONAL(KRB524D,[test x$KRB524D != x: ])
++AM_CONDITIONAL(KADMIND,[test x$KADMIND != x: ])
++AM_CONDITIONAL(KADMINLOCAL,[test x$KADMINLOCAL != x: ])
++AC_SUBST(KRB5KDC)
++AC_SUBST(KRB524D)
++AC_SUBST(KADMIND)
++AC_SUBST(KADMINLOCAL)
+ 
+ AC_ARG_WITH(afs,
+ [AC_HELP_STRING(--without-afs,[Disable AFS support (default is AUTO).])],
+@@ -174,16 +215,20 @@ if test x$ac_cv_header_krb5_h = xyes ; then
+ else
+ 	AC_DEFINE(KRB5_H,[<krb5/krb5.h>],[Define to the name of your Kerberos 5 header.])
+ fi
++
++USE_KRB4=0
+ if test x$krb4 != xno ; then
+ 	AC_CHECK_HEADER(krb.h,,[AC_CHECK_HEADER(kerberosIV/krb.h)])
+ 	if test x$ac_cv_header_krb_h = xyes ; then
+ 		AC_DEFINE(USE_KRB4,1,[Define if you have Kerberos IV as well.])
++		USE_KRB4=1
+ 		AC_DEFINE(KRB4_DES_H,[<des.h>],[Define to the name of your Kerberos IV des.h header.])
+ 		AC_DEFINE(KRB4_KRB_H,[<krb.h>],[Define to the name of your Kerberos IV krb.h header.])
+ 		AC_CHECK_HEADER(krb_err.h,[AC_DEFINE(KRB4_KRB_ERR_H,[<krb_err.h>],[Define to the name of your Kerberos IV krb_err.h header, if you have one.])])
+ 	else
+ 		if test x$ac_cv_header_kerberosIV_krb_h = xyes ; then
+ 			AC_DEFINE(USE_KRB4,1,[Define if you have Kerberos IV as well.])
++			USE_KRB4=1
+ 			AC_DEFINE(KRB4_DES_H,[<kerberosIV/des.h>],[Define to the name of your Kerberos IV des.h header.])
+ 			AC_DEFINE(KRB4_KRB_H,[<kerberosIV/krb.h>],[Define to the name of your Kerberos IV krb.h header.])
+ 			AC_CHECK_HEADER(kerberosIV/krb_err.h,[AC_DEFINE(KRB4_KRB_ERR_H,[<kerberosIV/krb_err.h>],[Define to the name of your Kerberos IV krb_err.h header, if you have one.])])
+@@ -192,6 +237,8 @@ if test x$krb4 != xno ; then
+ 		fi
+ 	fi
+ fi
++AC_SUBST(USE_KRB4)
++AM_CONDITIONAL(USE_KRB4,[test $USE_KRB4 -eq 1])
+ 
+ LIBSsave="$LIBS"
+ LIBS="$LIBS $KRB5_LIBS $KRB4_LIBS"
+@@ -286,14 +333,27 @@ AC_CHECK_DECL(error_message,
+ 	      [AC_DEFINE(HAVE_ERROR_MESSAGE_DECL,1,[Define if your krb5.h declares the error_message() function.])],,[$headers])
+ AC_CHECK_HEADERS(com_err.h et/com_err.h)
+ 
+-AC_CHECK_DECL(krb5_os_localaddr,
+-	      [AC_DEFINE(HAVE_KRB5_OS_LOCALADDR,1,[Define if your krb5.h declares the krb5_os_localaddr() function.])],,[$headers])
+-AC_CHECK_DECL(krb5_os_hostaddr,
+-	      [AC_DEFINE(HAVE_KRB5_OS_HOSTADDR,1,[Define if your krb5.h declares the krb5_os_hostaddr() function.])],,[$headers])
++USE_ADDRESSES=0
+ AC_CHECK_DECL(krb5_copy_addr,
+ 	      [AC_DEFINE(HAVE_KRB5_COPY_ADDR,1,[Define if your krb5.h declares the krb5_copy_addr() function.])],,[$headers])
++AC_CHECK_DECL(krb5_os_hostaddr,
++	      [AC_DEFINE(HAVE_KRB5_OS_HOSTADDR,1,[Define if your krb5.h declares the krb5_os_hostaddr() function.])],,[$headers])
++AC_CHECK_DECL(krb5_os_localaddr,
++	      [AC_DEFINE(HAVE_KRB5_OS_LOCALADDR,1,[Define if your krb5.h declares the krb5_os_localaddr() function.])],,[$headers])
+ AC_CHECK_DECL(krb5_get_all_client_addrs,
+ 	      [AC_DEFINE(HAVE_KRB5_GET_ALL_CLIENT_ADDRS,1,[Define if your krb5.h declares the krb5_get_all_client_addrs() function.])],,[$headers])
++if test x$ac_cv_decl_krb5_copy_addr = xyes ; then
++	if test x$ac_cv_decl_krb5_os_hostaddr = xyes ; then
++		if test x$ac_cv_decl_krb5_os_localaddr = xyes ; then
++			USE_ADDRESSES=1
++		fi
++	fi
++fi
++if test x$ac_cv_decl_krb5_get_all_client_addrs = xyes ; then
++	USE_ADDRESSES=1
++fi
++AC_SUBST(USE_ADDRESSES)
++AM_CONDITIONAL(USE_ADDRESSES,[test $USE_ADDRESSES -eq 1])
+ 
+ if test x$ac_cv_func_krb5_get_init_creds_opt_alloc = xyes ; then
+ 	if test x$ac_cv_func_krb5_get_init_creds_opt_free = xyes ; then
+@@ -307,7 +367,8 @@ AC_CHECK_TYPES(krb5_principal_data,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_creds.keyblock,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_creds.session,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_creds.is_skey,,,[$headers])
+-AC_CHECK_MEMBERS(krb5_creds.flags,,,[$headers])
++AC_CHECK_MEMBERS(krb5_creds.flags.i,,,[$headers])
++AC_CHECK_MEMBERS(krb5_creds.flags.b,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_creds.ticket_flags,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_keyblock.enctype,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_keyblock.length,,,[$headers])
+@@ -320,9 +381,7 @@ AC_CHECK_MEMBERS(krb5_address.addrtype,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_address.length,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_address.contents,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_authdata.len,,,[$headers])
+-AC_CHECK_MEMBERS(krb5_authdata.val->ad_type,,,[$headers])
+-AC_CHECK_MEMBERS(krb5_authdata.val->ad_data.length,,,[$headers])
+-AC_CHECK_MEMBERS(krb5_authdata.val->ad_data.data,,,[$headers])
++AC_CHECK_MEMBERS(krb5_authdata.val,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_authdata.ad_type,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_authdata.length,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_authdata.contents,,,[$headers])
+@@ -335,7 +394,7 @@ AC_CHECK_MEMBERS(krb5_principal_data.name.name_string.len,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_principal_data.name.name_string.val,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_principal_data.realm,,,[$headers])
+ AC_CHECK_MEMBERS(krb5_ticket.client,,,[$headers])
+-AC_CHECK_MEMBERS([krb5_ticket.enc_part2->client],,,[$headers])
++AC_CHECK_MEMBERS(krb5_ticket.enc_part2,,,[$headers])
+ 
+ LIBSsave="$LIBS"
+ LIBS="$LIBS $KRB5_LIBS $KRB4_LIBS"
+@@ -406,7 +465,7 @@ if test "$with_libpam" != no ; then
+ else
+ 	AC_MSG_RESULT(no)
+ fi
+-AM_CONDITIONAL(WITH_DIRECT_LIBPAM,test "$with_libpam" != no)
++AM_CONDITIONAL(WITH_DIRECT_LIBPAM,[test "$with_libpam" != no])
+ 
+ AC_ARG_ENABLE(default-realm,AC_HELP_STRING([--enable-default-realm=REALM],[last-ditch fallback realm (default is EXAMPLE.COM)]),default_realm=$enableval,default_realm=EXAMPLE.COM)
+ AC_DEFINE_UNQUOTED(DEFAULT_REALM,"$default_realm",[Define to the realm name which will be used if no realm is given as a parameter and none is given in krb5.conf.])
+@@ -556,11 +626,7 @@ tests/config/krb5.conf
+ tests/config/kdc.conf
+ tests/config/krb.conf
+ tests/kdc/Makefile
++tests/testenv.sh
+ tests/tools/Makefile
+-tests/tools/klist_t
+-tests/tools/klist_f
+-tests/tools/klist_c
+-tests/tools/klist_a
+-tests/tools/klist_4
+ po/Makefile.in
+ ])
+diff --git a/src/auth.c b/src/auth.c
+index 8194b56..6d2f4d9 100644
+--- a/src/auth.c
++++ b/src/auth.c
+@@ -224,6 +224,7 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags,
+ 				      NULL,
+ 				      gic_options,
+ 				      _pam_krb5_always_fail_prompter,
++				      &stash->v5expired,
+ 				      &stash->v5result);
+ 		stash->v5attempted = 1;
+ 		if (options->debug) {
+@@ -272,6 +273,7 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags,
+ 					      use_third_pass ?
+ 					      _pam_krb5_normal_prompter :
+ 					      _pam_krb5_previous_prompter,
++					      &stash->v5expired,
+ 					      &stash->v5result);
+ 			use_third_pass = 0;
+ 			stash->v5attempted = 1;
+@@ -365,6 +367,7 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags,
+ 					      use_third_pass ?
+ 					      _pam_krb5_normal_prompter :
+ 					      _pam_krb5_always_fail_prompter,
++					      &stash->v5expired,
+ 					      &stash->v5result);
+ 			use_third_pass = 0;
+ 			stash->v5attempted = 1;
+@@ -426,6 +429,7 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags,
+ 				      options->permit_password_callback ?
+ 				      _pam_krb5_always_prompter :
+ 				      _pam_krb5_normal_prompter,
++				      &stash->v5expired,
+ 				      &stash->v5result);
+ 		stash->v5attempted = 1;
+ 		if (options->debug) {
+diff --git a/src/password.c b/src/password.c
+index 71c0bae..66d5cb1 100644
+--- a/src/password.c
++++ b/src/password.c
+@@ -236,6 +236,7 @@ pam_sm_chauthtok(pam_handle_t *pamh, int flags,
+ 					 PASSWORD_CHANGE_PRINCIPAL,
+ 					 password, NULL,
+ 					 _pam_krb5_normal_prompter,
++					 NULL,
+ 					 &tmp_result);
+ 			prelim_attempted = 1;
+ 			if (options->debug) {
+@@ -288,6 +289,7 @@ pam_sm_chauthtok(pam_handle_t *pamh, int flags,
+ 					 password ?
+ 					 _pam_krb5_normal_prompter :
+ 					 _pam_krb5_always_fail_prompter,
++					 NULL,
+ 					 &tmp_result);
+ 			v5_free_get_init_creds_opt(ctx, tmp_gicopts);
+ 			prelim_attempted = 1;
+@@ -450,6 +452,7 @@ pam_sm_chauthtok(pam_handle_t *pamh, int flags,
+ 					 KRB5_TGS_NAME,
+ 					 password, gic_options,
+ 					 _pam_krb5_always_fail_prompter,
++					 NULL,
+ 					 &stash->v5result);
+ 			stash->v5attempted = 1;
+ 			if (i == PAM_SUCCESS) {
+diff --git a/src/prompter.c b/src/prompter.c
+index 5336aa4..014df55 100644
+--- a/src/prompter.c
++++ b/src/prompter.c
+@@ -344,7 +344,7 @@ _pam_krb5_generic_prompter(krb5_context context, void *data,
+ 					      "password, replacing prompt text "
+ 					      "with generic prompt");
+ 				}
+-				tmp = strdup("Password: ");
++				tmp = strdup(Y_("Password: "));
+ 			}
+ 		} else
+ 		if (_pam_krb5_prompt_type(pdata->ctx, prompts, i) ==
+diff --git a/src/stash.h b/src/stash.h
+index 1330512..e84f3bb 100644
+--- a/src/stash.h
++++ b/src/stash.h
+@@ -43,7 +43,7 @@ struct _pam_krb5_ccname_list {
+ struct _pam_krb5_stash {
+ 	char *key;
+ 	krb5_context v5ctx;
+-	int v5attempted, v5result;
++	int v5attempted, v5result, v5expired;
+ 	struct _pam_krb5_ccname_list *v5ccnames;
+ 	krb5_creds v5creds;
+ 	int v5setenv;
+diff --git a/src/v5.c b/src/v5.c
+index 9cdd891..216c905 100644
+--- a/src/v5.c
++++ b/src/v5.c
+@@ -69,6 +69,7 @@
+ #include "log.h"
+ #include "perms.h"
+ #include "prompter.h"
++#include "sly.h"
+ #include "stash.h"
+ #include "userinfo.h"
+ #include "v5.h"
+@@ -600,7 +601,7 @@ v5_creds_address_contents(krb5_creds *creds, int i)
+ #error "Don't know how to read addresses for your Kerberos implementation!"
+ #endif
+ 
+-#if defined(HAVE_KRB5_AUTHDATA_VAL__AD_TYPE) && defined(HAVE_KRB5_AUTHDATA_VAL__AD_DATA_LENGTH) && defined(HAVE_KRB5_AUTHDATA_VAL__AD_DATA_DATA)
++#if defined(HAVE_KRB5_AUTHDATA_VAL)
+ int
+ v5_creds_authdata_count(krb5_creds *creds)
+ {
+@@ -666,7 +667,7 @@ v5_creds_get_is_skey(krb5_creds *creds)
+ }
+ #endif
+ 
+-#if defined(HAVE_KRB5_CREDS_FLAGS)
++#if defined(HAVE_KRB5_CREDS_FLAGS_I)
+ krb5_flags
+ v5_creds_get_flags(krb5_creds *creds)
+ {
+@@ -700,7 +701,7 @@ v5_auth_con_setuserkey(krb5_context ctx, krb5_auth_context auth_con,
+ #error "Don't know how to set user-to-user key for your Kerberos implementation!"
+ #endif
+ 
+-#if defined(HAVE_KRB5_TICKET_ENC_PART2__CLIENT)
++#if defined(HAVE_KRB5_TICKET_ENC_PART2)
+ krb5_principal
+ v5_ticket_get_client(krb5_ticket *ticket)
+ {
+@@ -1057,6 +1336,7 @@ v5_get_creds(krb5_context ctx,
+ 				      const char *,
+ 				      int,
+ 				      krb5_prompt[]),
++	     int *expired,
+ 	     int *result)
+ {
+ 	int i;
+@@ -1349,6 +1629,9 @@ v5_get_creds(krb5_context ctx,
+ 		case 0:
+ 			/* Got password-changing creds, so warn about the
+ 			 * expired password and continue. */
++			if (expired) {
++				*expired = 1;
++			}
+ 			if (options->warn == 1) {
+ 				message.msg = "Warning: password has expired.";
+ 				message.msg_style = PAM_TEXT_INFO;
+@@ -1365,6 +1648,9 @@ v5_get_creds(krb5_context ctx,
+ 			debug("attempt to obtain credentials for %s "
+ 			      "failed: %s", realm_service, v5_error_message(i));
+ 		}
++		if (result) {
++			*result = i;
++		}
+ 		return PAM_AUTH_ERR;
+ 		break;
+ 	case EAGAIN:
+diff --git a/src/v5.h b/src/v5.h
+index 71955f2..1c8878b 100644
+--- a/src/v5.h
++++ b/src/v5.h
+@@ -54,6 +54,7 @@ int v5_get_creds(krb5_context ctx,
+ 					  const char *,
+ 					  int,
+ 					  krb5_prompt[]),
++		 int *expired,
+ 		 int *result);
+ 
+ int v5_get_creds_etype(krb5_context ctx,
+diff --git a/tests/001-pambasic/run.sh b/tests/001-pambasic/run.sh
+new file mode 100755
+index 0000000..ae29381
+--- /dev/null
++++ b/tests/001-pambasic/run.sh
+@@ -0,0 +1,36 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++test_flags="$test_flags ignore_afs"
++
++echo ""; echo Setting password to \"foo\".
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire never '$test_principal 2> /dev/null > /dev/null
++
++echo ""; echo Fail: incorrect password.
++test_run -auth $test_principal $pam_krb5 $test_flags -- bar
++
++echo ""; echo Fail: incorrect password.
++test_run -auth $test_principal $pam_krb5 $test_flags -- foolong
++
++echo ""; echo Fail: incorrect password.
++test_run -auth $test_principal $pam_krb5 $test_flags -- foolongerstill
++
++echo ""; echo Succeed: correct password.
++test_run -auth -setcred -session $test_principal $pam_krb5 $test_flags -- foo
++
++echo ""; echo Fail: cannot read password.
++test_run -auth $test_principal $pam_krb5 $test_flags use_first_pass -- foo
++
++echo ""; echo Succeed: correct password, incorrect first attempt.
++test_run -auth -setcred $test_principal $pam_krb5 $test_flags try_first_pass -- foo
++
++echo ""; echo Succeed: correct password, maybe use incorrect second attempt.
++test_run -auth -session $test_principal $pam_krb5 $test_flags -authtok foo -- bar
++
++echo ""; echo Succeed: correct password, ignore second attempt.
++test_run -auth -setcred -session $test_principal $pam_krb5 $test_flags -authtok foo use_first_pass -- bar
++
++echo ""; echo Succeed: correct password, maybe use incorrect second attempt.
++test_run -auth $test_principal $pam_krb5 $test_flags -authtok foo try_first_pass -- bar
+diff --git a/tests/001-pambasic/stderr.expected b/tests/001-pambasic/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/001-pambasic/stdout.expected b/tests/001-pambasic/stdout.expected
+new file mode 100644
+index 0000000..38b2b56
+--- /dev/null
++++ b/tests/001-pambasic/stdout.expected
+@@ -0,0 +1,55 @@
++
++Setting password to "foo".
++
++Fail: incorrect password.
++Calling module `pam_krb5.so'.
++`Password: ' -> `bar'
++AUTH	7	Authentication failure
++
++Fail: incorrect password.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foolong'
++AUTH	7	Authentication failure
++
++Fail: incorrect password.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foolongerstill'
++AUTH	7	Authentication failure
++
++Succeed: correct password.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ESTCRED	0	Success
++OPENSESS	0	Success
++CLOSESESS	0	Success
++DELCRED	0	Success
++
++Fail: cannot read password.
++Calling module `pam_krb5.so'.
++AUTH	7	Authentication failure
++
++Succeed: correct password, incorrect first attempt.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ESTCRED	0	Success
++DELCRED	0	Success
++
++Succeed: correct password, maybe use incorrect second attempt.
++Calling module `pam_krb5.so'.
++AUTH	0	Success
++OPENSESS	0	Success
++CLOSESESS	0	Success
++
++Succeed: correct password, ignore second attempt.
++Calling module `pam_krb5.so'.
++AUTH	0	Success
++ESTCRED	0	Success
++OPENSESS	0	Success
++CLOSESESS	0	Success
++DELCRED	0	Success
++
++Succeed: correct password, maybe use incorrect second attempt.
++Calling module `pam_krb5.so'.
++AUTH	0	Success
+diff --git a/tests/002-pamchpw-wrongpw/run.sh b/tests/002-pamchpw-wrongpw/run.sh
+new file mode 100755
+index 0000000..aec818c
+--- /dev/null
++++ b/tests/002-pamchpw-wrongpw/run.sh
+@@ -0,0 +1,8 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Fail: incorrect password.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire now '$test_principal 2> /dev/null > /dev/null
++test_run -auth -account $test_principal $pam_krb5 $test_flags -- bar
+diff --git a/tests/002-pamchpw-wrongpw/stderr.expected b/tests/002-pamchpw-wrongpw/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/002-pamchpw-wrongpw/stdout.expected b/tests/002-pamchpw-wrongpw/stdout.expected
+new file mode 100644
+index 0000000..2c8b42e
+--- /dev/null
++++ b/tests/002-pamchpw-wrongpw/stdout.expected
+@@ -0,0 +1,6 @@
++
++Fail: incorrect password.
++Calling module `pam_krb5.so'.
++`Password: ' -> `bar'
++AUTH	7	Authentication failure
++ACCT	0	Success
+diff --git a/tests/003-pamchpw-warn/run.sh b/tests/003-pamchpw-warn/run.sh
+new file mode 100755
+index 0000000..3c7c185
+--- /dev/null
++++ b/tests/003-pamchpw-warn/run.sh
+@@ -0,0 +1,9 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Succeed: correct password, warn about expiration.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire now '$test_principal 2> /dev/null > /dev/null
++test_settle
++test_run -auth -account $test_principal $pam_krb5 $test_flags -- foo bar bar
+diff --git a/tests/003-pamchpw-warn/stderr.expected b/tests/003-pamchpw-warn/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/003-pamchpw-warn/stdout.expected b/tests/003-pamchpw-warn/stdout.expected
+new file mode 100644
+index 0000000..9fd0634
+--- /dev/null
++++ b/tests/003-pamchpw-warn/stdout.expected
+@@ -0,0 +1,7 @@
++
++Succeed: correct password, warn about expiration.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++`WARNEXPIRED'
++AUTH	0	Success
++ACCT	12	Authentication token is no longer valid; new one required
+diff --git a/tests/004-pamchpw-nowarn/run.sh b/tests/004-pamchpw-nowarn/run.sh
+new file mode 100755
+index 0000000..f590236
+--- /dev/null
++++ b/tests/004-pamchpw-nowarn/run.sh
+@@ -0,0 +1,9 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Succeed: correct password, do not warn about expiration.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire now '$test_principal 2> /dev/null > /dev/null
++test_settle
++test_run -auth -account $test_principal $pam_krb5 $test_flags no_warn -- foo
+diff --git a/tests/004-pamchpw-nowarn/stderr.expected b/tests/004-pamchpw-nowarn/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/004-pamchpw-nowarn/stdout.expected b/tests/004-pamchpw-nowarn/stdout.expected
+new file mode 100644
+index 0000000..fdda8be
+--- /dev/null
++++ b/tests/004-pamchpw-nowarn/stdout.expected
+@@ -0,0 +1,6 @@
++
++Succeed: correct password, do not warn about expiration.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ACCT	12	Authentication token is no longer valid; new one required
+diff --git a/tests/005-pamchpw-success/run.sh b/tests/005-pamchpw-success/run.sh
+new file mode 100755
+index 0000000..56e664c
+--- /dev/null
++++ b/tests/005-pamchpw-success/run.sh
+@@ -0,0 +1,9 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Succeed: correct password, expired, change.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire now '$test_principal 2> /dev/null > /dev/null
++test_settle
++test_run -auth -account -chauthtok -setcred -session $test_principal $pam_krb5 $test_flags -- foo foo bar bar baz baz
+diff --git a/tests/005-pamchpw-success/stderr.expected b/tests/005-pamchpw-success/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/005-pamchpw-success/stdout.expected b/tests/005-pamchpw-success/stdout.expected
+new file mode 100644
+index 0000000..c6f1ca3
+--- /dev/null
++++ b/tests/005-pamchpw-success/stdout.expected
+@@ -0,0 +1,14 @@
++
++Succeed: correct password, expired, change.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++`WARNEXPIRED'
++AUTH	0	Success
++ACCT	12	Authentication token is no longer valid; new one required
++`Kerberos 5 Password: ' -> `foo'
++CHAUTHTOK1	0	Success
++CHAUTHTOK2	0	Success
++ESTCRED	0	Success
++OPENSESS	0	Success
++CLOSESESS	0	Success
++DELCRED	0	Success
+diff --git a/tests/006-options-fpri/run.sh b/tests/006-options-fpri/run.sh
+new file mode 100755
+index 0000000..4706411
+--- /dev/null
++++ b/tests/006-options-fpri/run.sh
+@@ -0,0 +1,10 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Checking handling of options.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire never '$test_principal 2> /dev/null > /dev/null
++
++echo "";echo FPRI
++test_run -auth -setcred $test_principal -run klist_f $pam_krb5 $test_flags renew_lifetime=3600 proxiable forwardable -- foo
+diff --git a/tests/006-options-fpri/stderr.expected b/tests/006-options-fpri/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/006-options-fpri/stdout.expected b/tests/006-options-fpri/stdout.expected
+new file mode 100644
+index 0000000..1565ca4
+--- /dev/null
++++ b/tests/006-options-fpri/stdout.expected
+@@ -0,0 +1,10 @@
++
++Checking handling of options.
++
++FPRI
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ESTCRED	0	Success
++FPRI
++DELCRED	0	Success
+diff --git a/tests/007-options-none/run.sh b/tests/007-options-none/run.sh
+new file mode 100755
+index 0000000..0edabd4
+--- /dev/null
++++ b/tests/007-options-none/run.sh
+@@ -0,0 +1,10 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Checking handling of options.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire never '$test_principal 2> /dev/null > /dev/null
++
++echo "";echo I
++test_run -auth -setcred $test_principal -run klist_f $pam_krb5 $test_flags renew_lifetime=0 not_proxiable not_forwardable -- foo
+diff --git a/tests/007-options-none/stderr.expected b/tests/007-options-none/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/007-options-none/stdout.expected b/tests/007-options-none/stdout.expected
+new file mode 100644
+index 0000000..97ec484
+--- /dev/null
++++ b/tests/007-options-none/stdout.expected
+@@ -0,0 +1,10 @@
++
++Checking handling of options.
++
++I
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ESTCRED	0	Success
++I
++DELCRED	0	Success
+diff --git a/tests/008-options-noaddr/run.sh b/tests/008-options-noaddr/run.sh
+new file mode 100755
+index 0000000..8d0cdc3
+--- /dev/null
++++ b/tests/008-options-noaddr/run.sh
+@@ -0,0 +1,10 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Checking handling of options.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire never '$test_principal 2> /dev/null > /dev/null
++
++echo "";echo No addresses.
++test_run -auth -setcred $test_principal -run klist_a0 $pam_krb5 $test_flags proxiable forwardable addressless -- foo
+diff --git a/tests/008-options-noaddr/stderr.expected b/tests/008-options-noaddr/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/008-options-noaddr/stdout.expected b/tests/008-options-noaddr/stdout.expected
+new file mode 100644
+index 0000000..74b068c
+--- /dev/null
++++ b/tests/008-options-noaddr/stdout.expected
+@@ -0,0 +1,10 @@
++
++Checking handling of options.
++
++No addresses.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ESTCRED	0	Success
++0
++DELCRED	0	Success
+diff --git a/tests/009-options-addrs/run.sh b/tests/009-options-addrs/run.sh
+new file mode 100755
+index 0000000..8e919a5
+--- /dev/null
++++ b/tests/009-options-addrs/run.sh
+@@ -0,0 +1,10 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Checking handling of options.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire never '$test_principal 2> /dev/null > /dev/null
++
++echo "";echo With local addresses.
++test_run -auth -setcred $test_principal -run klist_a $pam_krb5 $test_flags proxiable forwardable not_addressless -- foo
+diff --git a/tests/009-options-addrs/stderr.expected b/tests/009-options-addrs/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/009-options-addrs/stdout.expected b/tests/009-options-addrs/stdout.expected
+new file mode 100644
+index 0000000..58e35a1
+--- /dev/null
++++ b/tests/009-options-addrs/stdout.expected
+@@ -0,0 +1,10 @@
++
++Checking handling of options.
++
++With local addresses.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ESTCRED	0	Success
++0
++DELCRED	0	Success
+diff --git a/tests/010-options-moreaddrs/run.sh b/tests/010-options-moreaddrs/run.sh
+new file mode 100755
+index 0000000..787c5e4
+--- /dev/null
++++ b/tests/010-options-moreaddrs/run.sh
+@@ -0,0 +1,10 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Checking handling of options.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire never '$test_principal 2> /dev/null > /dev/null
++
++echo "";echo With local and extra addresses.
++test_run -auth -setcred $test_principal -run klist_a $pam_krb5 $test_flags proxiable forwardable hosts="1.2.3.4" -- foo
+diff --git a/tests/010-options-moreaddrs/stderr.expected b/tests/010-options-moreaddrs/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/010-options-moreaddrs/stdout.expected b/tests/010-options-moreaddrs/stdout.expected
+new file mode 100644
+index 0000000..8964898
+--- /dev/null
++++ b/tests/010-options-moreaddrs/stdout.expected
+@@ -0,0 +1,10 @@
++
++Checking handling of options.
++
++With local and extra addresses.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ESTCRED	0	Success
++1
++DELCRED	0	Success
+diff --git a/tests/010-options-moreaddrs/uses_addresses b/tests/010-options-moreaddrs/uses_addresses
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/011-options-nov4/run.sh b/tests/011-options-nov4/run.sh
+new file mode 100755
+index 0000000..ea980a8
+--- /dev/null
++++ b/tests/011-options-nov4/run.sh
+@@ -0,0 +1,10 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Checking handling of options.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire never '$test_principal 2> /dev/null > /dev/null
++
++echo "";echo Without krb4.
++test_run -auth -setcred $test_principal -run klist_4 $pam_krb5 $test_flags proxiable forwardable not_addressless no_krb4_convert_kdc no_krb4_use_as_req -- foo
+diff --git a/tests/011-options-nov4/stderr.expected b/tests/011-options-nov4/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/011-options-nov4/stdout.expected b/tests/011-options-nov4/stdout.expected
+new file mode 100644
+index 0000000..c5bfca6
+--- /dev/null
++++ b/tests/011-options-nov4/stdout.expected
+@@ -0,0 +1,9 @@
++
++Checking handling of options.
++
++Without krb4.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ESTCRED	0	Success
++DELCRED	0	Success
+diff --git a/tests/011-options-nov4/uses_v4 b/tests/011-options-nov4/uses_v4
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/012-options-renew0/run.sh b/tests/012-options-renew0/run.sh
+new file mode 100755
+index 0000000..d0f160f
+--- /dev/null
++++ b/tests/012-options-renew0/run.sh
+@@ -0,0 +1,10 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Checking handling of options.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire never '$test_principal 2> /dev/null > /dev/null
++
++echo "";echo Renewable lifetime 0.
++test_run -auth -setcred $test_principal -run klist_t $pam_krb5 $test_flags proxiable forwardable not_addressless renew_lifetime=0 -- foo
+diff --git a/tests/012-options-renew0/stderr.expected b/tests/012-options-renew0/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/012-options-renew0/stdout.expected b/tests/012-options-renew0/stdout.expected
+new file mode 100644
+index 0000000..5db70ac
+--- /dev/null
++++ b/tests/012-options-renew0/stdout.expected
+@@ -0,0 +1,10 @@
++
++Checking handling of options.
++
++Renewable lifetime 0.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ESTCRED	0	Success
++0
++DELCRED	0	Success
+diff --git a/tests/013-options-renew/run.sh b/tests/013-options-renew/run.sh
+new file mode 100755
+index 0000000..f3924d9
+--- /dev/null
++++ b/tests/013-options-renew/run.sh
+@@ -0,0 +1,10 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Checking handling of options.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire never '$test_principal 2> /dev/null > /dev/null
++
++echo "";echo Renewable lifetime 1 hour.
++test_run -auth -setcred $test_principal -run klist_t $pam_krb5 $test_flags proxiable forwardable not_addressless ticket_lifetime=3600 renew_lifetime=3600 -- foo
+diff --git a/tests/013-options-renew/stderr.expected b/tests/013-options-renew/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/013-options-renew/stdout.expected b/tests/013-options-renew/stdout.expected
+new file mode 100644
+index 0000000..7220c42
+--- /dev/null
++++ b/tests/013-options-renew/stdout.expected
+@@ -0,0 +1,10 @@
++
++Checking handling of options.
++
++Renewable lifetime 1 hour.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ESTCRED	0	Success
++3600
++DELCRED	0	Success
+diff --git a/tests/014-options-defccdir/run.sh b/tests/014-options-defccdir/run.sh
+new file mode 100755
+index 0000000..0f07400
+--- /dev/null
++++ b/tests/014-options-defccdir/run.sh
+@@ -0,0 +1,10 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Checking handling of options.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire never '$test_principal 2> /dev/null > /dev/null
++
++echo "";echo Default ccache directory.
++test_run -auth -setcred $test_principal -run klist_c $pam_krb5 $test_flags -- foo
+diff --git a/tests/014-options-defccdir/stderr.expected b/tests/014-options-defccdir/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/014-options-defccdir/stdout.expected b/tests/014-options-defccdir/stdout.expected
+new file mode 100644
+index 0000000..dd7978e
+--- /dev/null
++++ b/tests/014-options-defccdir/stdout.expected
+@@ -0,0 +1,10 @@
++
++Checking handling of options.
++
++Default ccache directory.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ESTCRED	0	Success
++FILE:/tmp/krb5_cc_$UID_XXXXXX
++DELCRED	0	Success
+diff --git a/tests/015-options-ccdir/run.sh b/tests/015-options-ccdir/run.sh
+new file mode 100755
+index 0000000..6d7ccc3
+--- /dev/null
++++ b/tests/015-options-ccdir/run.sh
+@@ -0,0 +1,10 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Checking handling of options.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire never '$test_principal 2> /dev/null > /dev/null
++
++echo "";echo Ccache directory = testdir/kdc.
++test_run -auth -setcred $test_principal -run klist_c $pam_krb5 $test_flags ccache_dir=${testdir}/kdc -- foo
+diff --git a/tests/015-options-ccdir/stderr.expected b/tests/015-options-ccdir/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/015-options-ccdir/stdout.expected b/tests/015-options-ccdir/stdout.expected
+new file mode 100644
+index 0000000..1058229
+--- /dev/null
++++ b/tests/015-options-ccdir/stdout.expected
+@@ -0,0 +1,10 @@
++
++Checking handling of options.
++
++Ccache directory = testdir/kdc.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ESTCRED	0	Success
++FILE:$testdir/kdc/krb5_cc_$UID_XXXXXX
++DELCRED	0	Success
+diff --git a/tests/016-options-banner/run.sh b/tests/016-options-banner/run.sh
+new file mode 100755
+index 0000000..ed5bc2e
+--- /dev/null
++++ b/tests/016-options-banner/run.sh
+@@ -0,0 +1,11 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Checking handling of options.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire never '$test_principal 2> /dev/null > /dev/null
++
++echo "";echo Banner = K3RB3R05 S
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++test_run -chauthtok $test_principal $pam_krb5 $test_flags banner="K3RB3R05 S" -- foo bar bar
+diff --git a/tests/016-options-banner/stderr.expected b/tests/016-options-banner/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/016-options-banner/stdout.expected b/tests/016-options-banner/stdout.expected
+new file mode 100644
+index 0000000..e02fafe
+--- /dev/null
++++ b/tests/016-options-banner/stdout.expected
+@@ -0,0 +1,10 @@
++
++Checking handling of options.
++
++Banner = K3RB3R05 S
++Calling module `pam_krb5.so'.
++`K3RB3R05 S Password: ' -> `foo'
++CHAUTHTOK1	0	Success
++`New K3RB3R05 S Password: ' -> `bar'
++`Repeat New K3RB3R05 S Password: ' -> `bar'
++CHAUTHTOK2	0	Success
+diff --git a/tests/017-options-help/run.sh b/tests/017-options-help/run.sh
+new file mode 100755
+index 0000000..5448886
+--- /dev/null
++++ b/tests/017-options-help/run.sh
+@@ -0,0 +1,11 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Checking handling of options.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire never '$test_principal 2> /dev/null > /dev/null
++
++echo "";echo Password-change Help Text
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++test_run -chauthtok $test_principal $pam_krb5 $test_flags pwhelp=$testdir/pwhelp.txt -- foo bar bar
+diff --git a/tests/017-options-help/stderr.expected b/tests/017-options-help/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/017-options-help/stdout.expected b/tests/017-options-help/stdout.expected
+new file mode 100644
+index 0000000..f79fb04
+--- /dev/null
++++ b/tests/017-options-help/stdout.expected
+@@ -0,0 +1,41 @@
++
++Checking handling of options.
++
++Password-change Help Text
++Calling module `pam_krb5.so'.
++` 1 ----------------------------------------------------------------------------
++ 2 ----------------------------------------------------------------------------
++ 3 ----------------------------------------------------------------------------
++ 4 ----------------------------------------------------------------------------
++ 5 ----------------------------------------------------------------------------
++ 6 ----------------------------------------------------------------------------
++ 7 ----------------------------------------------------------------------------
++ 8 ----------------------------------------------------------------------------
++ 9 ----------------------------------------------------------------------------
++10 ----------------------------------------------------------------------------
++11 ----------------------------------------------------------------------------
++12 ----------------------------------------------------------------------------
++13 ----------------------------------------------------------------------------
++14 ----------------------------------------------------------------------------
++15 ----------------------------------------------------------------------------
++16 ----------------------------------------------------------------------------
++17 ----------------------------------------------------------------------------
++18 ----------------------------------------------------------------------------
++19 ----------------------------------------------------------------------------
++20 ----------------------------------------------------------------------------
++21 ----------------------------------------------------------------------------
++22 ----------------------------------------------------------------------------
++23 ----------------------------------------------------------------------------
++24 ----------------------------------------------------------------------------
++25 ----------------------------------------------------------------------------
++26 ----------------------------------------------------------------------------
++27 ----------------------------------------------------------------------------
++28 ----------------------------------------------------------------------------
++29 ----------------------------------------------------------------------------
++30 ----------------------------------------------------------------------------
++'
++`Kerberos 5 Password: ' -> `foo'
++CHAUTHTOK1	0	Success
++`New Kerberos 5 Password: ' -> `bar'
++`Repeat New Kerberos 5 Password: ' -> `bar'
++CHAUTHTOK2	0	Success
+diff --git a/tests/018-krb4/run.sh b/tests/018-krb4/run.sh
+new file mode 100755
+index 0000000..75a90ee
+--- /dev/null
++++ b/tests/018-krb4/run.sh
+@@ -0,0 +1,13 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Checking ability to get v4 credentials.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire never '$test_principal 2> /dev/null > /dev/null
++
++echo "";echo With krb4 via krb524.
++test_run -auth -setcred $test_principal -run klist_4 $pam_krb5 $test_flags not_renewable not_proxiable not_forwardable krb4_convert krb4_convert_524 no_krb4_use_as_req -- foo
++
++echo "";echo With krb4 via kdc.
++test_run -auth -setcred $test_principal -run klist_4 $pam_krb5 $test_flags not_renewable not_proxiable not_forwardable krb4_convert no_krb4_convert_524 krb4_use_as_req -- foo
+diff --git a/tests/018-krb4/stderr.expected b/tests/018-krb4/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/018-krb4/stdout.expected b/tests/018-krb4/stdout.expected
+new file mode 100644
+index 0000000..3acd205
+--- /dev/null
++++ b/tests/018-krb4/stdout.expected
+@@ -0,0 +1,18 @@
++
++Checking ability to get v4 credentials.
++
++With krb4 via krb524.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ESTCRED	0	Success
++120
++DELCRED	0	Success
++
++With krb4 via kdc.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++AUTH	0	Success
++ESTCRED	0	Success
++120
++DELCRED	0	Success
+diff --git a/tests/018-krb4/uses_v4 b/tests/018-krb4/uses_v4
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/019-pamchpw-prompt-wrongpw/run.sh b/tests/019-pamchpw-prompt-wrongpw/run.sh
+new file mode 100755
+index 0000000..d19e918
+--- /dev/null
++++ b/tests/019-pamchpw-prompt-wrongpw/run.sh
+@@ -0,0 +1,8 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Fail: incorrect password.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire now '$test_principal 2> /dev/null > /dev/null
++test_run -auth -account $test_principal $pam_krb5 $test_flags chpw_prompt -- bar
+diff --git a/tests/019-pamchpw-prompt-wrongpw/stderr.expected b/tests/019-pamchpw-prompt-wrongpw/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/019-pamchpw-prompt-wrongpw/stdout.expected b/tests/019-pamchpw-prompt-wrongpw/stdout.expected
+new file mode 100644
+index 0000000..2c8b42e
+--- /dev/null
++++ b/tests/019-pamchpw-prompt-wrongpw/stdout.expected
+@@ -0,0 +1,6 @@
++
++Fail: incorrect password.
++Calling module `pam_krb5.so'.
++`Password: ' -> `bar'
++AUTH	7	Authentication failure
++ACCT	0	Success
+diff --git a/tests/020-pamchpw-prompt-success/run.sh b/tests/020-pamchpw-prompt-success/run.sh
+new file mode 100755
+index 0000000..f459914
+--- /dev/null
++++ b/tests/020-pamchpw-prompt-success/run.sh
+@@ -0,0 +1,9 @@
++#!/bin/sh
++
++source $testdir/testenv.sh
++
++echo "";echo Succeed: correct password, expired, change.
++$kadmin -q 'cpw -pw foo '$test_principal 2> /dev/null > /dev/null
++$kadmin -q 'modprinc -pwexpire now '$test_principal 2> /dev/null > /dev/null
++test_settle
++test_run -auth -account -setcred -session $test_principal $pam_krb5 $test_flags chpw_prompt -- foo bar bar
+diff --git a/tests/020-pamchpw-prompt-success/stderr.expected b/tests/020-pamchpw-prompt-success/stderr.expected
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/020-pamchpw-prompt-success/stdout.expected b/tests/020-pamchpw-prompt-success/stdout.expected
+new file mode 100644
+index 0000000..5508baa
+--- /dev/null
++++ b/tests/020-pamchpw-prompt-success/stdout.expected
+@@ -0,0 +1,13 @@
++
++Succeed: correct password, expired, change.
++Calling module `pam_krb5.so'.
++`Password: ' -> `foo'
++`Password expired.  You must change it now.'
++`New Kerberos 5 Password: ' -> `bar'
++`Repeat New Kerberos 5 Password: ' -> `bar'
++AUTH	0	Success
++ACCT	0	Success
++ESTCRED	0	Success
++OPENSESS	0	Success
++CLOSESESS	0	Success
++DELCRED	0	Success
+diff --git a/tests/Makefile.am b/tests/Makefile.am
+index 536af79..5170091 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -1,6 +1,69 @@
+ SUBDIRS = config tools kdc
+ 
+-EXTRA_DIST = run-tests
++EXTRA_DIST = run-tests.sh testenv.sh.in pwhelp.txt \
++	001-pambasic/run.sh \
++	001-pambasic/stderr.expected \
++	001-pambasic/stdout.expected \
++	002-pamchpw-wrongpw/run.sh \
++	002-pamchpw-wrongpw/stderr.expected \
++	002-pamchpw-wrongpw/stdout.expected \
++	003-pamchpw-warn/run.sh \
++	003-pamchpw-warn/stderr.expected \
++	003-pamchpw-warn/stdout.expected \
++	004-pamchpw-nowarn/run.sh \
++	004-pamchpw-nowarn/stderr.expected \
++	004-pamchpw-nowarn/stdout.expected \
++	005-pamchpw-success/run.sh \
++	005-pamchpw-success/stderr.expected \
++	005-pamchpw-success/stdout.expected \
++	006-options-fpri/run.sh \
++	006-options-fpri/stderr.expected \
++	006-options-fpri/stdout.expected \
++	007-options-none/run.sh \
++	007-options-none/stderr.expected \
++	007-options-none/stdout.expected \
++	008-options-noaddr/run.sh \
++	008-options-noaddr/stderr.expected \
++	008-options-noaddr/stdout.expected \
++	009-options-addrs/run.sh \
++	009-options-addrs/stderr.expected \
++	009-options-addrs/stdout.expected \
++	010-options-moreaddrs/run.sh \
++	010-options-moreaddrs/stderr.expected \
++	010-options-moreaddrs/stdout.expected \
++	010-options-moreaddrs/uses_addresses \
++	011-options-nov4/run.sh \
++	011-options-nov4/stderr.expected \
++	011-options-nov4/stdout.expected \
++	011-options-nov4/uses_v4 \
++	012-options-renew0/run.sh \
++	012-options-renew0/stderr.expected \
++	012-options-renew0/stdout.expected \
++	013-options-renew/run.sh \
++	013-options-renew/stderr.expected \
++	013-options-renew/stdout.expected \
++	014-options-defccdir/run.sh \
++	014-options-defccdir/stderr.expected \
++	014-options-defccdir/stdout.expected \
++	015-options-ccdir/run.sh \
++	015-options-ccdir/stderr.expected \
++	015-options-ccdir/stdout.expected \
++	016-options-banner/run.sh \
++	016-options-banner/stderr.expected \
++	016-options-banner/stdout.expected \
++	017-options-help/run.sh \
++	017-options-help/stderr.expected \
++	017-options-help/stdout.expected \
++	018-krb4/run.sh \
++	018-krb4/stderr.expected \
++	018-krb4/stdout.expected \
++	018-krb4/uses_v4 \
++	019-pamchpw-prompt-wrongpw/run.sh \
++	019-pamchpw-prompt-wrongpw/stderr.expected \
++	019-pamchpw-prompt-wrongpw/stdout.expected \
++	020-pamchpw-prompt-success/run.sh \
++	020-pamchpw-prompt-success/stderr.expected \
++	020-pamchpw-prompt-success/stdout.expected
+ 
+-check: $(srcdir)/run-tests all
+-	$(srcdir)/run-tests . @KRB5_BINDIR@
++check: all testenv.sh
++	$(srcdir)/run-tests.sh
+diff --git a/tests/config/kdc.conf.in b/tests/config/kdc.conf.in
+index e839ec4..da3005a 100644
+--- a/tests/config/kdc.conf.in
++++ b/tests/config/kdc.conf.in
+@@ -1,5 +1,6 @@
+ [kdcdefaults]
+- v4_mode = nopreauth
++ v4_mode = full
++ kdc_tcp_ports = 8800
+  kdc_ports = 8800
+ 
+ [realms]
+@@ -9,8 +9,7 @@
+   dict_file = /usr/share/dict/words
+   database_name = @TESTDIR@/kdc/principal
+   key_stash_file = @TESTDIR@/kdc/stash_file
+-  master_key_type = des-cbc-crc
+-  supported_enctypes = des3-cbc-sha1:normal des-cbc-crc:normal
++  supported_enctypes = aes256-cts:normal des3-cbc-sha1:normal des-cbc-crc:normal
+   kadmind_port = 8801
+   kpasswd_port = 8802
+  }
+diff --git a/tests/config/krb5.conf.in b/tests/config/krb5.conf.in
+index a8d8637..59a526f 100644
+--- a/tests/config/krb5.conf.in
++++ b/tests/config/krb5.conf.in
+@@ -6,6 +6,7 @@
+ [libdefaults]
+  ticket_lifetime = 24000
+  default_realm = EXAMPLE.COM
++ udp_preference_limit = 1
+ 
+ [realms]
+  EXAMPLE.COM = {
+diff --git a/tests/kdc/Makefile.am b/tests/kdc/Makefile.am
+index 65477c1..534909d 100644
+--- a/tests/kdc/Makefile.am
++++ b/tests/kdc/Makefile.am
+@@ -1 +1 @@
+-DISTCLEANFILES = krb5kdc.log krb5libs.log kadmind.log stash_file
++CLEANFILES = krb5kdc.log krb5libs.log kadmind.log stash_file kadmin_* principal* *_rcache
+diff --git a/tests/run-tests b/tests/run-tests
+deleted file mode 100755
+index ee027df..0000000
+--- a/tests/run-tests
++++ /dev/null
+@@ -1,256 +0,0 @@
+-#!/bin/bash
+-PATH=${PATH}:/usr/sbin:/usr/local/sbin:/usr/kerberos/sbin
+-principal=`id -nu`
+-
+-testdir=${1:-`/bin/pwd`}
+-testdir=`cd $testdir; /bin/pwd`
+-
+-PATH=${PATH}:${testdir}/tools
+-export KRB5_BINDIR=${2:-.}
+-
+-pam_krb5=${testdir}/../src/pam_krb5.so
+-if ! test -x $pam_krb5 ; then
+-	pam_krb5=${testdir}/../src/.libs/pam_krb5.so
+-fi
+-export KRB5_CONFIG=$testdir/config/krb5.conf
+-export KRBCONFDIR=$testdir/config
+-export KRB_CONF=$testdir/config/krb.conf
+-export KRB_REALMS=$testdir/config/krb.realms
+-export KRB5_KDC_PROFILE=$testdir/config/kdc.conf
+-export KRB5CCNAME=/dev/bogus-missing-file
+-export KRBTKFILE=/dev/bogus-missing-file
+-flags=unsecure_for_debugging_only
+-
+-settle() {
+-	sleep 1
+-}
+-
+-k524start() {
+-	if test x$K524DPID != x ; then
+-		kill $K524DPID
+-		unset K524DPID
+-	fi
+-
+-	krb524d -m -r EXAMPLE.COM -nofork &
+-	K524DPID=$!
+-
+-	kill -CONT $K524DPID
+-}
+-
+-kdcstart() {
+-	if test x$KDCPID != x ; then
+-		kill $KDCPID
+-		unset KDCPID
+-	fi
+-
+-	test -d $testdir/kdc || mkdir -p $testdir/kdc
+-	(echo .; echo .) | kdb5_util create -s 2> /dev/null > /dev/null
+-
+-	kadmin.local -q 'addpol -minlength 6 minimum_six' 2> /dev/null > /dev/null
+-	kadmin.local -q 'ank -pw foo '$principal 2> /dev/null > /dev/null
+-	kadmin.local -q 'modprinc -maxrenewlife "1 day" krbtgt/EXAMPLE.COM' 2> /dev/null > /dev/null
+-	kadmin.local -q 'modprinc -maxrenewlife "1 day" '$principal 2> /dev/null > /dev/null
+-	rm -f $testdir/kdc/krb5kdc.log
+-	rm -f $testdir/kdc/kadmind.log
+-	rm -f $testdir/kdc/krb5libs.log
+-	krb5kdc -r EXAMPLE.COM -n -port 8002 &
+-	KDCPID=$!
+-
+-	if test x$KADMINDPID != x ; then
+-		kill $KADMINDPID
+-		unset KADMINDID
+-	fi
+-
+-	kadmind -r EXAMPLE.COM -nofork &
+-	KADMINDPID=$!
+-
+-	k524start
+-
+-	settle
+-
+-	kill -CONT $KDCPID
+-	kill -CONT $KADMINDPID
+-	trap kdcstop EXIT
+-}
+-
+-k524stop() {
+-	if test x$K524DPID != x ; then
+-		kill $K524DPID
+-		unset K524DPID
+-	else
+-		echo "echo error: no running krb524d"
+-		exit 1
+-	fi
+-}
+-
+-kdcstop() {
+-	trap true EXIT
+-	k524stop
+-	if test x$KADMINDPID != x ; then
+-		kill $KADMINDPID
+-		unset KADMINDID
+-	else
+-		echo "echo error: no running kadmind"
+-		exit 1
+-	fi
+-	if test x$KDCPID != x ; then
+-		kill $KDCPID
+-		unset KDCPID
+-		kdb5_util destroy -f 2> /dev/null > /dev/null
+-	else
+-		echo "echo error: no running KDC"
+-		exit 1
+-	fi
+-}
+-
+-run() {
+-	# Filter out the module path.
+-	pam_harness "$@" 2>&1 | sed s,"\`.*pam",'\`pam',g
+-}
+-
+-# Start the KDC.
+-for script in ${testdir}/tools/klist_* ; do
+-	test -r $script && chmod +x $script 2> /dev/null
+-done
+-
+-kdcstart
+-
+-# First, a wrong password, then the right one, then a wrong one.
+-
+-echo "";echo Setting password to \"foo\".
+-kadmin.local -q 'cpw -pw foo '$principal 2> /dev/null > /dev/null
+-
+-echo "";echo Fail: incorrect password.
+-run -auth $principal $pam_krb5 $flags -- bar
+-
+-echo "";echo Fail: incorrect password.
+-run -auth $principal $pam_krb5 $flags -- foolong
+-
+-echo "";echo Succeed: correct password.
+-run -auth -setcred -session $principal $pam_krb5 $flags -- foo
+-
+-echo "";echo Fail: cannot read password.
+-run -auth $principal $pam_krb5 $flags use_first_pass -- foo
+-
+-echo "";echo Succeed: correct password, incorrect first attempt.
+-run -auth -setcred $principal $pam_krb5 $flags try_first_pass -- foo
+-
+-echo "";echo Succeed: correct password, maybe use incorrect second attempt.
+-run -auth -session $principal $pam_krb5 $flags -authtok foo -- bar
+-
+-echo "";echo Succeed: correct password, ignore second attempt.
+-run -auth -setcred -session $principal $pam_krb5 $flags -authtok foo use_first_pass -- bar
+-
+-echo "";echo Succeed: correct password, maybe use incorrect second attempt.
+-run -auth $principal $pam_krb5 $flags -authtok foo try_first_pass -- bar
+-
+-# Check for expired password detection (both right and wrong), and "nowarn".
+-
+-echo "";echo Expiring password.
+-kadmin.local -q 'cpw -pw foo '$principal 2> /dev/null > /dev/null
+-kadmin.local -q 'modprinc -pwexpire now '$principal 2> /dev/null > /dev/null
+-settle
+-
+-echo "";echo Fail: incorrect password.
+-kadmin.local -q 'cpw -pw foo '$principal 2> /dev/null > /dev/null
+-kadmin.local -q 'modprinc -pwexpire now '$principal 2> /dev/null > /dev/null
+-settle
+-run -auth -account $principal $pam_krb5 $flags -- bar
+-
+-echo "";echo Succeed: correct password, warn about expiration.
+-kadmin.local -q 'cpw -pw foo '$principal 2> /dev/null > /dev/null
+-kadmin.local -q 'modprinc -pwexpire now '$principal 2> /dev/null > /dev/null
+-settle
+-run -auth -account $principal $pam_krb5 $flags -- foo bar bar
+-
+-echo "";echo Succeed: correct password, do not warn about expiration.
+-kadmin.local -q 'cpw -pw foo '$principal 2> /dev/null > /dev/null
+-kadmin.local -q 'modprinc -pwexpire now '$principal 2> /dev/null > /dev/null
+-settle
+-run -auth -account $principal $pam_krb5 $flags no_warn -- foo
+-
+-echo "";echo Succeed: correct password, expired, change.
+-kadmin.local -q 'cpw -pw foo '$principal 2> /dev/null > /dev/null
+-kadmin.local -q 'modprinc -pwexpire now '$principal 2> /dev/null > /dev/null
+-settle
+-run -auth -account -chauthtok -setcred -session $principal $pam_krb5 $flags no_warn -- foo bar bar bar baz baz
+-
+-# Check password changing.
+-echo "";echo Resetting password to \"foo\".
+-
+-echo "";echo Succeed.
+-kadmin.local -q 'cpw -pw foo '$principal 2> /dev/null > /dev/null
+-run -chauthtok $principal $pam_krb5 $flags -- foo bar bar
+-
+-echo "";echo Fail: wrong initial password. 
+-kadmin.local -q 'cpw -pw foo '$principal 2> /dev/null > /dev/null
+-run -chauthtok $principal $pam_krb5 $flags -- Foo bar bar
+-
+-echo "";echo Fail: mismatched new password. 
+-kadmin.local -q 'cpw -pw foo '$principal 2> /dev/null > /dev/null
+-run -chauthtok $principal $pam_krb5 $flags -- foo bar bAr
+-
+-echo "";echo Fail: unacceptable password.
+-kadmin.local -q 'cpw -pw foo '$principal 2> /dev/null > /dev/null
+-kadmin.local -q 'modprinc -policy minimum_six '$principal 2> /dev/null > /dev/null
+-run -chauthtok $principal $pam_krb5 $flags -- foo bar bar
+-kadmin.local -q 'modprinc -clearpolicy '$principal 2> /dev/null > /dev/null
+-kadmin.local -q 'delprinc '$principal 2> /dev/null > /dev/null
+-kadmin.local -q 'ank -pw foo '$principal 2> /dev/null > /dev/null
+-
+-echo "";echo Succeed: use_authtok
+-kadmin.local -q 'cpw -pw foo '$principal 2> /dev/null > /dev/null
+-run -chauthtok $principal -oldauthtok foo -authtok bar $pam_krb5 $flags use_authtok
+-
+-# Check for being able to set particular options.
+-echo "";echo Checking handling of options.
+-kadmin.local -q 'cpw -pw foo '$principal 2> /dev/null > /dev/null
+-
+-echo "";echo FPI or FPRI
+-run -auth -setcred $principal -run klist_f $pam_krb5 $flags renewable proxiable forwardable -- foo
+-
+-echo "";echo I or RI
+-run -auth -setcred $principal -run klist_f $pam_krb5 $flags not_renewable not_proxiable not_forwardable -- foo
+-
+-echo "";echo No addresses.
+-run -auth -setcred $principal -run klist_a $pam_krb5 $flags renewable proxiable forwardable addressless -- foo
+-
+-echo "";echo With local addresses.
+-run -auth -setcred $principal -run klist_a $pam_krb5 $flags renewable proxiable forwardable not_addressless -- foo
+-
+-echo "";echo With local and extra addresses.
+-run -auth -setcred $principal -run klist_a $pam_krb5 $flags renewable proxiable forwardable hosts="localhost" -- foo
+-
+-echo "";echo Without krb4.
+-run -auth -setcred $principal -run klist_4 $pam_krb5 $flags renewable proxiable forwardable not_addressless no_krb4_convert -- foo
+-
+-echo "";echo With krb4 via krb524.
+-run -auth -setcred $principal -run klist_4 $pam_krb5 $flags renewable proxiable forwardable not_addressless krb4_convert -- foo
+-
+-k524stop
+-echo "";echo With krb4 via kdc.
+-run -auth -setcred $principal -run klist_4 $pam_krb5 $flags renewable proxiable forwardable not_addressless krb4_convert -- foo
+-k524start ; settle
+-
+-echo "";echo Renewable lifetime 0.
+-run -auth -setcred $principal -run klist_t $pam_krb5 $flags proxiable forwardable not_addressless renew_lifetime=0 -- foo
+-
+-echo "";echo Renewable lifetime 1 hour.
+-run -auth -setcred $principal -run klist_t $pam_krb5 $flags proxiable forwardable not_addressless renew_lifetime=3600 -- foo
+-
+-echo "";echo Default ccache directory.
+-run -auth -setcred $principal -run klist_c $pam_krb5 $flags -- foo
+-
+-echo "";echo Ccache directory = testdir/kdc.
+-run -auth -setcred $principal -run klist_c $pam_krb5 $flags ccache_dir=${testdir}/kdc -- foo
+-
+-echo "";echo Banner = K3RB3R05 S
+-kadmin.local -q 'cpw -pw foo '$principal 2> /dev/null > /dev/null
+-run -chauthtok $principal $pam_krb5 $flags banner="K3RB3R05 S" -- foo bar bar
+-
+-echo "";echo Password-change Help Text
+-kadmin.local -q 'cpw -pw foo '$principal 2> /dev/null > /dev/null
+-run -chauthtok $principal $pam_krb5 $flags pwhelp=$testdir/pwhelp.txt -- foo bar bar
+-
+-# Stop the KDC.
+-kdcstop
+diff --git a/tests/run-tests.sh b/tests/run-tests.sh
+new file mode 100755
+index 0000000..c93e2b9
+--- /dev/null
++++ b/tests/run-tests.sh
+@@ -0,0 +1,53 @@
++#!/bin/sh
++
++testdir=`dirname "$0"`
++testdir=`cd "$testdir" ; pwd`
++export testdir
++
++source $testdir/testenv.sh
++echo "Running tests using test principal \"$test_principal\"".
++echo "Running tests using KDC on \"$test_host\"".
++getent hosts "$test_host"
++
++# Tell the caller where the binaries are.
++test -n "$krb5kdc" && echo Using krb5kdc binary: $krb5kdc
++test -n "$krb524d" && echo Using krb524d binary: $krb524d
++test -n "$kadmind" && echo Using kadmind binary: $kadmind
++test -n "$kadmin"  && echo Using kadmin.local binary: $kadmin
++
++# Run each test with clear log files and a fresh copy of the KDC and kadmind,
++# and a fresh 524d if available.
++for test in ${@:-"$testdir"/0*} ; do
++	if ! test -s $test/run.sh ; then
++		continue
++	fi
++	if ! $test_addresses ; then
++		if test -r $test/uses_addresses ; then
++			echo Skipping address manipulating test `basename "$test"`.
++			continue
++		fi
++	fi
++	if ! $test_krb4 ; then
++		if test -r $test/uses_v4 ; then
++			echo Skipping v4-specific test `basename "$test"`.
++			continue
++		fi
++	fi
++	echo -n `basename "$test"` ..." "
++	test_kdcinitdb
++	test_kdcprep
++	meanwhile "$run_kdc" "$run_kadmind" "$run_krb524d" "$test/run.sh" > $test/stdout 2> $test/stderr
++	if test -s $test/stdout.expected ; then
++		if ! cmp -s $test/stdout.expected $test/stdout ; then
++			echo ""
++			diff -u $test/stdout.expected $test/stdout | sed "s|$testdir/||g"
++			exit 1
++		fi
++		if ! cmp -s $test/stderr.expected $test/stderr ; then
++			echo ""
++			diff -u $test/stderr.expected $test/stderr | sed "s|$testdir/||g"
++			exit 1
++		fi
++	fi
++	echo OK
++done
+diff --git a/tests/testenv.sh.in b/tests/testenv.sh.in
+new file mode 100755
+index 0000000..1bde795
+--- /dev/null
++++ b/tests/testenv.sh.in
+@@ -0,0 +1,92 @@
++#!/bin/sh
++
++PATH=${testdir}/tools:${PATH}; export PATH
++
++test_principal=`id -nu`
++test_host=@TESTHOST@
++
++if test @USE_ADDRESSES@ -eq 1 ; then
++	test_addresses=true
++else
++	test_addresses=false
++fi
++
++if test @USE_KRB4@ -eq 1 ; then
++	test_krb4=true
++else
++	test_krb4=false
++fi
++
++pam_krb5=@abs_builddir@/../src/pam_krb5.so
++if ! test -x $pam_krb5 ; then
++	pam_krb5=@abs_builddir@/../src/.libs/pam_krb5.so
++fi
++
++krb5kdc=@KRB5KDC@
++if test $krb5kdc = : ; then
++	krb5kdc=
++fi
++krb524d=@KRB524D@
++if test $krb524d = : ; then
++	krb524d=
++fi
++kadmind=@KADMIND@
++if test $kadmind = : ; then
++	kadmind=
++fi
++kadmin=@KADMINLOCAL@
++if test $kadmin = : ; then
++	kadmin=
++fi
++
++KRB5_CONFIG=@abs_builddir@/config/krb5.conf ; export KRB5_CONFIG
++KRBCONFDIR=@abs_builddir@/config ; export KRBCONFDIR
++KRB_CONF=@abs_builddir@/config/krb.conf ; export KRB_CONF
++KRB_REALMS=@abs_builddir@/config/krb.realms ; export KRB_REALMS
++KRB5_KDC_PROFILE=@abs_builddir@/config/kdc.conf ; export KRB5_KDC_PROFILE
++KRB5RCACHEDIR=@abs_builddir@/kdc ; export KRB5RCACHEDIR
++KRB5CCNAME=/dev/bogus-missing-file ; export KRB5CCNAME
++KRBTKFILE=/dev/bogus-missing-file ; export KRBTKFILE
++test_flags=unsecure_for_debugging_only
++
++test_settle() {
++	sleep 1
++}
++
++test_cleanmsg ()
++{
++	sed -e "s,Warning: Your password will expire in less than one hour.[^\']*,WARN1HOUR,g" \
++	    -e "s,Warning: .*password has expired[^\']*,WARNEXPIRED,g" \
++	    -e "s|$testdir/kdc|"'$testdir/kdc|g' \
++	    -e "s|krb5cc_"`id -u`"_......|"'krb5_cc_$UID_XXXXXX|g'
++}
++
++run_kdc="$krb5kdc -r EXAMPLE.COM -n > /dev/null 2> /dev/null"
++run_kadmind="$kadmind -r EXAMPLE.COM -nofork > /dev/null 2> /dev/null"
++if test -n "$krb524d" ; then
++	run_k524="$krb524d -m -r EXAMPLE.COM -nofork > /dev/null 2> /dev/null"
++else
++	run_k524="sleep 1"
++fi
++
++test_kdcinitdb() {
++	test -d @abs_builddir@/kdc || mkdir -p @abs_builddir@/kdc
++	kdb5_util destroy -f 2> /dev/null > /dev/null
++	(echo .; echo .; echo .) | kdb5_util create -s 2> /dev/null > /dev/null
++
++	$kadmin -q 'addpol -minlength 6 minimum_six' 2> /dev/null > /dev/null
++	$kadmin -q 'ank -pw foo '$test_principal 2> /dev/null > /dev/null
++	$kadmin -q 'modprinc -maxrenewlife "1 day" -maxlife "7 day" krbtgt/EXAMPLE.COM' 2> /dev/null > /dev/null
++	$kadmin -q 'modprinc -maxrenewlife "1 day" -maxlife "7 day" '$test_principal 2> /dev/null > /dev/null
++}
++
++test_kdcprep() {
++	rm -f @abs_builddir@/kdc/krb5kdc.log
++	rm -f @abs_builddir@/kdc/kadmind.log
++	rm -f @abs_builddir@/kdc/krb5libs.log
++}
++
++test_run() {
++	# Filter out the module path and clean up messages.
++	@abs_builddir@/tools/pam_harness "$@" 2>&1 | sed s,"\`.*pam",'\`pam',g | test_cleanmsg
++}
+diff --git a/tests/tools/Makefile.am b/tests/tools/Makefile.am
+index ea4b854..1292d6e 100644
+--- a/tests/tools/Makefile.am
++++ b/tests/tools/Makefile.am
+@@ -1,8 +1,22 @@
+-testdir = `cd $(builddir); /bin/pwd`
++AM_CFLAGS = @KRB5_CFLAGS@ @KRB4_CFLAGS@
++LIBS = @PAM_LIBS@ @KRB5_LIBS@ @KRB4_LIBS@ @KEYUTILS_LIBS@
+ 
+-EXTRA_DIST = klist_a.in klist_c.in klist_f.in klist_t.in klist_4.in
++testdir = `cd $(builddir); /bin/pwd`
+ 
+-noinst_PROGRAMS = pam_harness
++noinst_PROGRAMS = pam_harness meanwhile klist_a klist_a0 klist_f klist_t klist_c
++if USE_KRB4
++noinst_PROGRAMS += klist_4
++endif
++klist_a_LDADD = \
++	../../src/libpam_krb5.la \
++	../../src/logstdio.lo \
++	../../src/noitems.lo \
++	$(LIBS)
++klist_a0_LDADD = \
++	../../src/libpam_krb5.la \
++	../../src/logstdio.lo \
++	../../src/noitems.lo \
++	$(LIBS)
+ 
+ pam_harness_SOURCES = pam_harness.c
+ pam_harness_LDADD = -lpam -ldl
+diff --git a/tests/tools/klist_4.c b/tests/tools/klist_4.c
+new file mode 100644
+index 0000000..ebf7df5
+--- /dev/null
++++ b/tests/tools/klist_4.c
+@@ -0,0 +1,49 @@
++#include "../../config.h"
++#include <sys/types.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++
++#include KRB5_H
++#ifdef USE_KRB4
++#include KRB4_DES_H
++#include KRB4_KRB_H
++#ifdef KRB4_KRB_ERR_H
++#include KRB4_KRB_ERR_H
++#endif
++#endif
++
++int
++main(int argc, char **argv)
++{
++	char pname[ANAME_SZ + 1], pinst[INST_SZ + 1];
++	CREDENTIALS cred;
++	int ret;
++
++	ret = tf_init(tkt_string(), R_TKT_FIL);
++	if (ret != 0) {
++		printf("Error initializing ticket file \"%s\".\n",
++		       tkt_string());
++		return ret;
++	}
++	memset(&cred, 0, sizeof(cred));
++	ret = tf_get_pname(pname);
++	if (ret != 0) {
++		printf("Error reading names from \"%s\".\n", tkt_string());
++		return ret;
++	}
++	ret = tf_get_pinst(pinst);
++	if (ret != 0) {
++		printf("Error reading names from \"%s\".\n", tkt_string());
++		return ret;
++	}
++	ret = tf_get_cred(&cred);
++	if (ret != 0) {
++		printf("Error reading creds from \"%s\".\n", tkt_string());
++		return ret;
++	}
++	printf("%lu\n", (unsigned long) cred.lifetime);
++	tf_close();
++	return 0;
++}
+diff --git a/tests/tools/klist_4.in b/tests/tools/klist_4.in
+deleted file mode 100755
+index 813b58c..0000000
+--- a/tests/tools/klist_4.in
++++ /dev/null
+@@ -1,2 +0,0 @@
+-#!/bin/sh
+-klist -4 2> /dev/null | egrep '[0-9]+:[0-9]+:[0-9]+' | awk '{print $NF}'
+diff --git a/tests/tools/klist_a.c b/tests/tools/klist_a.c
+new file mode 100644
+index 0000000..d8d5ce1
+--- /dev/null
++++ b/tests/tools/klist_a.c
+@@ -0,0 +1,106 @@
++#include "../../config.h"
++#include <sys/types.h>
++#include <stdio.h>
++#include <string.h>
++
++#ifdef HAVE_SECURITY_PAM_APPL_H
++#include <security/pam_appl.h>
++#endif
++
++#include KRB5_H
++#ifdef USE_KRB4
++#include KRB4_DES_H
++#include KRB4_KRB_H
++#ifdef KRB4_KRB_ERR_H
++#include KRB4_KRB_ERR_H
++#endif
++#endif
++
++#ifndef HAVE_ERROR_MESSAGE_DECL
++#ifdef HAVE_COM_ERR_H
++#include <com_err.h>
++#elif defined(HAVE_ET_COM_ERR_H)
++#include <et/com_err.h>
++#endif
++#endif
++
++#include "../../src/options.h"
++#include "../../src/v5.h"
++
++#if defined(HAVE_KRB5_GET_ALL_CLIENT_ADDRS)
++static int
++local_address_count(krb5_context ctx)
++{
++	krb5_addresses addresses;
++	memset(&addresses, 0, sizeof(addresses));
++	if (krb5_get_all_client_addrs(ctx, &addresses) == 0) {
++		return addresses.len;
++	}
++	return -1;
++}
++#elif defined(HAVE_KRB5_OS_LOCALADDR)
++static int
++local_address_count(krb5_context ctx)
++{
++	int lcount;
++	krb5_address **addresses;
++	addresses = NULL;
++	if (krb5_os_localaddr(ctx, &addresses) == 0) {
++		lcount = 0;
++		while ((addresses != NULL) && (addresses[lcount] != NULL)) {
++			lcount++;
++		}
++		return lcount;
++	}
++	return -1;
++}
++#else
++#error "Don't know how to get default address list."
++#endif
++
++int
++main(int argc, char **argv)
++{
++	krb5_context ctx;
++	krb5_ccache ccache;
++	krb5_creds creds;
++	krb5_cc_cursor cursor;
++	krb5_error_code ret;
++	int count, lcount;
++
++	ctx = NULL;
++	ret = krb5_init_context(&ctx);
++	if (ret != 0) {
++		printf("Error initializing Kerberos.\n");
++		return ret;
++	}
++	lcount = local_address_count(ctx);
++	if (lcount < 0) {
++		printf("Error getting default address list.\n");
++		return ret;
++	}
++	ccache = NULL;
++	ret = krb5_cc_default(ctx, &ccache);
++	if (ret != 0) {
++		printf("Error initializing ccache.\n");
++		return ret;
++	}
++	cursor = NULL;
++	ret = krb5_cc_start_seq_get(ctx, ccache, &cursor);
++	if (ret == 0) {
++		memset(&creds, 0, sizeof(creds));
++		count = v5_creds_address_count(&creds);
++		while (krb5_cc_next_cred(ctx, ccache, &cursor, &creds) == 0) {
++			count += v5_creds_address_count(&creds);
++		}
++#ifdef BASE_ZERO
++		printf("%d\n", count);
++#else
++		printf("%d\n", count - lcount);
++#endif
++		krb5_cc_end_seq_get(ctx, ccache, &cursor);
++	}
++	krb5_cc_close(ctx, ccache);
++	krb5_free_context(ctx);
++	return 0;
++}
+diff --git a/tests/tools/klist_a.in b/tests/tools/klist_a.in
+deleted file mode 100755
+index 15db3c5..0000000
+--- a/tests/tools/klist_a.in
++++ /dev/null
+@@ -1,2 +0,0 @@
+-#!/bin/sh
+-klist -5 -a -n 2> /dev/null | grep Addresses: | sed 's,.*Addresses:,,g' | awk '{print $0}'
+diff --git a/tests/tools/klist_a0.c b/tests/tools/klist_a0.c
+new file mode 100644
+index 0000000..8eb63f3
+--- /dev/null
++++ b/tests/tools/klist_a0.c
+@@ -0,0 +1,2 @@
++#define BASE_ZERO
++#include "klist_a.c"
+diff --git a/tests/tools/klist_c.c b/tests/tools/klist_c.c
+new file mode 100644
+index 0000000..b2d2ab9
+--- /dev/null
++++ b/tests/tools/klist_c.c
+@@ -0,0 +1,23 @@
++#include "../../config.h"
++#include <sys/types.h>
++#include <stdio.h>
++#include <string.h>
++#include <krb5.h>
++int
++main(int argc, char **argv)
++{
++	krb5_context ctx;
++	krb5_error_code ret;
++	const char *ccname;
++
++	ctx = NULL;
++	ret = krb5_init_context(&ctx);
++	if (ret != 0) {
++		printf("Error initializing Kerberos.\n");
++		return ret;
++	}
++	ccname = krb5_cc_default_name(ctx);
++	printf("%s\n", ccname);
++	krb5_free_context(ctx);
++	return 0;
++}
+diff --git a/tests/tools/klist_c.in b/tests/tools/klist_c.in
+deleted file mode 100755
+index 27e8693..0000000
+--- a/tests/tools/klist_c.in
++++ /dev/null
+@@ -1,2 +0,0 @@
+-#!/bin/sh
+-klist -5 2> /dev/null | egrep '(ache:|[0-9]+:[0-9]+:[0-9]+)'
+diff --git a/tests/tools/klist_f.c b/tests/tools/klist_f.c
+new file mode 100644
+index 0000000..4697e5d
+--- /dev/null
++++ b/tests/tools/klist_f.c
+@@ -0,0 +1,117 @@
++#include "../../config.h"
++#include <sys/types.h>
++#include <stdio.h>
++#include <string.h>
++#include <krb5.h>
++int
++main(int argc, char **argv)
++{
++	krb5_context ctx;
++	krb5_ccache ccache;
++	krb5_creds creds;
++	krb5_cc_cursor cursor;
++	krb5_error_code ret;
++
++	ctx = NULL;
++	ret = krb5_init_context(&ctx);
++	if (ret != 0) {
++		printf("Error initializing Kerberos.\n");
++		return ret;
++	}
++	ccache = NULL;
++	ret = krb5_cc_default(ctx, &ccache);
++	if (ret != 0) {
++		printf("Error initializing ccache.\n");
++		return ret;
++	}
++	cursor = NULL;
++	ret = krb5_cc_start_seq_get(ctx, ccache, &cursor);
++	if (ret == 0) {
++		memset(&creds, 0, sizeof(creds));
++		while (krb5_cc_next_cred(ctx, ccache, &cursor, &creds) == 0) {
++#if defined(HAVE_KRB5_CREDS_FLAGS_B)
++			if (creds.flags.b.forwardable) {
++				printf("F");
++			}
++#elif defined(HAVE_KRB5_CREDS_TICKET_FLAGS)
++			if (creds.ticket_flags & TKT_FLG_FORWARDABLE) {
++				printf("F");
++			}
++#else
++#error "Don't know how to check for the forwardable ticket flag."
++#endif
++#if defined(HAVE_KRB5_CREDS_FLAGS_B)
++			if (creds.flags.b.forwarded) {
++				printf("f");
++			}
++#elif defined(HAVE_KRB5_CREDS_TICKET_FLAGS)
++			if (creds.ticket_flags & TKT_FLG_FORWARDED) {
++				printf("f");
++			}
++#else
++#error "Don't know how to check for the forwardable ticket flag."
++#endif
++#if defined(HAVE_KRB5_CREDS_FLAGS_B)
++			if (creds.flags.b.proxiable) {
++				printf("P");
++			}
++#elif defined(HAVE_KRB5_CREDS_TICKET_FLAGS)
++			if (creds.ticket_flags & TKT_FLG_PROXIABLE) {
++				printf("P");
++			}
++#else
++#error "Don't know how to check for the forwarded ticket flag."
++#endif
++#if defined(HAVE_KRB5_CREDS_FLAGS_B)
++			if (creds.flags.b.renewable) {
++				printf("R");
++			}
++#elif defined(HAVE_KRB5_CREDS_TICKET_FLAGS)
++			if (creds.ticket_flags & TKT_FLG_RENEWABLE) {
++				printf("R");
++			}
++#else
++#error "Don't know how to check for the renewable ticket flag."
++#endif
++#if defined(HAVE_KRB5_CREDS_FLAGS_B)
++			if (creds.flags.b.initial) {
++				printf("I");
++			}
++#elif defined(HAVE_KRB5_CREDS_TICKET_FLAGS)
++			if (creds.ticket_flags & TKT_FLG_INITIAL) {
++				printf("I");
++			}
++#else
++#error "Don't know how to check for the is-initial-ticket ticket flag."
++#endif
++#if defined(HAVE_KRB5_CREDS_FLAGS_B)
++			if (creds.flags.b.pre_authent) {
++				printf("A");
++			}
++#elif defined(HAVE_KRB5_CREDS_TICKET_FLAGS)
++			if (creds.ticket_flags & TKT_FLG_PRE_AUTH) {
++				printf("A");
++			}
++#else
++#error "Don't know how to check for the preauthenticated ticket flag."
++#endif
++#if defined(HAVE_KRB5_CREDS_FLAGS_B)
++			if (creds.flags.b.transited_policy_checked) {
++				printf("f");
++			}
++#elif defined(HAVE_KRB5_CREDS_TICKET_FLAGS) && defined(TKT_FLG_TRANSIT_POLICY_CHECKED)
++			if (creds.ticket_flags &
++			    TKT_FLG_TRANSIT_POLICY_CHECKED) {
++				printf("T");
++			}
++#else
++#warning "Don't know how to check for the transited-policy-checked ticket flag."
++#endif
++			printf("\n");
++		}
++		krb5_cc_end_seq_get(ctx, ccache, &cursor);
++	}
++	krb5_cc_close(ctx, ccache);
++	krb5_free_context(ctx);
++	return 0;
++}
+diff --git a/tests/tools/klist_f.in b/tests/tools/klist_f.in
+deleted file mode 100755
+index 9d3dc28..0000000
+--- a/tests/tools/klist_f.in
++++ /dev/null
+@@ -1,4 +0,0 @@
+-#!/bin/sh
+-PATH=${KRB5_BINDIR}${KRB5_BINDIR:+:}${PATH}
+-klist -5 -f 2> /dev/null | grep Flags: | sed 's,.*Flags:,,g' | awk '{print $NF}'
+-klist -5 -f -v 2> /dev/null | grep flags: | sed 's,.*flags:,,g'
+diff --git a/tests/tools/klist_t.c b/tests/tools/klist_t.c
+new file mode 100644
+index 0000000..5d303ff
+--- /dev/null
++++ b/tests/tools/klist_t.c
+@@ -0,0 +1,46 @@
++#include "../../config.h"
++#include <sys/types.h>
++#include <stdio.h>
++#include <string.h>
++#include <krb5.h>
++int
++main(int argc, char **argv)
++{
++	krb5_context ctx;
++	krb5_ccache ccache;
++	krb5_creds creds;
++	krb5_cc_cursor cursor;
++	krb5_error_code ret;
++
++	ctx = NULL;
++	ret = krb5_init_context(&ctx);
++	if (ret != 0) {
++		printf("Error initializing Kerberos.\n");
++		return ret;
++	}
++	ccache = NULL;
++	ret = krb5_cc_default(ctx, &ccache);
++	if (ret != 0) {
++		printf("Error initializing ccache.\n");
++		return ret;
++	}
++	cursor = NULL;
++	ret = krb5_cc_start_seq_get(ctx, ccache, &cursor);
++	if (ret == 0) {
++		memset(&creds, 0, sizeof(creds));
++		while (krb5_cc_next_cred(ctx, ccache, &cursor, &creds) == 0) {
++			if (creds.times.renew_till != 0) {
++				printf("%lu\n",
++				       (unsigned long) creds.times.renew_till -
++				       (unsigned long) creds.times.starttime);
++			} else {
++				printf("0\n");
++			}
++			break;
++		}
++		krb5_cc_end_seq_get(ctx, ccache, &cursor);
++	}
++	krb5_cc_close(ctx, ccache);
++	krb5_free_context(ctx);
++	return 0;
++}
+diff --git a/tests/tools/klist_t.in b/tests/tools/klist_t.in
+deleted file mode 100755
+index 8be2d6e..0000000
+--- a/tests/tools/klist_t.in
++++ /dev/null
+@@ -1,2 +0,0 @@
+-#!/bin/sh
+-klist -5 -f 2> /dev/null | egrep '(^Valid|Flags:|renew until|[0-9]+:[0-9]+:[0-9]+)'
+diff --git a/tests/tools/meanwhile.c b/tests/tools/meanwhile.c
+new file mode 100644
+index 0000000..69eaa11
+--- /dev/null
++++ b/tests/tools/meanwhile.c
+@@ -0,0 +1,144 @@
++/*
++ * Copyright 2011 Red Hat, Inc.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Library General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Library General Public License for more details.
++ *
++ * You should have received a copy of the GNU Library General Public
++ * License along with this program; if not, write to the Free
++ * Software Foundation, Inc., 59 Temple Place - Suite 330, Boston,
++ * MA 02111-1307, USA
++ *
++ */
++
++#include <sys/types.h>
++#include <sys/signal.h>
++#include <sys/wait.h>
++#include <paths.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++int
++main(int argc, char **argv)
++{
++	pid_t *children;
++	int n_children, i, mul, sig, status, ret, verbose = 0;
++	char *cmd, *args[4], **cmds, **execs;
++	signal(SIGCHLD, SIG_DFL);
++	if (argc < 2) {
++		return -1;
++	}
++	/* Parse command line arguments and count the number of commands we'll
++	 * launch as "background" processes. */
++	for (i = 1, n_children = 0; i < argc - 1; i++) {
++		if (strcmp(argv[i], "-v") == 0) {
++			verbose++;
++		}
++		n_children++;
++	}
++	/* Make some room. */
++	cmds = malloc(sizeof(char *) * (n_children + 1));
++	if (cmds == NULL) {
++		perror("malloc");
++		return -1;
++	}
++	execs = malloc(sizeof(char *) * (n_children + 1));
++	if (execs == NULL) {
++		perror("malloc");
++		return -1;
++	}
++	children = malloc(sizeof(pid_t) * n_children);
++	if (children == NULL) {
++		perror("malloc");
++		return -1;
++	}
++	/* Capture each "background" command, the command we'll run in the
++	 * foreground, and the variant we'll use to make the shell do the
++	 * parsing and piping. */
++	cmd = argv[argc - 1];
++	for (i = 1, n_children = 0; i < argc - 1; i++) {
++		if (strcmp(argv[i], "-v") == 0) {
++			verbose++;
++			continue;
++		}
++		cmds[n_children] = argv[i];
++		execs[n_children] = malloc(5 + strlen(argv[i]) + 1);
++		if (execs[n_children] == NULL) {
++			perror("malloc");
++			return -1;
++		}
++		sprintf(execs[n_children], "exec %s", cmds[n_children]);
++		children[n_children] = -1;
++		n_children++;
++	}
++	/* Walk the list of "background" children and start them up. */
++	for (i = 0; i < n_children; i++) {
++		args[0] = _PATH_BSHELL;
++		args[1] = "-c";
++		args[2] = execs[i];
++		args[3] = NULL;
++		children[i] = fork();
++		switch (children[i]) {
++		case -1:
++			/* Failure launching.  Keep going. */
++			memcpy(execs[i], "fork", 4);
++			perror(execs[i]);
++			break;
++		case 0:
++			/* Child.  Exec the actual command with the shell's
++			 * help. */
++			if (verbose) {
++				fprintf(stderr, "[%ld] %s\n", (long) getpid(),
++					execs[i]);
++			}
++			execvp(args[0], args);
++			return -1;
++		default:
++			/* Parent. */
++			break;
++		}
++	}
++	/* Run the foreground command. */
++	if (verbose) {
++		fprintf(stderr, "[%ld] %s\n", (long) getpid(), cmd);
++	}
++	ret = system(cmd);
++	if (verbose) {
++		fprintf(stderr, "[%ld] result is %d\n", (long) getpid(), ret);
++	}
++	/* Clean up the background processes. */
++	for (i = 0; i < n_children; i++) {
++		if (children[i] == -1) {
++			continue;
++		}
++		status = 0;
++		mul = 1;
++		sig = SIGTERM;
++		while (waitpid(children[i], &status, WNOHANG) != children[i]) {
++			if (verbose) {
++				fprintf(stderr, "[%ld] kill -%s %ld\n",
++					(long) getpid(), strsignal(sig),
++					(long) children[i]);
++			}
++			kill(children[i], sig);
++			usleep(mul++ * 100000);
++			if (mul > 20) {
++				sig = SIGKILL;
++			}
++		}
++		if (verbose) {
++			printf("Process %ld (%s) stopped.\n",
++			       (long) children[i], cmds[i]);
++		}
++	}
++	return ret;
++}
+diff --git a/src/Makefile.am b/src/Makefile.am
+index e814d0c..daa5cf0 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -1,4 +1,6 @@
+ AM_CFLAGS = @KRB5_CFLAGS@ @KRB4_CFLAGS@
++LD_AS_NEEDED = @LD_AS_NEEDED@
++KRB_LIBS = @KRB5_LIBS@ @KRB4_LIBS@ @KEYUTILS_LIBS@
+ 
+ securitydir = $(libdir)/security
+ security_LTLIBRARIES = pam_krb5.la
+@@ -34,21 +36,27 @@ libpam_krb5_la_SOURCES = \
+ 	init.h \
+ 	initopts.c \
+ 	initopts.h \
+-	items.c \
+-	items.h \
+ 	kuserok.c \
+ 	kuserok.h \
++	map.c \
++	map.h \
+ 	minikafs.h \
++	options.c \
++	options.h \
+ 	perms.c \
+ 	perms.h \
+ 	prompter.c \
+ 	prompter.h \
+ 	shmem.c \
+ 	shmem.h \
++	sly.c \
++	sly.h \
+ 	stash.c \
+ 	stash.h \
+ 	storetmp.c \
+ 	storetmp.h \
++	userinfo.c \
++	userinfo.h \
+ 	xstr.c \
+ 	xstr.h \
+ 	v4.c \
+@@ -57,33 +65,26 @@ libpam_krb5_la_SOURCES = \
+ 	v5.h
+ 	
+ pam_krb5_la_LDFLAGS = -avoid-version -export-dynamic -module -export-symbols-regex 'pam_sm.*' @SYMBOLIC_LINKER_FLAG@
+-pam_krb5_la_LIBADD = libpam_krb5.la @KRB5_LIBS@ @KRB4_LIBS@ @KEYUTILS_LIBS@ $(DIRECT_LIBPAM)
++pam_krb5_la_LIBADD = libpam_krb5.la $(KRB_LIBS) $(DIRECT_LIBPAM)
+ pam_krb5_la_SOURCES = \
+ 	log.c \
++	pamitems.c \
++	items.h \
+ 	log.h \
+-	map.c \
+-	map.h \
+-	options.c \
+-	options.h \
+-	tokens.h \
+-	userinfo.c \
+-	userinfo.h \
+ 	auth.c \
+ 	acct.c \
+ 	password.c \
+-	session.c \
+-	sly.c \
+-	sly.h
++	session.c
+ 
+ pam_newpag_la_LDFLAGS = -avoid-version -export-dynamic -module -export-symbols-regex 'pam_sm.*' @SYMBOLIC_LINKER_FLAG@
+-pam_newpag_la_LIBADD = libpam_krb5.la @KRB5_LIBS@ @KRB4_LIBS@ @KEYUTILS_LIBS@
++pam_newpag_la_LIBADD = libpam_krb5.la $(KRB_LIBS) $(DIRECT_LIBPAM)
+ pam_newpag_la_SOURCES = \
++	pamitems.c \
++	items.h \
+ 	pam_newpag.c \
+ 	log.c \
+ 	log.h \
+-	minikafs.h \
+-	options.c \
+-	options.h
++	minikafs.h
+ 
+ pam_krb5_storetmp_SOURCES = \
+ 	pam_krb5_storetmp.c
+@@ -92,55 +93,55 @@ pam_krb5_storetmp_LDADD = xstr.lo
+ 
+ afs5log_SOURCES = \
+ 	afs5log.c \
++	noitems.c \
++	items.h \
+ 	logstdio.c \
+ 	logstdio.h \
+ 	log.h
+-afs5log_LDADD = libpam_krb5.la @PAM_LIBS@ @KRB5_LIBS@ @KRB4_LIBS@ @KEYUTILS_LIBS@
++afs5log_LDADD = libpam_krb5.la @PAM_LIBS@ $(KRB_LIBS)
+ 
+ pagsh_SOURCES = \
+ 	pagsh.c \
+ 	logstdio.c \
+ 	logstdio.h \
+ 	log.h
+-pagsh_LDADD = libpam_krb5.la @PAM_LIBS@ @KRB5_LIBS@ @KRB4_LIBS@ @KEYUTILS_LIBS@
++pagsh_LDADD = libpam_krb5.la pamitems.lo @PAM_LIBS@ $(KRB_LIBS)
+ 
+ harness_SOURCES = harness.c
+ harness_LDADD = \
+ 	auth.lo \
+ 	acct.lo \
++	pamitems.lo \
+ 	password.lo \
+ 	session.lo \
+ 	logstdio.lo \
+-	map.lo \
+-	options.lo \
+ 	perms.lo \
+-	userinfo.lo \
+ 	sly.lo \
+ 	v4.lo \
+ 	v5.lo
+-harness_LDADD += libpam_krb5.la @PAM_LIBS@ @KRB5_LIBS@ @KRB4_LIBS@ @KEYUTILS_LIBS@
++harness_LDADD += libpam_krb5.la @PAM_LIBS@ $(KRB_LIBS)
+ 
+ harness_newpag_SOURCES = harness.c \
+ 	pam_dummy_acct.c \
+ 	pam_dummy_chauthtok.c
+ harness_newpag_LDADD = \
++	pamitems.lo \
+ 	pam_newpag.lo \
+ 	logstdio.lo \
+-	options.lo \
+ 	perms.lo \
+ 	v4.lo \
+ 	v5.lo
+-harness_newpag_LDADD += libpam_krb5.la @PAM_LIBS@ @KRB5_LIBS@ @KRB4_LIBS@ @KEYUTILS_LIBS@
++harness_newpag_LDADD += libpam_krb5.la @PAM_LIBS@ $(KRB_LIBS)
+ 
+ shmcat_SOURCES = shmcat.c
+ shmcat_LDADD = logstdio.lo libpam_krb5.la @PAM_LIBS@
+ 
+-uuauth_LDADD = logstdio.lo libpam_krb5.la @PAM_LIBS@ @KRB5_LIBS@ @KRB4_LIBS@ @KEYUTILS_LIBS@
++uuauth_LDADD = logstdio.lo noitems.lo libpam_krb5.la @PAM_LIBS@ $(KRB_LIBS)
++
++vfy_LDADD = logstdio.lo noitems.lo libpam_krb5.la @PAM_LIBS@ $(KRB_LIBS)
+ 
+ if AFS
+-pam_krb5_la_SOURCES += tokens.c
+-libpam_krb5_la_SOURCES += minikafs.c
+-harness_LDADD += minikafs.lo tokens.lo
++libpam_krb5_la_SOURCES += minikafs.c minikafs.h tokens.c tokens.h
+ else
+-libpam_krb5_la_SOURCES += noafs.c
++libpam_krb5_la_SOURCES += noafs.c tokens.h
+ endif
+diff --git a/src/noitems.c b/src/noitems.c
+new file mode 100644
+index 0000000..a7702e1
+--- /dev/null
++++ b/src/noitems.c
+@@ -0,0 +1,66 @@
++/*
++ * Copyright 2010 Red Hat, Inc.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, and the entire permission notice in its entirety,
++ *    including the disclaimer of warranties.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. The name of the author may not be used to endorse or promote
++ *    products derived from this software without specific prior
++ *    written permission.
++ *
++ * ALTERNATIVELY, this product may be distributed under the terms of the
++ * GNU Lesser General Public License, in which case the provisions of the
++ * LGPL are required INSTEAD OF the above restrictions.
++ *
++ * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESS OR IMPLIED
++ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN
++ * NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
++ * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
++ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "../config.h"
++
++#include <sys/types.h>
++#include <stdlib.h>
++
++#ifdef HAVE_SECURITY_PAM_APPL_H
++#include <security/pam_appl.h>
++#endif
++
++#ifdef HAVE_SECURITY_PAM_MODULES_H
++#include <security/pam_modules.h>
++#endif
++
++#include "items.h"
++
++int
++_pam_krb5_has_item(pam_handle_t *pamh, int item)
++{
++	return 0;
++}
++
++int
++_pam_krb5_get_item_text(pam_handle_t *pamh, int item, char **text)
++{
++	*text = NULL;
++	return PAM_SERVICE_ERR;
++}
++
++int
++_pam_krb5_get_item_conv(pam_handle_t *pamh, struct pam_conv **conv)
++{
++	*conv = NULL;
++	return PAM_SERVICE_ERR;
++}
+diff --git a/src/pamitems.c b/src/pamitems.c
+new file mode 100644
+index 0000000..ea11b7d
+--- /dev/null
++++ b/src/pamitems.c
+@@ -0,0 +1,74 @@
++/*
++ * Copyright 2003,2004,2005 Red Hat, Inc.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, and the entire permission notice in its entirety,
++ *    including the disclaimer of warranties.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. The name of the author may not be used to endorse or promote
++ *    products derived from this software without specific prior
++ *    written permission.
++ *
++ * ALTERNATIVELY, this product may be distributed under the terms of the
++ * GNU Lesser General Public License, in which case the provisions of the
++ * LGPL are required INSTEAD OF the above restrictions.
++ *
++ * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESS OR IMPLIED
++ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN
++ * NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
++ * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
++ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "../config.h"
++
++#include <sys/types.h>
++#include <stdlib.h>
++
++#ifdef HAVE_SECURITY_PAM_APPL_H
++#include <security/pam_appl.h>
++#endif
++
++#ifdef HAVE_SECURITY_PAM_MODULES_H
++#include <security/pam_modules.h>
++#endif
++
++#include "items.h"
++
++int
++_pam_krb5_has_item(pam_handle_t *pamh, int item)
++{
++	PAM_KRB5_MAYBE_CONST void *data;
++	data = NULL;
++	if ((pam_get_item(pamh, item, &data) == PAM_SUCCESS) &&
++	    (data != NULL)) {
++		return 1;
++	}
++	return 0;
++}
++
++int
++_pam_krb5_get_item_text(pam_handle_t *pamh, int item, char **text)
++{
++	if (item != PAM_CONV) {
++		return pam_get_item(pamh, item,
++				    (PAM_KRB5_MAYBE_CONST void**) text);
++	}
++	return PAM_SERVICE_ERR;
++}
++
++int
++_pam_krb5_get_item_conv(pam_handle_t *pamh, struct pam_conv **conv)
++{
++	return pam_get_item(pamh, PAM_CONV, (PAM_KRB5_MAYBE_CONST void**) conv);
++}
+diff --git a/tests/pwhelp.txt b/tests/pwhelp.txt
+new file mode 100644
+index 0000000..5054f86
+--- /dev/null
++++ b/tests/pwhelp.txt
+@@ -0,0 +1,30 @@
++ 1 ----------------------------------------------------------------------------
++ 2 ----------------------------------------------------------------------------
++ 3 ----------------------------------------------------------------------------
++ 4 ----------------------------------------------------------------------------
++ 5 ----------------------------------------------------------------------------
++ 6 ----------------------------------------------------------------------------
++ 7 ----------------------------------------------------------------------------
++ 8 ----------------------------------------------------------------------------
++ 9 ----------------------------------------------------------------------------
++10 ----------------------------------------------------------------------------
++11 ----------------------------------------------------------------------------
++12 ----------------------------------------------------------------------------
++13 ----------------------------------------------------------------------------
++14 ----------------------------------------------------------------------------
++15 ----------------------------------------------------------------------------
++16 ----------------------------------------------------------------------------
++17 ----------------------------------------------------------------------------
++18 ----------------------------------------------------------------------------
++19 ----------------------------------------------------------------------------
++20 ----------------------------------------------------------------------------
++21 ----------------------------------------------------------------------------
++22 ----------------------------------------------------------------------------
++23 ----------------------------------------------------------------------------
++24 ----------------------------------------------------------------------------
++25 ----------------------------------------------------------------------------
++26 ----------------------------------------------------------------------------
++27 ----------------------------------------------------------------------------
++28 ----------------------------------------------------------------------------
++29 ----------------------------------------------------------------------------
++30 ----------------------------------------------------------------------------

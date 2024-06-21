@@ -1,0 +1,404 @@
+diff --git a/src/v5.c b/src/v5.c
+index 9cdd891..0670d02 100644
+--- a/src/v5.c
++++ b/src/v5.c
+@@ -803,44 +803,59 @@ v5_appdefault_boolean(krb5_context ctx,
+ }
+ #endif
+ 
++/* Select the principal name of the service to use when validating the creds in
++ * question. */
+ static int
+-v5_validate(krb5_context ctx, krb5_creds *creds,
+-	    const struct _pam_krb5_options *options)
++v5_select_keytab_service(krb5_context ctx, krb5_creds *creds,
++			 const char *ktname,
++			 krb5_principal *service)
+ {
+ 	int i, score;
+-	char *principal;
+ 	krb5_principal princ, host;
+ 	krb5_keytab keytab;
+ 	krb5_kt_cursor cursor;
+ 	krb5_keytab_entry entry;
+ 	krb5_verify_init_creds_opt opt;
+ 
+-	/* Open the keytab. */
+-	memset(&keytab, 0, sizeof(keytab));
+-	i = krb5_kt_resolve(ctx, options->keytab, &keytab);
++	*service = NULL;
++
++	/* Figure out what the local host service is named -- we're mainly
++	 * interested in the second component, which is the local hostname. */
++	host = NULL;
++	i = krb5_sname_to_principal(ctx, NULL, "host", KRB5_NT_SRV_HST, &host);
+ 	if (i != 0) {
+-		warn("error resolving keytab '%s', not verifying TGT",
+-		     options->keytab);
++		crit("error guessing name of local host principal");
+ 		return PAM_SERVICE_ERR;
+ 	}
+ 
+-	/* Figure out what the local host service is named. */
+-	host = NULL;
+-	i = krb5_sname_to_principal(ctx, NULL, "host", KRB5_NT_SRV_HST, &host);
++	/* Open the keytab. */
++	memset(&keytab, 0, sizeof(keytab));
++	if (ktname != NULL) {
++		i = krb5_kt_resolve(ctx, ktname, &keytab);
++	} else {
++		i = krb5_kt_default(ctx, &keytab);
++	}
+ 	if (i != 0) {
+-		host = NULL;
++		if (ktname != NULL) {
++			warn("error resolving keytab '%s'", ktname);
++		} else {
++			warn("error resolving default keytab");
++		}
++		krb5_free_principal(ctx, host);
++		return PAM_SERVICE_ERR;
+ 	}
+ 
+ 	/* Set up to walk the keytab. */
+ 	memset(&cursor, 0, sizeof(cursor));
+ 	i = krb5_kt_start_seq_get(ctx, keytab, &cursor);
+ 	if (i != 0) {
+-		warn("error reading keytab '%s', not verifying TGT",
+-		     options->keytab);
+-		if (host != NULL) {
+-			krb5_free_principal(ctx, host);
++		if (ktname != NULL) {
++			warn("error reading keytab '%s'", ktname);
++		} else {
++			warn("error reading default keytab");
+ 		}
+ 		krb5_kt_close(ctx, keytab);
++		krb5_free_principal(ctx, host);
+ 		return PAM_SERVICE_ERR;
+ 	}
+ 
+@@ -857,13 +1078,10 @@ v5_validate(krb5_context ctx, krb5_creds *creds,
+ 		if (princ == NULL) {
+ 			i = krb5_copy_principal(ctx, entry.principal, &princ);
+ 			if (i != 0) {
+-				warn("internal error copying principal name, "
+-				     "not verifying TGT");
++				warn("internal error copying principal name");
+ 				krb5_kt_end_seq_get(ctx, keytab, &cursor);
+ 				krb5_kt_close(ctx, keytab);
+-				if (host != NULL) {
+-					krb5_free_principal(ctx, host);
+-				}
++				krb5_free_principal(ctx, host);
+ 				return PAM_SERVICE_ERR;
+ 			}
+ 		}
+@@ -875,13 +1093,10 @@ v5_validate(krb5_context ctx, krb5_creds *creds,
+ 			}
+ 			i = krb5_copy_principal(ctx, entry.principal, &princ);
+ 			if (i != 0) {
+-				warn("internal error copying principal name, "
+-				     "not verifying TGT");
++				warn("internal error copying principal name");
+ 				krb5_kt_end_seq_get(ctx, keytab, &cursor);
+ 				krb5_kt_close(ctx, keytab);
+-				if (host != NULL) {
+-					krb5_free_principal(ctx, host);
+-				}
++				krb5_free_principal(ctx, host);
+ 				return PAM_SERVICE_ERR;
+ 			}
+ 			score = 1;
+@@ -896,13 +1111,10 @@ v5_validate(krb5_context ctx, krb5_creds *creds,
+ 			}
+ 			i = krb5_copy_principal(ctx, entry.principal, &princ);
+ 			if (i != 0) {
+-				warn("internal error copying principal name, "
+-				     "not verifying TGT");
++				warn("internal error copying principal name");
+ 				krb5_kt_end_seq_get(ctx, keytab, &cursor);
+ 				krb5_kt_close(ctx, keytab);
+-				if (host != NULL) {
+-					krb5_free_principal(ctx, host);
+-				}
++				krb5_free_principal(ctx, host);
+ 				return PAM_SERVICE_ERR;
+ 			}
+ 			score = 2;
+@@ -914,19 +1126,16 @@ v5_validate(krb5_context ctx, krb5_creds *creds,
+ 		    krb5_realm_compare(ctx, entry.principal, creds->client) &&
+ 		    (v5_princ_component_length(entry.principal, 0) == 4) &&
+ 		    (memcmp(v5_princ_component_contents(entry.principal, 0),
+-		            "host", 4) == 0)) {
++			    "host", 4) == 0)) {
+ 			if (princ != NULL) {
+ 				krb5_free_principal(ctx, princ);
+ 			}
+ 			i = krb5_copy_principal(ctx, entry.principal, &princ);
+ 			if (i != 0) {
+-				warn("internal error copying principal name, "
+-				     "not verifying TGT");
++				warn("internal error copying principal name");
+ 				krb5_kt_end_seq_get(ctx, keytab, &cursor);
+ 				krb5_kt_close(ctx, keytab);
+-				if (host != NULL) {
+-					krb5_free_principal(ctx, host);
+-				}
++				krb5_free_principal(ctx, host);
+ 				return PAM_SERVICE_ERR;
+ 			}
+ 			score = 3;
+@@ -947,19 +1156,16 @@ v5_validate(krb5_context ctx, krb5_creds *creds,
+ 			}
+ 			i = krb5_copy_principal(ctx, entry.principal, &princ);
+ 			if (i != 0) {
+-				warn("internal error copying principal name, "
+-				     "not verifying TGT");
++				warn("internal error copying principal name");
+ 				krb5_kt_end_seq_get(ctx, keytab, &cursor);
+ 				krb5_kt_close(ctx, keytab);
+-				if (host != NULL) {
+-					krb5_free_principal(ctx, host);
+-				}
++				krb5_free_principal(ctx, host);
+ 				return PAM_SERVICE_ERR;
+ 			}
+ 			score = 4;
+ 		}
+ 		/* Favorite entry ("host" with the local hostname as the
+-		* instance, in the client's realm)? */
++		 * instance, in the client's realm)? */
+ 		if ((score < 5) &&
+ 		    (host != NULL) &&
+ 		    (v5_princ_component_count(entry.principal) == 2) &&
+@@ -977,66 +1183,94 @@ v5_validate(krb5_context ctx, krb5_creds *creds,
+ 			}
+ 			i = krb5_copy_principal(ctx, entry.principal, &princ);
+ 			if (i != 0) {
+-				warn("internal error copying principal name, "
+-				     "not verifying TGT");
++				warn("internal error copying principal name");
+ 				krb5_kt_end_seq_get(ctx, keytab, &cursor);
+ 				krb5_kt_close(ctx, keytab);
+-				if (host != NULL) {
+-					krb5_free_principal(ctx, host);
+-				}
++				krb5_free_principal(ctx, host);
+ 				return PAM_SERVICE_ERR;
+ 			}
+ 			score = 5;
+ 		}
+ 	}
+ 
+-	/* Close the cursor here.  Even though we're using cursors, the file
+-	 * handle is stored in the krb5_keytab structure, and it gets
+-	 * overwritten when the verify_init_creds() call below creates its own
+-	 * cursor, creating a leak. */
+ 	krb5_kt_end_seq_get(ctx, keytab, &cursor);
+-	if (princ == NULL) {
+-		warn("no suitable key found in keytab, not verifying TGT");
+-		krb5_kt_close(ctx, keytab);
+-		if (host != NULL) {
+-			krb5_free_principal(ctx, host);
+-		}
+-		return PAM_SERVICE_ERR;
+-	}
++	krb5_kt_close(ctx, keytab);
++	krb5_free_principal(ctx, host);
++
++	*service = princ;
++
++	return PAM_SUCCESS;
++}
++
++static int
++v5_validate(krb5_context ctx, krb5_creds *creds,
++	    const struct _pam_krb5_options *options, int *krberr)
++{
++	int i;
++	char *principal;
++	krb5_principal princ;
++	krb5_keytab keytab;
++	krb5_verify_init_creds_opt opt;
+ 
+-	/* Get a text representation of the principal to which the key belongs,
+-	 * for logging purposes. */
++	/* Try to figure out the name of a suitable service. */
++	princ = NULL;
++	v5_select_keytab_service(ctx, creds, options->keytab, &princ);
++
++	/* Try to get a text representation of the principal to which the key
++	 * belongs, for logging purposes. */
+ 	principal = NULL;
+-	i = krb5_unparse_name(ctx, princ, &principal);
+-	if (i != 0) {
+-		warn("internal error unparsing principal name, "
+-		     "not verifying TGT");
+-		krb5_free_principal(ctx, princ);
+-		krb5_kt_close(ctx, keytab);
+-		if (host != NULL) {
+-			krb5_free_principal(ctx, host);
++	if (princ != NULL) {
++		i = krb5_unparse_name(ctx, princ, &principal);
++	}
++
++	/* Try to open the keytab. */
++	keytab = NULL;
++	if (options->keytab != NULL) {
++		i = krb5_kt_resolve(ctx, options->keytab, &keytab);
++		if (i != 0) {
++			warn("error resolving keytab '%s'", options->keytab);
++		}
++	} else {
++		i = krb5_kt_default(ctx, &keytab);
++		if (i != 0) {
++			warn("error resolving default keytab");
+ 		}
+-		return PAM_SERVICE_ERR;
+ 	}
+ 
+-	/* Perform the verification checks using the service key. */
++	/* Perform the verification checks using the service's key, assuming we
++	 * have some idea of what the service's name is, and that we can read
++	 * the key. */
+ 	krb5_verify_init_creds_opt_init(&opt);
+ 	i = krb5_verify_init_creds(ctx, creds, princ, keytab, NULL, &opt);
+-	krb5_free_principal(ctx, princ);
+-	krb5_kt_close(ctx, keytab);
+-	if (host != NULL) {
+-		krb5_free_principal(ctx, host);
++	if (krberr != NULL) {
++		*krberr = i;
++	}
++	if (keytab != NULL) {
++		krb5_kt_close(ctx, keytab);
++	}
++	if (princ != NULL) {
++		krb5_free_principal(ctx, princ);
+ 	}
+ 
+ 	/* Log success or failure. */
+ 	if (i == 0) {
+-		notice("TGT verified using key for '%s'", principal);
+-		v5_free_unparsed_name(ctx, principal);
++		if (principal != NULL) {
++			notice("TGT verified using key for '%s'", principal);
++			v5_free_unparsed_name(ctx, principal);
++		} else {
++			notice("TGT verified");
++		}
+ 		return PAM_SUCCESS;
+ 	} else {
+-		crit("TGT failed verification using key for '%s': %s",
+-		     principal, v5_error_message(i));
+-		v5_free_unparsed_name(ctx, principal);
++		if (principal != NULL) {
++			crit("TGT failed verification using keytab and "
++			     "key for '%s': %s",
++			     principal, v5_error_message(i));
++			v5_free_unparsed_name(ctx, principal);
++		} else {
++			crit("TGT failed verification using keytab: %s",
++			     v5_error_message(i));
++		}
+ 		return PAM_AUTH_ERR;
+ 	}
+ }
+@@ -1272,7 +1298,7 @@ v5_get_creds(krb5_context ctx,
+ 			if (options->debug) {
+ 				debug("validating credentials");
+ 			}
+-			switch (v5_validate(ctx, creds, options)) {
++			switch (v5_validate(ctx, creds, options, NULL)) {
+ 			case PAM_AUTH_ERR:
+ 				return PAM_AUTH_ERR;
+ 				break;
+diff --git a/README b/README
+index c584ebd..99ed01d 100644
+--- a/README
++++ b/README
+@@ -104,6 +111,9 @@ o multiple_ccaches
+   sets the KRB5CCNAME variable after doing only one of the two.  This
+   option is usually not necessary for most services, but the option is
+   provided as a workaround.
++o no_validate
++  no_validate = service1 service2
++  Don't try to validate initial credentials.
+ o no_user_check
+   Go ahead and authenticate users for whom getpwnam() returns no information.
+   Credential cache and ticket files will be created and owned by the current
+@@ -157,11 +167,6 @@ o use_shmem
+   managment to be performed in different processes, so long as the PAM
+   environment is correctly propagated from one to the other.  A default list
+   of services can be set at compile-time.
+-o validate
+-  validate = service1 service2
+-  Validate initial credentials.  By default, credentials are validated if
+-  the specified keytab file can be read, using the first service for which
+-  a key is found.
+ 
+ Configuration file only:
+ o afs_cells = cell1 cell2 cell3 cell4=afs/cell4@EXAMPLE.COM
+diff --git a/src/options.c b/src/options.c
+index 4f9a35a..6e9ecfc 100644
+--- a/src/options.c
++++ b/src/options.c
+@@ -703,7 +729,7 @@ _pam_krb5_options_init(pam_handle_t *pamh, int argc,
+ 	options->validate = option_b(argc, argv,
+ 				     ctx, options->realm,
+ 				     service, NULL, NULL,
+-				     "validate", 0);
++				     "validate", 1);
+ 	if (options->debug && (options->validate == 1)) {
+ 		debug("flag: validate");
+ 	}
+diff --git a/src/pam_krb5.5.in b/src/pam_krb5.5.in
+index 9c3b6d9..39d91cc 100644
+--- a/src/pam_krb5.5.in
++++ b/src/pam_krb5.5.in
+@@ -269,8 +287,11 @@ services.  By default, the module is configured with
+ "use_shmem = \fI@DEFAULT_USE_SHMEM@\fR".
+ 
+ .IP "validate = \fItrue\fR|\fIfalse\fR|\fIservice\ [...]\fR"
+-specifies whether or not to attempt validation of the TGT.  The default is
+-\fBfalse\fR.
++specifies whether or not to attempt validation of the TGT using the local
++keytab.  The default is \fBtrue\fR.
++The \fBlibdefaults\fR \fBverify_ap_req_nofail\fR setting can
++affect whether or not errors reading the keytab which are encountered during
++validation will be suppressed.
+ 
+ .SH EXAMPLE
+ 
+diff --git a/src/pam_krb5.8.in b/src/pam_krb5.8.in
+index 84c50ff..d86969a 100644
+--- a/src/pam_krb5.8.in
++++ b/src/pam_krb5.8.in
+@@ -185,6 +202,14 @@ remote users who may not have local access.  Note that such a server should
+ have an encrypted connection with its client in order to avoid allowing the
+ user's password to be eavesdropped.
+ 
++.IP no_validate
++.IP "no_validate=\fIvlock\fR"
++tells pam_krb5.so to not attempt to use the local keytab to verify that the TGT
++obtained from the realm's servers has not been spoofed.
++The \fBlibdefaults\fR \fBverify_ap_req_nofail\fR setting can
++affect whether or not errors reading the keytab which are encountered during
++validation will be suppressed.
++
+ @MAN_AFS@.IP null_afs
+ @MAN_AFS@tells pam_krb5.so, when it attempts to set tokens, to try to get
+ @MAN_AFS@credentials for services with names which resemble afs@\fIREALM\fR
+@@ -279,11 +304,6 @@ tells pam_krb5.so to pass credentials from the authentication service function
+ to the session management service function using shared memory, or to do so for
+ specific services.
+ 
+-.IP validate
+-.IP "validate=\fIsshd\fR"
+-tells pam_krb5.so to verify that the TGT obtained from the realm's servers has
+-not been spoofed.  Note that the process which is performing authentication
+-must be able to read the \fIkeytab\fR in order for validation to be possible.
+ 
+ .SH FILES
+ \fI/etc/krb5.conf\fR

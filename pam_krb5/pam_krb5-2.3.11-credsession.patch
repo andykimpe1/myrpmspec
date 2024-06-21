@@ -1,0 +1,430 @@
+diff --git a/configure.ac b/configure.ac
+index bfba3c0..f8ac977 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -137,6 +137,13 @@ AC_ARG_WITH(default-multiple-ccaches,
+ AC_DEFINE_UNQUOTED(DEFAULT_MULTIPLE_CCACHES,"$DEFAULT_MULTIPLE_CCACHES",[Set to the default value for the "multiple_ccaches" setting.])
+ AC_SUBST(DEFAULT_MULTIPLE_CCACHES)
+ 
++AC_ARG_WITH(default-no-cred-session,
++[AC_HELP_STRING(--with-default-no-cred-session="sshd",[Set the default value of the "no_cred_session" option (default is "sshd").])],
++	    DEFAULT_NO_CRED_SESSION="$withval",
++	    DEFAULT_NO_CRED_SESSION=sshd)
++AC_DEFINE_UNQUOTED(DEFAULT_NO_CRED_SESSION,"$DEFAULT_NO_CRED_SESSION",[Set to the default value for the "no_cred_session" setting.])
++AC_SUBST(DEFAULT_NO_CRED_SESSION)
++
+ AC_ARG_WITH(default-use-shmem,
+ [AC_HELP_STRING(--with-default-use-shmem="sshd",[Set the default value of the "use_shmem" option (default is "sshd").])],
+ 	    DEFAULT_USE_SHMEM="$withval",
+diff --git a/src/auth.c b/src/auth.c
+index 6d2f4d9..a1498d4 100644
+--- a/src/auth.c
++++ b/src/auth.c
+@@ -64,6 +64,7 @@
+ #include "log.h"
+ #include "options.h"
+ #include "prompter.h"
++#include "session.h"
+ #include "sly.h"
+ #include "stash.h"
+ #include "tokens.h"
+@@ -526,7 +531,9 @@ pam_sm_setcred(pam_handle_t *pamh, int flags,
+ 	       int argc, PAM_KRB5_MAYBE_CONST char **argv)
+ {
+ 	if (flags & PAM_ESTABLISH_CRED) {
+-		return pam_sm_open_session(pamh, flags, argc, argv);
++		return _pam_krb5_open_session(pamh, flags, argc, argv,
++					      "pam_setcred(PAM_ESTABLISH_CRED)",
++					      _pam_krb5_session_caller_setcred);
+ 	}
+ 	if (flags & (PAM_REINITIALIZE_CRED | PAM_REFRESH_CRED)) {
+ 		if (_pam_krb5_sly_looks_unsafe() == 0) {
+@@ -537,7 +544,9 @@ pam_sm_setcred(pam_handle_t *pamh, int flags,
+ 		}
+ 	}
+ 	if (flags & PAM_DELETE_CRED) {
+-		return pam_sm_close_session(pamh, flags, argc, argv);
++		return _pam_krb5_close_session(pamh, flags, argc, argv,
++					       "pam_setcred(PAM_DELETE_CRED)",
++					       _pam_krb5_session_caller_setcred);
+ 	}
+ 	warn("pam_setcred() called with no flags");
+ 	return PAM_SERVICE_ERR;
+diff --git a/src/options.c b/src/options.c
+index fbb45a0..10c5a7c 100644
+--- a/src/options.c
++++ b/src/options.c
+@@ -535,6 +535,18 @@ _pam_krb5_options_init(pam_handle_t *pamh, int argc,
+ 	options->tokens = 0;
+ #endif
+ 
++	/* private option */
++	options->cred_session = option_b(argc, argv,
++					 ctx, options->realm,
++					 service, NULL, DEFAULT_NO_CRED_SESSION,
++					 "cred_session", 1);
++	if (options->debug && (options->cred_session == 1)) {
++		debug("flag: cred_session");
++	}
++	if (options->debug && (options->cred_session == 0)) {
++		debug("flag: no cred_session");
++	}
++
+ #ifdef HAVE_KRB5_GET_INIT_CREDS_OPT_SET_PKINIT
+ 	/* option specific to the Heimdal implementation */
+ 	options->pkinit_identity = option_s(argc, argv, ctx, options->realm,
+diff --git a/src/options.h b/src/options.h
+index 7cc0592..fd77ab0 100644
+--- a/src/options.h
++++ b/src/options.h
+@@ -44,6 +44,7 @@ struct _pam_krb5_options {
+ 	int canonicalize;
+ #endif
+ 	int chpw_prompt;
++	int cred_session;
+ 	int debug_sensitive;
+ 	int external;
+ 	int existing_ticket;
+diff --git a/src/pam_krb5.5.in b/src/pam_krb5.5.in
+index 03b1501..6177a94 100644
+--- a/src/pam_krb5.5.in
++++ b/src/pam_krb5.5.in
+@@ -81,6 +81,15 @@ unconditionally if the user's password is expired, and this flag can be used
+ to attempt to work around this bug in those applications.
+ The default is \fBfalse\fR.
+ 
++.IP "cred_session=\fItrue\fR|\fIfalse\fR|\fIservice [...]\fR"
++specifies that pam_krb5 should create and destroy credential caches, as it
++does when the calling application opens and closes a PAM session, when the
++calling application establishes and deletes PAM credentials.  This is done
++to compensate for applications which expect to create a credential cache but
++which don't use PAM session management.  It is usually a harmless redundancy
++in applications which don't require it, so this option is enabled by default
++except for this list of services: "\fI@DEFAULT_NO_CRED_SESSION@\fR".
++
+ .IP "existing_ticket = \fItrue\fR|\fIfalse\fR|\fIservice [...]\fR"
+ tells pam_krb5.so to accept the presence of pre-existing Kerberos credentials
+ provided by the calling application in the default credential cache as
+diff --git a/src/pam_krb5.8.in b/src/pam_krb5.8.in
+index 99322b8..3de67f2 100644
+--- a/src/pam_krb5.8.in
++++ b/src/pam_krb5.8.in
+@@ -102,6 +102,15 @@ unconditionally if the user's password is expired, and this flag can be used
+ to attempt to work around this bug in those applications.
+ The default is \fBfalse\fR.
+ 
++.IP cred_session
++specifies that pam_krb5 should create and destroy credential caches, as it
++does when the calling application opens and closes a PAM session, when the
++calling application establishes and deletes PAM credentials.  This is done
++to compensate for applications which expect to create a credential cache but
++which don't use PAM session management.  It is usually a harmless redundancy
++in applications which don't require it, so this option is enabled by default.
++except for services in this list: "\fI@DEFAULT_NO_CRED_SESSION@\fR".
++
+ .IP existing_ticket
+ tells pam_krb5.so to accept the presence of pre-existing Kerberos credentials
+ provided by the calling application in the default credential cache as
+diff --git a/src/session.c b/src/session.c
+index 0c267fa..21b9bd2 100644
+--- a/src/session.c
++++ b/src/session.c
+@@ -59,6 +59,7 @@
+ #include "log.h"
+ #include "options.h"
+ #include "prompter.h"
++#include "session.h"
+ #include "shmem.h"
+ #include "stash.h"
+ #include "tokens.h"
+@@ -68,8 +69,10 @@
+ #include "xstr.h"
+ 
+ int
+-pam_sm_open_session(pam_handle_t *pamh, int flags,
+-		    int argc, PAM_KRB5_MAYBE_CONST char **argv)
++_pam_krb5_open_session(pam_handle_t *pamh, int flags,
++		       int argc, PAM_KRB5_MAYBE_CONST char **argv,
++		       const char *caller,
++		       enum _pam_krb5_session_caller caller_type)
+ {
+ 	PAM_KRB5_MAYBE_CONST char *user;
+ 	char envstr[PATH_MAX + 20], *segname;
+@@ -102,6 +105,14 @@ pam_sm_open_session(pam_handle_t *pamh, int flags,
+ 		return PAM_SERVICE_ERR;
+ 	}
+ 
++	/* If we're in a no-cred-session situation, return. */
++	if ((!options->cred_session) &&
++	    (caller_type == _pam_krb5_session_caller_setcred)) {
++		_pam_krb5_options_free(pamh, ctx, options);
++		krb5_free_context(ctx);
++		return PAM_SUCCESS;
++	}
++
+ 	/* Get information about the user and the user's principal name. */
+ 	userinfo = _pam_krb5_user_info_init(ctx, user, options);
+ 	if (userinfo == NULL) {
+@@ -114,7 +125,7 @@ pam_sm_open_session(pam_handle_t *pamh, int flags,
+ 			retval = PAM_USER_UNKNOWN;
+ 		}
+ 		if (options->debug) {
+-			debug("pam_open_session returning %d (%s)",
++			debug("%s returning %d (%s)", caller,
+ 			      retval,
+ 			      pam_strerror(pamh, retval));
+ 		}
+@@ -131,7 +142,7 @@ pam_sm_open_session(pam_handle_t *pamh, int flags,
+ 		}
+ 		_pam_krb5_user_info_free(ctx, userinfo);
+ 		if (options->debug) {
+-			debug("pam_open_session returning %d (%s)", PAM_IGNORE,
++			debug("%s returning %d (%s)", caller, PAM_IGNORE,
+ 			      pam_strerror(pamh, PAM_IGNORE));
+ 		}
+ 		_pam_krb5_options_free(pamh, ctx, options);
+@@ -145,7 +156,7 @@ pam_sm_open_session(pam_handle_t *pamh, int flags,
+ 		warn("no stash for '%s' (shouldn't happen)", user);
+ 		_pam_krb5_user_info_free(ctx, userinfo);
+ 		if (options->debug) {
+-			debug("pam_open_session returning %d (%s)",
++			debug("%s returning %d (%s)", caller,
+ 			      PAM_SERVICE_ERR,
+ 			      pam_strerror(pamh, PAM_SERVICE_ERR));
+ 		}
+@@ -200,7 +211,7 @@ pam_sm_open_session(pam_handle_t *pamh, int flags,
+ 		}
+ 		_pam_krb5_user_info_free(ctx, userinfo);
+ 		if (options->debug) {
+-			debug("pam_open_session returning %d (%s)", PAM_SUCCESS,
++			debug("%s returning %d (%s)", caller, PAM_SUCCESS,
+ 			      pam_strerror(pamh, PAM_SUCCESS));
+ 		}
+ 		_pam_krb5_options_free(pamh, ctx, options);
+@@ -295,7 +306,7 @@ pam_sm_open_session(pam_handle_t *pamh, int flags,
+ 
+ 	/* Clean up. */
+ 	if (options->debug) {
+-		debug("pam_open_session returning %d (%s)", i,
++		debug("%s returning %d (%s)", caller, i,
+ 		      pam_strerror(pamh, i));
+ 	}
+ 	_pam_krb5_options_free(pamh, ctx, options);
+@@ -307,8 +318,10 @@ pam_sm_open_session(pam_handle_t *pamh, int flags,
+ }
+ 
+ int
+-pam_sm_close_session(pam_handle_t *pamh, int flags,
+-		     int argc, PAM_KRB5_MAYBE_CONST char **argv)
++_pam_krb5_close_session(pam_handle_t *pamh, int flags,
++			int argc, PAM_KRB5_MAYBE_CONST char **argv,
++		        const char *caller,
++		        enum _pam_krb5_session_caller caller_type)
+ {
+ 	PAM_KRB5_MAYBE_CONST char *user;
+ 	krb5_context ctx;
+@@ -338,6 +351,14 @@ pam_sm_close_session(pam_handle_t *pamh, int flags,
+ 		return PAM_SERVICE_ERR;
+ 	}
+ 
++	/* If we're in a no-cred-session situation, return. */
++	if ((!options->cred_session) &&
++	    (caller_type == _pam_krb5_session_caller_setcred)) {
++		_pam_krb5_options_free(pamh, ctx, options);
++		krb5_free_context(ctx);
++		return PAM_SUCCESS;
++	}
++
+ 	/* Get information about the user and the user's principal name. */
+ 	userinfo = _pam_krb5_user_info_init(ctx, user, options);
+ 	if (userinfo == NULL) {
+@@ -348,7 +369,7 @@ pam_sm_close_session(pam_handle_t *pamh, int flags,
+ 			retval = PAM_USER_UNKNOWN;
+ 		}
+ 		if (options->debug) {
+-			debug("pam_close_session returning %d (%s)",
++			debug("%s returning %d (%s)", caller,
+ 			      retval,
+ 			      pam_strerror(pamh, retval));
+ 		}
+@@ -366,7 +387,7 @@ pam_sm_close_session(pam_handle_t *pamh, int flags,
+ 		}
+ 		_pam_krb5_user_info_free(ctx, userinfo);
+ 		if (options->debug) {
+-			debug("pam_close_session returning %d (%s)", PAM_IGNORE,
++			debug("%s returning %d (%s)", caller, PAM_IGNORE,
+ 			      pam_strerror(pamh, PAM_IGNORE));
+ 		}
+ 		_pam_krb5_options_free(pamh, ctx, options);
+@@ -380,7 +401,7 @@ pam_sm_close_session(pam_handle_t *pamh, int flags,
+ 		warn("no stash for user %s (shouldn't happen)", user);
+ 		_pam_krb5_user_info_free(ctx, userinfo);
+ 		if (options->debug) {
+-			debug("pam_close_session returning %d (%s)",
++			debug("%s returning %d (%s)", caller,
+ 			      PAM_SERVICE_ERR,
+ 			      pam_strerror(pamh, PAM_SERVICE_ERR));
+ 		}
+@@ -398,7 +419,7 @@ pam_sm_close_session(pam_handle_t *pamh, int flags,
+ 		}
+ 		_pam_krb5_user_info_free(ctx, userinfo);
+ 		if (options->debug) {
+-			debug("pam_close_session returning %d (%s)",
++			debug("%s returning %d (%s)", caller,
+ 			      PAM_SUCCESS,
+ 			      pam_strerror(pamh, PAM_SUCCESS));
+ 		}
+@@ -436,7 +457,7 @@ pam_sm_close_session(pam_handle_t *pamh, int flags,
+ #endif
+ 	_pam_krb5_user_info_free(ctx, userinfo);
+ 	if (options->debug) {
+-		debug("pam_close_session returning %d (%s)",
++		debug("%s returning %d (%s)", caller,
+ 		      PAM_SUCCESS,
+ 		      pam_strerror(pamh, PAM_SUCCESS));
+ 	}
+@@ -444,3 +465,21 @@ pam_sm_close_session(pam_handle_t *pamh, int flags,
+ 	krb5_free_context(ctx);
+ 	return PAM_SUCCESS;
+ }
++
++int
++pam_sm_open_session(pam_handle_t *pamh, int flags,
++		    int argc, PAM_KRB5_MAYBE_CONST char **argv)
++{
++	return _pam_krb5_open_session(pamh, flags, argc, argv,
++				      "pam_sm_open_session",
++				      _pam_krb5_session_caller_session);
++}
++
++int
++pam_sm_close_session(pam_handle_t *pamh, int flags,
++		     int argc, PAM_KRB5_MAYBE_CONST char **argv)
++{
++	return _pam_krb5_close_session(pamh, flags, argc, argv,
++				       "pam_sm_close_session",
++				       _pam_krb5_session_caller_session);
++}
+diff --git a/src/session.h b/src/session.h
+new file mode 100644
+index 0000000..2d5db25
+--- /dev/null
++++ b/src/session.h
+@@ -0,0 +1,49 @@
++/*
++ * Copyright 2011 Red Hat, Inc.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, and the entire permission notice in its entirety,
++ *    including the disclaimer of warranties.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. The name of the author may not be used to endorse or promote
++ *    products derived from this software without specific prior
++ *    written permission.
++ *
++ * ALTERNATIVELY, this product may be distributed under the terms of the
++ * GNU Lesser General Public License, in which case the provisions of the
++ * LGPL are required INSTEAD OF the above restrictions.
++ *
++ * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESS OR IMPLIED
++ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN
++ * NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
++ * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
++ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef pam_krb5_session_h
++#define pam_krb5_session_h
++
++enum _pam_krb5_session_caller {
++	_pam_krb5_session_caller_setcred,
++	_pam_krb5_session_caller_session
++};
++int _pam_krb5_open_session(pam_handle_t *pamh, int flags,
++			   int argc, PAM_KRB5_MAYBE_CONST char **argv,
++			   const char *caller,
++			   enum _pam_krb5_session_caller caller_type);
++int _pam_krb5_close_session(pam_handle_t *pamh, int flags,
++			    int argc, PAM_KRB5_MAYBE_CONST char **argv,
++			    const char *caller,
++			    enum _pam_krb5_session_caller caller_type);
++
++#endif
+diff --git a/src/sly.c b/src/sly.c
+index eba0b76..f9a4db8 100644
+--- a/src/sly.c
++++ b/src/sly.c
+@@ -255,7 +255,10 @@ _pam_krb5_sly_maybe_refresh(pam_handle_t *pamh, int flags,
+ 	retval = PAM_SERVICE_ERR;
+ 
+ 	/* Save credentials in the right places. */
+-	v5ccname = krb5_cc_default_name(ctx);
++	v5ccname = pam_getenv(pamh, "KRB5CCNAME");
++	if (v5ccname == NULL) {
++		v5ccname = krb5_cc_default_name(ctx);
++	}
+ 	v5filename = NULL;
+ 	if (v5ccname == NULL) {
+ 		/* This should never happen, but all we can do is tell libpam
+diff --git a/src/tokens.c b/src/tokens.c
+index 62cf015..9dbf0ec 100644
+--- a/src/tokens.c
++++ b/src/tokens.c
+@@ -98,6 +98,7 @@ tokens_obtain(krb5_context context,
+ 	char localcell[LINE_MAX], homecell[LINE_MAX], homedir[LINE_MAX],
+ 	     lnk[LINE_MAX];
+ 	struct stat st;
++	char ccname[PATH_MAX];
+ 	krb5_ccache ccache;
+ 	uid_t uid;
+ 	const struct {
+@@ -112,6 +113,7 @@ tokens_obtain(krb5_context context,
+ 	};
+ 	int *methods, n_methods;
+ 	const char *p, *q;
++	static int counter = 0;
+ 
+ 	if (options->debug) {
+ 		debug("obtaining afs tokens");
+@@ -170,14 +172,15 @@ tokens_obtain(krb5_context context,
+ 
+ 	/* Open the ccache. */
+ 	memset(&ccache, 0, sizeof(ccache));
++	snprintf(ccname, sizeof(ccname), "MEMORY:_pam_krb5_token_s_%s-%d",
++		 info->unparsed_name, counter++);
+ 	if (stash &&
+-	    (stash->v5ccnames != NULL) &&
+-	    (stash->v5ccnames->name != NULL) &&
+-	    (strlen(stash->v5ccnames->name) > 0)) {
+-		if (krb5_cc_resolve(context, stash->v5ccnames->name,
+-				    &ccache) != 0) {
+-			memset(&ccache, 0, sizeof(ccache));
+-		}
++	    (v5_creds_check_initialized(context, &stash->v5creds) == 0) &&
++	    (krb5_cc_resolve(context, ccname, &ccache) == 0) &&
++	    (krb5_cc_initialize(context, ccache, stash->v5creds.client) == 0) &&
++	    (krb5_cc_store_cred(context, ccache, &stash->v5creds) == 0)) {
++	} else {
++		memset(&ccache, 0, sizeof(ccache));
+ 	}
+ 
+ 	/* Get the name of the local cell.  The root.afs volume which is
+@@ -303,7 +306,7 @@ tokens_obtain(krb5_context context,
+ 	}
+ 
+ 	if (ccache != NULL) {
+-		krb5_cc_close(context, ccache);
++		krb5_cc_destroy(context, ccache);
+ 	}
+ 
+ 	/* Suppress all errors. */

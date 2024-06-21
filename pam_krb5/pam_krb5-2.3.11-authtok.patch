@@ -1,0 +1,226 @@
+diff --git a/src/password.c b/src/password.c
+index f155b7c..7681627 100644
+--- a/src/password.c
++++ b/src/password.c
+@@ -82,7 +82,7 @@ pam_sm_chauthtok(pam_handle_t *pamh, int flags,
+ 	struct _pam_krb5_stash *stash;
+ 	krb5_get_init_creds_opt *gic_options, *tmp_gicopts;
+ 	int tmp_result, prelim_attempted;
+-	int i, retval;
++	int i, retval, use_third_pass;
+ 	char *pwhelp;
+ 	struct stat st;
+ 	FILE *fp;
+@@ -161,9 +161,25 @@ pam_sm_chauthtok(pam_handle_t *pamh, int flags,
+ 	 * obtaining a password-changing initial ticket. */
+ 	if (flags & PAM_PRELIM_CHECK) {
+ 		retval = PAM_AUTH_ERR;
+-		password = NULL;
+ 		prelim_attempted = 0;
+ 
++		/* Ideally we're only going to let libkrb5 ask questions once,
++		 * and after that we intend to lie to it. */
++		use_third_pass = options->use_third_pass;
++
++		/* Set up options for getting password-changing creds. */
++		i = v5_alloc_get_init_creds_opt(ctx, &tmp_gicopts);
++		if (i == 0) {
++			/* Set hard-coded defaults for password-changing creds
++			 * which might not match generally-used options. */
++			_pam_krb5_set_init_opts_for_pwchange(ctx,
++							     tmp_gicopts,
++							     options);
++		} else {
++			/* Try library defaults. */
++			tmp_gicopts = NULL;
++		}
++
+ 		/* Display password help text. */
+ 		if ((options->pwhelp != NULL) && (options->pwhelp[0] != '\0')) {
+ 			fp = fopen(options->pwhelp, "r");
+@@ -216,6 +232,7 @@ pam_sm_chauthtok(pam_handle_t *pamh, int flags,
+ 		}
+ 
+ 		/* Obtain the current password. */
++		password = NULL;
+ 		if (options->use_first_pass) {
+ 			/* Read the stored password. */
+ 			password = NULL;
+@@ -228,17 +245,31 @@ pam_sm_chauthtok(pam_handle_t *pamh, int flags,
+ 			}
+ 		}
+ 		if ((password != NULL) && (i == PAM_SUCCESS)) {
++			if (options->debug) {
++				if (use_third_pass) {
++					debug("trying previously-entered "
++					      "password for '%s', allowing "
++					      "libkrb5 to prompt for more",
++					      user);
++				} else {
++					debug("trying previously-entered "
++					      "password for '%s'", user);
++				}
++			}
+ 			/* We have a password, so try to obtain initial
+ 			 * credentials using the password. */
+ 			i = v5_get_creds(ctx, pamh,
+ 					 &stash->v5creds, user, userinfo,
+ 					 options,
+ 					 PASSWORD_CHANGE_PRINCIPAL,
+-					 password, NULL,
+-					 _pam_krb5_normal_prompter,
++					 password, tmp_gicopts,
++					 use_third_pass ?
++					 _pam_krb5_normal_prompter :
++					 _pam_krb5_previous_prompter,
+ 					 NULL,
+ 					 &tmp_result);
+ 			prelim_attempted = 1;
++			use_third_pass = 0;
+ 			if (options->debug) {
+ 				debug("Got %d (%s) acquiring credentials for "
+ 				      "%s: %s.",
+@@ -267,34 +298,33 @@ pam_sm_chauthtok(pam_handle_t *pamh, int flags,
+ 				pam_set_item(pamh, PAM_OLDAUTHTOK, password);
+ 			}
+ 		}
+-		/* We have a password, so try to obtain initial credentials
+-		 * using the password. */
++		/* We have a second password, so try to obtain initial
++		 * credentials using the password. */
++		if ((retval != PAM_SUCCESS) &&
+-		if (((password != NULL) && (i == PAM_SUCCESS)) ||
+-		    (prelim_attempted == 0)) {
+-			i = v5_alloc_get_init_creds_opt(ctx, &tmp_gicopts);
+-			if (i == 0) {
+-				/* Set hard-coded defaults for
+-				 * password-changing creds which might not
+-				 * match generally-used options. */
+-				_pam_krb5_set_init_opts_for_pwchange(ctx,
+-								     tmp_gicopts,
+-								     options);
+-			} else {
+-				/* Try library defaults. */
+-				tmp_gicopts = NULL;
++		    ((password != NULL) && (i == PAM_SUCCESS))) {
++			if (options->debug) {
++				if (use_third_pass) {
++					debug("trying newly-entered "
++					      "password for '%s', allowing "
++					      "libkrb5 to prompt for more",
++					      user);
++				} else {
++					debug("trying newly-entered "
++					      "password for '%s'", user);
++				}
+ 			}
+ 			i = v5_get_creds(ctx, pamh,
+ 					 &stash->v5creds, user, userinfo,
+ 					 options,
+ 					 PASSWORD_CHANGE_PRINCIPAL,
+ 					 password, tmp_gicopts,
+-					 password ?
++					 use_third_pass ?
+ 					 _pam_krb5_normal_prompter :
+ 					 _pam_krb5_always_fail_prompter,
+ 					 NULL,
+ 					 &tmp_result);
+-			v5_free_get_init_creds_opt(ctx, tmp_gicopts);
+ 			prelim_attempted = 1;
++			use_third_pass = 0;
+ 			if (options->debug) {
+ 				debug("Got %d (%s) acquiring credentials for "
+ 				      "%s.",
+@@ -304,6 +333,39 @@ pam_sm_chauthtok(pam_handle_t *pamh, int flags,
+ 			}
+ 			retval = i;
+ 		}
++		/* We haven't tried anything yet, so if it's allowed, try to
++		 * obtain initial credentials, letting libkrb5 ask the
++		 * questions. */
++		if ((retval != PAM_SUCCESS) &&
++		    (prelim_attempted == 0) &&
++		    use_third_pass) {
++			if (options->debug) {
++				debug("not using an entered password for '%s', "
++				      "allowing libkrb5 to prompt", user);
++			}
++			i = v5_get_creds(ctx, pamh,
++					 &stash->v5creds, user, userinfo,
++					 options,
++					 PASSWORD_CHANGE_PRINCIPAL,
++					 NULL, tmp_gicopts,
++					 options->permit_password_callback ?
++					 _pam_krb5_always_prompter :
++					 _pam_krb5_normal_prompter,
++					 NULL,
++					 &tmp_result);
++			prelim_attempted = 1;
++			use_third_pass = 0;
++			if (options->debug) {
++				debug("Got %d (%s) acquiring credentials for "
++				      "%s.",
++				      tmp_result, v5_error_message(tmp_result),
++				      PASSWORD_CHANGE_PRINCIPAL);
++			}
++			retval = i;
++		}
++
++		/* Clean up the password-changing options. */
++		v5_free_get_init_creds_opt(ctx, tmp_gicopts);
+ 		/* Free [the copy of] the password. */
+ 		xstrfree(password);
+ 	}
+diff --git a/src/prompter.c b/src/prompter.c
+index 014df55..7d28081 100644
+--- a/src/prompter.c
++++ b/src/prompter.c
+@@ -276,7 +276,7 @@ _pam_krb5_generic_prompter(krb5_context context, void *data,
+ 	int headers, i, j, ret, num_msgs;
+ 	char *tmp;
+ 	struct _pam_krb5_prompter_data *pdata = data;
+-	krb5_data *pw0, *pw1;
++	krb5_data *pw1, *pw2;
+ 
+ 	/* If we have a name or banner, we need to make space for it in the
+ 	 * messages structure, so keep track of the number of non-prompts which
+@@ -438,8 +438,8 @@ _pam_krb5_generic_prompter(krb5_context context, void *data,
+ 	}
+ 
+ 	/* Gather up the results. */
+-	pw0 = NULL;
+ 	pw1 = NULL;
++	pw2 = NULL;
+ 	for (i = j = 0; i < num_prompts; i++) {
+ 		if (_pam_krb5_prompt_default_is_password(&prompts[i], pdata)) {
+ 			/* We never prompted for this. */
+@@ -474,24 +474,24 @@ _pam_krb5_generic_prompter(krb5_context context, void *data,
+ 		/* If it's a prompt for a new password, make note of it. */
+ 		if (_pam_krb5_prompt_type(pdata->ctx, prompts, i) ==
+ 		    KRB5_PROMPT_TYPE_NEW_PASSWORD) {
+-			pw0 = prompts[i].reply;
++			pw1 = prompts[i].reply;
+ 		}
+ 		if (_pam_krb5_prompt_type(pdata->ctx, prompts, i) ==
+ 		    KRB5_PROMPT_TYPE_NEW_PASSWORD_AGAIN) {
+-			pw1 = prompts[i].reply;
++			pw2 = prompts[i].reply;
+ 		}
+ 		j++;
+ 	}
+ 	/* If we were called as part of a password-change operation, then
+ 	 * we've captured both the new password and its confirmation.  Save the
+ 	 * new password as the PAM_AUTHTOK for other modules. */
+-	if ((pw0 != NULL) && (pw1 != NULL) &&
+-	    (strcmp(pw0->data, pw1->data) == 0)) {
++	if ((pw1 != NULL) && (pw2 != NULL) &&
++	    (strcmp(pw1->data, pw2->data) == 0)) {
+ 		if (pdata->options->debug) {
+ 			debug("saving newly-entered password for use by "
+ 			      "other modules");
+ 		}
+-		pam_set_item(pdata->pamh, PAM_AUTHTOK, pw0->data);
++		pam_set_item(pdata->pamh, PAM_AUTHTOK, pw1->data);
+ 	}
+ 
+ 	_pam_krb5_maybe_free_responses(responses, num_msgs);
