@@ -1,0 +1,215 @@
+diff -Naur procps-3.2.8.orig/sysctl.c procps-3.2.8/sysctl.c
+--- procps-3.2.8.orig/sysctl.c	2015-03-02 15:17:09.000000000 +0100
++++ procps-3.2.8/sysctl.c	2015-03-02 16:19:13.021999900 +0100
+@@ -32,6 +32,7 @@
+ #include <errno.h>
+ #include "proc/procps.h"
+ #include "proc/version.h"
++#include "proc/alloc.h"
+ 
+ 
+ // Proof that C++ causes brain damage:
+@@ -481,7 +482,106 @@
+    return rc;
+ }
+ 
++struct pair {
++    char *name;
++    char *value;
++};
++
++static int sortpairs(const void *A, const void *B)
++{
++    const struct pair *a = *(struct pair * const *) A;
++    const struct pair *b = *(struct pair * const *) B;
++    return strcmp(a->name, b->name);
++}
++
++static int PreloadSystem(void)
++{
++    unsigned di, i;
++    const char *dirs[] = {
++	"/run/sysctl.d",
++	"/etc/sysctl.d",
++	"/usr/local/lib/sysctl.d",
++	"/usr/lib/sysctl.d",
++	"/lib/sysctl.d",
++    };
++    struct pair **cfgs = NULL;
++    unsigned ncfgs = 0;
++    int rc = 0;
++    struct stat ts;
++    enum { nprealloc = 16 };
++
++    for (di = 0; di < sizeof(dirs) / sizeof(dirs[0]); ++di) {
++	struct dirent *de;
++	DIR *dp = opendir(dirs[di]);
++	if (!dp)
++	    continue;
++
++	while ((de = readdir(dp))) {
++	    if (!strcmp(de->d_name, ".")
++	        || !strcmp(de->d_name, ".."))
++		continue;
++	    if (strlen(de->d_name) < 5
++	        || strcmp(de->d_name + strlen(de->d_name) - 5, ".conf"))
++		continue;
++	    /* check if config already known */
++	    for (i = 0; i < ncfgs; ++i) {
++		if (cfgs && !strcmp(cfgs[i]->name, de->d_name))
++		    break;
++	    }
++	    if (i < ncfgs)
++		/* already in */
++		continue;
++
++	    if (ncfgs % nprealloc == 0)
++		cfgs =
++		    xrealloc(cfgs,
++		         sizeof(struct pair *) * (ncfgs +
++				      nprealloc));
++
++	    if (cfgs) {
++		cfgs[ncfgs] =
++		    xmalloc(sizeof(struct pair) +
++		        strlen(de->d_name) * 2 + 2 +
++		        strlen(dirs[di]) + 1);
++		cfgs[ncfgs]->name =
++		    (char *)cfgs[ncfgs] + sizeof(struct pair);
++		strcpy(cfgs[ncfgs]->name, de->d_name);
++		cfgs[ncfgs]->value =
++		    (char *)cfgs[ncfgs] + sizeof(struct pair) +
++		    strlen(cfgs[ncfgs]->name) + 1;
++		sprintf(cfgs[ncfgs]->value, "%s/%s", dirs[di],
++		    de->d_name);
++		ncfgs++;
++	    } else {
++		error(EXIT_FAILURE, 0, "internal error");
++	    }
+ 
++	}
++	closedir(dp);
++    }
++    qsort(cfgs, ncfgs, sizeof(struct cfg *), sortpairs);
++
++    for (i = 0; i < ncfgs; ++i) {
++	if (!Quiet)
++	    printf("* Applying %s ...\n", cfgs[i]->value);
++	rc |= Preload(cfgs[i]->value);
++    }
++
++
++    if (stat(DEFAULT_PRELOAD, &ts) < 0 || S_ISREG(ts.st_mode)) {
++	if (!Quiet)
++	    printf("* Applying %s ...\n", DEFAULT_PRELOAD);
++	rc |= Preload(DEFAULT_PRELOAD);
++    }
++
++    /* cleaning */
++    for (i = 0; i < ncfgs; ++i) {
++	free(cfgs[i]);
++    }
++    if (cfgs) free(cfgs);
++
++    return rc;
++}
+ 
+ /*
+  *    Main... 
+@@ -508,6 +608,10 @@
+    for (; argv && *argv && **argv; argv++) {
+       if (SwitchesAllowed && **argv == '-') {        /* we have a switch */
+          if ((*argv)[1] && (*argv)[2]){       // don't yet handle "sysctl -ew"
++              if (!strcmp("--system",*argv)) {
++                 IgnoreError = true;
++                 return PreloadSystem();
++              }
+               if (!strcmp("--help",*argv)) {
+                  Usage(me);
+                  exit(0);
+diff -Naur procps-3.2.8.orig/Makefile procps-3.2.8/Makefile
+--- procps-3.2.8.orig/Makefile	2015-03-02 16:39:52.000000000 +0100
++++ procps-3.2.8/Makefile	2015-03-02 16:42:04.893001873 +0100
+@@ -243,7 +243,10 @@
+ 
+ ############ prog.o --> prog
+ 
+-pmap w uptime tload free sysctl vmstat utmp pgrep skill pwdx: % : %.o $(LIBPROC)
++pmap w uptime tload free vmstat utmp pgrep skill pwdx: % : %.o $(LIBPROC)
++	$(CC) $(ALL_CFLAGS) $^ $(ALL_LDFLAGS) -o $@
++
++sysctl: % : %.o proc/alloc.o $(LIBPROC)
+ 	$(CC) $(ALL_CFLAGS) $^ $(ALL_LDFLAGS) -o $@
+ 
+ slabtop top: % : %.o $(LIBPROC)
+diff -Naur procps-3.2.8.orig/sysctl.c procps-3.2.8/sysctl.c
+--- procps-3.2.8.orig/sysctl.c	2015-03-02 16:48:33.000000000 +0100
++++ procps-3.2.8/sysctl.c	2015-03-02 16:54:32.478999667 +0100
+@@ -126,6 +126,7 @@
+           "        %s [-n] [-e] [-q] -w variable=value ... \n" 
+           "        %s [-n] [-e] -a \n" 
+           "        %s [-n] [-e] [-q] -p <file>   (default /etc/sysctl.conf) \n"
++          "        %s [-n] [-e] [-q] --system\n"
+           "        %s [-n] [-e] -A\n", name, name, name, name, name);
+    return -1;
+ }
+diff -Naur procps-3.2.8.orig/sysctl.8 procps-3.2.8/sysctl.8
+--- procps-3.2.8.orig/sysctl.8	2015-03-02 17:00:31.000000000 +0100
++++ procps-3.2.8/sysctl.8	2015-03-02 17:04:06.143004456 +0100
+@@ -16,6 +16,8 @@
+ .br
+ .B "sysctl [-n] [-e] [-q] -p [filename]..."
+ .br
++.B "sysctl [-n] [-e] [-q] --system"
++.br
+ .B "sysctl [-n] [-e] -a"
+ .br
+ .B "sysctl [-n] [-e] -A"
+@@ -59,7 +61,21 @@
+ Load in sysctl settings from the file(s) specified or /etc/sysctl.conf if none given.
+ Specifying \- as filename means reading data from standard input.
+ .TP
+-.B "-a"
++.B "--system"
++Load settings from all system configuration files.
++.br
++/run/sysctl.d/*.conf
++.br
++/etc/sysctl.d/*.conf
++.br
++/usr/local/lib/sysctl.d/*.conf
++.br
++/usr/lib/sysctl.d/*.conf
++.br
++/lib/sysctl.d/*.conf
++.br
++/etc/sysctl.conf
++.TP.B "-a"
+ Display all values currently available.
+ .TP
+ .B "-A"
+diff -Naur procps-3.2.8.orig/sysctl.c procps-3.2.8/sysctl.c
+--- procps-3.2.8.orig/sysctl.c	2015-03-04 15:35:07.000000000 +0100
++++ procps-3.2.8/sysctl.c	2015-03-04 15:35:23.911999980 +0100
+@@ -127,7 +127,7 @@
+           "        %s [-n] [-e] -a \n" 
+           "        %s [-n] [-e] [-q] -p <file>   (default /etc/sysctl.conf) \n"
+           "        %s [-n] [-e] [-q] --system\n"
+-          "        %s [-n] [-e] -A\n", name, name, name, name, name);
++          "        %s [-n] [-e] -A\n", name, name, name, name, name, name);
+    return -1;
+ }
+ 
+diff -Naur procps-3.2.8.orig/sysctl.8 procps-3.2.8/sysctl.8
+--- procps-3.2.8.orig/sysctl.8	2015-03-04 16:49:36.000000000 +0100
++++ procps-3.2.8/sysctl.8	2015-03-04 16:50:01.850999893 +0100
+@@ -75,7 +75,8 @@
+ /lib/sysctl.d/*.conf
+ .br
+ /etc/sysctl.conf
+-.TP.B "-a"
++.TP
++.B "-a"
+ Display all values currently available.
+ .TP
+ .B "-A"

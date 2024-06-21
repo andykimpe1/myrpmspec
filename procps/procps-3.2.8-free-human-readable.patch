@@ -1,0 +1,212 @@
+diff -Naur procps-3.2.8.orig/free.c procps-3.2.8/free.c
+--- procps-3.2.8.orig/free.c	2015-01-28 14:48:05.000000000 +0100
++++ procps-3.2.8/free.c	2015-01-28 17:38:55.842001164 +0100
+@@ -19,7 +19,6 @@
+ #include <string.h>
+ #include <unistd.h>
+ 
+-#define S(X) ( ((unsigned long long)(X) << 10) >> shift)
+ 
+ const char help_message[] =
+ "usage: free [-b|-k|-m|-g] [-l] [-o] [-t] [-s delay] [-c count] [-V]\n"
+@@ -33,10 +32,54 @@
+ "  -V display version information and exit\n"
+ ;
+ 
++int shift = 10;
++int human_readable = 0;
++
++
++// Scale unit (-b, -k, -m, -g, -h)
++char *S(unsigned long long X)
++{
++    const char *unit = "BKMGT";
++    static char buf[41], buf2[11];
++    int i;
++
++    if (human_readable) {
++	for (i = 0; unit[i] != '\0'; i++) {
++	    switch (unit[i]) {
++		case 'B':
++		    if (4 >= snprintf(buf2, sizeof(buf2), "%llu%c", X << 10, unit[i])) {
++			snprintf(buf, sizeof(buf), "%10s", buf2);
++			return buf;
++		    }
++		    break;
++		case 'K':
++		    if (4 >= snprintf(buf2, sizeof(buf2), "%lld%c", X, unit[i])) {
++			snprintf(buf, sizeof(buf), "%10s", buf2);
++			return buf;
++		    }
++		    break;
++		default:
++		    if (4 >= snprintf(buf2, sizeof(buf2), "%.1f%c", (double)(X) / (1ULL << ((i-1)*10)), unit[i])) {
++			snprintf(buf, sizeof(buf), "%10s", buf2);
++			return buf;
++		    }
++		    if (4 >= snprintf(buf2, sizeof(buf2), "%lld%c", X >> ((i-1)*10), unit[i])) {
++			snprintf(buf, sizeof(buf), "%10s", buf2);
++			return buf;
++		    }
++	    }
++        }
++    } else {
++	snprintf(buf, sizeof(buf), "%10Lu", (X << 10) >> shift);
++    }
++
++    return buf;
++}
++
++
+ int main(int argc, char *argv[]){
+     int i;
+     int count = 0;
+-    int shift = 10;
+     int pause_length = 0;
+     int show_high = 0;
+     int show_total = 0;
+@@ -44,12 +87,13 @@
+     int old_fmt = 0;
+ 
+     /* check startup flags */
+-    while( (i = getopt(argc, argv, "bkmglotc:as:V") ) != -1 )
++    while( (i = getopt(argc, argv, "bkmghlotc:as:V") ) != -1 )
+         switch (i) {
+         case 'b': shift = 0;  break;
+         case 'k': shift = 10; break;
+         case 'm': shift = 20; break;
+         case 'g': shift = 30; break;
++        case 'h': human_readable = 1; break;
+         case 'l': show_high = 1; break;
+         case 'o': old_fmt = 1; break;
+         case 't': show_total = 1; break;
+@@ -67,56 +111,49 @@
+         printf("             total       used       free     shared    buffers     cached");
+         if (show_available) printf("  available");
+         printf("\n");
+-        printf(
+-            "%-7s %10Lu %10Lu %10Lu %10Lu %10Lu %10Lu", "Mem:",
+-            S(kb_main_total),
+-            S(kb_main_used),
+-            S(kb_main_free),
+-            S(kb_main_shared),
+-            S(kb_main_buffers),
+-            S(kb_main_cached)
+-        );
+-        if (show_available) printf(" %10Lu", S(kb_main_available));
++        printf("Mem:    ");
++        printf("%s ", S(kb_main_total));
++        printf("%s ", S(kb_main_used));
++        printf("%s ", S(kb_main_free));
++        printf("%s ", S(kb_main_shared));
++        printf("%s ", S(kb_main_buffers));
++        printf("%s",  S(kb_main_cached));
++        if (show_available) printf(" %s", S(kb_main_available));
+         printf("\n");
+         // Print low vs. high information, if the user requested it.
+         // Note we check if low_total==0: if so, then this kernel does
+         // not export the low and high stats.  Note we still want to
+         // print the high info, even if it is zero.
+         if (show_high) {
+-            printf(
+-                "%-7s %10Lu %10Lu %10Lu\n", "Low:",
+-                S(kb_low_total),
+-                S(kb_low_total - kb_low_free),
+-                S(kb_low_free)
+-            );
+-            printf(
+-                "%-7s %10Lu %10Lu %10Lu\n", "High:",
+-                S(kb_high_total),
+-                S(kb_high_total - kb_high_free),
+-                S(kb_high_free)
+-            );
++            printf("Low:    ");
++            printf("%s ", S(kb_low_total));
++            printf("%s ", S(kb_low_total - kb_low_free));
++            printf("%s" , S(kb_low_free));
++            printf("\n");
++            printf("High:   ");
++            printf("%s ", S(kb_high_total));
++            printf("%s ", S(kb_high_total - kb_high_free));
++            printf("%s" , S(kb_high_free));
++            printf("\n");
+         }
+-        if(!old_fmt){
++        if (!old_fmt) {
+             unsigned KLONG buffers_plus_cached = kb_main_buffers + kb_main_cached;
+-            printf(
+-                "-/+ buffers/cache: %10Lu %10Lu\n", 
+-                S(kb_main_used - buffers_plus_cached),
+-                S(kb_main_free + buffers_plus_cached)
+-            );
++            printf("-/+ buffers/cache: ");
++            printf("%s ", S(kb_main_used - buffers_plus_cached));
++            printf("%s" , S(kb_main_free + buffers_plus_cached));
++            printf("\n");
+         }
+-        printf(
+-            "%-7s %10Lu %10Lu %10Lu\n", "Swap:",
+-            S(kb_swap_total),
+-            S(kb_swap_used),
+-            S(kb_swap_free)
+-        );
+-        if(show_total){
+-            printf(
+-                "%-7s %10Lu %10Lu %10Lu\n", "Total:",
+-                S(kb_main_total + kb_swap_total),
+-                S(kb_main_used  + kb_swap_used),
+-                S(kb_main_free  + kb_swap_free)
+-            );
++        printf("Swap:   ");
++        printf("%s ", S(kb_swap_total));
++        printf("%s ", S(kb_swap_used));
++        printf("%s" , S(kb_swap_free));
++        printf("\n");
++        if (show_total) {
++            printf("Total:  ");
++            printf("%s ", S(kb_main_total + kb_swap_total));
++            printf("%s ", S(kb_main_used  + kb_swap_used));
++            printf("%s" , S(kb_main_free  + kb_swap_free));
++            printf("\n");
+         }
+         if(pause_length){
+ 	    fputc('\n', stdout);
+diff -Naur procps-3.2.8.orig/free.1 procps-3.2.8/free.1
+--- procps-3.2.8.orig/free.1	2015-01-28 17:56:58.000000000 +0100
++++ procps-3.2.8/free.1	2015-01-28 18:21:04.066999807 +0100
+@@ -5,7 +5,7 @@
+ .SH NAME
+ free \- Display amount of free and used memory in the system
+ .SH SYNOPSIS
+-.BR "free " [ "\-b" " | " "\-k" " | " "\-m" "] [" "\-o" "] [" "\-s"
++.BR "free " [ "\-b" " | " "\-k" " | " "\-m" " | " "\-g" " | " "\-h" "] [" "\-o" "] [" "\-s"
+ .I delay
+ .RB "] [" "\-c"
+ .I count
+@@ -18,7 +18,11 @@
+ .SS Options
+ The \fB-b\fP switch displays the amount of memory in bytes; the 
+ \fB-k\fP switch (set by default) displays it in kilobytes; the \fB-m\fP
+-switch displays it in megabytes.
++switch displays it in megabytes; the \fB-g\fP switch displays it in gigabytes.
++.PP
++The \fB-h\fP switch displays all output fields automatically scaled
++to the shortest (three digit) representation including the unit. That
++makes the values human readable.
+ .PP
+ The \fB-t\fP switch displays a line containing the totals.
+ .PP
+diff -Naur procps-3.2.8.orig/free.c procps-3.2.8/free.c
+--- procps-3.2.8.orig/free.c	2015-03-02 16:55:24.000000000 +0100
++++ procps-3.2.8/free.c	2015-03-02 16:59:10.469998669 +0100
+@@ -21,8 +21,9 @@
+ 
+ 
+ const char help_message[] =
+-"usage: free [-b|-k|-m|-g] [-l] [-o] [-t] [-s delay] [-c count] [-V]\n"
++"usage: free [-b|-k|-m|-g|-h] [-l] [-o] [-t] [-s delay] [-c count] [-V]\n"
+ "  -b,-k,-m,-g show output in bytes, KB, MB, or GB\n"
++"  -h human readable output (automatic unit scaling)\n"
+ "  -l show detailed low and high memory statistics\n"
+ "  -o use old format (no -/+buffers/cache line)\n"
+ "  -t display total for RAM + swap\n"

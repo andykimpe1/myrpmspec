@@ -1,0 +1,142 @@
+diff -Naur procps-3.2.8.orig/free.c procps-3.2.8/free.c
+--- procps-3.2.8.orig/free.c	2004-01-30 03:30:29.000000000 +0100
++++ procps-3.2.8/free.c	2014-06-23 20:42:12.000000000 +0200
+@@ -29,6 +29,7 @@
+ "  -t display total for RAM + swap\n"
+ "  -s update every [delay] seconds\n"
+ "  -c update [count] times\n"
++"  -a show available memory if exported by kernel (>80 characters per line)\n"
+ "  -V display version information and exit\n"
+ ;
+ 
+@@ -39,10 +40,11 @@
+     int pause_length = 0;
+     int show_high = 0;
+     int show_total = 0;
++    int show_available = 0;
+     int old_fmt = 0;
+ 
+     /* check startup flags */
+-    while( (i = getopt(argc, argv, "bkmglotc:s:V") ) != -1 )
++    while( (i = getopt(argc, argv, "bkmglotc:as:V") ) != -1 )
+         switch (i) {
+         case 'b': shift = 0;  break;
+         case 'k': shift = 10; break;
+@@ -53,6 +55,7 @@
+         case 't': show_total = 1; break;
+         case 's': pause_length = 1000000 * atof(optarg); break;
+         case 'c': count = strtoul(optarg, NULL, 10); break;
++        case 'a': show_available = 1; break;
+ 	case 'V': display_version(); exit(0);
+         default:
+             fwrite(help_message,1,strlen(help_message),stderr);
+@@ -61,9 +64,11 @@
+ 
+     do {
+         meminfo();
+-        printf("             total       used       free     shared    buffers     cached\n");
++        printf("             total       used       free     shared    buffers     cached");
++        if (show_available) printf("  available");
++        printf("\n");
+         printf(
+-            "%-7s %10Lu %10Lu %10Lu %10Lu %10Lu %10Lu\n", "Mem:",
++            "%-7s %10Lu %10Lu %10Lu %10Lu %10Lu %10Lu", "Mem:",
+             S(kb_main_total),
+             S(kb_main_used),
+             S(kb_main_free),
+@@ -71,6 +76,8 @@
+             S(kb_main_buffers),
+             S(kb_main_cached)
+         );
++        if (show_available) printf(" %10Lu", S(kb_main_available));
++        printf("\n");
+         // Print low vs. high information, if the user requested it.
+         // Note we check if low_total==0: if so, then this kernel does
+         // not export the low and high stats.  Note we still want to
+diff -Naur procps-3.2.8.orig/free.1 procps-3.2.8/free.1
+--- procps-3.2.8.orig/free.1	2014-06-23 18:46:00.000000000 +0200
++++ procps-3.2.8/free.1	2014-06-23 21:00:32.000000000 +0200
+@@ -7,11 +7,14 @@
+ .SH SYNOPSIS
+ .BR "free " [ "\-b" " | " "\-k" " | " "\-m" "] [" "\-o" "] [" "\-s"
+ .I delay
+-.RB "] [" "\-t" "] [" "\-l" "] [" "\-V" "]
++.RB "] [" "\-c"
++.I count
++.RB "] [" "\-a" "] [" "\-t" "] [" "\-l" "] [" "\-V" "]
+ .SH DESCRIPTION
+ \fBfree\fP displays the total amount of free and used physical and swap 
+ memory in the system, as well as the buffers used by the kernel.
+-The shared memory column should be ignored; it is obsolete.
++The shared memory column represents the 'Shmem' value.
++The available memory column represents the 'MemAvailable' value.
+ .SS Options
+ The \fB-b\fP switch displays the amount of memory in bytes; the 
+ \fB-k\fP switch (set by default) displays it in kilobytes; the \fB-m\fP
+@@ -28,8 +31,15 @@
+ .BR usleep (3)
+ is used for microsecond resolution delay times.
+ .PP
++The \fB-c\fP switch used together with the \fB-s\fP switch interrupts the polling
++after \fIcount\fP repetitions.
++.PP
+ The \fB-l\fP switch shows detailed low and high memory statistics.
+ .PP
++The \fB-a\fP switch shows the available memory (if supported by the running kernel
++and enabled with \fBsysctl -w vm.meminfo_legacy_layout=0\fP ; shows zero when unsupported
++or disabled). The produced output is wider than 80 characters.
++.PP
+ The \fB\-V\fP switch displays version information.
+ .SH FILES
+ .ta
+diff -Naur procps-3.2.8.orig/proc/sysinfo.c procps-3.2.8/proc/sysinfo.c
+--- procps-3.2.8.orig/proc/sysinfo.c	2014-06-23 18:46:00.000000000 +0200
++++ procps-3.2.8/proc/sysinfo.c	2014-06-23 20:24:44.000000000 +0200
+@@ -515,6 +515,7 @@
+ unsigned long kb_high_total;
+ unsigned long kb_low_free;
+ unsigned long kb_low_total;
++unsigned long kb_main_available;
+ /* 2.4.xx era */
+ unsigned long kb_active;
+ unsigned long kb_inact_laundry;
+@@ -571,14 +572,15 @@
+   {"LowFree",      &kb_low_free},
+   {"LowTotal",     &kb_low_total},
+   {"Mapped",       &kb_mapped},       // kB version of vmstat nr_mapped
++  {"MemAvailable", &kb_main_available}, // important
+   {"MemFree",      &kb_main_free},    // important
+-  {"MemShared",    &kb_main_shared},  // important, but now gone!
+   {"MemTotal",     &kb_main_total},   // important
+   {"NFS_Unstable", &kb_nfs_unstable},
+   {"PageTables",   &kb_pagetables},   // kB version of vmstat nr_page_table_pages
+   {"ReverseMaps",  &nr_reversemaps},  // same as vmstat nr_page_table_pages
+   {"SReclaimable", &kb_swap_reclaimable}, // "swap reclaimable" (dentry and inode structures)
+   {"SUnreclaim",   &kb_swap_unreclaimable},
++  {"Shmem",        &kb_main_shared},  // obsolete MemShared replaced with Shmem reusing the column
+   {"Slab",         &kb_slab},         // kB version of vmstat nr_slab
+   {"SwapCached",   &kb_swap_cached},
+   {"SwapFree",     &kb_swap_free},    // important
+diff -Naur procps-3.2.8.orig/proc/sysinfo.h procps-3.2.8/proc/sysinfo.h
+--- procps-3.2.8.orig/proc/sysinfo.h	2014-06-23 18:46:00.000000000 +0200
++++ procps-3.2.8/proc/sysinfo.h	2014-06-23 20:28:06.000000000 +0200
+@@ -34,6 +34,7 @@
+ extern unsigned long kb_high_total;
+ extern unsigned long kb_low_free;
+ extern unsigned long kb_low_total;
++extern unsigned long kb_main_available;
+ /* 2.4.xx era */
+ extern unsigned long kb_active;
+ extern unsigned long kb_inact_laundry;  // grrr...
+diff -Naur procps-3.2.8.orig/proc/library.map procps-3.2.8/proc/library.map
+--- procps-3.2.8.orig/proc/library.map	2014-06-23 21:08:41.000000000 +0200
++++ procps-3.2.8/proc/library.map	2014-06-23 20:38:19.000000000 +0200
+@@ -16,7 +16,7 @@
+   meminfo; vminfo; getstat; getdiskstat; getpartitions_num; getslabinfo; get_pid_digits;
+   kb_active; kb_inactive; kb_main_buffers; kb_main_cached;
+   kb_main_free; kb_main_total; kb_main_used; kb_swap_free;
+-  kb_swap_total; kb_swap_used; kb_main_shared;
++  kb_swap_total; kb_swap_used; kb_main_shared; kb_main_available;
+   kb_low_total; kb_low_free; kb_high_total; kb_high_free;
+   vm_pgpgin; vm_pgpgout; vm_pswpin; vm_pswpout;
+   free_slabinfo; put_slabinfo; get_slabinfo; get_proc_stats;

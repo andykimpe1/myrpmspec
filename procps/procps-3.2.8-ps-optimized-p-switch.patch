@@ -1,0 +1,255 @@
+diff -Naur procps-3.2.8.orig/ps/common.h procps-3.2.8.new/ps/common.h
+--- procps-3.2.8.orig/ps/common.h	2014-07-03 16:36:13.000000000 +0200
++++ procps-3.2.8.new/ps/common.h	2014-07-03 18:37:41.930330005 +0200
+@@ -41,6 +41,7 @@
+ #define SEL_SESS 12
+ #define SEL_COMM 13
+ #define SEL_PPID 14
++#define SEL_PID_QUICK 15
+ 
+ /* Since an enum could be smashed by a #define, it would be bad. */
+ #define U98  0 /* Unix98 standard */    /* This must be 0 */
+diff -Naur procps-3.2.8.orig/ps/display.c procps-3.2.8.new/ps/display.c
+--- procps-3.2.8.orig/ps/display.c	2014-07-03 16:36:13.000000000 +0200
++++ procps-3.2.8.new/ps/display.c	2014-07-10 15:18:03.536328060 +0200
+@@ -149,6 +149,7 @@
+     case SEL_FGID: show_gid("FGID", walk->n, walk->u); break;
+     case SEL_PGRP: show_pid("PGRP", walk->n, walk->u); break;
+     case SEL_PID : show_pid("PID ", walk->n, walk->u); break;
++    case SEL_PID_QUICK : show_pid("PID_QUICK ", walk->n, walk->u); break;
+     case SEL_PPID: show_pid("PPID", walk->n, walk->u); break;
+     case SEL_TTY : show_tty("TTY ", walk->n, walk->u); break;
+     case SEL_SESS: show_pid("SESS", walk->n, walk->u); break;
+@@ -328,7 +329,29 @@
+ static void simple_spew(void){
+   proc_t buf;
+   PROCTAB* ptp;
+-  ptp = openproc(needs_for_format | needs_for_sort | needs_for_select | needs_for_threads);
++  pid_t* pidlist;
++  int flags;
++  int i;
++
++  pidlist = NULL;
++  flags = needs_for_format | needs_for_sort | needs_for_select | needs_for_threads;
++
++  // -q option (only single SEL_PID_QUICK typecode entry expected in the list, if present)
++  if (selection_list && selection_list->typecode==SEL_PID_QUICK) {
++    flags |= PROC_PID;
++
++    pidlist = (pid_t*) malloc(selection_list->n * sizeof(pid_t));
++    if (!pidlist) {
++      fprintf(stderr, "Error: not enough memory.\n");
++      exit(1);
++    }
++
++    for (i = 0; i < selection_list->n; i++) {
++      pidlist[i] = selection_list->u[selection_list->n-i-1].pid;
++    }
++  }
++
++  ptp = openproc(flags, pidlist);
+   if(!ptp) {
+     fprintf(stderr, "Error: can not access /proc.\n");
+     exit(1);
+@@ -381,6 +404,8 @@
+     break;
+   }
+   closeproc(ptp);
++
++  if (pidlist) free(pidlist);
+ }
+ 
+ /***** forest output requires sorting by ppid; add start_time by default */
+@@ -542,6 +567,52 @@
+   closeproc(ptp);
+ }
+ 
++static void arg_check_conflicts(void)
++{
++  int selection_list_len;
++  int has_quick_pid;
++
++  selection_node *walk = selection_list;
++  has_quick_pid = 0;
++  selection_list_len = 0;
++
++  while (walk) {
++    if (walk->typecode == SEL_PID_QUICK) has_quick_pid++;
++    walk = walk->next;
++    selection_list_len++;
++  }
++
++  /* -q doesn't allow multiple occurences */
++  if (has_quick_pid > 1) { 
++    fprintf(stderr, "q/-q/--quick-pid can only be used once.\n");
++    exit(1);
++  }
++
++  /* -q doesn't allow combinations with other selection switches */
++  if (has_quick_pid && selection_list_len > has_quick_pid) { 
++    fprintf(stderr, "q/-q/--quick-pid cannot be combined with other selection options.\n");
++    exit(1);
++  }
++
++  /* -q cannot be used with forest type listings */
++  if (has_quick_pid && forest_type) {
++    fprintf(stderr, "q/-q/--quick-pid cannot be used together with forest type listings.\n");
++    exit(1);
++  }
++
++  /* -q cannot be used with sort */
++  if (has_quick_pid && sort_list) {
++    fprintf(stderr, "q/-q,--quick-pid cannot be used together with sort options.\n");
++    exit(1);
++  }
++
++  /* -q cannot be used with -N */
++  if (has_quick_pid && negate_selection) {
++    fprintf(stderr, "q/-q/--quick-pid cannot be used together with negation switches.\n");
++    exit(1);
++  }
++
++}
+ 
+ /***** no comment */
+ int main(int argc, char *argv[]){
+@@ -580,6 +651,9 @@
+   reset_global();  /* must be before parser */
+   arg_parse(argc,argv);
+ 
++  /* check for invalid combination of arguments */
++  arg_check_conflicts();
++
+ /*  arg_show(); */
+   trace("screen is %ux%u\n",screen_cols,screen_rows);
+ /*  printf("sizeof(proc_t) is %d.\n", sizeof(proc_t)); */
+diff -Naur procps-3.2.8.orig/ps/help.c procps-3.2.8.new/ps/help.c
+--- procps-3.2.8.orig/ps/help.c	2004-07-30 03:18:21.000000000 +0200
++++ procps-3.2.8.new/ps/help.c	2014-07-09 19:59:51.269328360 +0200
+@@ -21,6 +21,7 @@
+ "-a all w/ tty except session leaders  -U by real user ID (supports names)\n"
+ "-d all except session leaders         -g by session OR by effective group name\n"
+ "-e all processes                      -p by process ID\n"
++"                                      -q by process ID (unsorted & quick)\n"
+ "T  all processes on this terminal     -s processes in the sessions given\n"
+ "a  all w/ tty, including other users  -t by tty\n"
+ "g  OBSOLETE -- DO NOT USE             -u by effective user ID (supports names)\n"
+@@ -32,6 +33,7 @@
+ "-O,O preloaded -o  v  virtual memory  --cumulative --format --deselect\n"
+ "-l,l long          u  user-oriented   --sort --tty --forest --version\n"
+ "-F   extra full    X  registers       --heading --no-heading --context\n"
++"                                      --quick-pid\n"
+ "                    ********* misc options *********\n"
+ "-V,V  show version      L  list format codes  f  ASCII art forest\n"
+ "-m,m,-L,-T,H  threads   S  children in sum    -y change -l format\n"
+diff -Naur procps-3.2.8.orig/ps/parser.c procps-3.2.8.new/ps/parser.c
+--- procps-3.2.8.orig/ps/parser.c	2014-07-03 16:36:12.000000000 +0200
++++ procps-3.2.8.new/ps/parser.c	2014-07-09 16:29:28.556327920 +0200
+@@ -419,6 +419,14 @@
+       if(err) return err;
+       selection_list->typecode = SEL_PID;
+       return NULL; /* can't have any more options */
++    case 'q': /* end */
++      trace("-q quick select by PID.\n");
++      arg=get_opt_arg();
++      if(!arg) return "List of process IDs must follow -q.";
++      err=parse_list(arg, parse_pid);
++      if(err) return err;
++      selection_list->typecode = SEL_PID_QUICK;
++      return NULL; /* can't have any more options */
+ #if 0
+     case 'r':
+       trace("-r some Digital Unix thing about warnings...\n");
+@@ -685,6 +693,14 @@
+       if(err) return err;
+       selection_list->typecode = SEL_PID;
+       return NULL; /* can't have any more options */
++    case 'q': /* end */
++      trace("q Quick select by process ID\n");
++      arg=get_opt_arg();
++      if(!arg) return "List of process IDs must follow q.";
++      err=parse_list(arg, parse_pid);
++      if(err) return err;
++      selection_list->typecode = SEL_PID_QUICK;
++      return NULL; /* can't have any more options */
+     case 'r':
+       trace("r Select running processes\n");
+       running_only = 1;
+@@ -809,6 +825,7 @@
+   {"noheadings",    &&case_noheadings},
+   {"pid",           &&case_pid},
+   {"ppid",          &&case_ppid},
++  {"quick-pid",     &&case_pid_quick},
+   {"rows",          &&case_rows},
+   {"sid",           &&case_sid},
+   {"sort",          &&case_sort},
+@@ -936,6 +953,14 @@
+     if(err) return err;
+     selection_list->typecode = SEL_PID;
+     return NULL;
++  case_pid_quick:
++    trace("--quick-pid\n");
++    arg = grab_gnu_arg();
++    if(!arg) return "List of process IDs must follow --quick-pid.";
++    err=parse_list(arg, parse_pid);
++    if(err) return err;
++    selection_list->typecode = SEL_PID_QUICK;
++    return NULL;
+   case_ppid:
+     trace("--ppid\n");
+     arg = grab_gnu_arg();
+diff -Naur procps-3.2.8.orig/ps/ps.1 procps-3.2.8.new/ps/ps.1
+--- procps-3.2.8.orig/ps/ps.1	2014-07-03 16:36:13.000000000 +0200
++++ procps-3.2.8.new/ps/ps.1	2014-07-09 20:32:44.543328378 +0200
+@@ -159,7 +159,7 @@
+ .B ps\ \-C\ syslogd\ \-o\ pid=
+ .TP
+ Print only the name of PID 42:
+-.B ps\ \-p\ 42\ \-o\ comm=
++.B ps\ \-q\ 42\ \-o\ comm=
+ .PP
+ .PP
+ .\" """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+@@ -281,6 +281,21 @@
+ This selects the processes whose process ID numbers appear in
+ \fIpidlist\fR.  Identical to \fBp\fR and\ \fB\-\-pid\fR.
+ 
++.opt q \ pidlist
++Quick select by process ID.  Identical to \fB\-q\fR and\ \fB\-\-quick\-pid\fR.
++
++.opt \-q \ pidlist
++Quick select by PID.
++.br
++This selects the processes whose process ID numbers appear in
++\fIpidlist\fR.
++With this option \fBps\fR reads the necessary info only
++for the pids listed in the \fIpidlist\fR and doesn't apply
++additional filtering rules. The order of pids is unsorted
++and preserved. No additional selection options, sorting
++and forest type listings are allowed in this mode.
++Identical to \fBq\fR and\ \fB\-\-quick\-pid\fR.
++
+ .opt \-s \ sesslist
+ Select by session ID.
+ .br
+@@ -335,6 +350,9 @@
+ That\ is, it selects processes that are children
+ of those listed in \fRpidlist\fR.
+ 
++.opt \-\-quick\-pid \ pidlist
++Quick select by process\ ID.  Identical to \fB\-q\fR\ and\ \fBq\fR.
++
+ .opt \-\-sid \ sesslist
+ Select by session\ ID.  Identical to\ \fB\-s\fR.
+ 
+diff -Naur procps-3.2.8.orig/ps/select.c procps-3.2.8.new/ps/select.c
+--- procps-3.2.8.orig/ps/select.c	2003-09-25 05:53:08.000000000 +0200
++++ procps-3.2.8.new/ps/select.c	2014-07-03 18:38:13.347328830 +0200
+@@ -102,6 +102,7 @@
+ 
+     break; case SEL_PGRP: return_if_match(pgrp,pid);
+     break; case SEL_PID : return_if_match(tgid,pid);
++    break; case SEL_PID_QUICK : return_if_match(tgid,pid);
+     break; case SEL_PPID: return_if_match(ppid,ppid);
+     break; case SEL_TTY : return_if_match(tty,tty);
+     break; case SEL_SESS: return_if_match(session,pid);

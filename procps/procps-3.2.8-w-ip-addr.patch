@@ -1,0 +1,311 @@
+diff -Naur procps-3.2.7.orig/w.c procps-3.2.7/w.c
+--- procps-3.2.7.orig/w.c	2012-07-03 11:11:26.000000000 +0200
++++ procps-3.2.7/w.c	2012-07-03 12:30:27.000000000 +0200
+@@ -28,6 +28,7 @@
+ #include <utmp.h>
+ #include <locale.h>
+ #include <termios.h>
++#include <arpa/inet.h>
+ 
+ static int ignoreuser = 0;	/* for '-u' */
+ static proc_t **procs;		/* our snapshot of the process table */
+@@ -40,36 +41,164 @@
+ #   define FROM_STRING "off"
+ #endif
+ 
++#define FROM_LEN 16
++
+ /* Uh... same thing as UT_NAMESIZE */
+ #define USERSZ (sizeof u->ut_user)
+ 
+ 
+-/* This routine is careful since some programs leave utmp strings
+- * unprintable.  Always outputs at least 16 chars padded with spaces
+- * on the right if necessary.
++/*
++ * This routine is careful since some programs leave utmp strings
++ * unprintable. Always outputs at least 16 chars padded with
++ * spaces on the right if necessary.
+  */
+-static void print_host(const char *restrict host, int len) {
+-    const char *last;
+-    int width = 0;
+-
+-    /* FIXME: there should really be a way to configure this... */
+-    /* for now, we'll just limit it to the 16 that the libc5 version
+-     * of utmp uses.
+-     */
+-    if (len > 16) len = 16;
+-    last = host + len;
+-    for ( ; host < last ; host++){
+-        if (isprint(*host) && *host != ' ') {
+-	    fputc(*host, stdout);
+-	    ++width;
+-	} else {
+-	    break;
+-	}
+-    }
+-    // space-fill, and a '-' too if needed to ensure the column exists
+-    if(width < 16) fputs("-               "+width, stdout);
++static void print_host(const char *restrict host, int len, const int fromlen)
++{
++        const char *last;
++        int width = 0;
++
++        if (len > fromlen)
++                len = fromlen;
++        last = host + len;
++        for (; host < last; host++) {
++                if (*host == '\0') break;
++                if (isprint(*host) && *host != ' ') {
++                        fputc(*host, stdout);
++                        ++width;
++                } else {
++                        fputc('-', stdout);
++                        ++width;
++                        break;
++                }
++        }
++
++        /*
++         * space-fill, and a '-' too if needed to ensure the
++         * column exists
++         */
++        while (width++ < fromlen)
++                fputc(' ', stdout);
++}
++
++
++/* This routine prints the display part of the host or IPv6 link address interface */
++static void print_display_or_interface(const char *restrict host, int len, int restlen)
++{
++        char *disp,*tmp;
++
++        if (restlen <= 0) return; /* not enough space for printing anything */
++
++        /* search for a collon (might be a display) */
++        disp = (char *)host;
++        while ( (disp < (host + len)) && (*disp != ':') && isprint(*disp) ) disp++;
++
++        /* colon found */
++        if (*disp == ':') {
++                /* detect multiple colons -> IPv6 in the host (not a display) */
++                tmp = disp+1;
++                while ( (tmp < (host + len)) && (*tmp != ':') && isprint(*tmp) ) tmp++;
++
++                if (*tmp != ':') { /* multiple colons not found - it's a display */
++
++                        /* number of chars till the end of the input field */
++                        len -= (disp - host);
++
++                        /* if it is still longer than the rest of the output field, then cut it */
++                        if (len > restlen) len = restlen;
++
++                        /* print the display */
++                        while ((len > 0) && isprint(*disp) && (*disp != ' ')) {
++                                len--; restlen--;
++                                fputc(*disp, stdout);
++                                disp++;
++                        }
++
++                        if ((len > 0) && (*disp != '\0')) { /* space or nonprintable found - replace with dash and stop printing */
++                                restlen--;
++                                fputc('-', stdout);
++                        }
++                } else { /* multiple colons found - it's an IPv6 address */
++                        
++                        /* search for % (interface separator in case of IPv6 link address) */
++                        while ( (tmp < (host + len)) && (*tmp != '%') && isprint(*tmp) ) tmp++;
++
++                        if (*tmp == '%') { /* interface separator found */
++                                
++                                /* number of chars till the end of the input field */
++                                len -= (tmp - host);
++
++                                /* if it is still longer than the rest of the output field, then cut it */
++                                if (len > restlen) len = restlen;
++
++				/* print the interface */
++                                while ((len > 0) && isprint(*tmp) && (*tmp != ' ')) {
++                                        len--; restlen--;
++                                        fputc(*tmp, stdout);
++                                        tmp++;
++                                }
++                                if ((len > 0) && (*tmp != '\0')) {  /* space or nonprintable found - replace with dash and stop printing */
++                                        restlen--;
++                                        fputc('-', stdout);
++                                }
++                        }
++
++                }
++        }
++
++        /* padding with spaces */
++        while (restlen > 0) {
++                fputc(' ', stdout);
++                restlen--;
++        }
++}
++
++
++/* This routine prints either the hostname or the IP address of the remote */
++static void print_from(const utmp_t *restrict const u, const int ip_addresses, const int fromlen) {
++        char buf[fromlen + 1];
++        char buf_ipv6[INET6_ADDRSTRLEN];
++        int len;
++        int32_t ut_addr_v6[4];      /* IP address of the remote host */
++
++        if (ip_addresses) { /* -i switch used */
++                memcpy(&ut_addr_v6, &u->ut_addr_v6, sizeof(ut_addr_v6));
++                if (IN6_IS_ADDR_V4MAPPED(&ut_addr_v6)) {
++                        /* map back */
++                        ut_addr_v6[0] = ut_addr_v6[3];
++                        ut_addr_v6[1] = 0;
++                        ut_addr_v6[2] = 0;
++                        ut_addr_v6[3] = 0;
++                }
++                if (ut_addr_v6[1] || ut_addr_v6[2] || ut_addr_v6[3]) {
++                        /* IPv6 */
++                        if (!inet_ntop(AF_INET6, &ut_addr_v6, buf_ipv6, sizeof(buf_ipv6))) {
++                                strcpy(buf, ""); /* invalid address, clean the buffer */
++                        } else {
++                                strncpy(buf, buf_ipv6, fromlen); /* adress valid, copy to buffer */
++                        }
++                } else {
++                        /* IPv4 */
++                        if (!(ut_addr_v6[0] && inet_ntop(AF_INET, &ut_addr_v6[0], buf, sizeof(buf)))) {
++                                strcpy(buf, ""); /* invalid address, clean the buffer */
++                        }
++                }
++                buf[fromlen] = '\0';
++
++                len = strlen(buf);
++                if (len) { /* IP address is non-empty, print it (and concatenate with display, if present) */
++                        fputs(buf, stdout);
++                        /* show the display part of the host or IPv6 link addr. interface, if present */
++                        print_display_or_interface(u->ut_host, UT_HOSTSIZE, fromlen - len);
++                } else { /* IP address is empty, print the host instead */
++                        print_host(u->ut_host, UT_HOSTSIZE, fromlen);
++                }
++        } else {  /* -i switch NOT used */
++                print_host(u->ut_host, UT_HOSTSIZE, fromlen);
++        }
+ }
+ 
++
++
+ /***** compact 7 char format for time intervals (belongs in libproc?) */
+ static void print_time_ival7(time_t t, int centi_sec, FILE* fout) {
+     if((long)t < (long)0){  /* system clock changed? */
+@@ -172,7 +301,7 @@
+ 
+ 
+ /***** showinfo */
+-static void showinfo(utmp_t *u, int formtype, int maxcmd, int from) {
++static void showinfo(utmp_t *u, int formtype, int maxcmd, int from, const int ip_addresses) {
+     unsigned long long jcpu;
+     int ut_pid_found;
+     unsigned i;
+@@ -199,7 +328,7 @@
+     if (formtype) {
+ 	printf("%-9.8s%-9.8s", uname, u->ut_line);
+ 	if (from)
+-	    print_host(u->ut_host, sizeof u->ut_host);
++	    print_from(u, ip_addresses, FROM_LEN);
+ 	print_logintime(u->ut_time, stdout);
+ 	if (*u->ut_line == ':')			/* idle unknown for xdm logins */
+ 	    printf(" ?xdm? ");
+@@ -214,7 +343,7 @@
+     } else {
+ 	printf("%-9.8s%-9.8s", u->ut_user, u->ut_line);
+ 	if (from)
+-	    print_host(u->ut_host, sizeof u->ut_host);
++	    print_from(u, ip_addresses, FROM_LEN);
+ 	if (*u->ut_line == ':')			/* idle unknown for xdm logins */
+ 	    printf(" ?xdm? ");
+ 	else
+@@ -237,13 +366,14 @@
+     utmp_t *u;
+     struct winsize win;
+     int header=1, longform=1, from=1, args, maxcmd=80, ch;
++    int ip_addresses = 0;
+ 
+ #ifndef W_SHOWFROM
+     from = 0;
+ #endif
+ 
+     setlocale(LC_ALL, "");
+-    for (args=0; (ch = getopt(argc, argv, "hlusfV")) != EOF; args++)
++    for (args=0; (ch = getopt(argc, argv, "hlusfiV")) != EOF; args++)
+ 	switch (ch) {
+ 	  case 'h': header = 0;		break;
+ 	  case 'l': longform = 1;	break;
+@@ -251,6 +381,7 @@
+ 	  case 'f': from = !from;	break;
+ 	  case 'V': display_version();	exit(0);
+ 	  case 'u': ignoreuser = 1;	break;
++	  case 'i': ip_addresses = 1; from = 1;	break;
+ 	  default:
+ 	    printf("usage: w -hlsufV [user]\n"
+ 		   "    -h    skip header\n"
+@@ -258,6 +389,7 @@
+ 		   "    -s    short listing\n"
+ 		   "    -u    ignore uid of processes\n"
+ 		   "    -f    toggle FROM field (default %s)\n"
++		   "    -i    display IP address instead of hostname (if possible)\n"
+ 		   "    -V    display version\n", FROM_STRING);
+ 	    exit(1);
+ 	}
+@@ -295,14 +427,14 @@
+ 	    u = getutent();
+ 	    if (unlikely(!u)) break;
+ 	    if (u->ut_type != USER_PROCESS) continue;
+- 	    if (!strncmp(u->ut_user, user, USERSZ)) showinfo(u, longform, maxcmd, from);
++ 	    if (!strncmp(u->ut_user, user, USERSZ)) showinfo(u, longform, maxcmd, from, ip_addresses);
+ 	}
+     } else {
+ 	for (;;) {
+ 	    u = getutent();
+ 	    if (unlikely(!u)) break;
+ 	    if (u->ut_type != USER_PROCESS) continue;
+- 	    if (*u->ut_user) showinfo(u, longform, maxcmd, from);
++ 	    if (*u->ut_user) showinfo(u, longform, maxcmd, from, ip_addresses);
+ 	}
+     }
+     endutent();
+diff -Naur procps-3.2.7.orig/w.1 procps-3.2.7/w.1
+--- procps-3.2.7.orig/w.1	2003-09-01 02:20:21.000000000 +0200
++++ procps-3.2.7/w.1	2012-07-25 11:52:56.000000000 +0200
+@@ -5,7 +5,7 @@
+ w \- Show who is logged on and what they are doing.
+ .SH SYNOPSIS
+ .B w \-
+-.RB [ husfV ]
++.RB [ husfiV ]
+ .RI [ user ]
+ .SH DESCRIPTION
+ .B "w "
+@@ -52,6 +52,9 @@
+ .B from
+ field is shown by default.
+ .TP 0.5i
++.B "\-i "
++Display IP address instead of hostname (if possible)
++.TP 0.5i
+ .B "\-V "
+ Display version information.
+ .TP 0.5i
+diff -Naur procps-3.2.8.orig/w.c procps-3.2.8/w.c
+--- procps-3.2.8.orig/w.c	2015-03-02 18:29:14.000000000 +0100
++++ procps-3.2.8/w.c	2015-03-02 18:29:50.329001289 +0100
+@@ -76,6 +76,10 @@
+          * space-fill, and a '-' too if needed to ensure the
+          * column exists
+          */
++        if (!width) {
++                fputc('-', stdout);
++                ++width;
++        }
+         while (width++ < fromlen)
+                 fputc(' ', stdout);
+ }
