@@ -1,0 +1,241 @@
+diff --git a/apps/konsole/desktop/sessionui.rc b/apps/konsole/desktop/sessionui.rc
+index aab2824..f14eecc 100644
+--- a/apps/konsole/desktop/sessionui.rc
++++ b/apps/konsole/desktop/sessionui.rc
+@@ -1,6 +1,6 @@
+ <!DOCTYPE kpartgui>
+ 
+-<kpartgui name="session" version="2">
++<kpartgui name="session" version="8">
+     <MenuBar>
+         <Menu name="file">
+             <Action name="open-browser" group="session-operations"/>
+@@ -12,6 +12,7 @@
+             <Action name="rename-session" group="session-edit-operations" />
+             <Separator group="session-edit-operations"/>
+             <Action name="copy-input-to" group="session-edit-operations"/>
++            <Action name="zmodem-upload" group="session-edit-operations"/>
+             <Separator group="session-edit-operations"/>
+             <Action name="clear" group="session-edit-operations" />
+             <Action name="clear-and-reset" group="session-edit-operations" />
+diff --git a/apps/konsole/src/Session.cpp b/apps/konsole/src/Session.cpp
+index 3f1df8b..4ecbdc9 100644
+--- a/apps/konsole/src/Session.cpp
++++ b/apps/konsole/src/Session.cpp
+@@ -3,6 +3,7 @@
+ 
+     Copyright 2006-2008 by Robert Knight <robertknight@gmail.com>
+     Copyright 1997,1998 by Lars Doelle <lars.doelle@on-line.de>
++    Copyright 2009 by Thomas Dreibholz <dreibh@iem.uni-due.de>
+ 
+     This program is free software; you can redistribute it and/or modify
+     it under the terms of the GNU General Public License as published by
+@@ -1031,8 +1032,6 @@ void Session::startZModem(const QString &zmodem, const QString &dir, const QStri
+   if (!dir.isEmpty())
+      _zmodemProc->setWorkingDirectory(dir);
+ 
+-  _zmodemProc->start();
+-
+   connect(_zmodemProc,SIGNAL (readyReadStandardOutput()),
+           this, SLOT(zmodemReadAndSendBlock()));
+   connect(_zmodemProc,SIGNAL (readyReadStandardError()),
+@@ -1040,14 +1039,16 @@ void Session::startZModem(const QString &zmodem, const QString &dir, const QStri
+   connect(_zmodemProc,SIGNAL (finished(int,QProcess::ExitStatus)),
+           this, SLOT(zmodemFinished()));
+ 
+-  disconnect( _shellProcess,SIGNAL(block_in(const char*,int)), this, SLOT(onReceiveBlock(const char*,int)) );
+-  connect( _shellProcess,SIGNAL(block_in(const char*,int)), this, SLOT(zmodemRcvBlock(const char*,int)) );
++  _zmodemProc->start();
++  
++  disconnect( _shellProcess,SIGNAL(receivedData(const char*,int)), this, SLOT(onReceiveBlock(const char*,int)) );
++  connect( _shellProcess,SIGNAL(receivedData(const char*,int)), this, SLOT(zmodemRcvBlock(const char*,int)) );
+ 
+   _zmodemProgress = new ZModemDialog(QApplication::activeWindow(), false,
+                                     i18n("ZModem Progress"));
+ 
+   connect(_zmodemProgress, SIGNAL(user1Clicked()),
+-          this, SLOT(zmodemDone()));
++          this, SLOT(zmodemFinished()));
+ 
+   _zmodemProgress->show();
+ }
+@@ -1100,14 +1101,18 @@ void Session::zmodemRcvBlock(const char *data, int len)
+ 
+ void Session::zmodemFinished()
+ {
+-  if (_zmodemProc)
+-  {
+-    delete _zmodemProc;
+-    _zmodemProc = 0;
++  /* zmodemFinished() is called by QProcess's finished() and
++      ZModemDialog's user1Clicked(). Therefore, an invokation by
++      user1Clicked() will recursively invoke this function again
++      when the KProcess is deleted! */
++  if (_zmodemProc) {
++    KProcess* process = _zmodemProc;
++    _zmodemProc = 0;   // Set _zmodemProc to 0 avoid recursive invokations!
+     _zmodemBusy = false;
++    delete process;    // Now, the KProcess may be disposed safely.
+ 
+-    disconnect( _shellProcess,SIGNAL(block_in(const char*,int)), this ,SLOT(zmodemRcvBlock(const char*,int)) );
+-    connect( _shellProcess,SIGNAL(block_in(const char*,int)), this, SLOT(onReceiveBlock(const char*,int)) );
++    disconnect( _shellProcess,SIGNAL(receivedData(const char*,int)), this ,SLOT(zmodemRcvBlock(const char*,int)) );
++    connect( _shellProcess,SIGNAL(receivedData(const char*,int)), this, SLOT(onReceiveBlock(const char*,int)) );
+ 
+     _shellProcess->sendData("\030\030\030\030", 4); // Abort
+     _shellProcess->sendData("\001\013\n", 3); // Try to get prompt back
+diff --git a/apps/konsole/src/SessionController.cpp b/apps/konsole/src/SessionController.cpp
+index a622bd5..5f0da81 100644
+--- a/apps/konsole/src/SessionController.cpp
++++ b/apps/konsole/src/SessionController.cpp
+@@ -1,5 +1,6 @@
+ /*
+     Copyright 2006-2008 by Robert Knight <robertknight@gmail.com>
++    Copyright 2009 by Thomas Dreibholz <dreibh@iem.uni-due.de>
+ 
+     This program is free software; you can redistribute it and/or modify
+     it under the terms of the GNU General Public License as published by
+@@ -31,8 +32,10 @@
+ #include <KInputDialog>
+ #include <KLocale>
+ #include <KMenu>
++#include <KMessageBox>
+ #include <KRun>
+ #include <kshell.h>
++#include <KStandardDirs>
+ #include <KToggleAction>
+ #include <KUrl>
+ #include <KXMLGUIFactory>
+@@ -138,7 +141,10 @@ SessionController::SessionController(Session* session , TerminalDisplay* view, Q
+     // listen for output changes to set activity flag
+     connect( _session->emulation() , SIGNAL(outputChanged()) , this ,
+             SLOT(fireActivity()) );
+-    
++
++    // listen for detection of ZModem transfer
++    connect( _session , SIGNAL(zmodemDetected()) , this , SLOT(zmodemDownload()) ); 
++
+     // listen for flow control status changes
+     connect( _session , SIGNAL(flowControlEnabledChanged(bool)) , _view ,
+         SLOT(setFlowControlWarningEnabled(bool)) );
+@@ -429,6 +435,12 @@ void SessionController::setupActions()
+     action->setIcon( KIcon("edit-clear-history") );
+     connect( action , SIGNAL(triggered()) , this , SLOT(clearAndReset()) );
+ 
++    action = collection->addAction("zmodem-upload");
++    action->setText( i18n( "&ZModem Upload..." ) );
++    action->setIcon( KIcon("document-open") );
++    action->setShortcut( QKeySequence(Qt::CTRL+Qt::ALT+Qt::Key_U) );
++    connect( action , SIGNAL(triggered()) , this , SLOT(zmodemUpload()) );
++    
+     // Monitor
+     toggleAction = new KToggleAction(i18n("Monitor for &Activity"),this);
+     toggleAction->setShortcut( QKeySequence(Qt::CTRL+Qt::SHIFT+Qt::Key_A) );
+@@ -1048,6 +1060,57 @@ bool SessionController::isKonsolePart() const
+         return true;
+ }
+ 
++void SessionController::zmodemDownload()
++{
++    QString zmodem = KGlobal::dirs()->findExe("rz");
++    if(zmodem.isEmpty()) {
++       zmodem = KGlobal::dirs()->findExe("lrz");
++    }
++    if(!zmodem.isEmpty()) {
++        const QString path = KFileDialog::getExistingDirectory(
++                                QString(), _view,
++                                i18n("Save ZModem Download to..."));
++
++        if(!path.isEmpty()) {
++            _session->startZModem(zmodem, path, QStringList());
++            return;
++        }
++    }
++    else {
++        KMessageBox::error(_view,
++          i18n("<p>A ZModem file transfer attempt has been detected, "
++               "but no suitable ZModem software was found on this system.\n"
++               "<p>You may wish to install the 'rzsz' or 'lrzsz' package.\n"));
++    }
++    _session->cancelZModem();
++    return;
++}
++
++void SessionController::zmodemUpload()
++{
++    if(_session->isZModemBusy()) {
++      KMessageBox::sorry(_view,
++         i18n("<p>The current session already has a ZModem file transfer in progress."));
++      return;
++    }
++    QString zmodem = KGlobal::dirs()->findExe("sz");
++    if(zmodem.isEmpty()) {
++       zmodem = KGlobal::dirs()->findExe("lsz");
++    }
++    if(zmodem.isEmpty()) {
++        KMessageBox::sorry(_view,
++           i18n("<p>No suitable ZModem software was found on this system.\n"
++                "<p>You may wish to install the 'rzsz' or 'lrzsz' package.\n"));
++        return;
++    }
++
++    QStringList files = KFileDialog::getOpenFileNames(KUrl(), QString(), _view,
++                           i18n("Select Files for ZModem Upload"));
++    if(!files.isEmpty()) {
++        _session->startZModem(zmodem, QString::null, files);
++    }
++}
++
+ SessionTask::SessionTask(QObject* parent)
+     :  QObject(parent)
+     ,  _autoDelete(false)
+diff --git a/apps/konsole/src/SessionController.h b/apps/konsole/src/SessionController.h
+index 825a124..93fc862 100644
+--- a/apps/konsole/src/SessionController.h
++++ b/apps/konsole/src/SessionController.h
+@@ -1,5 +1,6 @@
+ /*
+     Copyright 2006-2008 by Robert Knight <robertknight@gmail.com>
++    Copyright 2009 by Thomas Dreibholz <dreibh@iem.uni-due.de>
+ 
+     This program is free software; you can redistribute it and/or modify
+     it under the terms of the GNU General Public License as published by
+@@ -208,6 +209,9 @@ private slots:
+                                          // display area
+ 
+     void updateSearchFilter();
++    
++    void zmodemDownload();
++    void zmodemUpload();
+ 
+     /* Returns true if called within a KPart; false if called within Konsole. */
+     bool isKonsolePart() const;
+diff --git a/apps/konsole/src/ZModemDialog.cpp b/apps/konsole/src/ZModemDialog.cpp
+index a2c5eea..39c6895 100644
+--- a/apps/konsole/src/ZModemDialog.cpp
++++ b/apps/konsole/src/ZModemDialog.cpp
+@@ -34,8 +34,8 @@ ZModemDialog::ZModemDialog(QWidget *parent, bool modal, const QString &caption)
+   setButtons( User1|Close );
+   setButtonGuiItem( User1, KGuiItem(i18n("&Stop")) );
+ 
+-  setDefaultButton( User1 );
+-  setEscapeButton(User1);
++  setDefaultButton( Close );
++  setEscapeButton( User1 );
+ 
+   showButtonSeparator( true );
+   enableButton(Close, false);
+diff --git a/apps/konsole/src/main.cpp b/apps/konsole/src/main.cpp
+index ee1c93d..5bc18ab 100644
+--- a/apps/konsole/src/main.cpp
++++ b/apps/konsole/src/main.cpp
+@@ -154,6 +154,9 @@ void fillAboutData(KAboutData& aboutData)
+   aboutData.addCredit(ki18n("Stephan Binner"),
+     ki18n("Bug fixes and general improvements"),
+     "binner@kde.org");
++  aboutData.addCredit(ki18n("Thomas Dreibholz"),
++    ki18n("General improvements"),
++    "dreibh@iem.uni-due.de");
+   aboutData.addCredit(ki18n("Chris Machemer"),
+     ki18n("Bug fixes"),
+     "machey@ceinetworks.com");

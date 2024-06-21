@@ -1,0 +1,806 @@
+diff -up kdebase-4.3.4/apps/konsole/src/EditProfileDialog.cpp.me1 kdebase-4.3.4/apps/konsole/src/EditProfileDialog.cpp
+--- kdebase-4.3.4/apps/konsole/src/EditProfileDialog.cpp.me1	2012-07-05 00:32:54.912384586 +0200
++++ kdebase-4.3.4/apps/konsole/src/EditProfileDialog.cpp	2012-07-05 13:12:34.061077736 +0200
+@@ -42,6 +42,7 @@
+ #include <KUrlCompletion>
+ #include <KWindowSystem>
+ #include <KTextEdit>
++#include <KMessageBox>
+ 
+ // Konsole
+ #include "ColorScheme.h"
+@@ -63,8 +64,13 @@ EditProfileDialog::EditProfileDialog(QWi
+     setCaption(i18n("Edit Profile"));
+     setButtons( KDialog::Ok | KDialog::Cancel | KDialog::Apply );
+ 
++    // disable the apply button , since no modification has been made
++    enableButtonApply(false);
++
+     connect( this , SIGNAL(applyClicked()) , this , SLOT(save()) );
++
+     connect( _delayedPreviewTimer , SIGNAL(timeout()) , this , SLOT(delayedPreviewActivate()) );
++
+     _ui = new Ui::EditProfileDialog();
+     _ui->setupUi(mainWidget());
+ 
+@@ -85,8 +91,7 @@ EditProfileDialog::EditProfileDialog(QWi
+     connect( _ui->tabWidget , SIGNAL(currentChanged(int)) , this , 
+             SLOT(preparePage(int)) );
+ 
+-    _tempProfile = new Profile;
+-    _tempProfile->setHidden(true);
++    createTempProfile();
+ }
+ EditProfileDialog::~EditProfileDialog()
+ {
+@@ -107,6 +112,10 @@ void EditProfileDialog::save()
+         iter.next();
+         _previewedProperties.remove(iter.key());
+     }
++
++    createTempProfile();
++
++    enableButtonApply(false);
+ }
+ void EditProfileDialog::reject()
+ {
+@@ -115,6 +124,18 @@ void EditProfileDialog::reject()
+ }
+ void EditProfileDialog::accept()
+ {
++    Q_ASSERT( _profile );
++    Q_ASSERT( _tempProfile );
++
++    if (   ( _tempProfile->isPropertySet(Profile::Name) &&
++             _tempProfile->name().isEmpty() )
++        || ( _profile->name().isEmpty() && _tempProfile->name().isEmpty() ) )
++    {
++        KMessageBox::sorry(this,
++                i18n("<p>Each profile must have a name before it can be saved "
++                     "into disk.</p>"));
++        return;
++    }
+     save();
+     unpreviewAll();
+     KDialog::accept(); 
+@@ -153,10 +174,10 @@ void EditProfileDialog::updateCaption(co
+ }
+ void EditProfileDialog::setProfile(Profile::Ptr profile)
+ {
+-    _profile = profile;
+-
+     Q_ASSERT( profile );
+ 
++    _profile = profile;
++
+     // update caption
+     updateCaption(profile);
+ 
+@@ -169,7 +190,7 @@ void EditProfileDialog::setProfile(Profi
+ 
+     if ( _tempProfile )
+     {
+-        _tempProfile = new Profile;
++        createTempProfile();
+     }
+ }
+ const Profile::Ptr EditProfileDialog::lookupProfile() const
+@@ -211,8 +232,8 @@ void EditProfileDialog::preparePage(int 
+ }
+ void EditProfileDialog::selectProfileName()
+ {
+-    _ui->profileNameEdit->selectAll();
+     _ui->profileNameEdit->setFocus();
++    _ui->profileNameEdit->selectAll();
+ }
+ void EditProfileDialog::setupGeneralPage(const Profile::Ptr info)
+ {
+@@ -220,12 +241,19 @@ void EditProfileDialog::setupGeneralPage
+     {
+         ProfileGroup::Ptr group = info->asGroup(); 
+         if (!group || group->profiles().count() < 2)
++        {
+             _ui->profileNameEdit->setText( info->name() );
++            _ui->profileNameEdit->setClearButtonShown(true);
++
++            _ui->emptyNameWarningWidget->setVisible( info->name().isEmpty() );
++            _ui->emptyNameWarningWidget->setText(i18n("Profile name is empty."));
++        }
+         else 
+         {
+             _ui->profileNameEdit->setText( groupProfileNames(group,-1) );
+-            _ui->profileNameLabel->setEnabled(false);
+             _ui->profileNameEdit->setEnabled(false);
++            _ui->profileNameLabel->setEnabled(false);
++            _ui->emptyNameWarningWidget->setVisible(false);
+         }
+     }
+ 
+@@ -248,24 +276,25 @@ void EditProfileDialog::setupGeneralPage
+ 
+     // window options
+     _ui->showMenuBarButton->setChecked( info->property<bool>(Profile::ShowMenuBar) );
++    _ui->saveGeometryOnExitButton->setChecked( info->property<bool>(Profile::SaveGeometryOnExit) );
+ 
+     // signals and slots
+     connect( _ui->dirSelectButton , SIGNAL(clicked()) , this , SLOT(selectInitialDir()) );
+     connect( _ui->iconSelectButton , SIGNAL(clicked()) , this , SLOT(selectIcon()) );
+     connect( _ui->startInSameDirButton , SIGNAL(toggled(bool)) , this , 
+             SLOT(startInSameDir(bool)));
+-    connect( _ui->profileNameEdit , SIGNAL(textChanged(const QString&)) , this ,
+-            SLOT(profileNameChanged(const QString&)) );
+-    connect( _ui->initialDirEdit , SIGNAL(textChanged(const QString&)) , this , 
+-            SLOT(initialDirChanged(const QString&)) );
+-    connect(_ui->commandEdit , SIGNAL(textChanged(const QString&)) , this ,
+-            SLOT(commandChanged(const QString&)) ); 
+-    
++    connect( _ui->profileNameEdit , SIGNAL(textChanged(QString)) , this ,
++            SLOT(profileNameChanged(QString)) );
++    connect( _ui->initialDirEdit , SIGNAL(textChanged(QString)) , this ,
++            SLOT(initialDirChanged(QString)) );
++    connect(_ui->commandEdit , SIGNAL(textChanged(QString)) , this ,
++            SLOT(commandChanged(QString)) );
++    connect(_ui->environmentEditButton , SIGNAL(clicked()) , this ,
++            SLOT(showEnvironmentEditor()) );
+     connect(_ui->showMenuBarButton , SIGNAL(toggled(bool)) , this , 
+             SLOT(showMenuBar(bool)) );
+-
+-    connect(_ui->environmentEditButton , SIGNAL(clicked()) , this , 
+-            SLOT(showEnvironmentEditor()) );
++    connect(_ui->saveGeometryOnExitButton , SIGNAL(toggled(bool)) , this ,
++           SLOT(saveGeometryOnExit(bool)) );
+ }
+ void EditProfileDialog::showEnvironmentEditor()
+ {
+@@ -283,7 +312,7 @@ void EditProfileDialog::showEnvironmentE
+     if ( dialog->exec() == QDialog::Accepted )
+     {
+         QStringList newEnvironment = edit->toPlainText().split('\n');
+-        _tempProfile->setProperty(Profile::Environment,newEnvironment);
++        updateTempProfileProperty(Profile::Environment,newEnvironment);
+     }
+ 
+     dialog->deleteLater();
+@@ -343,14 +372,14 @@ void EditProfileDialog::setupTabsPage(co
+            this , SLOT(insertRemoteTabTitleText(const QString&)) ); 
+ }
+ void EditProfileDialog::showNewTabButton(bool show)
+-{ _tempProfile->setProperty(Profile::ShowNewAndCloseTabButtons,show); }
++{ updateTempProfileProperty(Profile::ShowNewAndCloseTabButtons,show); }
+ void EditProfileDialog::tabBarVisibilityChanged(int newValue)
+ {
+-    _tempProfile->setProperty( Profile::TabBarMode , newValue );
++    updateTempProfileProperty( Profile::TabBarMode , newValue );
+ }
+ void EditProfileDialog::tabBarPositionChanged(int newValue)
+ {
+-    _tempProfile->setProperty( Profile::TabBarPosition , newValue );
++    updateTempProfileProperty( Profile::TabBarPosition , newValue );
+ }
+ void EditProfileDialog::insertTabTitleText(const QString& text)
+ {
+@@ -362,15 +391,19 @@ void EditProfileDialog::insertRemoteTabT
+ }
+ void EditProfileDialog::showMenuBar(bool show)
+ {
+-    _tempProfile->setProperty(Profile::ShowMenuBar,show);
++    updateTempProfileProperty(Profile::ShowMenuBar,show);
++}
++void EditProfileDialog::saveGeometryOnExit(bool save)
++{
++    updateTempProfileProperty(Profile::SaveGeometryOnExit,save);
+ }
+ void EditProfileDialog::tabTitleFormatChanged(const QString& format)
+ {
+-    _tempProfile->setProperty(Profile::LocalTabTitleFormat,format);
++    updateTempProfileProperty(Profile::LocalTabTitleFormat,format);
+ }
+ void EditProfileDialog::remoteTabTitleFormatChanged(const QString& format)
+ {
+-    _tempProfile->setProperty(Profile::RemoteTabTitleFormat,format);
++    updateTempProfileProperty(Profile::RemoteTabTitleFormat,format);
+ }
+ 
+ void EditProfileDialog::selectIcon()
+@@ -380,28 +413,29 @@ void EditProfileDialog::selectIcon()
+     if (!icon.isEmpty())
+     {
+         _ui->iconSelectButton->setIcon( KIcon(icon) );
+-        _tempProfile->setProperty(Profile::Icon,icon);
++        updateTempProfileProperty(Profile::Icon,icon);
+     }
+ }
+ void EditProfileDialog::profileNameChanged(const QString& text)
+ {
+-    _tempProfile->setProperty(Profile::Name,text);
++    _ui->emptyNameWarningWidget->setVisible(text.isEmpty());
++    updateTempProfileProperty(Profile::Name,text);
+     updateCaption(_tempProfile);
+ }
+ void EditProfileDialog::startInSameDir(bool sameDir)
+ {
+-    _tempProfile->setProperty(Profile::StartInCurrentSessionDir,sameDir);
++    updateTempProfileProperty(Profile::StartInCurrentSessionDir,sameDir);
+ }
+ void EditProfileDialog::initialDirChanged(const QString& dir)
+ {
+-    _tempProfile->setProperty(Profile::Directory,dir);
++    updateTempProfileProperty(Profile::Directory,dir);
+ }
+ void EditProfileDialog::commandChanged(const QString& command)
+ {
+     ShellCommand shellCommand(command);
+ 
+-    _tempProfile->setProperty(Profile::Command,shellCommand.command());
+-    _tempProfile->setProperty(Profile::Arguments,shellCommand.arguments());
++    updateTempProfileProperty(Profile::Command,shellCommand.command());
++    updateTempProfileProperty(Profile::Arguments,shellCommand.arguments());
+ }
+ void EditProfileDialog::selectInitialDir()
+ {
+@@ -476,7 +510,7 @@ void EditProfileDialog::setupAppearanceP
+ }
+ void EditProfileDialog::setAntialiasText(bool enable)
+ {
+-    _tempProfile->setProperty(Profile::AntiAliasFonts,enable);
++    updateTempProfileProperty(Profile::AntiAliasFonts,enable);
+ 
+     // update preview to reflect text smoothing state
+     fontSelected(_ui->fontPreviewLabel->font());
+@@ -749,7 +783,7 @@ void EditProfileDialog::colorSchemeSelec
+         kDebug() << "Setting temp profile color to" << colors->name();
+         
+         previewColorScheme(selected.first());
+-        _tempProfile->setProperty(Profile::ColorScheme,colors->name());
++        updateTempProfileProperty(Profile::ColorScheme,colors->name());
+ 
+         updateTransparencyWarning();
+     }
+@@ -779,6 +813,51 @@ void EditProfileDialog::updateTransparen
+         _ui->transparencyWarningWidget->setHidden(KWindowSystem::compositingActive() || !hasTransparency);
+     }
+ }
++
++void EditProfileDialog::createTempProfile()
++{
++    _tempProfile = Profile::Ptr(new Profile);
++    _tempProfile->setHidden(true);
++}
++
++void EditProfileDialog::updateTempProfileProperty(Profile::Property property, const QVariant & value)
++{
++    _tempProfile->setProperty(property, value);
++    updateButtonApply();
++}
++
++void EditProfileDialog::updateButtonApply( )
++{
++    bool userModified = false;
++
++    QHashIterator<Profile::Property,QVariant> iter(_tempProfile->setProperties());
++    while ( iter.hasNext() )
++    {
++        iter.next();
++
++        Profile::Property property = iter.key();
++        QVariant value = iter.value() ;
++
++        // for previewed property
++        if( _previewedProperties.contains(int(property)) )
++        {
++           if ( value != _previewedProperties.value(int(property)))
++           {
++                userModified = true ;
++                break ;
++           }
++        }
++        // for not-previewed property
++        else if ( (value != _profile->property<QVariant>(property)) )
++        {
++            userModified = true ;
++            break ;
++        }
++    }
++
++    enableButtonApply(userModified);
++}
++
+ void EditProfileDialog::setupKeyboardPage(const Profile::Ptr /* info */)
+ {
+     // setup translator list
+@@ -806,7 +885,7 @@ void EditProfileDialog::keyBindingSelect
+         QAbstractItemModel* model = _ui->keyBindingList->model();
+         const KeyboardTranslator* translator = model->data(selected.first(),Qt::UserRole+1)
+                                                 .value<const KeyboardTranslator*>();
+-        _tempProfile->setProperty(Profile::KeyBindings,translator->name());
++        updateTempProfileProperty(Profile::KeyBindings,translator->name());
+     }
+ 
+     updateKeyBindingsButtons();
+@@ -867,7 +946,7 @@ void EditProfileDialog::showKeyBindingEd
+ 
+         if ( newTranslator->name() == currentTranslator )
+         {
+-            _tempProfile->setProperty(Profile::KeyBindings,newTranslator->name());
++            updateTempProfileProperty(Profile::KeyBindings,newTranslator->name());
+         }
+     }
+ }
+@@ -879,28 +958,28 @@ void EditProfileDialog::editKeyBinding()
+ {
+     showKeyBindingEditor(false);
+ }
+-void EditProfileDialog::setupCombo( ComboOption* options , const Profile::Ptr profile )
++void EditProfileDialog::setupCheckBoxes( BooleanOption* options , const Profile::Ptr profile )
+ {
+     while ( options->button != 0 )
+     {
+-        options->button->setChecked(profile->property<bool>((Profile::Property)options->property));
++        options->button->setChecked(profile->property<bool>(options->property));
+         connect( options->button , SIGNAL(toggled(bool)) , this , options->slot );
+ 
+         ++options;
+     }
+ }
+-void EditProfileDialog::setupRadio( RadioOption* possible , int actual )
++void EditProfileDialog::setupRadio( RadioOption* possibilities , int actual )
+ {
+-    while (possible->button != 0)
++    while (possibilities->button != 0)
+     {
+-        if ( possible->property == actual )
+-            possible->button->setChecked(true);
++        if ( possibilities->value == actual )
++            possibilities->button->setChecked(true);
+         else
+-            possible->button->setChecked(false);
+-   
+-        connect( possible->button , SIGNAL(clicked()) , this , possible->slot );
++            possibilities->button->setChecked(false);
++
++        connect( possibilities->button , SIGNAL(clicked()) , this , possibilities->slot );
+ 
+-        ++possible;
++        ++possibilities;
+     }
+ }
+ 
+@@ -936,35 +1015,35 @@ void EditProfileDialog::setupScrollingPa
+ 
+ void EditProfileDialog::scrollBackLinesChanged(int lineCount)
+ {
+-    _tempProfile->setProperty(Profile::HistorySize , lineCount);
++    updateTempProfileProperty(Profile::HistorySize , lineCount);
+ }
+ void EditProfileDialog::noScrollBack()
+ {
+-    _tempProfile->setProperty(Profile::HistoryMode , Profile::DisableHistory);
++    updateTempProfileProperty(Profile::HistoryMode , Profile::DisableHistory);
+ }
+ void EditProfileDialog::fixedScrollBack()
+ {
+-    _tempProfile->setProperty(Profile::HistoryMode , Profile::FixedSizeHistory);
++    updateTempProfileProperty(Profile::HistoryMode , Profile::FixedSizeHistory);
+ }
+ void EditProfileDialog::unlimitedScrollBack()
+ {
+-    _tempProfile->setProperty(Profile::HistoryMode , Profile::UnlimitedHistory );
++    updateTempProfileProperty(Profile::HistoryMode , Profile::UnlimitedHistory );
+ }
+ void EditProfileDialog::hideScrollBar()
+ {
+-    _tempProfile->setProperty(Profile::ScrollBarPosition , Profile::ScrollBarHidden );
++    updateTempProfileProperty(Profile::ScrollBarPosition , Profile::ScrollBarHidden );
+ }
+ void EditProfileDialog::showScrollBarLeft()
+ {
+-    _tempProfile->setProperty(Profile::ScrollBarPosition , Profile::ScrollBarLeft );
++    updateTempProfileProperty(Profile::ScrollBarPosition , Profile::ScrollBarLeft );
+ }
+ void EditProfileDialog::showScrollBarRight()
+ {
+-    _tempProfile->setProperty(Profile::ScrollBarPosition , Profile::ScrollBarRight );
++    updateTempProfileProperty(Profile::ScrollBarPosition , Profile::ScrollBarRight );
+ }
+ void EditProfileDialog::setupAdvancedPage(const Profile::Ptr profile)
+ {
+-    ComboOption  options[] = { { _ui->enableBlinkingTextButton , Profile::BlinkingTextEnabled , 
++    BooleanOption  options[] = { { _ui->enableBlinkingTextButton , Profile::BlinkingTextEnabled , 
+                                  SLOT(toggleBlinkingText(bool)) },
+                                { _ui->enableFlowControlButton , Profile::FlowControlEnabled ,
+                                  SLOT(toggleFlowControl(bool)) },
+@@ -974,9 +1053,9 @@ void EditProfileDialog::setupAdvancedPag
+                                  SLOT(toggleBlinkingCursor(bool)) },
+                                { _ui->enableBidiRenderingButton , Profile::BidiRenderingEnabled ,
+                                  SLOT(togglebidiRendering(bool)) },
+-                               { 0 , 0 , 0 }
++                               { 0 , Profile::Property(0) , 0 }
+                              };
+-    setupCombo( options , profile );
++    setupCheckBoxes( options , profile );
+ 
+     // interaction options
+     _ui->wordCharacterEdit->setText( profile->property<QString>(Profile::WordCharacters) );
+@@ -1014,51 +1093,51 @@ void EditProfileDialog::setDefaultCodec(
+ {
+     QString name = QString(codec->name());
+ 
+-    _tempProfile->setProperty(Profile::DefaultEncoding,name);
++    updateTempProfileProperty(Profile::DefaultEncoding,name);
+     _ui->characterEncodingLabel->setText(codec->name());
+ }
+ void EditProfileDialog::customCursorColorChanged(const QColor& color)
+ {
+-    _tempProfile->setProperty(Profile::CustomCursorColor,color);
++    updateTempProfileProperty(Profile::CustomCursorColor,color);
+ 
+     // ensure that custom cursor colors are enabled
+     _ui->customCursorColorButton->click();
+ }
+ void EditProfileDialog::wordCharactersChanged(const QString& text)
+ {
+-    _tempProfile->setProperty(Profile::WordCharacters,text);
++    updateTempProfileProperty(Profile::WordCharacters,text);
+ }
+ void EditProfileDialog::autoCursorColor()
+ {
+-    _tempProfile->setProperty(Profile::UseCustomCursorColor,false);
++    updateTempProfileProperty(Profile::UseCustomCursorColor,false);
+ }
+ void EditProfileDialog::customCursorColor()
+ {
+-    _tempProfile->setProperty(Profile::UseCustomCursorColor,true);
++    updateTempProfileProperty(Profile::UseCustomCursorColor,true);
+ }
+ void EditProfileDialog::setCursorShape(int index)
+ {
+-    _tempProfile->setProperty(Profile::CursorShape,index);
++    updateTempProfileProperty(Profile::CursorShape,index);
+ }
+ void EditProfileDialog::togglebidiRendering(bool enable)
+ {
+-    _tempProfile->setProperty(Profile::BidiRenderingEnabled,enable);
++    updateTempProfileProperty(Profile::BidiRenderingEnabled,enable);
+ }
+ void EditProfileDialog::toggleBlinkingCursor(bool enable)
+ {
+-    _tempProfile->setProperty(Profile::BlinkingCursorEnabled,enable);
++    updateTempProfileProperty(Profile::BlinkingCursorEnabled,enable);
+ }
+ void EditProfileDialog::toggleBlinkingText(bool enable)
+ {
+-    _tempProfile->setProperty(Profile::BlinkingTextEnabled,enable);
++    updateTempProfileProperty(Profile::BlinkingTextEnabled,enable);
+ }
+ void EditProfileDialog::toggleFlowControl(bool enable)
+ {
+-    _tempProfile->setProperty(Profile::FlowControlEnabled,enable);
++    updateTempProfileProperty(Profile::FlowControlEnabled,enable);
+ }
+ void EditProfileDialog::toggleResizeWindow(bool enable)
+ {
+-    _tempProfile->setProperty(Profile::AllowProgramsToResizeWindow,enable);
++    updateTempProfileProperty(Profile::AllowProgramsToResizeWindow,enable);
+ }
+ void EditProfileDialog::fontSelected(const QFont& font)
+ {
+@@ -1080,7 +1159,7 @@ void EditProfileDialog::fontSelected(con
+ 
+    _ui->fontPreviewLabel->setFont(previewFont);
+    
+-   _tempProfile->setProperty(Profile::Font,font);
++   updateTempProfileProperty(Profile::Font,font);
+ 
+    preview(Profile::Font,font);
+ }
+@@ -1102,7 +1181,7 @@ void EditProfileDialog::setFontSize(int 
+     newFont.setPointSize(pointSize);
+     _ui->fontPreviewLabel->setFont(newFont);
+ 
+-    _tempProfile->setProperty(Profile::Font,newFont);
++    updateTempProfileProperty(Profile::Font,newFont);
+ 
+     preview(Profile::Font,newFont);
+ }
+diff -up kdebase-4.3.4/apps/konsole/src/EditProfileDialog.h.me1 kdebase-4.3.4/apps/konsole/src/EditProfileDialog.h
+--- kdebase-4.3.4/apps/konsole/src/EditProfileDialog.h.me1	2012-07-05 00:35:07.071385090 +0200
++++ kdebase-4.3.4/apps/konsole/src/EditProfileDialog.h	2012-07-05 10:46:34.725067266 +0200
+@@ -46,8 +46,6 @@ namespace Ui
+ namespace Konsole
+ {
+ 
+-class Profile;
+-
+ /**
+  * A dialog which allows the user to edit a profile.
+  * After the dialog is created, it can be initialised with the settings
+@@ -120,6 +118,7 @@ private slots:
+     void insertRemoteTabTitleText(const QString& text);
+ 
+     void showMenuBar(bool);
++    void saveGeometryOnExit(bool);
+     void showEnvironmentEditor();
+     void tabBarVisibilityChanged(int);
+     void tabBarPositionChanged(int);
+@@ -200,22 +199,36 @@ private:
+     void updateCaption(const Profile::Ptr profile);
+     void updateTransparencyWarning();
+ 
++
++    // Update _tempProfile in a way of respecting the apply button.
++    // When used with some previewed property, this method should
++    // always come after the preview operation.
++    void updateTempProfileProperty(Profile::Property, const QVariant& value);
++
++    // helper method for creating an empty & hidden profile and assigning
++    // it to _tempProfile.
++    void createTempProfile();
++
++    // Enable or disable apply button, used only within
++    // updateTempProfileProperty().
++    void updateButtonApply();
++    
+     static QString groupProfileNames(const ProfileGroup::Ptr group, int maxLength = -1);
+ 
+     struct RadioOption
+     {
+        QAbstractButton* button;
+-       int property;
++       int value;
+        const char* slot; 
+     };
+-    void setupRadio(RadioOption* possible,int actual);
+-    struct ComboOption
++    void setupRadio(RadioOption* possibilities, int actual);
++    struct BooleanOption
+     {
+        QAbstractButton* button;
+-       int property;
++       Profile::Property property;
+        const char* slot;
+     };
+-    void setupCombo(ComboOption* options , const Profile::Ptr profile);
++    void setupCheckBoxes(BooleanOption* options , const Profile::Ptr profile);
+ 
+     const Profile::Ptr lookupProfile() const;
+ 
+diff -up kdebase-4.3.4/apps/konsole/src/EditProfileDialog.ui.me1 kdebase-4.3.4/apps/konsole/src/EditProfileDialog.ui
+--- kdebase-4.3.4/apps/konsole/src/EditProfileDialog.ui.me1	2012-07-05 00:35:47.563384232 +0200
++++ kdebase-4.3.4/apps/konsole/src/EditProfileDialog.ui	2012-07-05 12:44:20.261070361 +0200
+@@ -60,15 +60,18 @@
+            </widget>
+           </item>
+           <item row="0" column="1" colspan="2" >
+-           <widget class="QLineEdit" name="profileNameEdit" >
++           <widget class="KLineEdit" name="profileNameEdit" >
+             <property name="toolTip" >
+              <string>A descriptive name for the profile</string>
+             </property>
+            </widget>
+           </item>
+-          <item row="1" column="0" >
+-           <widget class="QLabel" name="label_3" >
+-            <property name="text" >
++          <item row="1" column="1" colspan="2">
++           <widget class="Konsole::WarningBox" name="emptyNameWarningWidget" native="true"/>
++          </item>
++          <item row="2" column="0">
++           <widget class="QLabel" name="label_3">
++            <property name="text">
+              <string>Command:</string>
+             </property>
+             <property name="alignment" >
+@@ -76,7 +79,7 @@
+             </property>
+            </widget>
+           </item>
+-          <item row="1" column="1" colspan="2" >
++          <item row="2" column="1" colspan="2" >
+            <widget class="KLineEdit" name="commandEdit" >
+             <property name="toolTip" >
+              <string>The command to execute when new terminal sessions are created using this profile</string>
+@@ -86,7 +89,7 @@
+             </property>
+            </widget>
+           </item>
+-          <item row="2" column="0" >
++          <item row="3" column="0" >
+            <widget class="QLabel" name="label_9" >
+             <property name="text" >
+              <string>Initial directory:</string>
+@@ -96,7 +99,7 @@
+             </property>
+            </widget>
+           </item>
+-          <item row="2" column="1" colspan="2" >
++          <item row="3" column="1" colspan="2" >
+            <widget class="KLineEdit" name="initialDirEdit" >
+             <property name="toolTip" >
+              <string>The initial working directory for new terminal sessions using this profile</string>
+@@ -106,7 +109,7 @@
+             </property>
+            </widget>
+           </item>
+-          <item row="2" column="3" >
++          <item row="3" column="3" >
+            <widget class="QToolButton" name="dirSelectButton" >
+             <property name="toolTip" >
+              <string>Browse for initial directory</string>
+@@ -116,7 +119,14 @@
+             </property>
+            </widget>
+           </item>
+-          <item row="4" column="0" >
++          <item row="4" column="1" colspan="2">
++           <widget class="QCheckBox" name="startInSameDirButton">
++            <property name="text">
++             <string>Start in same directory as current tab</string>
++            </property>
++           </widget>
++          </item>
++          <item row="5" column="0" >
+            <widget class="QLabel" name="label_10" >
+             <property name="text" >
+              <string>Icon:</string>
+@@ -126,7 +136,7 @@
+             </property>
+            </widget>
+           </item>
+-          <item row="4" column="1" >
++          <item row="5" column="1" >
+            <widget class="QPushButton" name="iconSelectButton" >
+             <property name="sizePolicy" >
+              <sizepolicy vsizetype="Fixed" hsizetype="Fixed" >
+@@ -160,7 +170,7 @@
+             </property>
+            </widget>
+           </item>
+-          <item row="4" column="2" >
++          <item row="5" column="2" >
+            <spacer>
+             <property name="orientation" >
+              <enum>Qt::Horizontal</enum>
+@@ -173,7 +183,7 @@
+             </property>
+            </spacer>
+           </item>
+-          <item row="5" column="0" >
++          <item row="6" column="0" >
+            <widget class="QLabel" name="environmentLabel" >
+             <property name="text" >
+              <string>Environment:</string>
+@@ -183,7 +193,7 @@
+             </property>
+            </widget>
+           </item>
+-          <item row="5" column="1" >
++          <item row="6" column="1" >
+            <widget class="QPushButton" name="environmentEditButton" >
+             <property name="toolTip" >
+              <string>Edit the list of environment variables and associated values</string>
+@@ -193,13 +203,6 @@
+             </property>
+            </widget>
+           </item>
+-          <item row="3" column="1" colspan="2" >
+-           <widget class="QCheckBox" name="startInSameDirButton" >
+-            <property name="text" >
+-             <string>Start in same directory as current tab</string>
+-            </property>
+-           </widget>
+-          </item>
+          </layout>
+         </widget>
+        </item>
+@@ -228,6 +231,22 @@
+             </property>
+            </widget>
+           </item>
++         <item>
++          <widget class="QCheckBox" name="saveGeometryOnExitButton">
++           <property name="sizePolicy">
++            <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
++             <horstretch>0</horstretch>
++             <verstretch>0</verstretch>
++            </sizepolicy>
++           </property>
++           <property name="toolTip">
++            <string>Set the window size and position for this profile when exiting</string>
++           </property>
++           <property name="text">
++            <string>Save window size and position on exit</string>
++           </property>
++          </widget>
++         </item>         
+          </layout>
+         </widget>
+        </item>
+diff -up kdebase-4.3.4/apps/konsole/src/MainWindow.cpp.me1 kdebase-4.3.4/apps/konsole/src/MainWindow.cpp
+--- kdebase-4.3.4/apps/konsole/src/MainWindow.cpp.me1	2012-07-05 00:37:38.003376709 +0200
++++ kdebase-4.3.4/apps/konsole/src/MainWindow.cpp	2012-07-05 00:39:23.785389740 +0200
+@@ -76,6 +76,8 @@ MainWindow::MainWindow()
+ 
+     connect( _viewManager , SIGNAL(setMenuBarVisibleRequest(bool)) , this ,
+             SLOT(setMenuBarVisibleOnce(bool)) );
++    connect( _viewManager , SIGNAL(setSaveGeometryOnExitRequest(bool)) , this ,
++           SLOT(setSaveGeometryOnExit(bool)) );
+     connect( _viewManager , SIGNAL(newViewRequest(Profile::Ptr)) , 
+         this , SLOT(newFromProfile(Profile::Ptr)) );
+     connect( _viewManager , SIGNAL(newViewRequest()) , 
+@@ -126,6 +128,11 @@ void MainWindow::setMenuBarVisibleOnce(b
+     _menuBarVisibilitySet = true;
+ }
+ 
++void MainWindow::setSaveGeometryOnExit(bool save)
++{
++    setAutoSaveSettings("MainWindow",save);
++}
++
+ void MainWindow::correctShortcuts()
+ {
+     // replace F1 shortcut for help contents
+diff -up kdebase-4.3.4/apps/konsole/src/MainWindow.h.me1 kdebase-4.3.4/apps/konsole/src/MainWindow.h
+--- kdebase-4.3.4/apps/konsole/src/MainWindow.h.me1	2012-07-05 00:39:44.794373687 +0200
++++ kdebase-4.3.4/apps/konsole/src/MainWindow.h	2012-07-05 00:40:39.148389481 +0200
+@@ -169,6 +169,8 @@ class MainWindow : public KXmlGuiWindow
+         // effect if the menu bar is a MacOS-style top-level menu
+         void setMenuBarVisibleOnce(bool visible);
+ 
++        void setSaveGeometryOnExit(bool visible);
++
+         void openUrls(const QList<KUrl>& urls);
+ 
+     private:
+diff -up kdebase-4.3.4/apps/konsole/src/Profile.cpp.me1 kdebase-4.3.4/apps/konsole/src/Profile.cpp
+--- kdebase-4.3.4/apps/konsole/src/Profile.cpp.me1	2012-07-05 00:40:50.420384273 +0200
++++ kdebase-4.3.4/apps/konsole/src/Profile.cpp	2012-07-05 00:41:41.102391098 +0200
+@@ -76,6 +76,7 @@ const Profile::PropertyInfo Profile::Def
+     , { LocalTabTitleFormat , "tabtitle" , 0 , QVariant::String }
+     , { RemoteTabTitleFormat , "RemoteTabTitleFormat" , GENERAL_GROUP , QVariant::String }
+     , { ShowMenuBar , "ShowMenuBar" , GENERAL_GROUP , QVariant::Bool }
++    , { SaveGeometryOnExit , "SaveGeometryOnExit" , GENERAL_GROUP , QVariant::Bool }
+     , { TabBarMode , "TabBarMode" , GENERAL_GROUP , QVariant::Int }
+     , { TabBarPosition , "TabBarPosition" , GENERAL_GROUP , QVariant::Int }
+     , { StartInCurrentSessionDir , "StartInCurrentSessionDir" , GENERAL_GROUP , QVariant::Bool }
+@@ -154,6 +155,7 @@ FallbackProfile::FallbackProfile()
+     setProperty(TabBarMode,AlwaysShowTabBar);
+     setProperty(TabBarPosition,TabBarBottom);
+     setProperty(ShowMenuBar,true);
++    setProperty(SaveGeometryOnExit,true);
+     setProperty(StartInCurrentSessionDir,true);
+     setProperty(ShowNewAndCloseTabButtons,false);
+     setProperty(MenuIndex,"0");
+diff -up kdebase-4.3.4/apps/konsole/src/Profile.h.me1 kdebase-4.3.4/apps/konsole/src/Profile.h
+--- kdebase-4.3.4/apps/konsole/src/Profile.h.me1	2012-07-05 00:41:49.394597084 +0200
++++ kdebase-4.3.4/apps/konsole/src/Profile.h	2012-07-05 00:42:37.676384091 +0200
+@@ -115,6 +115,7 @@ public:
+         RemoteTabTitleFormat,   
+         /** (bool) Specifies whether the menu bar should be shown in the main application window. */
+         ShowMenuBar,    
++        SaveGeometryOnExit,
+         /** (TabBarModeEnum) Specifies when the tab bar should be shown in
+          * the main application window. */ 
+         TabBarMode,    
+diff -up kdebase-4.3.4/apps/konsole/src/ViewManager.cpp.me1 kdebase-4.3.4/apps/konsole/src/ViewManager.cpp
+--- kdebase-4.3.4/apps/konsole/src/ViewManager.cpp.me1	2012-07-05 00:42:43.669491625 +0200
++++ kdebase-4.3.4/apps/konsole/src/ViewManager.cpp	2012-07-05 00:43:25.340387907 +0200
+@@ -761,6 +761,8 @@ void ViewManager::applyProfile(TerminalD
+     // menu bar visibility
+     emit setMenuBarVisibleRequest( info->property<bool>(Profile::ShowMenuBar) );
+ 
++    emit setSaveGeometryOnExitRequest( info->property<bool>(Profile::SaveGeometryOnExit) );
++
+     // tab bar visibility
+     if (applyContainerSettings)
+     {
+diff -up kdebase-4.3.4/apps/konsole/src/ViewManager.h.me1 kdebase-4.3.4/apps/konsole/src/ViewManager.h
+--- kdebase-4.3.4/apps/konsole/src/ViewManager.h.me1	2012-07-05 00:43:36.514383418 +0200
++++ kdebase-4.3.4/apps/konsole/src/ViewManager.h	2012-07-05 00:43:59.123474648 +0200
+@@ -196,6 +196,7 @@ signals:
+      * activated.
+      */
+     void setMenuBarVisibleRequest(bool);
++    void setSaveGeometryOnExitRequest(bool);
+ 
+     /** Requests creation of a new view with the default profile. */
+     void newViewRequest();
