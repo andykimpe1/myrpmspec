@@ -1,0 +1,1441 @@
+--- a/gcore.c	2011-04-24 11:32:23.000000000 -0400
++++ b/gcore.c	2013-05-22 14:53:42.796216956 -0400
+@@ -20,15 +20,13 @@
+ 
+ static void gcore_offset_table_init(void);
+ static void gcore_size_table_init(void);
++static void gcore_machdep_init(void);
+ 
+ static void do_gcore(char *arg);
+ static void print_version(void);
+ 
+ static struct command_table_entry command_table[] = {
+ 	{ "gcore", cmd_gcore, help_gcore, 0 },
+-#ifdef GCORE_TEST
+-	{ "gcore_test", cmd_gcore_test, help_gcore_test, 0 },
+-#endif
+ 	{ (char *)NULL }                               
+ };
+ 
+@@ -40,6 +38,7 @@ _init(void) /* Register the command set.
+ 	gcore_coredump_table_init();
+ 	gcore_arch_table_init();
+ 	gcore_arch_regsets_init();
++	gcore_machdep_init();
+         register_extension(command_table);
+ 	return 1;
+ }
+@@ -70,8 +69,8 @@ char *help_gcore[] = {
+ "    -f Specify kinds of memory to be written into core dumps according to",
+ "       the filter flag in bitwise:",
+ "  ",
+-"           AP  AS  FP  FS  ELF HP  HS",
+-"       ------------------------------",
++"           AP  AS  FP  FS  ELF HP  HS  DD",
++"       ----------------------------------",
+ "         0",
+ "         1  x",
+ "         2      x",
+@@ -80,7 +79,8 @@ char *help_gcore[] = {
+ "        16          x       x",
+ "        32                      x",
+ "        64                          x",
+-"       127  x   x   x   x   x   x   x",
++"       128                              x",
++"       255  x   x   x   x   x   x   x   x",
+ " ",
+ "        AP  Anonymous Private Memory",
+ "        AS  Anonymous Shared Memory",
+@@ -89,6 +89,7 @@ char *help_gcore[] = {
+ "        ELF ELF header pages in file-backed private memory areas",
+ "        HP  Hugetlb Private Memory",
+ "        HS  Hugetlb Shared Memory",
++"        DD  Memory advised using madvise with MADV_DONTDUMP flag",
+ " ",
+ "    -V Display version information",
+ "  ",
+@@ -184,7 +185,7 @@ cmd_gcore(void)
+ 	int optversion;
+ 
+ 	if (ACTIVE())
+-		error(FATAL, "no support on live kernel");
++		error(FATAL, "no support on live kernel\n");
+ 
+ 	gcore_dumpfilter_set_default();
+ 	gcore_verbose_set_default();
+@@ -335,10 +336,9 @@ static void do_gcore(char *arg)
+ 
+ static void print_version(void)
+ {
+-	fprintf(fp, "gcore extension module: version " VERSION " (released on "
++	fprintf(fp, "crash gcore command: version " VERSION " (released on "
+ 		RELEASE_DATE ")\n");
+ 	fprintf(fp, "Copyright (C) " PERIOD "  Fujitsu Limited\n");
+-	fprintf(fp, "\n");
+ }
+ 
+ static void gcore_offset_table_init(void)
+@@ -351,11 +351,16 @@ static void gcore_offset_table_init(void
+ 	GCORE_MEMBER_OFFSET_INIT(desc_struct_base2, "desc_struct", "base2");
+ 	GCORE_MEMBER_OFFSET_INIT(fpu_state, "fpu", "state");
+ 	GCORE_MEMBER_OFFSET_INIT(inode_i_nlink, "inode", "i_nlink");
++	if (GCORE_INVALID_MEMBER(inode_i_nlink))
++		GCORE_ANON_MEMBER_OFFSET_INIT(inode_i_nlink, "inode", "i_nlink");
+ 	GCORE_MEMBER_OFFSET_INIT(nsproxy_pid_ns, "nsproxy", "pid_ns");
++	GCORE_MEMBER_OFFSET_INIT(mm_context_t_vdso, "mm_context_t", "vdso");
+ 	GCORE_MEMBER_OFFSET_INIT(mm_struct_arg_start, "mm_struct", "arg_start");
+ 	GCORE_MEMBER_OFFSET_INIT(mm_struct_arg_end, "mm_struct", "arg_end");
+ 	GCORE_MEMBER_OFFSET_INIT(mm_struct_map_count, "mm_struct", "map_count");
++	GCORE_MEMBER_OFFSET_INIT(mm_struct_reserved_vm, "mm_struct", "reserved_vm");
+ 	GCORE_MEMBER_OFFSET_INIT(mm_struct_saved_auxv, "mm_struct", "saved_auxv");
++	GCORE_MEMBER_OFFSET_INIT(mm_struct_context, "mm_struct", "context");
+ 	GCORE_MEMBER_OFFSET_INIT(pid_level, "pid", "level");
+ 	GCORE_MEMBER_OFFSET_INIT(pid_namespace_level, "pid_namespace", "level");
+         if (MEMBER_EXISTS("pt_regs", "ax"))
+@@ -442,6 +447,8 @@ static void gcore_offset_table_init(void
+ 	GCORE_MEMBER_OFFSET_INIT(task_struct_uid, "task_struct", "uid");
+ 	GCORE_MEMBER_OFFSET_INIT(task_struct_used_math, "task_struct", "used_math");
+ 	GCORE_MEMBER_OFFSET_INIT(thread_info_status, "thread_info", "status");
++	GCORE_MEMBER_OFFSET_INIT(thread_info_fpstate, "thread_info", "fpstate");
++	GCORE_MEMBER_OFFSET_INIT(thread_info_vfpstate, "thread_info", "vfpstate");
+ 	GCORE_MEMBER_OFFSET_INIT(thread_struct_ds, "thread_struct", "ds");
+ 	GCORE_MEMBER_OFFSET_INIT(thread_struct_es, "thread_struct", "es");
+ 	GCORE_MEMBER_OFFSET_INIT(thread_struct_fs, "thread_struct", "fs");
+@@ -466,11 +473,15 @@ static void gcore_offset_table_init(void
+ 
+ 	if (symbol_exists("_cpu_pda"))
+ 		GCORE_MEMBER_OFFSET_INIT(x8664_pda_oldrsp, "x8664_pda", "oldrsp");
++	GCORE_MEMBER_OFFSET_INIT(vfp_state_hard, "vfp_state", "hard");
++	GCORE_MEMBER_OFFSET_INIT(vfp_hard_struct_fpregs, "vfp_hard_struct", "fpregs");
++	GCORE_MEMBER_OFFSET_INIT(vfp_hard_struct_fpscr, "vfp_hard_struct", "fpscr");
+ }
+ 
+ static void gcore_size_table_init(void)
+ {
+ 	GCORE_STRUCT_SIZE_INIT(i387_union, "i387_union");
++	GCORE_STRUCT_SIZE_INIT(mm_context_t, "mm_context_t");
+ 	GCORE_MEMBER_SIZE_INIT(mm_struct_saved_auxv, "mm_struct", "saved_auxv");
+ 	GCORE_MEMBER_SIZE_INIT(thread_struct_ds, "thread_struct", "ds");
+ 	GCORE_MEMBER_SIZE_INIT(thread_struct_es, "thread_struct", "es");
+@@ -481,40 +492,18 @@ static void gcore_size_table_init(void)
+ 	GCORE_MEMBER_SIZE_INIT(thread_struct_tls_array, "thread_struct", "tls_array");
+ 	GCORE_STRUCT_SIZE_INIT(thread_xstate, "thread_xstate");
+ 	GCORE_MEMBER_SIZE_INIT(vm_area_struct_anon_vma, "vm_area_struct", "anon_vma");
++	GCORE_MEMBER_SIZE_INIT(vfp_hard_struct_fpregs, "vfp_hard_struct", "fpregs");
++	GCORE_MEMBER_SIZE_INIT(vfp_hard_struct_fpscr, "vfp_hard_struct", "fpscr");
+ 
+ }
+ 
+-#ifdef GCORE_TEST
+-
+-char *help_gcore_test[] = {
+-"gcore_test",
+-"gcore_test - test gcore",
+-"\n"
+-"  ",
+-NULL,
+-};
+-
+-void cmd_gcore_test(void)
++static void gcore_machdep_init(void)
+ {
+-	int failed = FALSE;
+-	char *message = NULL;
++	if (STRUCT_EXISTS("fault_data") || STRUCT_EXISTS("vm_fault"))
++		gcore_machdep->vm_alwaysdump = 0x04000000;
++	else
++		gcore_machdep->vm_alwaysdump = 0x08000000;
+ 
+-#define TEST_MODULE(test)					\
+-	message = test();					\
+-	if (message) {						\
+-		failed = TRUE;					\
+-		fprintf(fp, #test ": %s\n", message);		\
+-	}
+-
+-	TEST_MODULE(gcore_x86_test);
+-	TEST_MODULE(gcore_coredump_table_test);
+-	TEST_MODULE(gcore_dumpfilter_test);
+-	TEST_MODULE(gcore_verbose_test);
+-
+-	if (!failed)
+-		fprintf(fp, "All test cases are successfully passed\n");
+-
+-#undef TEST_MODULE
++	if (!gcore_arch_vsyscall_has_vm_alwaysdump_flag())
++		gcore_machdep->vm_alwaysdump = 0x00000000;
+ }
+-
+-#endif /* GCORE_TEST */
+--- a/gcore.mk	2013-05-22 14:52:20.640477017 -0400
++++ b/gcore.mk	2013-05-22 14:53:42.794217007 -0400
+@@ -12,9 +12,9 @@
+ # GNU General Public License for more details.
+ #
+ 
+-VERSION=1.0.1
+-DATE=25 April 2011
+-PERIOD=2010, 2011
++VERSION=1.0-4.el6 [1.2.1 equivalent]
++DATE=14 Tue 2013
++PERIOD=2010, 2011, 2012, 2013
+ 
+ ARCH=UNSUPPORTED
+ 
+@@ -30,6 +30,12 @@ ifeq ($(shell arch), x86_64)
+   ARCH=SUPPORTED
+ endif
+ 
++ifeq ($(shell arch), arm)
++  TARGET=ARM
++  TARGET_CFLAGS=
++  ARCH=SUPPORTED
++endif
++
+ ifeq ($(shell /bin/ls /usr/include/crash/defs.h 2>/dev/null), /usr/include/crash/defs.h)
+   INCDIR=/usr/include/crash
+ endif
+@@ -53,6 +59,10 @@ ifneq (,$(findstring $(TARGET), X86 X86_
+ GCORE_CFILES += libgcore/gcore_x86.c
+ endif
+ 
++ifneq (,$(findstring $(TARGET), ARM))
++GCORE_CFILES += libgcore/gcore_arm.c
++endif
++
+ GCORE_OFILES = $(patsubst %.c,%.o,$(GCORE_CFILES))
+ 
+ COMMON_CFLAGS=-Wall -I$(INCDIR) -I./libgcore -fPIC -D$(TARGET) \
+--- a/libgcore/gcore_arm.c	1969-12-31 19:00:00.000000000 -0500
++++ b/libgcore/gcore_arm.c	2013-05-22 14:53:42.796216956 -0400
+@@ -0,0 +1,157 @@
++/* gcore_arm.c -- core analysis suite
++ *
++ * Copyright (C) 2012 Marvell INC
++ * Author: Lei Wen <leiwen@marvell.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ */
++#if defined(ARM)
++
++#include "defs.h"
++#include <gcore_defs.h>
++#include <stdint.h>
++#include <elf.h>
++#include <asm/ldt.h>
++
++static int gpr_get(struct task_context *target,
++		       const struct user_regset *regset,
++		       unsigned int size, void *buf)
++{
++	struct user_regs_struct *regs = (struct user_regs_struct *)buf;
++
++	BZERO(regs, sizeof(*regs));
++
++	readmem(machdep->get_stacktop(target->task) - 8 - SIZE(pt_regs), KVADDR,
++		regs, SIZE(pt_regs), "genregs_get: pt_regs",
++		gcore_verbose_error_handle());
++
++	return 0;
++}
++
++static int fpa_get(struct task_context *target,
++		       const struct user_regset *regset,
++		       unsigned int size, void *buf)
++{
++	struct user_fp *fp = (struct user_fp*)buf;
++
++	BZERO(fp, sizeof(*fp));
++	readmem(target->task + OFFSET(task_struct_thread_info)
++		+ GCORE_OFFSET(thread_info_fpstate),
++		KVADDR, fp, sizeof(*fp),
++		"fpa_get: fpstate",
++		gcore_verbose_error_handle());
++	return 0;
++}
++
++static int vfp_get(struct task_context *target,
++		       const struct user_regset *regset,
++		       unsigned int size, void *buf)
++{
++	struct user_vfp *vfp = (struct user_vfp*)buf;
++
++	BZERO(vfp, sizeof(*vfp));
++	readmem(target->task + OFFSET(task_struct_thread_info)
++		+ GCORE_OFFSET(thread_info_vfpstate)
++		+ GCORE_OFFSET(vfp_state_hard)
++		+ GCORE_OFFSET(vfp_hard_struct_fpregs),
++		KVADDR, &vfp->fpregs, GCORE_SIZE(vfp_hard_struct_fpregs),
++		"vfp_get: fpregs",
++		gcore_verbose_error_handle());
++
++	readmem(target->task + OFFSET(task_struct_thread_info)
++		+ GCORE_OFFSET(thread_info_vfpstate)
++		+ GCORE_OFFSET(vfp_state_hard)
++		+ GCORE_OFFSET(vfp_hard_struct_fpscr),
++		KVADDR, &vfp->fpscr, GCORE_SIZE(vfp_hard_struct_fpscr),
++		"vfp_get: fpregs",
++		gcore_verbose_error_handle());
++	return 0;
++}
++
++static inline int
++vfp_vector_active(struct task_context *target,
++		  const struct user_regset *regset)
++{
++	return !!symbol_exists("vfp_vector");
++}
++
++enum gcore_regset {
++	REGSET_GPR,
++	REGSET_FPR,
++	REGSET_VFP,
++};
++
++#define NT_ARM_VFP	0x400           /* ARM VFP/NEON registers */
++static struct user_regset arm_regsets[] = {
++	[REGSET_GPR] = {
++		.core_note_type = NT_PRSTATUS,
++		.name = "CORE",
++		.size = ELF_NGREG * sizeof(unsigned int),
++		.get = gpr_get,
++	},
++	[REGSET_FPR] = {
++		.core_note_type = NT_FPREGSET,
++		.name = "CORE",
++		.size = sizeof(struct user_fp),
++		.get = fpa_get,
++	},
++	[REGSET_VFP] = {
++		.core_note_type = NT_ARM_VFP,
++		.name = "CORE",
++		.size = ARM_VFPREGS_SIZE,
++		.active = vfp_vector_active,
++		.get = vfp_get,
++	},
++};
++#ifndef ARRAY_SIZE
++#  define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
++#endif
++
++static const struct user_regset_view arm_regset_view = {
++	.name = "arm",
++	.regsets = arm_regsets,
++	.n = ARRAY_SIZE(arm_regsets),
++	.e_machine = EM_ARM,
++};
++
++const struct user_regset_view *
++task_user_regset_view(void)
++{
++	return &arm_regset_view;
++}
++
++int gcore_is_arch_32bit_emulation(struct task_context *tc)
++{
++	return FALSE;
++}
++
++/**
++ * Return an address to gate_vma.
++ */
++ulong gcore_arch_get_gate_vma(void)
++{
++	if (!symbol_exists("gate_vma"))
++		return 0UL;
++
++	return symbol_value("gate_vma");
++}
++
++char *gcore_arch_vma_name(ulong vma)
++{
++	return NULL;
++}
++
++int gcore_arch_vsyscall_has_vm_alwaysdump_flag(void)
++{
++	return FALSE;
++}
++
++#endif /* defined(ARM) */
+--- a/libgcore/gcore_coredump.c	2011-04-24 11:32:23.000000000 -0400
++++ b/libgcore/gcore_coredump.c	2013-05-22 14:53:42.795216978 -0400
+@@ -46,22 +46,22 @@ static void fill_note(struct memelfnote 
+ 		      unsigned int sz, void *data);
+ 
+ static int notesize(struct memelfnote *en);
+-static void alignfile(int fd, off_t *foffset);
+-static void writenote(struct memelfnote *men, int fd, off_t *foffset);
+-static void write_note_info(int fd, struct elf_note_info *info, off_t *foffset);
++static void alignfile(int fd, loff_t *foffset);
++static void writenote(struct memelfnote *men, int fd, loff_t *foffset);
++static void write_note_info(int fd, struct elf_note_info *info, loff_t *foffset);
+ static size_t get_note_info_size(struct elf_note_info *info);
+-static ulong first_vma(ulong mmap, ulong gate_vma);
+-static ulong next_vma(ulong this_vma, ulong gate_vma);
+ 
+ static inline int thread_group_leader(ulong task);
+ 
++static int uvtop_quiet(ulong vaddr, physaddr_t *paddr);
++
+ void gcore_coredump(void)
+ {
+ 	struct thread_group_list *tglist = NULL;
+ 	struct elf_note_info *info;
+ 	int map_count, phnum;
+ 	ulong vma, index, mmap;
+-	off_t offset, foffset, dataoff;
++	loff_t offset, foffset, dataoff;
+ 	char *mm_cache, *buffer = NULL;
+ 	ulong gate_vma;
+ 
+@@ -169,18 +169,18 @@ void gcore_coredump(void)
+ 	write_note_info(gcore->fd, info, &foffset);
+ 	progressf("done.\n");
+ 
++	/* Align to page. Segment needs to begin with offset multiple
++	 * of block size, typically multiple of 512 bytes, in order to
++	 * make skipped page-faulted pages as holes. See the
++	 * page-fault code below. */
++	if (lseek(gcore->fd, dataoff - foffset, SEEK_CUR) < 0) {
++		error(FATAL, "%s: lseek: %s\n", gcore->corename,
++		      strerror(errno));
++	}
++
+ 	buffer = GETBUF(PAGE_SIZE);
+ 	BZERO(buffer, PAGE_SIZE);
+ 
+-	{
+-		size_t len;
+-
+-		len = dataoff - foffset;
+-		if ((size_t)write(gcore->fd, buffer, len) != len)
+-			error(FATAL, "%s: write: %s\n", gcore->corename,
+-			      strerror(errno));
+-	}
+-
+ 	progressf("Writing PT_LOAD segment ... \n");
+ 	FOR_EACH_VMA_OBJECT(vma, index, mmap, gate_vma) {
+ 		ulong addr, end, vm_start;
+@@ -195,19 +195,47 @@ void gcore_coredump(void)
+ 		for (addr = vm_start; addr < end; addr += PAGE_SIZE) {
+ 			physaddr_t paddr;
+ 
+-			if (uvtop(CURRENT_CONTEXT(), addr, &paddr, FALSE)) {
++			if (uvtop_quiet(addr, &paddr)) {
+ 				readmem(paddr, PHYSADDR, buffer, PAGE_SIZE,
+ 					"readmem vma list",
+ 					gcore_verbose_error_handle());
++				if (write(gcore->fd, buffer, PAGE_SIZE)
++				    != PAGE_SIZE)
++					error(FATAL, "%s: write: %s\n",
++					      gcore->corename,
++					      strerror(errno));
+ 			} else {
+ 				pagefaultf("page fault at %lx\n", addr);
+-				BZERO(buffer, PAGE_SIZE);
+-			}
+-
+-			if (write(gcore->fd, buffer, PAGE_SIZE) != PAGE_SIZE)
+-				error(FATAL, "%s: write: %s\n", gcore->corename,
+-				      strerror(errno));
+ 
++				/* Fill unavailable page-faulted pages
++				 * with 0 for ease of implementation;
++				 * to be honest, I want to avoid
++				 * restructuring program header table.
++				 *
++				 * Also, we do skip these pages by
++				 * lseek(). Recent filesystems support
++				 * sparse file that doesn't allocate
++				 * actual blocks if there are no
++				 * corresponding write; such part is
++				 * called hole. Hence, the skip works
++				 * just like a filter for page-faulted
++				 * pages.
++				 *
++				 * Note, however, that we don't reedit
++				 * program headers and these pages are
++				 * logically present on corefile as
++				 * zero-filled pages. If copying the
++				 * corefile on system that doesn't
++				 * support sparse file, resulting
++				 * corefile can be much larger than
++				 * original size.
++				 */
++				if (lseek(gcore->fd, PAGE_SIZE, SEEK_CUR) < 0) {
++					error(FATAL, "%s: lseek: %s\n",
++					      gcore->corename,
++					      strerror(errno));
++				}
++			}
+ 		}
+ 	}
+ 	progressf("done.\n");
+@@ -454,8 +482,8 @@ fill_thread_core_info(struct elf_thread_
+ 		    !regset->active(task_to_context(t->task), regset))
+ 			continue;
+ 		data = (void *)GETBUF(regset->size);
+-		if (!regset->get(task_to_context(t->task), regset, regset->size,
+-				 data))
++		if (regset->get(task_to_context(t->task), regset, regset->size,
++				data))
+ 			continue;
+ 		if (regset->callback)
+ 			regset->callback(t, regset);
+@@ -583,7 +611,7 @@ fill_note(struct memelfnote *note, const
+ }
+ 
+ static void
+-alignfile(int fd, off_t *foffset)
++alignfile(int fd, loff_t *foffset)
+ {
+         static const char buffer[4] = {};
+ 	const size_t len = roundup(*foffset, 4) - *foffset;
+@@ -591,11 +619,11 @@ alignfile(int fd, off_t *foffset)
+ 	if ((size_t)write(fd, buffer, len) != len)
+ 		error(FATAL, "%s: write %s\n", gcore->corename,
+ 		      strerror(errno));
+-	*foffset += (off_t)len;
++	*foffset += (loff_t)len;
+ }
+ 
+ static void
+-writenote(struct memelfnote *men, int fd, off_t *foffset)
++writenote(struct memelfnote *men, int fd, loff_t *foffset)
+ {
+ 	uint32_t n_namesz, n_descsz, n_type;
+ 
+@@ -627,7 +655,7 @@ writenote(struct memelfnote *men, int fd
+ }
+ 
+ static void
+-write_note_info(int fd, struct elf_note_info *info, off_t *foffset)
++write_note_info(int fd, struct elf_note_info *info, loff_t *foffset)
+ {
+         int first = 1;
+         struct elf_thread_core_info *t = info->thread;
+@@ -658,12 +686,12 @@ get_note_info_size(struct elf_note_info 
+ 	return info->size;
+ }
+ 
+-static ulong first_vma(ulong mmap, ulong gate_vma)
++ulong first_vma(ulong mmap, ulong gate_vma)
+ {
+ 	return mmap ? mmap : gate_vma;
+ }
+ 
+-static ulong next_vma(ulong this_vma, ulong gate_vma)
++ulong next_vma(ulong this_vma, ulong gate_vma)
+ {
+ 	ulong next;
+ 
+@@ -886,3 +914,52 @@ compat_fill_auxv_note(struct elf_note_in
+ }
+ 
+ #endif /* GCORE_ARCH_COMPAT */
++
++static int uvtop_quiet(ulong vaddr, physaddr_t *paddr)
++{
++	FILE *saved_fp = fp;
++	int page_present;
++
++	/* uvtop() with verbose FALSE returns wrong physical address
++	 * for gate_vma. The problem is that kvtop() wrongly thinks of
++	 * the fixed address 0xffffffffff600000 as the one that
++	 * belongs to direct mapping region and calculates the result
++	 * by substracting offset of direct-mapping space from the
++	 * fixed address. However, it's necessary to do paging to get
++	 * correct physical address.
++	 *
++	 * uvtop() does paging if verbose == TRUE. Then, it retuns
++	 * correct physical address.
++	 *
++	 * Next output of vtop clarifies this bug, where the first
++	 * PHYSICAL showing 0x7f600000 is wrong one and the PHYSICAL
++	 * in the last line showing 0x1c08000 is correct one.
++	 *
++	 * crash> vtop 0xffffffffff600000
++	 * VIRTUAL           PHYSICAL        
++	 * ffffffffff600000  7f600000        
++	 *
++	 * PML4 DIRECTORY: ffffffff81a85000
++	 * PAGE DIRECTORY: 1a87067
++	 *    PUD: 1a87ff8 => 1a88067
++	 *    PMD: 1a88fd8 => 28049067
++	 *    PTE: 28049000 => 1c08165
++	 *   PAGE: 1c08000
++	 *
++	 *   PTE    PHYSICAL  FLAGS
++	 * 1c08165   1c08000  (PRESENT|USER|ACCESSED|DIRTY|GLOBAL)
++	 *
++	 *       PAGE        PHYSICAL      MAPPING       INDEX CNT FLAGS
++	 * ffffea00000621c0   1c08000                0        0  1 20000000000400
++	 *
++	 * The remaining problem is that if specifying TRUE to
++	 * verbose, same information is displayed during gcore
++	 * processing. To avoid this, we assign the file pointer to
++	 * /dev/null to fp during call of uvtop().
++	 */
++	fp = pc->nullfp;
++	page_present = uvtop(CURRENT_CONTEXT(), vaddr, paddr, TRUE);
++	fp = saved_fp;
++
++	return page_present;
++}
+--- a/libgcore/gcore_coredump_table.c	2011-04-24 11:32:23.000000000 -0400
++++ b/libgcore/gcore_coredump_table.c	2013-05-22 14:53:42.795216978 -0400
+@@ -427,56 +427,3 @@ pid_alive(ulong task)
+ 
+         return !!pid;
+ }
+-
+-#ifdef GCORE_TEST
+-
+-char *gcore_coredump_table_test(void)
+-{
+-	int test_i_nlink, test_pid, test_pgrp, test_session, test_cputime, test_uid, test_gid;
+-
+-	if (gcore_is_rhel4()) {
+-		test_i_nlink = ggt->get_inode_i_nlink == get_inode_i_nlink_v0;
+-		test_pid = ggt->task_pid == task_pid;
+-		test_pgrp = ggt->task_pgrp == process_group;
+-		test_session = ggt->task_session == task_session;
+-		test_cputime = ggt->thread_group_cputime == thread_group_cputime_v0;
+-		test_uid = ggt->task_uid == task_uid_v0;
+-		test_gid = ggt->task_gid == task_gid_v0;
+-	} else if (gcore_is_rhel5()) {
+-		test_i_nlink = ggt->get_inode_i_nlink == get_inode_i_nlink_v0;
+-		test_pid = ggt->task_pid == task_pid;
+-		test_pgrp = ggt->task_pgrp == process_group;
+-		test_session = ggt->task_session == task_session;
+-		test_cputime = ggt->thread_group_cputime == thread_group_cputime_v0;
+-		test_uid = ggt->task_uid == task_uid_v0;
+-		test_gid = ggt->task_gid == task_gid_v0;
+-	} else if (gcore_is_rhel6()) {
+-		test_i_nlink = ggt->get_inode_i_nlink == get_inode_i_nlink_v19;
+-		test_pid = ggt->task_pid == task_pid_vnr;
+-		test_pgrp = ggt->task_pgrp == task_pgrp_vnr;
+-		test_session = ggt->task_session == task_session_vnr;
+-		test_cputime = ggt->thread_group_cputime == thread_group_cputime_v22;
+-		test_uid = ggt->task_uid == task_uid_v28;
+-		test_gid = ggt->task_gid == task_gid_v28;
+-	} else if (THIS_KERNEL_VERSION == LINUX(2,6,36)) {
+-		test_i_nlink = ggt->get_inode_i_nlink == get_inode_i_nlink_v19;
+-		test_pid = ggt->task_pid == task_pid_vnr;
+-		test_pgrp = ggt->task_pgrp == task_pgrp_vnr;
+-		test_session = ggt->task_session == task_session_vnr;
+-		test_cputime = ggt->thread_group_cputime == thread_group_cputime_v22;
+-		test_uid = ggt->task_uid == task_uid_v28;
+-		test_gid = ggt->task_gid == task_gid_v28;
+-	}
+-
+-	mu_assert("ggt->get_inode_i_nlink has wrongly been registered", test_i_nlink);
+-	mu_assert("ggt->task_pid has wrongly been registered", test_pid);
+-	mu_assert("ggt->task_pgrp has wrongly been registered", test_pgrp);
+-	mu_assert("ggt->task_session has wrongly been registered", test_session);
+-	mu_assert("ggt->thread_group_cputime has wrongly been registered", test_cputime);
+-	mu_assert("ggt->task_uid has wrongly been registered", test_uid);
+-	mu_assert("ggt->task_gid has wrongly been registered", test_gid);
+-
+-	return NULL;
+-}
+-
+-#endif /* GCORE_TEST */
+--- a/libgcore/gcore_defs.h	2011-04-24 11:32:23.000000000 -0400
++++ b/libgcore/gcore_defs.h	2013-05-22 14:53:42.796216956 -0400
+@@ -47,7 +47,9 @@
+ #define Elf_Phdr Elf64_Phdr
+ #define Elf_Shdr Elf64_Shdr
+ #define Elf_Nhdr Elf64_Nhdr
+-#elif X86
++#endif
++
++#ifdef X86
+ #define ELF_EXEC_PAGESIZE 4096
+ 
+ #define ELF_MACHINE EM_386
+@@ -67,6 +69,26 @@
+ #define Elf_Nhdr Elf32_Nhdr
+ #endif
+ 
++#ifdef ARM
++#define ELF_EXEC_PAGESIZE 4096
++
++#define ELF_MACHINE EM_ARM
++#define ELF_OSABI ELFOSABI_NONE
++
++#define ELF_CLASS ELFCLASS32
++#define ELF_DATA ELFDATA2LSB
++#define ELF_ARCH EM_ARM
++
++#define Elf_Half Elf32_Half
++#define Elf_Word Elf32_Word
++#define Elf_Off Elf32_Off
++
++#define Elf_Ehdr Elf32_Ehdr
++#define Elf_Phdr Elf32_Phdr
++#define Elf_Shdr Elf32_Shdr
++#define Elf_Nhdr Elf32_Nhdr
++#endif
++
+ /*
+  * gcore_regset.c
+  *
+@@ -200,17 +222,26 @@ struct user_regset_view {
+ extern const struct user_regset_view *task_user_regset_view(void);
+ extern void gcore_default_regsets_init(void);
+ 
+-#if X86
++#ifdef X86
+ #define REGSET_VIEW_NAME "i386"
+ #define REGSET_VIEW_MACHINE EM_386
+-#elif X86_64
++#endif
++
++#ifdef X86_64
+ #define REGSET_VIEW_NAME "x86_64"
+ #define REGSET_VIEW_MACHINE EM_X86_64
+-#elif IA64
++#endif
++
++#ifdef IA64
+ #define REGSET_VIEW_NAME "ia64"
+ #define REGSET_VIEW_MACHINE EM_IA_64
+ #endif
+ 
++#ifdef ARM
++#define REGSET_VIEW_NAME "arm"
++#define REGSET_VIEW_MACHINE EM_ARM
++#endif
++
+ /*
+  * gcore_dumpfilter.c
+  */
+@@ -221,6 +252,7 @@ extern void gcore_default_regsets_init(v
+ #define GCORE_DUMPFILTER_ELF_HEADERS     (0x10)
+ #define GCORE_DUMPFILTER_HUGETLB_PRIVATE (0x20)
+ #define GCORE_DUMPFILTER_HUGETLB_SHARED  (0x40)
++#define GCORE_DUMPFILTER_DONTDUMP        (0x80)
+ 
+ #define GCORE_DUMPFILTER_MAX_LEVEL (GCORE_DUMPFILTER_ANON_PRIVATE	\
+ 				    |GCORE_DUMPFILTER_ANON_SHARED	\
+@@ -228,7 +260,8 @@ extern void gcore_default_regsets_init(v
+ 				    |GCORE_DUMPFILTER_MAPPED_SHARED	\
+ 				    |GCORE_DUMPFILTER_ELF_HEADERS	\
+ 				    |GCORE_DUMPFILTER_HUGETLB_PRIVATE	\
+-				    |GCORE_DUMPFILTER_HUGETLB_SHARED)
++				    |GCORE_DUMPFILTER_HUGETLB_SHARED	\
++				    |GCORE_DUMPFILTER_DONTDUMP)
+ 
+ #define GCORE_DUMPFILTER_DEFAULT (GCORE_DUMPFILTER_ANON_PRIVATE		\
+ 				  | GCORE_DUMPFILTER_ANON_SHARED	\
+@@ -393,16 +426,64 @@ struct user_regs_struct {
+ };
+ #endif
+ 
++#ifdef ARM
++struct user_fp {
++	struct fp_reg {
++		unsigned int sign1:1;
++		unsigned int unused:15;
++		unsigned int sign2:1;
++		unsigned int exponent:14;
++		unsigned int j:1;
++		unsigned int mantissa1:31;
++		unsigned int mantissa0:32;
++	} fpregs[8];
++	unsigned int fpsr:32;
++	unsigned int fpcr:32;
++	unsigned char ftype[8];
++	unsigned int init_flag;
++};
++
++struct user_vfp {
++	unsigned long long fpregs[32];
++	unsigned long fpscr;
++};
++
++struct user_regs_struct{
++	unsigned long r0;
++	unsigned long r1;
++	unsigned long r2;
++	unsigned long r3;
++	unsigned long r4;
++	unsigned long r5;
++	unsigned long r6;
++	unsigned long r7;
++	unsigned long r8;
++	unsigned long r9;
++	unsigned long r10;
++	unsigned long fp;
++	unsigned long ip;
++	unsigned long sp;
++	unsigned long lr;
++	unsigned long pc;
++	unsigned long cpsr;
++	unsigned long ORIG_r0;
++};
++
++#define ARM_VFPREGS_SIZE ( 32 * 8 /*fpregs*/ + 4 /*fpscr*/ )
++#endif
++
+ typedef ulong elf_greg_t;
+ #define ELF_NGREG (sizeof(struct user_regs_struct) / sizeof(elf_greg_t))
+ typedef elf_greg_t elf_gregset_t[ELF_NGREG];
+ 
+-#ifdef X86
++#if defined(X86) || defined(ARM)
+ #define PAGE_SIZE 4096
+ #endif
+ 
+ extern int gcore_is_arch_32bit_emulation(struct task_context *tc);
+ extern ulong gcore_arch_get_gate_vma(void);
++extern char *gcore_arch_vma_name(ulong vma);
++extern int gcore_arch_vsyscall_has_vm_alwaysdump_flag(void);
+ 
+ /*
+  * gcore_coredump_table.c
+@@ -421,6 +502,7 @@ extern struct gcore_one_session_data *gc
+ extern struct gcore_coredump_table *ggt;
+ extern struct gcore_offset_table gcore_offset_table;
+ extern struct gcore_size_table gcore_size_table;
++extern struct gcore_machdep_table *gcore_machdep;
+ 
+ /*
+  * Misc
+@@ -557,7 +639,9 @@ typedef __kernel_old_gid_t      old_gid_
+ #ifdef X86_64
+ typedef unsigned int __kernel_uid_t;
+ typedef unsigned int __kernel_gid_t;
+-#elif X86
++#endif
++
++#if defined(X86) || defined(ARM)
+ typedef unsigned short __kernel_uid_t;
+ typedef unsigned short __kernel_gid_t;
+ #endif
+@@ -726,7 +810,12 @@ struct elf_note_info {
+ #define VM_IO           0x00004000      /* Memory mapped I/O or similar */
+ #define VM_RESERVED     0x00080000      /* Count as reserved_vm like IO */
+ #define VM_HUGETLB      0x00400000      /* Huge TLB Page VM */
+-#define VM_ALWAYSDUMP   0x04000000      /* Always include in core dumps */
++#define VM_DONTDUMP	0x04000000	/* Do not include in the core dump */
++#define VM_ALWAYSDUMP   (gcore_machdep->vm_alwaysdump)
++                                        /* Always include in core dumps */
++
++extern ulong first_vma(ulong mmap, ulong gate_vma);
++extern ulong next_vma(ulong this_vma, ulong gate_vma);
+ 
+ #define FOR_EACH_VMA_OBJECT(vma, index, mmap, gate_vma)			\
+ 	for (index = 0, vma = first_vma(mmap, gate_vma); vma;		\
+@@ -765,10 +854,13 @@ struct gcore_offset_table
+ 	long fpu_state;
+ 	long inode_i_nlink;
+ 	long nsproxy_pid_ns;
++	long mm_context_t_vdso;
+ 	long mm_struct_arg_start;
+ 	long mm_struct_arg_end;
+ 	long mm_struct_map_count;
++	long mm_struct_reserved_vm;
+ 	long mm_struct_saved_auxv;
++	long mm_struct_context;
+ 	long pid_level;
+ 	long pid_namespace_level;
+ 	long pt_regs_ax;
+@@ -807,6 +899,8 @@ struct gcore_offset_table
+ 	long task_struct_uid;
+ 	long task_struct_used_math;
+ 	long thread_info_status;
++	long thread_info_fpstate;
++	long thread_info_vfpstate;
+ 	long thread_struct_ds;
+ 	long thread_struct_es;
+ 	long thread_struct_fs;
+@@ -821,12 +915,16 @@ struct gcore_offset_table
+ 	long thread_struct_io_bitmap_max;
+ 	long thread_struct_io_bitmap_ptr;
+ 	long user_regset_n;
++	long vfp_state_hard;
++	long vfp_hard_struct_fpregs;
++	long vfp_hard_struct_fpscr;
+ 	long vm_area_struct_anon_vma;
+ 	long x8664_pda_oldrsp;
+ };
+ 
+ struct gcore_size_table
+ {
++	long mm_context_t;
+ 	long mm_struct_saved_auxv;
+ 	long thread_struct_ds;
+ 	long thread_struct_es;
+@@ -835,6 +933,8 @@ struct gcore_size_table
+ 	long thread_struct_gs;
+ 	long thread_struct_gsindex;
+ 	long thread_struct_tls_array;
++	long vfp_hard_struct_fpregs;
++	long vfp_hard_struct_fpscr;
+ 	long vm_area_struct_anon_vma;
+ 	long thread_xstate;
+ 	long i387_union;
+@@ -850,9 +950,20 @@ struct gcore_size_table
+ #define GCORE_MEMBER_SIZE_INIT(X, Y, Z) (GCORE_ASSIGN_SIZE(X) = MEMBER_SIZE(Y, Z))
+ #define GCORE_STRUCT_SIZE_INIT(X, Y) (GCORE_ASSIGN_SIZE(X) = STRUCT_SIZE(Y))
+ 
++#define GCORE_INVALID_MEMBER(X) (gcore_offset_table.X == INVALID_OFFSET)
++
++#define GCORE_ANON_MEMBER_OFFSET_REQUEST ((struct datatype_member *)(-2))
++#define GCORE_ANON_MEMBER_OFFSET(X,Y)    datatype_info((X), (Y), GCORE_ANON_MEMBER_OFFSET_REQUEST)
++#define GCORE_ANON_MEMBER_OFFSET_INIT(X, Y, Z) (GCORE_ASSIGN_OFFSET(X) = ANON_MEMBER_OFFSET(Y, Z))
++
+ extern struct gcore_offset_table gcore_offset_table;
+ extern struct gcore_size_table gcore_size_table;
+ 
++struct gcore_machdep_table
++{
++	ulong vm_alwaysdump;
++};
++
+ /*
+  * gcore flags
+  */
+@@ -949,58 +1060,20 @@ static inline void gcore_arch_table_init
+ #endif
+ }
+ 
+-static inline void gcore_arch_regsets_init(void)
+-{
+-#if X86_64
+-	extern void gcore_x86_64_regsets_init(void);
+-	gcore_x86_64_regsets_init();
+-#elif X86
+-	extern void gcore_x86_32_regsets_init(void);
+-	gcore_x86_32_regsets_init();
+-#else
+-	extern void gcore_default_regsets_init(void);
+-	gcore_default_regsets_init();
++#ifdef X86_64
++extern void gcore_x86_64_regsets_init(void);
++extern void gcore_x86_32_regsets_init(void);
++#define gcore_arch_regsets_init gcore_x86_64_regsets_init
+ #endif
+-}
+-
+-#ifdef GCORE_TEST
+-
+-static inline int gcore_proc_version_contains(const char *s)
+-{
+-	return strstr(kt->proc_version, s) ? TRUE : FALSE;
+-}
+-
+-static inline int gcore_is_rhel4(void)
+-{
+-	return THIS_KERNEL_VERSION == LINUX(2,6,9)
+-		&& gcore_proc_version_contains(".EL");
+-}
+-
+-static inline int gcore_is_rhel5(void)
+-{
+-	return THIS_KERNEL_VERSION == LINUX(2,6,18)
+-		&& gcore_proc_version_contains(".el5");
+-}
+ 
+-static inline int gcore_is_rhel6(void)
+-{
+-	return THIS_KERNEL_VERSION == LINUX(2,6,32)
+-		&& gcore_proc_version_contains(".el6");
+-}
+-
+-extern char *help_gcore_test[];
+-extern void cmd_gcore_test(void);
+-
+-#define mu_assert(message, test) do { if (!(test)) return message; } while (0)
+-#define mu_run_test(test) do { char *message = test(); tests_run++; \
+-		　　　　if (message) return message; } while (0)
+-extern int tests_run;
+-
+-extern char *gcore_x86_test(void);
+-extern char *gcore_coredump_table_test(void);
+-extern char *gcore_dumpfilter_test(void);
+-extern char *gcore_verbose_test(void);
++#ifdef X86
++extern void gcore_x86_32_regsets_init(void);
++#define gcore_arch_regsets_init gcore_x86_32_regsets_init
++#endif
+ 
++#ifndef gcore_arch_regsets_init
++extern void gcore_default_regsets_init(void);
++#define gcore_arch_regsets_init gcore_default_regsets_init
+ #endif
+ 
+ #endif /* GCORE_DEFS_H_ */
+--- a/libgcore/gcore_dumpfilter.c	2011-04-24 11:32:23.000000000 -0400
++++ b/libgcore/gcore_dumpfilter.c	2013-05-22 14:53:42.795216978 -0400
+@@ -18,6 +18,15 @@
+ 
+ static ulong dumpfilter = GCORE_DUMPFILTER_DEFAULT;
+ 
++static int always_dump_vma(ulong vma)
++{
++	if (vma == gcore_arch_get_gate_vma())
++		return TRUE;
++	if (gcore_arch_vma_name(vma))
++		return TRUE;
++	return FALSE;
++}
++
+ /**
+  * Set a given filter value to the current state
+  * @filter a filter value given from command line
+@@ -76,19 +85,45 @@ ulong gcore_dumpfilter_vma_dump_size(ulo
+ 	vm_pgoff = ULONG(vma_cache + OFFSET(vm_area_struct_vm_pgoff));
+ 	anon_vma = ULONG(vma_cache + GCORE_OFFSET(vm_area_struct_anon_vma));
+ 
+-        /* The vma can be set up to tell us the answer directly.  */
+-        if (vm_flags & VM_ALWAYSDUMP)
+-                goto whole;
++        /* always dump the vdso and vsyscall sections */
++	if (always_dump_vma(vma))
++		goto whole;
++
++	if (!gcore_machdep->vm_alwaysdump && (vm_flags & VM_DONTDUMP) &&
++	    !is_filtered(GCORE_DUMPFILTER_DONTDUMP))
++		goto nothing;
+ 
+         /* Hugetlb memory check */
+-	if (vm_flags & VM_HUGETLB)
++	if (vm_flags & VM_HUGETLB) {
+ 		if ((vm_flags & VM_SHARED)
+ 		    ? is_filtered(GCORE_DUMPFILTER_HUGETLB_SHARED)
+ 		    : is_filtered(GCORE_DUMPFILTER_HUGETLB_PRIVATE))
+ 			goto whole;
+ 
+-        /* Do not dump I/O mapped devices or special mappings */
+-        if (vm_flags & (VM_IO | VM_RESERVED))
++		/* Hugepage memory filtering was introduced at the
++		 * time where VM_NODUMP or VM_DONTDUMP flag was not
++		 * introduced yet, so there was still VM_RESERVED
++		 * flag. At that time, vmas with VM_HUGETLB flag
++		 * always had VM_RESERVED flag, too. This means that
++		 * if the vma had VM_HUGETLB flag and it was not
++		 * filtered by neither of two filtering types,
++		 * GCORE_DUMPFILTER_HUGETLB_{SHARED, PRIVATE}, then
++		 * the memory was always filtered by VM_RESEARVED
++		 * check below. However, after VM_NODUMP or
++		 * VM_DONTDUMP was introduced, VM_RESERVED flag was
++		 * removed and the check to see if VM_RESERVED flag
++		 * was set, was also removed. This goto nothing is
++		 * needed instead of checking the VM_RESERVED flag. */
++		goto nothing;
++	}
++
++        /* Do not dump I/O mapped devices */
++        if (vm_flags & VM_IO)
++		goto nothing;
++
++	/* Do not dump special mappings */
++	if (GCORE_VALID_MEMBER(mm_struct_reserved_vm)
++	    && (vm_flags & VM_RESERVED))
+ 		goto nothing;
+ 
+         /* By default, dump shared memory if mapped from an anonymous file. */
+@@ -150,25 +185,3 @@ whole:
+ pagesize:
+ 	return PAGE_SIZE;
+ }
+-
+-#ifdef GCORE_TEST
+-
+-char *gcore_dumpfilter_test(void)
+-{
+-	dumpfilter = 0UL;
+-	mu_assert("given filter level is too large",
+-		  !gcore_dumpfilter_set(GCORE_DUMPFILTER_MAX_LEVEL + 1));
+-	mu_assert("dumpfilter was updated given an invalid argument",
+-		  dumpfilter == 0UL);
+-
+-	dumpfilter = 0UL;
+-	mu_assert("didn't return TRUE even if a valid argument was given",
+-		  gcore_dumpfilter_set(GCORE_DUMPFILTER_MAX_LEVEL));
+-	mu_assert("not set given valid argument",
+-		  dumpfilter == GCORE_DUMPFILTER_MAX_LEVEL);
+-	dumpfilter = GCORE_DUMPFILTER_DEFAULT;
+-
+-	return NULL;
+-}
+-
+-#endif
+--- a/libgcore/gcore_global_data.c	2011-04-24 11:32:23.000000000 -0400
++++ b/libgcore/gcore_global_data.c	2013-05-22 14:53:42.794217007 -0400
+@@ -24,3 +24,6 @@ struct gcore_coredump_table *ggt = &gcor
+ 
+ struct gcore_offset_table gcore_offset_table = {0, };
+ struct gcore_size_table gcore_size_table = {0, };
++
++struct gcore_machdep_table gcore_machdep_table;
++struct gcore_machdep_table *gcore_machdep = &gcore_machdep_table;
+--- a/libgcore/gcore_regset.c	2011-04-24 11:32:23.000000000 -0400
++++ b/libgcore/gcore_regset.c	2013-05-22 14:53:42.796216956 -0400
+@@ -29,7 +29,7 @@ static int genregs_get(struct task_conte
+ 	readmem(machdep->get_stacktop(target->task) - SIZE(pt_regs), KVADDR,
+ 		buf, size, "genregs_get: pt_regs", gcore_verbose_error_handle());
+ 
+-	return TRUE;
++	return 0;
+ }
+ 
+ #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+--- a/libgcore/gcore_verbose.c	2011-04-24 11:32:23.000000000 -0400
++++ b/libgcore/gcore_verbose.c	2013-05-22 14:53:42.794217007 -0400
+@@ -90,55 +90,3 @@ ulong gcore_verbose_error_handle(void)
+ {
+ 	return gvd->error_handle;
+ }
+-
+-#ifdef GCORE_TEST
+-
+-char *gcore_verbose_test(void)
+-{
+-	int test;
+-
+-	gcore_verbose_set_default();
+-	test = gcore_verbose_set(VERBOSE_PROGRESS);
+-	mu_assert("failed to set VERBOSE_PROGRESS", test);
+-	test = !!(gcore_verbose_get() & VERBOSE_PROGRESS);
+-	mu_assert("VERBOSE_PROGRESS is not set even after set operation", test);
+-	test = !!(gcore_verbose_error_handle() & QUIET);
+-	mu_assert("error_handle is not set to QUIET", test);
+-
+-	gcore_verbose_set_default();
+-	test = gcore_verbose_set(VERBOSE_NONQUIET);
+-	mu_assert("failed to set VERBOSE_NONQUIET", test);
+-	test = !!(gcore_verbose_get() & VERBOSE_NONQUIET);
+-	mu_assert("VERBOSE_NONQUIET is not set even after set operation", test);
+-	test = !!(gcore_verbose_error_handle() & QUIET);
+-	mu_assert("error_handle is set to QUIET even if VERBOSE_NONQUIET is set", !test);
+-
+-	gcore_verbose_set_default();
+-	test = gcore_verbose_set(VERBOSE_PAGEFAULT);
+-	mu_assert("failed to set VERBOSE_PAGEFAULT", test);
+-	test = !!(gcore_verbose_get() & VERBOSE_PAGEFAULT);
+-	mu_assert("VERBOSE_PAGEFAULT is not set even after set operation", test);
+-	test = !!(gcore_verbose_error_handle() & QUIET);
+-	mu_assert("error_handle is not set to QUIET", test);
+-
+-	gcore_verbose_set_default();
+-	test = gcore_verbose_set(VERBOSE_PAGEFAULT | VERBOSE_NONQUIET);
+-	mu_assert("failed to set VERBOSE_PAGEFAULT | VERBOSE_NONQUIET", test);
+-	test = !!(gcore_verbose_get() & (VERBOSE_PAGEFAULT | VERBOSE_NONQUIET));
+-	mu_assert("VERBOSE_PAGEFAULT is not set even after set operation", test);
+-	test = !!(gcore_verbose_error_handle() & QUIET);
+-	mu_assert("error_handle is not set to QUIET", !test);
+-
+-	gcore_verbose_set_default();
+-	test = gcore_verbose_set(VERBOSE_MAX_LEVEL);
+-	mu_assert("VERBOSE_MAX_LEVEL should be valid, but here thought of as invalid.", test);
+-
+-	gcore_verbose_set_default();
+-	test = gcore_verbose_set(VERBOSE_MAX_LEVEL+1);
+-	mu_assert("(VERBOSE_MAX_LEVEL+1) should be invalid, but somehow accepted.", !test);
+-
+-	return NULL;
+-}
+-
+-#endif /* GCORE_TEST */
+-
+--- a/libgcore/gcore_x86.c	2013-05-22 14:52:20.641477032 -0400
++++ b/libgcore/gcore_x86.c	2013-05-22 14:53:42.794217007 -0400
+@@ -362,7 +362,7 @@ static int xfpregs_get(struct task_conte
+ 
+ 	*fxsave = xstate.fxsave;
+ 
+-	return TRUE;
++	return 0;
+ }
+ 
+ static void xfpregs_callback(struct elf_thread_core_info *t,
+@@ -430,7 +430,7 @@ static int fpregs_soft_get(struct task_c
+ 			   void *buf)
+ {
+ 	error(WARNING, "not support FPU software emulation\n");
+-	return TRUE;
++	return 0;
+ }
+ 
+ static inline struct _fpxreg *
+@@ -560,14 +560,14 @@ static int fpregs_get(struct task_contex
+ 			gxt->get_thread_struct_fpu_size(),
+ 			"fpregs_get: xstate", gcore_verbose_error_handle());
+ 		memcpy(buf, &xstate.fsave, sizeof(xstate.fsave));
+-		return TRUE;
++		return 0;
+ 	}
+ 
+ 	sanitize_i387_state(target);
+ 
+ 	convert_from_fxsr(buf, target);
+ 
+-        return TRUE;
++        return 0;
+ }
+ 
+ static ulong gcore_x86_get_thread_struct_fpu_thread_xstate(struct task_context *tc)
+@@ -649,6 +649,7 @@ xstateregs_active(struct task_context *t
+ 		  const struct user_regset *regset)
+ {
+ 	return cpu_has_xsave() && fpregs_active(target, regset)
++		&& symbol_exists("xstate_fx_sw_bytes")
+ 		&& !!get_xstate_regsets_number();
+ }
+ 
+@@ -668,9 +669,6 @@ xstateregs_get(struct task_context *targ
+ 
+         init_fpu(target->task);
+ 
+-	if (!symbol_exists("xstate_fx_sw_bytes"))
+-		error(FATAL, "xstate_fx_sw_bytes: symbol does not exist\n");
+-
+ 	xstate_fx_sw_bytes = symbol_value("xstate_fx_sw_bytes");
+ 
+         /*
+@@ -682,7 +680,7 @@ xstateregs_get(struct task_context *targ
+ 		USER_XSTATE_FX_SW_WORDS * sizeof(uint64_t),
+ 		"fill_xstate: sw_reserved", gcore_verbose_error_handle());
+ 
+-	return TRUE;
++	return 0;
+ }
+ 
+ #ifdef X86_64
+@@ -814,7 +812,7 @@ static int regset_tls_get(struct task_co
+ 		fill_user_desc(&info[i], GDT_ENTRY_TLS_MIN + i, &tls_array[i]);
+ 	}
+ 
+-	return TRUE;
++	return 0;
+ }
+ 
+ #define IO_BITMAP_BITS  65536
+@@ -825,6 +823,7 @@ static int
+ ioperm_active(struct task_context *target,
+ 	      const struct user_regset *regset)
+ {
++	ulong io_bitmap_ptr;
+ 	unsigned int io_bitmap_max;
+ 
+ 	readmem(target->task + OFFSET(task_struct_thread) +
+@@ -832,7 +831,12 @@ ioperm_active(struct task_context *targe
+ 		&io_bitmap_max, sizeof(io_bitmap_max),
+ 		"ioperm_active: io_bitmap_max", gcore_verbose_error_handle());
+ 
+-	return !!io_bitmap_max;
++	readmem(target->task + OFFSET(task_struct_thread) +
++		GCORE_OFFSET(thread_struct_io_bitmap_ptr), KVADDR,
++		&io_bitmap_ptr, sizeof(io_bitmap_ptr),
++		"ioperm_get: io_bitmap_ptr", gcore_verbose_error_handle());
++
++	return io_bitmap_max && io_bitmap_ptr;
+ }
+ 
+ static int ioperm_get(struct task_context *target,
+@@ -847,9 +851,6 @@ static int ioperm_get(struct task_contex
+ 		&io_bitmap_ptr, sizeof(io_bitmap_ptr),
+ 		"ioperm_get: io_bitmap_ptr", gcore_verbose_error_handle());
+ 
+-	if (!io_bitmap_ptr)
+-		return FALSE;
+-
+ 	readmem(io_bitmap_ptr, KVADDR, buf, size, "ioperm_get: copy IO bitmap",
+ 		gcore_verbose_error_handle());
+ 
+@@ -1525,9 +1526,9 @@ static int get_active_regs(struct task_c
+ 		return TRUE;
+ 	}
+ 
+-	if ((NETDUMP_DUMPFILE() && (target->task == tt->panic_task))
+-	    || KDUMP_DUMPFILE()) {
+-		struct user_regs_struct *note = get_regs_from_elf_notes(target);
++	if ((NETDUMP_DUMPFILE() || KDUMP_DUMPFILE()) &&
++	    exist_regs_in_elf_notes(target)) {
++		struct user_regs_struct *note =	get_regs_from_elf_notes(target);
+ 		memcpy(regs, note, sizeof(struct user_regs_struct));
+ 		return TRUE;
+ 	}
+@@ -1562,28 +1563,8 @@ enum {
+ 	GCORE_SYSCALL_OPCODE_BYTES = 2
+ };
+ 
+-/*
+- * Note: Why I don't look at opcode for sysenter instruction?
+- * ==========================================================
+- *
+- * - There are only three kinds of instructions to perform system call
+- *   invocation: sysenter, syscall and int 0x80. So, in order to
+- *   indicate sysenter is used now, it's sufficient to show syscall
+- *   and int 0x80 are not used now.
+- *
+- * - We can avoid assembly's optimization problem causing to change
+- *   relative address where sysenter is placed:
+- *   VDSO32_SYSENTER_RETURN. To find syscall and int 0x80, it's
+- *   sufficient to look at the address (%eip - 2), where 2 is the
+- *   length of system call instructions.
+- *
+- * - The opcode of sysenter is the following, although it's not used
+- *   actually:
+- *
+- * static const unsigned char GCORE_OPCODE_SYSENTER[] = {0x0f, 0x05};
+- *
+- */
+-static const unsigned char GCORE_OPCODE_SYSCALL[] = {0x0f, 0x34};
++static const unsigned char GCORE_OPCODE_SYSCALL[] = {0x0f, 0x05};
++static const unsigned char GCORE_OPCODE_SYSENTER[] = {0x0f, 0x34};
+ static const unsigned char GCORE_OPCODE_INT80[] = {0xcd, 0x80};
+ 
+ /**
+@@ -1618,7 +1599,21 @@ check_kernel_entry(struct task_context *
+ 		if (memcmp(opcode, GCORE_OPCODE_INT80, sizeof(opcode)) == 0)
+ 			return GCORE_KERNEL_ENTRY_INT80;
+ 
+-		return GCORE_KERNEL_ENTRY_SYSENTER32;
++		if (!uvtop(target,
++			   regs->ip
++			   - 2 /* jmp enter_kernel or int 0x80 */
++			   - 7 /* nop alignment bytes */
++			   - sizeof(opcode), /* sysenter */
++			   &paddr, FALSE))
++			return GCORE_KERNEL_ENTRY_IA32_UNKNOWN;
++
++		readmem(paddr, PHYSADDR, opcode, sizeof(opcode),
++			"check_context: opcode 2", gcore_verbose_error_handle());
++
++		if (memcmp(opcode, GCORE_OPCODE_SYSENTER, sizeof(opcode)) == 0)
++			return GCORE_KERNEL_ENTRY_SYSENTER32;
++
++		return GCORE_KERNEL_ENTRY_IA32_UNKNOWN;
+ 
+ 	} else {
+ 		const int vector = (int)~regs->orig_ax;
+@@ -2257,60 +2252,68 @@ ulong gcore_arch_get_gate_vma(void)
+ #endif
+ }
+ 
+-#ifdef GCORE_TEST
+-
+-#ifdef X86_64
+-static char *gcore_x86_64_test(void)
++char *gcore_arch_vma_name(ulong vma)
+ {
+-	int test_rsp, test_fpu, test_syscall, test_math;
++	ulong mm, vm_start, vdso;
+ 
+-	if (gcore_is_rhel4()) {
+-		test_rsp = gxt->get_old_rsp == gcore_x86_64_get_cpu_pda_oldrsp;
+-		test_fpu = gxt->get_thread_struct_fpu == gcore_x86_get_thread_struct_i387;
+-		test_syscall = gxt->is_special_syscall == is_special_syscall_v0;
+-		test_math = gxt->tsk_used_math == tsk_used_math_v0;
+-	} else if (gcore_is_rhel5()) {
+-		test_rsp = gxt->get_old_rsp == gcore_x86_64_get_cpu__pda_oldrsp;
+-		test_fpu = gxt->get_thread_struct_fpu == gcore_x86_get_thread_struct_i387;
+-		test_syscall = gxt->is_special_syscall == is_special_syscall_v0;
+-		test_math = gxt->tsk_used_math == tsk_used_math_v11;
+-	} else if (gcore_is_rhel6()) {
+-		test_rsp = gxt->get_old_rsp == gcore_x86_64_get_per_cpu__old_rsp;
+-		test_fpu = gxt->get_thread_struct_fpu == gcore_x86_get_thread_struct_thread_xstate;
+-		test_syscall = gxt->is_special_syscall == is_special_syscall_v26;
+-		test_math = gxt->tsk_used_math == tsk_used_math_v11;
+-	} else if (THIS_KERNEL_VERSION == LINUX(2,6,36)) {
+-		test_rsp = gxt->get_old_rsp == gcore_x86_64_get_old_rsp;
+-		test_fpu = gxt->get_thread_struct_fpu == gcore_x86_get_thread_struct_fpu_thread_xstate;
+-		test_syscall = gxt->is_special_syscall == is_special_syscall_v26;
+-		test_math = gxt->tsk_used_math == tsk_used_math_v11;
+-	}
+-
+-	mu_assert("gxt->get_old_rsp has wrongly been registered", test_rsp);
+-	mu_assert("gxt->get_thread_struct_fpu has wrongly been registered", test_fpu);
+-	mu_assert("gxt->is_special_syscall has wrongly been registered", test_syscall);
+-	mu_assert("gxt->tsk_used_math has wrongly been registered", test_math);
++	readmem(vma + OFFSET(vm_area_struct_vm_mm), KVADDR, &mm, sizeof(mm),
++		"gcore_arch_vma_name: vma->vm_mm",
++		gcore_verbose_error_handle());
+ 
+-	return NULL;
+-}
+-#endif
++	readmem(vma + OFFSET(vm_area_struct_vm_start), KVADDR, &vm_start,
++		sizeof(vm_start), "gcore_arch_vma_name: vma->vm_start",
++		gcore_verbose_error_handle());
+ 
+-#ifdef X86
+-static char *gcore_x86_32_test(void)
+-{
++	readmem(mm + GCORE_OFFSET(mm_struct_context) +
++		GCORE_OFFSET(mm_context_t_vdso), KVADDR, &vdso,	sizeof(vdso),
++		"gcore_arch_vma_name: mm->context.vdso",
++		gcore_verbose_error_handle());
++
++	if (mm && vm_start == vdso)
++		return "[vdso]";
++	if (vma == symbol_value("gate_vma"))
++		return "[vsyscall]";
+ 	return NULL;
+ }
+-#endif
+ 
+-char *gcore_x86_test(void)
+-{
+-#ifdef X86_64
+-	return gcore_x86_64_test();
+-#else
+-	return gcore_x86_32_test();
+-#endif
+-}
++/**
++ * VM_ALWAYSDUMP flag was removed when introducing VM_DONTDUMP
++ * flag. We need to determine which flag is present on a given
++ * dumpfile. A simple idea is to look up existence of symbol
++ * always_dump_vma, which was again newly introduced at the same time
++ * of removal of VM_ALWAYSDUMP flag. Unfortunately, gcc removes the
++ * function by function inlining optimization, we cannot use
++ * it. Instead, as a workaround, we look up vsyscall page and try to
++ * determine if the VM_ALWAYSDUMP flag is being set on the vma
++ * corresponding to vsyscall page.
++ */
++int gcore_arch_vsyscall_has_vm_alwaysdump_flag(void)
++{
++	char *vma_cache;
++	ulong target_vma, gate_vma, vm_flags;
++
++	target_vma = 0UL;
++
++	if ((gate_vma = gcore_arch_get_gate_vma()))
++		target_vma = gate_vma;
++	else {
++		ulong vma, index, mmap = 0UL;
++
++		FOR_EACH_VMA_OBJECT(vma, index, mmap, gate_vma) {
++			if (gcore_arch_vma_name(vma)) {
++				target_vma = vma;
++				break;
++			}
++		}
++	}
+ 
+-#endif
++	if (!target_vma)
++		return FALSE;
++
++	vma_cache = fill_vma_cache(target_vma);
++	vm_flags = ULONG(vma_cache + OFFSET(vm_area_struct_vm_flags));
++
++	return (vm_flags & VM_ALWAYSDUMP) ? TRUE : FALSE;
++}
+ 
+ #endif /* defined(X86) || defined(X86_64) */
