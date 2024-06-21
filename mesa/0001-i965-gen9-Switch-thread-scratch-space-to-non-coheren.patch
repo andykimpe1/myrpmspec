@@ -1,0 +1,74 @@
+diff -up mesa-11.0.7/src/mesa/drivers/dri/i965/brw_eu_emit.c.jx mesa-11.0.7/src/mesa/drivers/dri/i965/brw_eu_emit.c
+--- mesa-11.0.7/src/mesa/drivers/dri/i965/brw_eu_emit.c.jx	2015-12-07 08:59:47.000000000 -0500
++++ mesa-11.0.7/src/mesa/drivers/dri/i965/brw_eu_emit.c	2016-03-03 15:45:31.520664432 -0500
+@@ -1977,6 +1977,19 @@ void gen6_math(struct brw_codegen *p,
+    brw_set_src1(p, insn, src1);
+ }
+ 
++/**
++ * Return the right surface index to access the thread scratch space using
++ * stateless dataport messages.
++ */
++unsigned
++brw_scratch_surface_idx(const struct brw_codegen *p)
++{
++   /* The scratch space is thread-local so IA coherency is unnecessary. */
++   if (p->devinfo->gen >= 8)
++      return 253 /* GEN8_BTI_STATELESS_NON_COHERENT */;
++   else
++      return 255 /* BRW_BTI_STATELESS */;
++}
+ 
+ /**
+  * Write a block of OWORDs (half a GRF each) from the scratch buffer,
+@@ -2077,7 +2090,7 @@ void brw_oword_block_write_scratch(struc
+ 
+       brw_set_dp_write_message(p,
+ 			       insn,
+-			       255, /* binding table index (255=stateless) */
++                               brw_scratch_surface_idx(p),
+ 			       msg_control,
+ 			       msg_type,
+ 			       mlen,
+@@ -2163,7 +2176,7 @@ brw_oword_block_read_scratch(struct brw_
+ 
+       brw_set_dp_read_message(p,
+ 			      insn,
+-			      255, /* binding table index (255=stateless) */
++                              brw_scratch_surface_idx(p),
+ 			      msg_control,
+ 			      BRW_DATAPORT_READ_MESSAGE_OWORD_BLOCK_READ, /* msg_type */
+ 			      BRW_DATAPORT_READ_TARGET_RENDER_CACHE,
+diff -up mesa-11.0.7/src/mesa/drivers/dri/i965/brw_eu.h.jx mesa-11.0.7/src/mesa/drivers/dri/i965/brw_eu.h
+--- mesa-11.0.7/src/mesa/drivers/dri/i965/brw_eu.h.jx	2015-12-07 08:59:47.000000000 -0500
++++ mesa-11.0.7/src/mesa/drivers/dri/i965/brw_eu.h	2016-03-03 15:45:31.519664426 -0500
+@@ -317,6 +317,8 @@ void brw_oword_block_read(struct brw_cod
+ 			  uint32_t offset,
+ 			  uint32_t bind_table_index);
+ 
++unsigned brw_scratch_surface_idx(const struct brw_codegen *p);
++
+ void brw_oword_block_read_scratch(struct brw_codegen *p,
+ 				  struct brw_reg dest,
+ 				  struct brw_reg mrf,
+diff -up mesa-11.0.7/src/mesa/drivers/dri/i965/brw_vec4_generator.cpp.jx mesa-11.0.7/src/mesa/drivers/dri/i965/brw_vec4_generator.cpp
+--- mesa-11.0.7/src/mesa/drivers/dri/i965/brw_vec4_generator.cpp.jx	2015-12-07 08:59:47.000000000 -0500
++++ mesa-11.0.7/src/mesa/drivers/dri/i965/brw_vec4_generator.cpp	2016-03-03 15:45:31.522664446 -0500
+@@ -900,7 +900,7 @@ vec4_generator::generate_scratch_read(ve
+    if (devinfo->gen < 6)
+       brw_inst_set_cond_modifier(p->devinfo, send, inst->base_mrf);
+    brw_set_dp_read_message(p, send,
+-			   255, /* binding table index: stateless access */
++                           brw_scratch_surface_idx(p),
+ 			   BRW_DATAPORT_OWORD_DUAL_BLOCK_1OWORD,
+ 			   msg_type,
+ 			   BRW_DATAPORT_READ_TARGET_RENDER_CACHE,
+@@ -971,7 +971,7 @@ vec4_generator::generate_scratch_write(v
+    if (devinfo->gen < 6)
+       brw_inst_set_cond_modifier(p->devinfo, send, inst->base_mrf);
+    brw_set_dp_write_message(p, send,
+-			    255, /* binding table index: stateless access */
++                            brw_scratch_surface_idx(p),
+ 			    BRW_DATAPORT_OWORD_DUAL_BLOCK_1OWORD,
+ 			    msg_type,
+ 			    3, /* mlen */
