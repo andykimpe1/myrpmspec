@@ -1,0 +1,51 @@
+Fixup for bz 595356
+Problem. Steps to Reproduce:
+---
+# blktrace -d /dev/sda -w 30
+# rm -f sda.blktrace.0
+# mkdir sda.blktrace.0
+# blktrace -d /dev/sda -w 30
+Open output file ./sda.blktrace.0 failed: 21/Is a directory
+FAILED to start thread on CPU 0: 1/Operation not permitted
+
+blktrace does not end after 30 seconds, it will be running
+until you kill it. Moreover, next attempts to run blktrace
+failed with error.
+
+The bug:
+---
+If open_ios() fails, then tracer_wait_unblock() in the
+thread_main() waits for event, wich will never occur:
+in the case of unsuccess tracers are not unblocked.
+
+Fixup:
+---
+Make sure unblock_tracers() is also called in the case on
+unsuccess (when nthreads_running != ncpus).
+---
+
+Signed-off-by: Edward Shishkin <edward@redhat.com>
+---
+
+--- blktrace-1.0.1.orig/blktrace.c
++++ blktrace-1.0.1/blktrace.c
+@@ -1848,7 +1848,7 @@
+ 
+ 	for (cpu = 0; cpu < ncpus; cpu++)
+ 		if (start_tracer(cpu))
+-			break;
++			return;
+ 
+ 	wait_tracers_ready(cpu);
+ 
+@@ -2589,8 +2589,8 @@
+ 	}
+ 
+ 	start_tracers();
+-	if (nthreads_running == ncpus) {
+-		unblock_tracers();
++	unblock_tracers();
++ 	if (nthreads_running == ncpus) {
+ 		start_buts();
+ 		if (net_mode == Net_client)
+ 			printf("blktrace: connected!\n");
