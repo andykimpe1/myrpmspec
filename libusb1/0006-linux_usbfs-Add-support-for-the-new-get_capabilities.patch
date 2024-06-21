@@ -1,0 +1,117 @@
+From 1fabeefda0fb31aa36203aa8b3f07debdc83d22a Mon Sep 17 00:00:00 2001
+From: Hans de Goede <hdegoede@redhat.com>
+Date: Thu, 28 Jun 2012 16:40:52 +0200
+Subject: [PATCH 1/6] linux_usbfs: Add support for the new get_capabilities
+ ioctl
+
+There were a few (new) usbdevfs capabilities which libusbx could not
+discover in any other way then checking the kernel version. There are 3
+problems with this:
+1) It is just not very pretty
+2) Given the tendency of enterprise distros to backport stuff it is not
+   reliable
+3) Some of these features turn out to not work with certain host controllers,
+   making depending on them based on the kernel version not a good idea
+
+Therefor a new USBDEVFS_GET_CAPABILITIES ioctl has been added to the kernel
+to offer a better way to find out a device's capabilities (technically
+the capabilities of the host controller to which the device is attached,
+but that does not matter).
+
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+---
+ libusb/os/linux_usbfs.c | 24 ++++++++++++++++++++----
+ libusb/os/linux_usbfs.h | 10 ++++++++++
+ 2 files changed, 30 insertions(+), 4 deletions(-)
+
+diff -up libusb-1.0.8/libusb/os/linux_usbfs.c.caps libusb-1.0.8/libusb/os/linux_usbfs.c
+--- libusb-1.0.8/libusb/os/linux_usbfs.c.caps	2012-08-22 15:32:34.677822979 +0200
++++ libusb-1.0.8/libusb/os/linux_usbfs.c	2012-08-22 15:39:27.526002251 +0200
+@@ -107,6 +107,7 @@ struct linux_device_priv {
+ 
+ struct linux_device_handle_priv {
+ 	int fd;
++	__u32 caps;
+ };
+ 
+ enum reap_action {
+@@ -1139,6 +1140,7 @@ static int op_open(struct libusb_device_
+ {
+ 	struct linux_device_handle_priv *hpriv = __device_handle_priv(handle);
+ 	char filename[PATH_MAX];
++	int r;
+ 
+ 	__get_usbfs_path(handle->dev, filename);
+ 	usbi_dbg("opening %s", filename);
+@@ -1161,6 +1163,18 @@ static int op_open(struct libusb_device_
+ 		}
+ 	}
+ 
++	r = ioctl(hpriv->fd, IOCTL_USBFS_GET_CAPABILITIES, &hpriv->caps);
++	if (r < 0) {
++		if (errno == ENOTTY)
++			usbi_dbg("%s: getcap not available", filename);
++		else
++			usbi_err(HANDLE_CTX(handle),
++				 "%s: getcap failed (%d)", filename, errno);
++		hpriv->caps = 0;
++		if (supports_flag_bulk_continuation)
++			hpriv->caps |= USBFS_CAP_BULK_CONTINUATION;
++	}
++
+ 	return usbi_add_pollfd(HANDLE_CTX(handle), hpriv->fd, POLLOUT);
+ }
+ 
+@@ -1544,7 +1558,7 @@ static int submit_bulk_transfer(struct u
+ 		urb->type = urb_type;
+ 		urb->endpoint = transfer->endpoint;
+ 		urb->buffer = transfer->buffer + (i * MAX_BULK_BUFFER_LENGTH);
+-		if (supports_flag_bulk_continuation && !is_out)
++		if ((dpriv->caps & USBFS_CAP_BULK_CONTINUATION) && !is_out)
+ 			urb->flags = USBFS_URB_SHORT_NOT_OK;
+ 		if (i == num_urbs - 1 && last_urb_partial)
+ 			urb->buffer_length = transfer->length % MAX_BULK_BUFFER_LENGTH;
+@@ -1553,7 +1567,7 @@ static int submit_bulk_transfer(struct u
+ 		else
+ 			urb->buffer_length = MAX_BULK_BUFFER_LENGTH;
+ 
+-		if (i > 0 && supports_flag_bulk_continuation)
++		if (i > 0 && (dpriv->caps & USBFS_CAP_BULK_CONTINUATION))
+ 			urb->flags |= USBFS_URB_BULK_CONTINUATION;
+ 
+ 		r = ioctl(dpriv->fd, IOCTL_USBFS_SUBMITURB, urb);
+diff -up libusb-1.0.8/libusb/os/linux_usbfs.h.caps libusb-1.0.8/libusb/os/linux_usbfs.h
+--- libusb-1.0.8/libusb/os/linux_usbfs.h.caps	2011-02-07 11:53:41.000000000 +0100
++++ libusb-1.0.8/libusb/os/linux_usbfs.h	2012-08-22 15:33:21.224843100 +0200
+@@ -21,6 +21,8 @@
+ #ifndef __LIBUSB_USBFS_H__
+ #define __LIBUSB_USBFS_H__
+ 
++#include <linux/types.h>
++
+ #define SYSFS_DEVICE_PATH "/sys/bus/usb/devices"
+ 
+ struct usbfs_ctrltransfer {
+@@ -115,6 +117,11 @@ struct usbfs_hub_portinfo {
+ 	unsigned char port[127];	/* port to device num mapping */
+ };
+ 
++#define USBFS_CAP_ZERO_PACKET		0x01
++#define USBFS_CAP_BULK_CONTINUATION	0x02
++#define USBFS_CAP_NO_PACKET_SIZE_LIM	0x04
++#define USBFS_CAP_BULK_SCATTER_GATHER	0x08
++
+ #define IOCTL_USBFS_CONTROL	_IOWR('U', 0, struct usbfs_ctrltransfer)
+ #define IOCTL_USBFS_BULK		_IOWR('U', 2, struct usbfs_bulktransfer)
+ #define IOCTL_USBFS_RESETEP	_IOR('U', 3, unsigned int)
+@@ -134,5 +141,8 @@ struct usbfs_hub_portinfo {
+ #define IOCTL_USBFS_CLEAR_HALT	_IOR('U', 21, unsigned int)
+ #define IOCTL_USBFS_DISCONNECT	_IO('U', 22)
+ #define IOCTL_USBFS_CONNECT	_IO('U', 23)
++#define IOCTL_USBFS_CLAIM_PORT	_IOR('U', 24, unsigned int)
++#define IOCTL_USBFS_RELEASE_PORT	_IOR('U', 25, unsigned int)
++#define IOCTL_USBFS_GET_CAPABILITIES	_IOR('U', 26, __u32)
+ 
+ #endif
+-- 
+1.7.11.4

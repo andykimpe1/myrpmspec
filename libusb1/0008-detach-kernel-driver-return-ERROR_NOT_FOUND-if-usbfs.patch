@@ -1,0 +1,65 @@
+From daa923ac06cbf5bcac6922a9520aa7fc9919134e Mon Sep 17 00:00:00 2001
+From: Hans de Goede <hdegoede@redhat.com>
+Date: Sat, 28 Jul 2012 11:43:52 +0200
+Subject: [PATCH 3/6] detach-kernel-driver: return ERROR_NOT_FOUND if usbfs is
+ already bound (v3)
+
+Currently applications for devices which only are accessed from userspace
+can use claim / release interface to make sure they don't get in each others
+way. The same however does not work for applications which first need to detach
+a "native" / in kernel driver, as this detach will not only detach native
+drivers but also the usbfs driver, thus stealing the device from another
+userspace / libusbx app.
+
+This patch fixes libusb_detach_kernel_driver to only detach "real" kernel
+drivers and not the special usbfs driver used for userspace access to
+USB devices. If the usbfs driver is found LIBUSB_ERROR_NOT_FOUND will be
+returned to indicate no driver was detached.
+
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+---
+ libusb/core.c           | 4 ++++
+ libusb/os/linux_usbfs.c | 6 ++++++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/libusb/core.c b/libusb/core.c
+index 7c2f4d7..4c513f7 100644
+--- a/libusb/core.c
++++ b/libusb/core.c
+@@ -1513,6 +1513,10 @@ int API_EXPORTED libusb_kernel_driver_active(libusb_device_handle *dev,
+  *
+  * This functionality is not available on Darwin or Windows.
+  *
++ * Note that libusb itself also talks to the device through a special kernel
++ * driver, if this driver is already attached to the device, this call will
++ * not detach it and return LIBUSB_ERROR_NOT_FOUND.
++ *
+  * \param dev a device handle
+  * \param interface_number the interface to detach the driver from
+  * \returns 0 on success
+diff --git a/libusb/os/linux_usbfs.c b/libusb/os/linux_usbfs.c
+index 839ebde..1407866 100644
+--- a/libusb/os/linux_usbfs.c
++++ b/libusb/os/linux_usbfs.c
+@@ -1538,12 +1538,18 @@ static int op_detach_kernel_driver(struct libusb_device_handle *handle,
+ {
+ 	int fd = __device_handle_priv(handle)->fd;
+ 	struct usbfs_ioctl command;
++	struct usbfs_getdriver getdrv;
+ 	int r;
+ 
+ 	command.ifno = interface;
+ 	command.ioctl_code = IOCTL_USBFS_DISCONNECT;
+ 	command.data = NULL;
+ 
++	getdrv.interface = interface;
++	r = ioctl(fd, IOCTL_USBFS_GETDRIVER, &getdrv);
++	if (r == 0 && strcmp(getdrv.driver, "usbfs") == 0)
++		return LIBUSB_ERROR_NOT_FOUND;
++
+ 	r = ioctl(fd, IOCTL_USBFS_IOCTL, &command);
+ 	if (r) {
+ 		if (errno == ENODATA)
+-- 
+1.7.11.4
+

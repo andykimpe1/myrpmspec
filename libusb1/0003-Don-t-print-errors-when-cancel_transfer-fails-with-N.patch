@@ -1,0 +1,46 @@
+From e8c0b72bf8cc6d89c3546bbdbcc85b2c63086578 Mon Sep 17 00:00:00 2001
+From: Hans de Goede <hdegoede@redhat.com>
+Date: Mon, 20 Feb 2012 16:12:19 +0100
+Subject: [PATCH 2/6] Don't print errors when cancel_transfer fails with
+ NOT_FOUND
+
+As stated in the documentation for libusb_cancel_transfer,
+LIBUSB_ERROR_NOT_FOUND is an expected return value for
+libusb_cancel_transfer (under certain circumstances) printing
+an error each time this happens therefor is undesirable.
+
+More so because under Linux IOCTL_USBFS_DISCARDURB sets errno
+to EINVAL when the kernel could not find the urb in the kernels
+urbs in flight list. Which means that the urb has already completed
+at the host controller level, but it has not necessarily already
+been reaped. IOW under Linux libusb_cancel_transfer may yield a
+result of LIBUSB_ERROR_NOT_FOUND *before* the transfer's callback
+has been called! So there is no way for an application to avoid
+calling libusb_cancel_transfer on already completed transfers.
+
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+---
+ libusb/io.c |    7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/libusb/io.c b/libusb/io.c
+index bb6e275..9f46cf0 100644
+--- a/libusb/io.c
++++ b/libusb/io.c
+@@ -1351,8 +1351,11 @@ int API_EXPORTED libusb_cancel_transfer(struct libusb_transfer *transfer)
+ 	usbi_mutex_lock(&itransfer->lock);
+ 	r = usbi_backend->cancel_transfer(itransfer);
+ 	if (r < 0) {
+-		usbi_err(TRANSFER_CTX(transfer),
+-			"cancel transfer failed error %d", r);
++		if (r != LIBUSB_ERROR_NOT_FOUND)
++			usbi_err(TRANSFER_CTX(transfer),
++				"cancel transfer failed error %d", r);
++		else
++			usbi_dbg("cancel transfer failed error %d", r);
+ 
+ 		if (r == LIBUSB_ERROR_NO_DEVICE)
+ 			itransfer->flags |= USBI_TRANSFER_DEVICE_DISAPPEARED;
+-- 
+1.7.9.3
+

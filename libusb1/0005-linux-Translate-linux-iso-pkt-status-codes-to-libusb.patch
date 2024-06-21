@@ -1,0 +1,68 @@
+From 4c3e7f9818c0d1d0462fde6f219da65fb102a434 Mon Sep 17 00:00:00 2001
+From: Hans de Goede <hdegoede@redhat.com>
+Date: Fri, 24 Feb 2012 11:15:30 +0100
+Subject: [PATCH 4/6] linux: Translate linux iso pkt status codes to libusb
+ transfer status codes
+
+During testing of my usbredir code I hit a scenario where my libusb app
+was seeing EXDEV as status in the transfer's iso_packet_desc
+
+This happened because we don't translate linux negative errno errors
+stored in iso pkts status to libusb transfer status codes at all! So this
+patch adds translation for this.
+
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+---
+ libusb/os/linux_usbfs.c |   36 +++++++++++++++++++++++++++++++++++-
+ 1 file changed, 35 insertions(+), 1 deletion(-)
+
+diff --git a/libusb/os/linux_usbfs.c b/libusb/os/linux_usbfs.c
+index 36d37a4..a7d8298 100644
+--- a/libusb/os/linux_usbfs.c
++++ b/libusb/os/linux_usbfs.c
+@@ -2053,7 +2053,41 @@ static int handle_iso_completion(struct usbi_transfer *itransfer,
+ 		struct usbfs_iso_packet_desc *urb_desc = &urb->iso_frame_desc[i];
+ 		struct libusb_iso_packet_descriptor *lib_desc =
+ 			&transfer->iso_packet_desc[tpriv->iso_packet_offset++];
+-		lib_desc->status = urb_desc->status;
++		lib_desc->status = LIBUSB_TRANSFER_COMPLETED;
++		switch (urb_desc->status) {
++		case 0:
++			break;
++		case -ENOENT: /* cancelled */
++		case -ECONNRESET:
++			break;
++		case -ENODEV:
++		case -ESHUTDOWN:
++			usbi_dbg("device removed");
++			lib_desc->status = LIBUSB_TRANSFER_NO_DEVICE;
++			break;
++		case -EPIPE:
++			usbi_dbg("detected endpoint stall");
++			lib_desc->status = LIBUSB_TRANSFER_STALL;
++			break;
++		case -EOVERFLOW:
++			usbi_dbg("overflow error");
++			lib_desc->status = LIBUSB_TRANSFER_OVERFLOW;
++			break;
++		case -ETIME:
++		case -EPROTO:
++		case -EILSEQ:
++		case -ECOMM:
++		case -ENOSR:
++		case -EXDEV:
++			usbi_dbg("low-level USB error %d", urb_desc->status);
++			lib_desc->status = LIBUSB_TRANSFER_ERROR;
++			break;
++		default:
++			usbi_warn(TRANSFER_CTX(transfer),
++				"unrecognised urb status %d", urb_desc->status);
++			lib_desc->status = LIBUSB_TRANSFER_ERROR;
++			break;
++		}
+ 		lib_desc->actual_length = urb_desc->actual_length;
+ 	}
+ 
+-- 
+1.7.9.3
+
