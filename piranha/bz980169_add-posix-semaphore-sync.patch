@@ -1,0 +1,152 @@
+From 00b0e2e7b73c1d0f265e247f192cafa78cf477c8 Mon Sep 17 00:00:00 2001
+From: Ryan O'Hara <rohara@redhat.com>
+Date: Mon, 15 Jul 2013 10:12:37 -0500
+Subject: [PATCH] Add POSIX semaphose for pulse/lvsd synchronization.
+
+Resolves: #980169
+
+Signed-off-by: Ryan O'Hara <rohara@redhat.com>
+---
+ Makefile  |  2 +-
+ globals.h |  2 ++
+ lvsd.c    | 11 +++++++++++
+ pulse.c   | 38 ++++++++++++++++++++++++++++++++------
+ 4 files changed, 46 insertions(+), 7 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index f40125d..243e353 100644
+--- a/Makefile
++++ b/Makefile
+@@ -51,7 +51,7 @@ else
+ endif
+ 
+ LDFLAGS   	= -ggdb # -lefence
+-LOADLIBES 	= -lpopt -lm
++LOADLIBES 	= -lpopt -lm -lpthread -lrt
+ INCLUDE   	= 
+ 
+ SBIN	  	= $(DESTDIR)/usr/sbin
+diff --git a/globals.h b/globals.h
+index 74e60b0..97786cb 100644
+--- a/globals.h
++++ b/globals.h
+@@ -12,3 +12,5 @@
+ #define CFGFILE	"/etc/sysconfig/ha/lvs.cf"
+ #define IPVSADM	"/sbin/ipvsadm"
+ #define RESERVE	"/usr/sbin/scsi_reserve"
++
++#define LVS_MUTEX "lvs"
+diff --git a/lvsd.c b/lvsd.c
+index 10a25ca..10d7749 100644
+--- a/lvsd.c
++++ b/lvsd.c
+@@ -111,10 +111,12 @@
+ #include <string.h>
+ #include <sys/signal.h>
+ #include <sys/prctl.h>
++#include <sys/stat.h>
+ #include <sys/wait.h>
+ #include <unistd.h>
+ #include <assert.h>
+ #include <syslog.h>
++#include <semaphore.h>
+ 
+ #include "globals.h"
+ #include "lvsconfig.h"
+@@ -1247,6 +1249,7 @@ startServices (struct lvsConfig *config, int flags, char *configFile)
+   int status;
+   int doShutdown = 0;
+   int vsn, sn;
++  sem_t *sem = NULL;
+ 
+   if (flags & LVS_FLAG_ASDAEMON)
+     {
+@@ -1294,6 +1297,14 @@ startServices (struct lvsConfig *config, int flags, char *configFile)
+   sigdelset (&sigs, SIGTERM);
+   sigdelset (&sigs, SIGHUP);
+ 
++  if ((sem = sem_open (LVS_MUTEX, O_CREAT, 0644, 0)) == SEM_FAILED) {
++      piranha_log (flags, (char *) "Error creating semaphore: %s", strerror(errno));
++      sem_unlink (LVS_MUTEX);
++      doShutdown = 1;
++  } else {
++      sem_post (sem);
++      sem_unlink (LVS_MUTEX);
++  }
+ 
+   while (!doShutdown)
+     {
+diff --git a/pulse.c b/pulse.c
+index 330c220..a9cd4ab 100644
+--- a/pulse.c
++++ b/pulse.c
+@@ -126,12 +126,15 @@
+ #include <popt.h>
+ #include <sys/ioctl.h>
+ #include <sys/signal.h>
++#include <sys/stat.h>
+ #include <sys/time.h>
+ #include <sys/wait.h>
+ #include <unistd.h>
+ #include <pwd.h>
+ #include <setjmp.h>
+ #include <syslog.h>
++#include <semaphore.h>
++#include <time.h>
+ 
+ #include "globals.h"
+ #include "lvsconfig.h"
+@@ -1386,7 +1389,8 @@ activateLvs (struct lvsConfig *config, int flags)
+ 
+   pid_t child = 0;
+   char *argv[6];
+-
++  sem_t *sem = NULL;
++  struct timespec ts;
+ 
+   executeCommand (config, flags, config->activeCommand);
+ 
+@@ -1406,13 +1410,35 @@ activateLvs (struct lvsConfig *config, int flags)
+   if (pulse_debug)
+     logArgv (flags, argv);
+ 
+-  if (!(flags & PULSE_FLAG_NORUN))
+-    {
+-      if (!(child = fork ()))
+-	{
++  if ((sem = sem_open (LVS_MUTEX, O_CREAT, 0644, 0)) == SEM_FAILED) {
++      piranha_log (flags, (char *) "Failed to open semaphore: %s", strerror(errno));
++      sem_unlink (LVS_MUTEX);
++      exit (-1);
++  }
++
++  if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
++      piranha_log (flags, (char *) "Failed to get current time: %s", strerror(errno));
++      sem_unlink (LVS_MUTEX);
++      exit (-1);
++  }
++
++  /*
++   * 10 seconds is a long time to wait for semaphore...
++   */
++  ts.tv_sec += 10;
++
++  if (!(flags & PULSE_FLAG_NORUN)) {
++      if (!(child = fork ())) {
+ 	  execv (lvsBinary, argv);
+ 	  exit (-1);
+-	}
++      }
++      if (sem_timedwait (sem, &ts) != 0) {
++	  piranha_log (flags, (char *) "Error waiting for semaphore: %s", strerror(errno));
++	  sem_unlink (LVS_MUTEX);
++	  kill (child, SIGKILL);
++	  exit (-1);
++      }
++      sem_unlink (LVS_MUTEX);
+     }
+ 
+   syncDaemon (config, flags, 1);
+-- 
+1.8.1.4
+
