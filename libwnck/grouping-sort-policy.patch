@@ -1,0 +1,264 @@
+From c6e1f41ff66ccb69fe9a8d1c18644bb7df18a427 Mon Sep 17 00:00:00 2001
+From: Ray Strode <rstrode@redhat.com>
+Date: Thu, 3 Mar 2011 09:41:05 -0500
+Subject: [PATCH 1/2] tasklist: make sure windows in groups are sorted consistently
+
+Right now, they are sorted by age in some parts of the code and
+sorted alphabetically in other parts.  The desired default
+(alphabetical ordering) always seems to "win", so we may want to
+drop the code that sorts it the other way entirely, but for now
+at least make both places consistent.
+
+https://bugzilla.gnome.org/show_bug.cgi?id=171804
+---
+ libwnck/tasklist.c |    3 ++-
+ 1 files changed, 2 insertions(+), 1 deletions(-)
+
+diff --git a/libwnck/tasklist.c b/libwnck/tasklist.c
+index cbf0c9a..50fb295 100644
+--- a/libwnck/tasklist.c
++++ b/libwnck/tasklist.c
+@@ -2363,7 +2363,8 @@ wnck_tasklist_update_lists (WnckTasklist *tasklist)
+     {
+       class_group_task = WNCK_TASK (l->data);
+ 
+-      class_group_task->windows = g_list_sort (class_group_task->windows, wnck_task_compare);
++      class_group_task->windows = g_list_sort (class_group_task->windows,
++                                               wnck_task_compare_alphabetically);
+ 
+       /* so the number of windows in the task gets reset on the
+        * task label
+-- 
+1.7.1
+
+
+From 67e310905f8f8a9e2d4c6ec771b116b69800d996 Mon Sep 17 00:00:00 2001
+From: Ray Strode <rstrode@redhat.com>
+Date: Thu, 3 Mar 2011 09:45:44 -0500
+Subject: [PATCH 2/2] tasklist: add new sort policy for windows in groups
+
+Right now the tasklist always sorts grouped windows
+alphabetically.  This commit adds a new policy
+"by age" which sorts things in the same order they
+show up ungrouped.
+
+https://bugzilla.gnome.org/show_bug.cgi?id=171804
+---
+ libwnck/tasklist.c |  101 ++++++++++++++++++++++++++++++++++++++++++++++------
+ libwnck/tasklist.h |   17 +++++++++
+ 2 files changed, 107 insertions(+), 11 deletions(-)
+
+diff --git a/libwnck/tasklist.c b/libwnck/tasklist.c
+index 50fb295..64152df 100644
+--- a/libwnck/tasklist.c
++++ b/libwnck/tasklist.c
+@@ -210,6 +210,8 @@ struct _WnckTasklistPrivate
+   WnckTasklistGroupingType grouping;
+   gint grouping_limit;
+ 
++  WnckTasklistGroupingSortPolicy grouping_sort_policy;
++
+   guint activate_timeout_id;
+   guint screen_connections [N_SCREEN_CONNECTIONS];
+ 
+@@ -933,6 +935,26 @@ wnck_tasklist_set_grouping (WnckTasklist            *tasklist,
+   gtk_widget_queue_resize (GTK_WIDGET (tasklist));
+ }
+ 
++/**
++ * wnck_tasklist_set_grouping_sort_policy:
++ * @tasklist: a #WnckTasklist.
++ * @policy: a #WnckTasklistGroupingSortPolicy
++ *
++ * Sets how tasks are sorted when grouped.
++ */
++void
++wnck_tasklist_set_grouping_sort_policy (WnckTasklist                  *tasklist,
++                                        WnckTasklistGroupingSortPolicy policy)
++{
++  g_return_if_fail (WNCK_IS_TASKLIST (tasklist));
++
++  if (tasklist->priv->grouping_sort_policy == policy)
++    return;
++
++  tasklist->priv->grouping_sort_policy = policy;
++  gtk_widget_queue_resize (GTK_WIDGET (tasklist));
++}
++
+ static void
+ wnck_tasklist_set_relief_callback (WnckWindow   *win,
+ 				   WnckTask     *task,
+@@ -1490,6 +1512,29 @@ wnck_task_size_allocated (GtkWidget     *widget,
+ }
+ 
+ static void
++sort_class_group_task_window_tasks (WnckTasklist *tasklist,
++                                    WnckTask     *class_group_task)
++{
++  g_return_if_fail (class_group_task->type == WNCK_TASK_CLASS_GROUP);
++
++  switch (tasklist->priv->grouping_sort_policy)
++    {
++    case WNCK_TASKLIST_GROUPING_SORT_ALPHABETICALLY:
++      class_group_task->windows = g_list_sort (class_group_task->windows,
++                                               wnck_task_compare_alphabetically);
++      break;
++    case WNCK_TASKLIST_GROUPING_SORT_BY_AGE:
++      /* wnck_task_compare always compares window tasks by their sort order
++       * (which is map order by default, see the _wnck_window_create call
++       * in screen.c:update_client_list) */
++      class_group_task->windows = g_list_sort (class_group_task->windows, wnck_task_compare);
++      break;
++    default:
++      g_assert_not_reached ();
++    }
++}
++
++static void
+ wnck_tasklist_size_allocate (GtkWidget      *widget,
+                              GtkAllocation  *allocation)
+ {
+@@ -1549,9 +1594,8 @@ wnck_tasklist_size_allocate (GtkWidget      *widget,
+ 	  visible_tasks = g_list_prepend (visible_tasks, class_group_task);
+ 
+           /* Sort */
+-          class_group_task->windows = g_list_sort (class_group_task->windows,
+-                                                   wnck_task_compare_alphabetically);
+-	  
++          sort_class_group_task_window_tasks (tasklist, class_group_task);
++
+ 	  /* Hide all this group's windows */
+ 	  l = class_group_task->windows;
+ 	  while (l != NULL)
+@@ -2363,8 +2407,7 @@ wnck_tasklist_update_lists (WnckTasklist *tasklist)
+     {
+       class_group_task = WNCK_TASK (l->data);
+ 
+-      class_group_task->windows = g_list_sort (class_group_task->windows,
+-                                               wnck_task_compare_alphabetically);
++      sort_class_group_task_window_tasks (tasklist, class_group_task);
+ 
+       /* so the number of windows in the task gets reset on the
+        * task label
+@@ -4096,7 +4139,7 @@ wnck_task_compare_alphabetically (gconstpointer a,
+ }
+ 
+ static gint
+-compare_class_group_tasks (WnckTask *task1, WnckTask *task2)
++compare_class_group_tasks_alphabetically (WnckTask *task1, WnckTask *task2)
+ {
+   const char *name1, *name2;
+ 
+@@ -4107,22 +4150,52 @@ compare_class_group_tasks (WnckTask *task1, WnckTask *task2)
+ }
+ 
+ static gint
++compare_class_group_tasks_by_age (WnckTask *task1, WnckTask *task2)
++{
++  WnckTask *window_task1, *window_task2;
++
++  g_return_val_if_fail (task1->type == WNCK_TASK_CLASS_GROUP, 1);
++  g_return_val_if_fail (task2->type == WNCK_TASK_CLASS_GROUP, -1);
++
++  /* uses the fact that the windows associated with class group tasks
++   * are sorted by age. see wnck_tasklist_size_allocate() */
++  window_task1 = WNCK_TASK (g_list_last (task2->windows)->data);
++  window_task2 = WNCK_TASK (g_list_last (task2->windows)->data);
++
++  g_assert (window_task1->type == WNCK_TASK_WINDOW);
++  g_assert (window_task2->type == WNCK_TASK_WINDOW);
++
++  return wnck_window_get_sort_order (window_task1->window) -
++         wnck_window_get_sort_order (window_task2->window);
++}
++
++static gint
+ wnck_task_compare (gconstpointer  a,
+ 		   gconstpointer  b)
+ {
++  WnckTasklist *tasklist;
+   WnckTask *task1 = WNCK_TASK (a);
+   WnckTask *task2 = WNCK_TASK (b);
+   gint pos1, pos2;
+ 
+   pos1 = pos2 = 0;  /* silence the compiler */
+ 
++  tasklist = task1->tasklist;
++
+   switch (task1->type)
+     {
+     case WNCK_TASK_CLASS_GROUP:
+       if (task2->type == WNCK_TASK_CLASS_GROUP)
+-	return compare_class_group_tasks (task1, task2);
++        {
++          if (tasklist->priv->grouping_sort_policy == WNCK_TASKLIST_GROUPING_SORT_ALPHABETICALLY)
++            return compare_class_group_tasks_alphabetically (task1, task2);
++          else
++            return compare_class_group_tasks_by_age (task1, task2);
++        }
+       else
+-	return -1; /* Sort groups before everything else */
++        {
++          return -1; /* Sort groups before everything else */
++        }
+ 
+     case WNCK_TASK_WINDOW:
+       pos1 = wnck_window_get_sort_order (task1->window);
+@@ -4136,10 +4209,16 @@ wnck_task_compare (gconstpointer  a,
+     {
+     case WNCK_TASK_CLASS_GROUP:
+       if (task1->type == WNCK_TASK_CLASS_GROUP)
+-	return compare_class_group_tasks (task1, task2);
++        {
++          if (tasklist->priv->grouping_sort_policy == WNCK_TASKLIST_GROUPING_SORT_ALPHABETICALLY)
++            return compare_class_group_tasks_alphabetically (task1, task2);
++          else
++            return compare_class_group_tasks_by_age (task1, task2);
++        }
+       else
+-	return 1; /* Sort groups before everything else */
+-
++        {
++          return 1; /* Sort groups before everything else */
++        }
+     case WNCK_TASK_WINDOW:
+       pos2 = wnck_window_get_sort_order (task2->window);
+       break;
+diff --git a/libwnck/tasklist.h b/libwnck/tasklist.h
+index fca3011..7f20ba1 100644
+--- a/libwnck/tasklist.h
++++ b/libwnck/tasklist.h
+@@ -83,6 +83,21 @@ typedef enum {
+   WNCK_TASKLIST_ALWAYS_GROUP
+ } WnckTasklistGroupingType;
+ 
++/**
++ * WnckTasklistGroupingSortPolicy:
++ * @WNCK_TASKLIST_GROUPING_SORT_ALPHABETICALLY: When grouping multiple
++ * #WnckWindow, sort alphetically by window title.
++ * @WNCK_TASKLIST_GROUPING_SORT_BY_AGE: When group multiple #WnckWindow,
++ * sort by order they were mapped.
++ *
++ * Type defining the sort policy of the #WnckTasklist when grouping multiple
++ * #WnckWindow
++ */
++typedef enum {
++  WNCK_TASKLIST_GROUPING_SORT_ALPHABETICALLY,
++  WNCK_TASKLIST_GROUPING_SORT_BY_AGE
++} WnckTasklistGroupingSortPolicy;
++
+ GType wnck_tasklist_get_type (void) G_GNUC_CONST;
+ 
+ GtkWidget *wnck_tasklist_new (WnckScreen *screen);
+@@ -91,6 +106,8 @@ const int *wnck_tasklist_get_size_hint_list (WnckTasklist  *tasklist,
+ 
+ void wnck_tasklist_set_grouping (WnckTasklist             *tasklist,
+ 				 WnckTasklistGroupingType  grouping);
++void wnck_tasklist_set_grouping_sort_policy (WnckTasklist                   *tasklist,
++					     WnckTasklistGroupingSortPolicy  policy);
+ void wnck_tasklist_set_switch_workspace_on_unminimize (WnckTasklist  *tasklist,
+ 						       gboolean       switch_workspace_on_unminimize);
+ void wnck_tasklist_set_grouping_limit (WnckTasklist *tasklist,
+-- 
+1.7.1
+
