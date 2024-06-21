@@ -1,0 +1,4806 @@
+diff --git a/configure.ac b/configure.ac
+index fc02e90..817bf8b 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -17,6 +17,10 @@ AC_INIT([Mesa],[mesa_version],
+ AC_CONFIG_AUX_DIR([bin])
+ AC_CANONICAL_HOST
+ 
++dnl Save user CFLAGS and CXXFLAGS so one can override the default ones
++USER_CFLAGS="$CFLAGS"
++USER_CXXFLAGS="$CXXFLAGS"
++
+ dnl Versions for external dependencies
+ LIBDRM_REQUIRED=2.4.24
+ LIBDRM_RADEON_REQUIRED=2.4.24
+@@ -85,7 +89,7 @@ if test "x$GCC" = xyes -a "x$CLANG" = xno; then
+     GCC_VERSION=`$CC -dumpversion`
+     if test $? -eq 0; then
+         major=`echo $GCC_VERSION | cut -d. -f1`
+-        minor=`echo $GCC_VERSION | cut -d. -f1`
++        minor=`echo $GCC_VERSION | cut -d. -f2`
+     fi
+ 
+     if test $major -lt 3 -o $major -eq 3 -a $minor -lt 3 ; then
+@@ -1806,6 +1810,11 @@ if test "x$with_gallium_drivers" != x; then
+             gallium_check_st "nouveau/drm" "dri-nouveau" "xorg-nouveau"
+             ;;
+         xswrast)
++            GALLIUM_DRIVERS_DIRS="$GALLIUM_DRIVERS_DIRS softpipe"
++            if test "x$MESA_LLVM" = x1; then
++                GALLIUM_DRIVERS_DIRS="$GALLIUM_DRIVERS_DIRS llvmpipe"
++            fi
++
+             if test "x$HAVE_ST_DRI" = xyes; then
+                 GALLIUM_TARGET_DIRS="$GALLIUM_TARGET_DIRS dri-swrast"
+             fi
+@@ -1824,6 +1833,10 @@ dnl Restore LDFLAGS and CPPFLAGS
+ LDFLAGS="$_SAVE_LDFLAGS"
+ CPPFLAGS="$_SAVE_CPPFLAGS"
+ 
++dnl Add user CFLAGS and CXXFLAGS
++CFLAGS="$CFLAGS $USER_CFLAGS"
++CXXFLAGS="$CXXFLAGS $USER_CXXFLAGS"
++
+ dnl Substitute the config
+ AC_CONFIG_FILES([configs/autoconf])
+ 
+diff --git a/docs/news.html b/docs/news.html
+index eea6cd6..70b38c6 100644
+--- a/docs/news.html
++++ b/docs/news.html
+@@ -11,6 +11,13 @@
+ <H1>News</H1>
+ 
+ 
++<h2>July 31, 2011</h2>
++
++<p>
++<a href="relnotes-7.11.html">Mesa 7.11</a> is released.  This is a new
++release with many new features.
++</p>
++
+ <h2>June 13, 2011</h2>
+ 
+ <p>
+diff --git a/docs/relnotes-7.11.html b/docs/relnotes-7.11.html
+index 79776d3..52033cf 100644
+--- a/docs/relnotes-7.11.html
++++ b/docs/relnotes-7.11.html
+@@ -30,7 +30,12 @@ for DRI hardware acceleration.
+ 
+ <h2>MD5 checksums</h2>
+ <pre>
+-tbd
++fa2c7068503133fb2453244cda11cb2a  MesaLib-7.11.tar.gz
++ff03aca82d0560009a076a87c888cf13  MesaLib-7.11.tar.bz2
++ede1ac0976f6f05df586093fc17d63ed  MesaLib-7.11.zip
++b4fb81a47c5caedaefad49af7702c23d  MesaGLUT-7.11.tar.gz
++77a9a0bbd7f8bca882aa5709b88cb071  MesaGLUT-7.11.tar.bz2
++c19ef0c6eb61188c96ed4ccedd70717c  MesaGLUT-7.11.zip
+ </pre>
+ 
+ 
+diff --git a/src/gallium/auxiliary/util/u_vbuf_mgr.c b/src/gallium/auxiliary/util/u_vbuf_mgr.c
+index 19eb689..56e4866 100644
+--- a/src/gallium/auxiliary/util/u_vbuf_mgr.c
++++ b/src/gallium/auxiliary/util/u_vbuf_mgr.c
+@@ -49,7 +49,7 @@ struct u_vbuf_caps {
+    unsigned fetch_dword_unaligned:1;
+ };
+ 
+-struct u_vbuf_mgr_elements {
++struct u_vbuf_elements {
+    unsigned count;
+    struct pipe_vertex_element ve[PIPE_MAX_ATTRIBS];
+ 
+@@ -67,7 +67,7 @@ struct u_vbuf_mgr_elements {
+    boolean incompatible_layout;
+ };
+ 
+-struct u_vbuf_mgr_priv {
++struct u_vbuf_priv {
+    struct u_vbuf_mgr b;
+    struct u_vbuf_caps caps;
+    struct pipe_context *pipe;
+@@ -75,17 +75,15 @@ struct u_vbuf_mgr_priv {
+    struct translate_cache *translate_cache;
+    unsigned translate_vb_slot;
+ 
+-   struct u_vbuf_mgr_elements *ve;
++   struct u_vbuf_elements *ve;
+    void *saved_ve, *fallback_ve;
+    boolean ve_binding_lock;
+ 
+-   unsigned saved_buffer_offset[PIPE_MAX_ATTRIBS];
+-
+    boolean any_user_vbs;
+    boolean incompatible_vb_layout;
+ };
+ 
+-static void u_vbuf_mgr_init_format_caps(struct u_vbuf_mgr_priv *mgr)
++static void u_vbuf_init_format_caps(struct u_vbuf_priv *mgr)
+ {
+    struct pipe_screen *screen = mgr->pipe->screen;
+ 
+@@ -115,13 +113,13 @@ static void u_vbuf_mgr_init_format_caps(struct u_vbuf_mgr_priv *mgr)
+ }
+ 
+ struct u_vbuf_mgr *
+-u_vbuf_mgr_create(struct pipe_context *pipe,
+-                  unsigned upload_buffer_size,
+-                  unsigned upload_buffer_alignment,
+-                  unsigned upload_buffer_bind,
+-                  enum u_fetch_alignment fetch_alignment)
++u_vbuf_create(struct pipe_context *pipe,
++              unsigned upload_buffer_size,
++              unsigned upload_buffer_alignment,
++              unsigned upload_buffer_bind,
++              enum u_fetch_alignment fetch_alignment)
+ {
+-   struct u_vbuf_mgr_priv *mgr = CALLOC_STRUCT(u_vbuf_mgr_priv);
++   struct u_vbuf_priv *mgr = CALLOC_STRUCT(u_vbuf_priv);
+ 
+    mgr->pipe = pipe;
+    mgr->translate_cache = translate_cache_create();
+@@ -133,19 +131,21 @@ u_vbuf_mgr_create(struct pipe_context *pipe,
+    mgr->caps.fetch_dword_unaligned =
+          fetch_alignment == U_VERTEX_FETCH_BYTE_ALIGNED;
+ 
+-   u_vbuf_mgr_init_format_caps(mgr);
++   u_vbuf_init_format_caps(mgr);
+ 
+    return &mgr->b;
+ }
+ 
+-void u_vbuf_mgr_destroy(struct u_vbuf_mgr *mgrb)
++void u_vbuf_destroy(struct u_vbuf_mgr *mgrb)
+ {
+-   struct u_vbuf_mgr_priv *mgr = (struct u_vbuf_mgr_priv*)mgrb;
++   struct u_vbuf_priv *mgr = (struct u_vbuf_priv*)mgrb;
+    unsigned i;
+ 
+-   for (i = 0; i < mgr->b.nr_real_vertex_buffers; i++) {
++   for (i = 0; i < mgr->b.nr_vertex_buffers; i++) {
+       pipe_resource_reference(&mgr->b.vertex_buffer[i].buffer, NULL);
+-      pipe_resource_reference(&mgr->b.real_vertex_buffer[i], NULL);
++   }
++   for (i = 0; i < mgr->b.nr_real_vertex_buffers; i++) {
++      pipe_resource_reference(&mgr->b.real_vertex_buffer[i].buffer, NULL);
+    }
+ 
+    translate_cache_destroy(mgr->translate_cache);
+@@ -154,8 +154,8 @@ void u_vbuf_mgr_destroy(struct u_vbuf_mgr *mgrb)
+ }
+ 
+ 
+-static enum u_vbuf_return_flags
+-u_vbuf_translate_begin(struct u_vbuf_mgr_priv *mgr,
++static void
++u_vbuf_translate_begin(struct u_vbuf_priv *mgr,
+                        int min_index, int max_index)
+ {
+    struct translate_key key;
+@@ -282,9 +282,9 @@ u_vbuf_translate_begin(struct u_vbuf_mgr_priv *mgr,
+    if (mgr->translate_vb_slot != ~0) {
+       /* Setup the new vertex buffer. */
+       pipe_resource_reference(
+-            &mgr->b.real_vertex_buffer[mgr->translate_vb_slot], out_buffer);
+-      mgr->b.vertex_buffer[mgr->translate_vb_slot].buffer_offset = out_offset;
+-      mgr->b.vertex_buffer[mgr->translate_vb_slot].stride = key.output_stride;
++            &mgr->b.real_vertex_buffer[mgr->translate_vb_slot].buffer, out_buffer);
++      mgr->b.real_vertex_buffer[mgr->translate_vb_slot].buffer_offset = out_offset;
++      mgr->b.real_vertex_buffer[mgr->translate_vb_slot].stride = key.output_stride;
+ 
+       /* Setup new vertex elements. */
+       for (i = 0; i < mgr->ve->count; i++) {
+@@ -311,11 +311,9 @@ u_vbuf_translate_begin(struct u_vbuf_mgr_priv *mgr,
+    }
+ 
+    pipe_resource_reference(&out_buffer, NULL);
+-
+-   return upload_flushed ? U_VBUF_UPLOAD_FLUSHED : 0;
+ }
+ 
+-static void u_vbuf_translate_end(struct u_vbuf_mgr_priv *mgr)
++static void u_vbuf_translate_end(struct u_vbuf_priv *mgr)
+ {
+    if (mgr->fallback_ve == NULL) {
+       return;
+@@ -328,7 +326,7 @@ static void u_vbuf_translate_end(struct u_vbuf_mgr_priv *mgr)
+    mgr->fallback_ve = NULL;
+ 
+    /* Delete the now-unused VBO. */
+-   pipe_resource_reference(&mgr->b.real_vertex_buffer[mgr->translate_vb_slot],
++   pipe_resource_reference(&mgr->b.real_vertex_buffer[mgr->translate_vb_slot].buffer,
+                            NULL);
+    mgr->b.nr_real_vertex_buffers = mgr->b.nr_vertex_buffers;
+ }
+@@ -336,15 +334,15 @@ static void u_vbuf_translate_end(struct u_vbuf_mgr_priv *mgr)
+ #define FORMAT_REPLACE(what, withwhat) \
+     case PIPE_FORMAT_##what: format = PIPE_FORMAT_##withwhat; break
+ 
+-struct u_vbuf_mgr_elements *
+-u_vbuf_mgr_create_vertex_elements(struct u_vbuf_mgr *mgrb,
+-                                  unsigned count,
+-                                  const struct pipe_vertex_element *attribs,
+-                                  struct pipe_vertex_element *native_attribs)
++struct u_vbuf_elements *
++u_vbuf_create_vertex_elements(struct u_vbuf_mgr *mgrb,
++                              unsigned count,
++                              const struct pipe_vertex_element *attribs,
++                              struct pipe_vertex_element *native_attribs)
+ {
+-   struct u_vbuf_mgr_priv *mgr = (struct u_vbuf_mgr_priv*)mgrb;
++   struct u_vbuf_priv *mgr = (struct u_vbuf_priv*)mgrb;
+    unsigned i;
+-   struct u_vbuf_mgr_elements *ve = CALLOC_STRUCT(u_vbuf_mgr_elements);
++   struct u_vbuf_elements *ve = CALLOC_STRUCT(u_vbuf_elements);
+ 
+    ve->count = count;
+ 
+@@ -440,11 +438,11 @@ u_vbuf_mgr_create_vertex_elements(struct u_vbuf_mgr *mgrb,
+    return ve;
+ }
+ 
+-void u_vbuf_mgr_bind_vertex_elements(struct u_vbuf_mgr *mgrb,
+-                                     void *cso,
+-                                     struct u_vbuf_mgr_elements *ve)
++void u_vbuf_bind_vertex_elements(struct u_vbuf_mgr *mgrb,
++                                 void *cso,
++                                 struct u_vbuf_elements *ve)
+ {
+-   struct u_vbuf_mgr_priv *mgr = (struct u_vbuf_mgr_priv*)mgrb;
++   struct u_vbuf_priv *mgr = (struct u_vbuf_priv*)mgrb;
+ 
+    if (!cso) {
+       return;
+@@ -456,17 +454,17 @@ void u_vbuf_mgr_bind_vertex_elements(struct u_vbuf_mgr *mgrb,
+    }
+ }
+ 
+-void u_vbuf_mgr_destroy_vertex_elements(struct u_vbuf_mgr *mgr,
+-                                        struct u_vbuf_mgr_elements *ve)
++void u_vbuf_destroy_vertex_elements(struct u_vbuf_mgr *mgr,
++                                    struct u_vbuf_elements *ve)
+ {
+    FREE(ve);
+ }
+ 
+-void u_vbuf_mgr_set_vertex_buffers(struct u_vbuf_mgr *mgrb,
+-                                   unsigned count,
+-                                   const struct pipe_vertex_buffer *bufs)
++void u_vbuf_set_vertex_buffers(struct u_vbuf_mgr *mgrb,
++                               unsigned count,
++                               const struct pipe_vertex_buffer *bufs)
+ {
+-   struct u_vbuf_mgr_priv *mgr = (struct u_vbuf_mgr_priv*)mgrb;
++   struct u_vbuf_priv *mgr = (struct u_vbuf_priv*)mgrb;
+    unsigned i;
+ 
+    mgr->any_user_vbs = FALSE;
+@@ -489,8 +487,13 @@ void u_vbuf_mgr_set_vertex_buffers(struct u_vbuf_mgr *mgrb,
+       const struct pipe_vertex_buffer *vb = &bufs[i];
+ 
+       pipe_resource_reference(&mgr->b.vertex_buffer[i].buffer, vb->buffer);
+-      pipe_resource_reference(&mgr->b.real_vertex_buffer[i], NULL);
+-      mgr->saved_buffer_offset[i] = vb->buffer_offset;
++      pipe_resource_reference(&mgr->b.real_vertex_buffer[i].buffer, NULL);
++
++      mgr->b.real_vertex_buffer[i].buffer_offset =
++      mgr->b.vertex_buffer[i].buffer_offset = vb->buffer_offset;
++
++      mgr->b.real_vertex_buffer[i].stride =
++      mgr->b.vertex_buffer[i].stride = vb->stride;
+ 
+       if (!vb->buffer) {
+          continue;
+@@ -501,79 +504,95 @@ void u_vbuf_mgr_set_vertex_buffers(struct u_vbuf_mgr *mgrb,
+          continue;
+       }
+ 
+-      pipe_resource_reference(&mgr->b.real_vertex_buffer[i], vb->buffer);
++      pipe_resource_reference(&mgr->b.real_vertex_buffer[i].buffer, vb->buffer);
+    }
+ 
+-   for (; i < mgr->b.nr_real_vertex_buffers; i++) {
++   for (i = count; i < mgr->b.nr_vertex_buffers; i++) {
+       pipe_resource_reference(&mgr->b.vertex_buffer[i].buffer, NULL);
+-      pipe_resource_reference(&mgr->b.real_vertex_buffer[i], NULL);
+    }
+-
+-   memcpy(mgr->b.vertex_buffer, bufs,
+-          sizeof(struct pipe_vertex_buffer) * count);
++   for (i = count; i < mgr->b.nr_real_vertex_buffers; i++) {
++      pipe_resource_reference(&mgr->b.real_vertex_buffer[i].buffer, NULL);
++   }
+ 
+    mgr->b.nr_vertex_buffers = count;
+    mgr->b.nr_real_vertex_buffers = count;
+ }
+ 
+-static enum u_vbuf_return_flags
+-u_vbuf_upload_buffers(struct u_vbuf_mgr_priv *mgr,
++static void
++u_vbuf_upload_buffers(struct u_vbuf_priv *mgr,
+                       int min_index, int max_index,
+                       unsigned instance_count)
+ {
+-   unsigned i, nr = mgr->ve->count;
++   unsigned i;
+    unsigned count = max_index + 1 - min_index;
+-   boolean uploaded[PIPE_MAX_ATTRIBS] = {0};
+-   enum u_vbuf_return_flags retval = 0;
+-
+-   for (i = 0; i < nr; i++) {
+-      unsigned index = mgr->ve->ve[i].vertex_buffer_index;
++   unsigned nr_velems = mgr->ve->count;
++   unsigned nr_vbufs = mgr->b.nr_vertex_buffers;
++   unsigned start_offset[PIPE_MAX_ATTRIBS];
++   unsigned end_offset[PIPE_MAX_ATTRIBS] = {0};
++
++   /* Determine how much data needs to be uploaded. */
++   for (i = 0; i < nr_velems; i++) {
++      struct pipe_vertex_element *velem = &mgr->ve->ve[i];
++      unsigned index = velem->vertex_buffer_index;
++      unsigned instance_div = velem->instance_divisor;
+       struct pipe_vertex_buffer *vb = &mgr->b.vertex_buffer[index];
++      unsigned first, size;
+ 
+-      if (vb->buffer &&
+-          u_vbuf_resource(vb->buffer)->user_ptr &&
+-          !uploaded[index]) {
+-         unsigned first, size;
+-         boolean flushed;
+-         unsigned instance_div = mgr->ve->ve[i].instance_divisor;
+-
+-         if (instance_div) {
+-            first = 0;
+-            size = vb->stride *
+-                   ((instance_count + instance_div - 1) / instance_div);
+-         } else if (vb->stride) {
+-            first = vb->stride * min_index;
+-            size = vb->stride * count;
+-
+-            /* Unusual case when stride is smaller than the format size.
+-             * XXX This won't work with interleaved arrays. */
+-            if (mgr->ve->native_format_size[i] > vb->stride)
+-               size += mgr->ve->native_format_size[i] - vb->stride;
+-         } else {
+-            first = 0;
+-            size = mgr->ve->native_format_size[i];
+-         }
++      assert(vb->buffer);
++
++      if (!u_vbuf_resource(vb->buffer)->user_ptr) {
++         continue;
++      }
+ 
+-         u_upload_data(mgr->b.uploader, first, size,
+-                       u_vbuf_resource(vb->buffer)->user_ptr + first,
+-                       &vb->buffer_offset,
+-                       &mgr->b.real_vertex_buffer[index],
+-                       &flushed);
++      first = vb->buffer_offset + velem->src_offset;
+ 
+-         vb->buffer_offset -= first;
++      if (!vb->stride) {
++         /* Constant attrib. */
++         size = mgr->ve->src_format_size[i];
++      } else if (instance_div) {
++         /* Per-instance attrib. */
++         unsigned count = (instance_count + instance_div - 1) / instance_div;
++         size = vb->stride * (count - 1) + mgr->ve->src_format_size[i];
++      } else {
++         /* Per-vertex attrib. */
++         first += vb->stride * min_index;
++         size = vb->stride * (count - 1) + mgr->ve->src_format_size[i];
++      }
+ 
+-         uploaded[index] = TRUE;
+-         if (flushed)
+-            retval |= U_VBUF_UPLOAD_FLUSHED;
++      /* Update offsets. */
++      if (!end_offset[index]) {
++         start_offset[index] = first;
++         end_offset[index] = first + size;
+       } else {
+-         assert(mgr->b.real_vertex_buffer[index]);
++         if (first < start_offset[index])
++            start_offset[index] = first;
++         if (first + size > end_offset[index])
++            end_offset[index] = first + size;
+       }
+    }
+ 
+-   return retval;
++   /* Upload buffers. */
++   for (i = 0; i < nr_vbufs; i++) {
++      unsigned start = start_offset[i];
++      unsigned end = end_offset[i];
++      boolean flushed;
++
++      if (!end) {
++         continue;
++      }
++      assert(start < end);
++
++      u_upload_data(mgr->b.uploader, start, end - start,
++                    u_vbuf_resource(mgr->b.vertex_buffer[i].buffer)->user_ptr + start,
++                    &mgr->b.real_vertex_buffer[i].buffer_offset,
++                    &mgr->b.real_vertex_buffer[i].buffer,
++                    &flushed);
++
++      mgr->b.real_vertex_buffer[i].buffer_offset -= start;
++   }
+ }
+ 
+-static void u_vbuf_mgr_compute_max_index(struct u_vbuf_mgr_priv *mgr)
++static void u_vbuf_compute_max_index(struct u_vbuf_priv *mgr)
+ {
+    unsigned i, nr = mgr->ve->count;
+ 
+@@ -582,25 +601,26 @@ static void u_vbuf_mgr_compute_max_index(struct u_vbuf_mgr_priv *mgr)
+    for (i = 0; i < nr; i++) {
+       struct pipe_vertex_buffer *vb =
+             &mgr->b.vertex_buffer[mgr->ve->ve[i].vertex_buffer_index];
+-      int unused;
+-      unsigned max_index;
++      unsigned max_index, src_size, unused;
+ 
+       if (!vb->buffer ||
+           !vb->stride ||
+-          u_vbuf_resource(vb->buffer)->user_ptr) {
++          u_vbuf_resource(vb->buffer)->user_ptr ||
++          mgr->ve->ve[i].instance_divisor) {
+          continue;
+       }
+ 
+-      /* How many bytes is unused after the last vertex.
+-       * width0 may be "count*stride - unused" and we have to compensate
+-       * for that when dividing by stride. */
+-      unused = vb->stride -
+-               (mgr->ve->ve[i].src_offset + mgr->ve->src_format_size[i]);
++      src_size = mgr->ve->ve[i].src_offset + mgr->ve->src_format_size[i];
+ 
+       /* If src_offset is greater than stride (which means it's a buffer
+        * offset rather than a vertex offset)... */
+-      if (unused < 0) {
++      if (src_size >= vb->stride) {
+          unused = 0;
++      } else {
++         /* How many bytes is unused after the last vertex.
++          * width0 may be "count*stride - unused" and we have to compensate
++          * for that when dividing by stride. */
++         unused = vb->stride - src_size;
+       }
+ 
+       /* Compute the maximum index for this vertex element. */
+@@ -613,50 +633,43 @@ static void u_vbuf_mgr_compute_max_index(struct u_vbuf_mgr_priv *mgr)
+ }
+ 
+ enum u_vbuf_return_flags
+-u_vbuf_mgr_draw_begin(struct u_vbuf_mgr *mgrb,
+-                      const struct pipe_draw_info *info)
++u_vbuf_draw_begin(struct u_vbuf_mgr *mgrb,
++                  const struct pipe_draw_info *info)
+ {
+-   struct u_vbuf_mgr_priv *mgr = (struct u_vbuf_mgr_priv*)mgrb;
++   struct u_vbuf_priv *mgr = (struct u_vbuf_priv*)mgrb;
+    int min_index, max_index;
+-   enum u_vbuf_return_flags retval = 0;
+ 
+-   u_vbuf_mgr_compute_max_index(mgr);
++   u_vbuf_compute_max_index(mgr);
+ 
+-   min_index = info->min_index - info->index_bias;
+-   if (info->max_index == ~0) {
+-      max_index = mgr->b.max_index;
++   if (info->indexed) {
++      min_index = info->min_index;
++      if (info->max_index == ~0) {
++         max_index = mgr->b.max_index;
++      } else {
++         max_index = MIN2(info->max_index, mgr->b.max_index);
++      }
++      min_index += info->index_bias;
++      max_index += info->index_bias;
+    } else {
+-      max_index = MIN2(info->max_index - info->index_bias, mgr->b.max_index);
++      min_index = info->start;
++      max_index = info->start + info->count - 1;
+    }
+ 
+    /* Translate vertices with non-native layouts or formats. */
+    if (mgr->incompatible_vb_layout || mgr->ve->incompatible_layout) {
+-      retval |= u_vbuf_translate_begin(mgr, min_index, max_index);
+-
+-      if (mgr->fallback_ve) {
+-         retval |= U_VBUF_BUFFERS_UPDATED;
+-      }
++      u_vbuf_translate_begin(mgr, min_index, max_index);
+    }
+ 
+    /* Upload user buffers. */
+    if (mgr->any_user_vbs) {
+-      retval |= u_vbuf_upload_buffers(mgr, min_index, max_index,
+-                                      info->instance_count);
+-      retval |= U_VBUF_BUFFERS_UPDATED;
++      u_vbuf_upload_buffers(mgr, min_index, max_index, info->instance_count);
+    }
+-   return retval;
++   return mgr->any_user_vbs || mgr->fallback_ve ? U_VBUF_BUFFERS_UPDATED : 0;
+ }
+ 
+-void u_vbuf_mgr_draw_end(struct u_vbuf_mgr *mgrb)
++void u_vbuf_draw_end(struct u_vbuf_mgr *mgrb)
+ {
+-   struct u_vbuf_mgr_priv *mgr = (struct u_vbuf_mgr_priv*)mgrb;
+-   unsigned i;
+-
+-   /* buffer offsets were modified in u_vbuf_upload_buffers */
+-   if (mgr->any_user_vbs) {
+-      for (i = 0; i < mgr->b.nr_vertex_buffers; i++)
+-         mgr->b.vertex_buffer[i].buffer_offset = mgr->saved_buffer_offset[i];
+-   }
++   struct u_vbuf_priv *mgr = (struct u_vbuf_priv*)mgrb;
+ 
+    if (mgr->fallback_ve) {
+       u_vbuf_translate_end(mgr);
+diff --git a/src/gallium/auxiliary/util/u_vbuf_mgr.h b/src/gallium/auxiliary/util/u_vbuf_mgr.h
+index 4e63724..568106b 100644
+--- a/src/gallium/auxiliary/util/u_vbuf_mgr.h
++++ b/src/gallium/auxiliary/util/u_vbuf_mgr.h
+@@ -49,7 +49,7 @@ struct u_vbuf_mgr {
+    /* Contains only real vertex buffers.
+     * Hardware drivers should use real_vertex_buffers[i]
+     * instead of vertex_buffers[i].buffer. */
+-   struct pipe_resource *real_vertex_buffer[PIPE_MAX_ATTRIBS];
++   struct pipe_vertex_buffer real_vertex_buffer[PIPE_MAX_ATTRIBS];
+    int nr_real_vertex_buffers;
+ 
+    /* Precomputed max_index for hardware vertex buffers. */
+@@ -71,7 +71,7 @@ struct u_vbuf_resource {
+ };
+ 
+ /* Opaque type containing information about vertex elements for the manager. */
+-struct u_vbuf_mgr_elements;
++struct u_vbuf_elements;
+ 
+ enum u_fetch_alignment {
+    U_VERTEX_FETCH_BYTE_ALIGNED,
+@@ -79,42 +79,40 @@ enum u_fetch_alignment {
+ };
+ 
+ enum u_vbuf_return_flags {
+-   U_VBUF_BUFFERS_UPDATED = 1,
+-   U_VBUF_UPLOAD_FLUSHED = 2
++   U_VBUF_BUFFERS_UPDATED = 1
+ };
+ 
+ 
+ struct u_vbuf_mgr *
+-u_vbuf_mgr_create(struct pipe_context *pipe,
+-                  unsigned upload_buffer_size,
+-                  unsigned upload_buffer_alignment,
+-                  unsigned upload_buffer_bind,
+-                  enum u_fetch_alignment fetch_alignment);
++u_vbuf_create(struct pipe_context *pipe,
++              unsigned upload_buffer_size,
++              unsigned upload_buffer_alignment,
++              unsigned upload_buffer_bind,
++              enum u_fetch_alignment fetch_alignment);
+ 
+-void u_vbuf_mgr_destroy(struct u_vbuf_mgr *mgr);
++void u_vbuf_destroy(struct u_vbuf_mgr *mgr);
+ 
+-struct u_vbuf_mgr_elements *
+-u_vbuf_mgr_create_vertex_elements(struct u_vbuf_mgr *mgr,
+-                                  unsigned count,
+-                                  const struct pipe_vertex_element *attrs,
+-                                  struct pipe_vertex_element *native_attrs);
++struct u_vbuf_elements *
++u_vbuf_create_vertex_elements(struct u_vbuf_mgr *mgr,
++                              unsigned count,
++                              const struct pipe_vertex_element *attrs,
++                              struct pipe_vertex_element *native_attrs);
+ 
+-void u_vbuf_mgr_bind_vertex_elements(struct u_vbuf_mgr *mgr,
+-                                     void *cso,
+-                                     struct u_vbuf_mgr_elements *ve);
++void u_vbuf_bind_vertex_elements(struct u_vbuf_mgr *mgr,
++                                 void *cso,
++                                 struct u_vbuf_elements *ve);
+ 
+-void u_vbuf_mgr_destroy_vertex_elements(struct u_vbuf_mgr *mgr,
+-                                        struct u_vbuf_mgr_elements *ve);
++void u_vbuf_destroy_vertex_elements(struct u_vbuf_mgr *mgr,
++                                    struct u_vbuf_elements *ve);
+ 
+-void u_vbuf_mgr_set_vertex_buffers(struct u_vbuf_mgr *mgr,
+-                                   unsigned count,
+-                                   const struct pipe_vertex_buffer *bufs);
++void u_vbuf_set_vertex_buffers(struct u_vbuf_mgr *mgr,
++                               unsigned count,
++                               const struct pipe_vertex_buffer *bufs);
+ 
+-enum u_vbuf_return_flags
+-u_vbuf_mgr_draw_begin(struct u_vbuf_mgr *mgr,
+-                      const struct pipe_draw_info *info);
++enum u_vbuf_return_flags u_vbuf_draw_begin(struct u_vbuf_mgr *mgr,
++                                           const struct pipe_draw_info *info);
+ 
+-void u_vbuf_mgr_draw_end(struct u_vbuf_mgr *mgr);
++void u_vbuf_draw_end(struct u_vbuf_mgr *mgr);
+ 
+ 
+ static INLINE struct u_vbuf_resource *u_vbuf_resource(struct pipe_resource *r)
+diff --git a/src/gallium/drivers/i915/i915_state_dynamic.c b/src/gallium/drivers/i915/i915_state_dynamic.c
+index 204cee6..1a21433 100644
+--- a/src/gallium/drivers/i915/i915_state_dynamic.c
++++ b/src/gallium/drivers/i915/i915_state_dynamic.c
+@@ -268,8 +268,8 @@ static void upload_SCISSOR_RECT(struct i915_context *i915)
+ {
+    unsigned x1 = i915->scissor.minx;
+    unsigned y1 = i915->scissor.miny;
+-   unsigned x2 = i915->scissor.maxx;
+-   unsigned y2 = i915->scissor.maxy;
++   unsigned x2 = i915->scissor.maxx - 1;
++   unsigned y2 = i915->scissor.maxy - 1;
+    unsigned sc[3];
+ 
+    sc[0] = _3DSTATE_SCISSOR_RECT_0_CMD;
+diff --git a/src/gallium/drivers/nouveau/nouveau_fence.c b/src/gallium/drivers/nouveau/nouveau_fence.c
+index d8f59dc..ea2038c 100644
+--- a/src/gallium/drivers/nouveau/nouveau_fence.c
++++ b/src/gallium/drivers/nouveau/nouveau_fence.c
+@@ -219,5 +219,7 @@ nouveau_fence_next(struct nouveau_screen *screen)
+    if (screen->fence.current->state < NOUVEAU_FENCE_STATE_EMITTED)
+       nouveau_fence_emit(screen->fence.current);
+ 
++   nouveau_fence_ref(NULL, &screen->fence.current);
++
+    nouveau_fence_new(screen, &screen->fence.current, FALSE);
+ }
+diff --git a/src/gallium/drivers/r300/r300_context.c b/src/gallium/drivers/r300/r300_context.c
+index 0554c40..b8a250d 100644
+--- a/src/gallium/drivers/r300/r300_context.c
++++ b/src/gallium/drivers/r300/r300_context.c
+@@ -106,7 +106,7 @@ static void r300_destroy_context(struct pipe_context* context)
+         draw_destroy(r300->draw);
+ 
+     if (r300->vbuf_mgr)
+-        u_vbuf_mgr_destroy(r300->vbuf_mgr);
++        u_vbuf_destroy(r300->vbuf_mgr);
+ 
+     /* XXX: This function assumes r300->query_list was initialized */
+     r300_release_referenced_objects(r300);
+@@ -437,7 +437,7 @@ struct pipe_context* r300_create_context(struct pipe_screen* screen,
+     r300_init_state_functions(r300);
+     r300_init_resource_functions(r300);
+ 
+-    r300->vbuf_mgr = u_vbuf_mgr_create(&r300->context, 1024 * 1024, 16,
++    r300->vbuf_mgr = u_vbuf_create(&r300->context, 1024 * 1024, 16,
+                                        PIPE_BIND_VERTEX_BUFFER |
+                                        PIPE_BIND_INDEX_BUFFER,
+                                        U_VERTEX_FETCH_DWORD_ALIGNED);
+diff --git a/src/gallium/drivers/r300/r300_context.h b/src/gallium/drivers/r300/r300_context.h
+index d71db00..60cbe1a 100644
+--- a/src/gallium/drivers/r300/r300_context.h
++++ b/src/gallium/drivers/r300/r300_context.h
+@@ -425,7 +425,7 @@ struct r300_vertex_element_state {
+     struct pipe_vertex_element velem[PIPE_MAX_ATTRIBS];
+     unsigned format_size[PIPE_MAX_ATTRIBS];
+ 
+-    struct u_vbuf_mgr_elements *vmgr_elements;
++    struct u_vbuf_elements *vmgr_elements;
+ 
+     /* The size of the vertex, in dwords. */
+     unsigned vertex_size_dwords;
+diff --git a/src/gallium/drivers/r300/r300_emit.c b/src/gallium/drivers/r300/r300_emit.c
+index d214af4..8a20038 100644
+--- a/src/gallium/drivers/r300/r300_emit.c
++++ b/src/gallium/drivers/r300/r300_emit.c
+@@ -822,8 +822,7 @@ void r300_emit_textures_state(struct r300_context *r300,
+ void r300_emit_vertex_arrays(struct r300_context* r300, int offset,
+                              boolean indexed, int instance_id)
+ {
+-    struct pipe_vertex_buffer *vbuf = r300->vbuf_mgr->vertex_buffer;
+-    struct pipe_resource **valid_vbuf = r300->vbuf_mgr->real_vertex_buffer;
++    struct pipe_vertex_buffer *vbuf = r300->vbuf_mgr->real_vertex_buffer;
+     struct pipe_vertex_element *velem = r300->velems->velem;
+     struct r300_resource *buf;
+     int i;
+@@ -861,7 +860,7 @@ void r300_emit_vertex_arrays(struct r300_context* r300, int offset,
+         }
+ 
+         for (i = 0; i < vertex_array_count; i++) {
+-            buf = r300_resource(valid_vbuf[velem[i].vertex_buffer_index]);
++            buf = r300_resource(vbuf[velem[i].vertex_buffer_index].buffer);
+             OUT_CS_RELOC(buf);
+         }
+     } else {
+@@ -913,7 +912,7 @@ void r300_emit_vertex_arrays(struct r300_context* r300, int offset,
+         }
+ 
+         for (i = 0; i < vertex_array_count; i++) {
+-            buf = r300_resource(valid_vbuf[velem[i].vertex_buffer_index]);
++            buf = r300_resource(vbuf[velem[i].vertex_buffer_index].buffer);
+             OUT_CS_RELOC(buf);
+         }
+     }
+@@ -1221,15 +1220,17 @@ validate:
+                                 r300_resource(r300->vbo)->domain, 0);
+     /* ...vertex buffers for HWTCL path... */
+     if (do_validate_vertex_buffers && r300->vertex_arrays_dirty) {
+-        struct pipe_resource **buf = r300->vbuf_mgr->real_vertex_buffer;
+-        struct pipe_resource **last = r300->vbuf_mgr->real_vertex_buffer +
++        struct pipe_vertex_buffer *vbuf = r300->vbuf_mgr->real_vertex_buffer;
++        struct pipe_vertex_buffer *last = r300->vbuf_mgr->real_vertex_buffer +
+                                       r300->vbuf_mgr->nr_real_vertex_buffers;
+-        for (; buf != last; buf++) {
+-            if (!*buf)
++        struct pipe_resource *buf;
++        for (; vbuf != last; vbuf++) {
++            buf = vbuf->buffer;
++            if (!buf)
+                 continue;
+ 
+-            r300->rws->cs_add_reloc(r300->cs, r300_resource(*buf)->cs_buf,
+-                                    r300_resource(*buf)->domain, 0);
++            r300->rws->cs_add_reloc(r300->cs, r300_resource(buf)->cs_buf,
++                                    r300_resource(buf)->domain, 0);
+         }
+     }
+     /* ...and index buffer for HWTCL path. */
+@@ -1237,13 +1238,12 @@ validate:
+         r300->rws->cs_add_reloc(r300->cs, r300_resource(index_buffer)->cs_buf,
+                                 r300_resource(index_buffer)->domain, 0);
+ 
+-    /* Now do the validation. */
++    /* Now do the validation (flush is called inside cs_validate on failure). */
+     if (!r300->rws->cs_validate(r300->cs)) {
+         /* Ooops, an infinite loop, give up. */
+         if (flushed)
+             return FALSE;
+ 
+-        r300_flush(&r300->context, RADEON_FLUSH_ASYNC, NULL);
+         flushed = TRUE;
+         goto validate;
+     }
+diff --git a/src/gallium/drivers/r300/r300_render.c b/src/gallium/drivers/r300/r300_render.c
+index b31141a..5860671 100644
+--- a/src/gallium/drivers/r300/r300_render.c
++++ b/src/gallium/drivers/r300/r300_render.c
+@@ -146,7 +146,7 @@ static void r300_emit_draw_init(struct r300_context *r300, unsigned mode,
+ static void r300_split_index_bias(struct r300_context *r300, int index_bias,
+                                   int *buffer_offset, int *index_offset)
+ {
+-    struct pipe_vertex_buffer *vb, *vbufs = r300->vbuf_mgr->vertex_buffer;
++    struct pipe_vertex_buffer *vb, *vbufs = r300->vbuf_mgr->real_vertex_buffer;
+     struct pipe_vertex_element *velem = r300->velems->velem;
+     unsigned i, size;
+     int max_neg_bias;
+@@ -338,7 +338,7 @@ static boolean immd_is_good_idea(struct r300_context *r300,
+         vbi = velem->vertex_buffer_index;
+ 
+         if (!checked[vbi]) {
+-            buf = r300->vbuf_mgr->real_vertex_buffer[vbi];
++            buf = r300->vbuf_mgr->real_vertex_buffer[vbi].buffer;
+ 
+             if ((r300_resource(buf)->domain != RADEON_DOMAIN_GTT)) {
+                 return FALSE;
+@@ -389,13 +389,13 @@ static void r300_draw_arrays_immediate(struct r300_context *r300,
+         velem = &r300->velems->velem[i];
+         size[i] = r300->velems->format_size[i] / 4;
+         vbi = velem->vertex_buffer_index;
+-        vbuf = &r300->vbuf_mgr->vertex_buffer[vbi];
++        vbuf = &r300->vbuf_mgr->real_vertex_buffer[vbi];
+         stride[i] = vbuf->stride / 4;
+ 
+         /* Map the buffer. */
+         if (!map[vbi]) {
+             map[vbi] = (uint32_t*)r300->rws->buffer_map(
+-                r300_resource(r300->vbuf_mgr->real_vertex_buffer[vbi])->buf,
++                r300_resource(vbuf->buffer)->buf,
+                 r300->cs, PIPE_TRANSFER_READ | PIPE_TRANSFER_UNSYNCHRONIZED);
+             map[vbi] += (vbuf->buffer_offset / 4) + stride[i] * info->start;
+         }
+@@ -423,7 +423,7 @@ static void r300_draw_arrays_immediate(struct r300_context *r300,
+         vbi = r300->velems->velem[i].vertex_buffer_index;
+ 
+         if (map[vbi]) {
+-            r300->rws->buffer_unmap(r300_resource(r300->vbuf_mgr->real_vertex_buffer[vbi])->buf);
++            r300->rws->buffer_unmap(r300_resource(r300->vbuf_mgr->real_vertex_buffer[vbi].buffer)->buf);
+             map[vbi] = NULL;
+         }
+     }
+@@ -545,7 +545,9 @@ static void r300_draw_elements_immediate(struct r300_context *r300,
+             PREP_INDEXED, NULL, 2+count_dwords, 0, info->index_bias, -1))
+         return;
+ 
+-    r300_emit_draw_init(r300, info->mode, info->min_index, info->max_index);
++    r300_emit_draw_init(r300, info->mode,
++                        info->min_index + info->index_bias,
++                        info->max_index + info->index_bias);
+ 
+     BEGIN_CS(2 + count_dwords);
+     OUT_CS_PKT3(R300_PACKET3_3D_DRAW_INDX_2, count_dwords);
+@@ -779,7 +781,7 @@ static void r300_draw_vbo(struct pipe_context* pipe,
+     r300_update_derived_state(r300);
+ 
+     /* Start the vbuf manager and update buffers if needed. */
+-    if (u_vbuf_mgr_draw_begin(r300->vbuf_mgr, &info) & U_VBUF_BUFFERS_UPDATED) {
++    if (u_vbuf_draw_begin(r300->vbuf_mgr, &info) & U_VBUF_BUFFERS_UPDATED) {
+         r300->vertex_arrays_dirty = TRUE;
+     }
+ 
+@@ -810,7 +812,7 @@ static void r300_draw_vbo(struct pipe_context* pipe,
+         }
+     }
+ 
+-    u_vbuf_mgr_draw_end(r300->vbuf_mgr);
++    u_vbuf_draw_end(r300->vbuf_mgr);
+ }
+ 
+ /****************************************************************************
+diff --git a/src/gallium/drivers/r300/r300_state.c b/src/gallium/drivers/r300/r300_state.c
+index 057cd9f..11282a4 100644
+--- a/src/gallium/drivers/r300/r300_state.c
++++ b/src/gallium/drivers/r300/r300_state.c
+@@ -1583,7 +1583,7 @@ static void r300_set_vertex_buffers(struct pipe_context* pipe,
+         count = 1;
+     }
+ 
+-    u_vbuf_mgr_set_vertex_buffers(r300->vbuf_mgr, count, buffers);
++    u_vbuf_set_vertex_buffers(r300->vbuf_mgr, count, buffers);
+ 
+     if (r300->screen->caps.has_tcl) {
+         /* HW TCL. */
+@@ -1691,7 +1691,7 @@ static void* r300_create_vertex_elements_state(struct pipe_context* pipe,
+ 
+     velems->count = count;
+     velems->vmgr_elements =
+-        u_vbuf_mgr_create_vertex_elements(r300->vbuf_mgr, count, attribs,
++        u_vbuf_create_vertex_elements(r300->vbuf_mgr, count, attribs,
+                                           velems->velem);
+ 
+     if (r300_screen(pipe->screen)->caps.has_tcl) {
+@@ -1721,7 +1721,7 @@ static void r300_bind_vertex_elements_state(struct pipe_context *pipe,
+ 
+     r300->velems = velems;
+ 
+-    u_vbuf_mgr_bind_vertex_elements(r300->vbuf_mgr, state, velems->vmgr_elements);
++    u_vbuf_bind_vertex_elements(r300->vbuf_mgr, state, velems->vmgr_elements);
+ 
+     if (r300->draw) {
+         draw_set_vertex_elements(r300->draw, velems->count, velems->velem);
+@@ -1738,7 +1738,7 @@ static void r300_delete_vertex_elements_state(struct pipe_context *pipe, void *s
+     struct r300_context *r300 = r300_context(pipe);
+     struct r300_vertex_element_state *velems = state;
+ 
+-    u_vbuf_mgr_destroy_vertex_elements(r300->vbuf_mgr, velems->vmgr_elements);
++    u_vbuf_destroy_vertex_elements(r300->vbuf_mgr, velems->vmgr_elements);
+     FREE(state);
+ }
+ 
+diff --git a/src/gallium/drivers/r600/eg_state_inlines.h b/src/gallium/drivers/r600/eg_state_inlines.h
+index af2ec56..b559011 100644
+--- a/src/gallium/drivers/r600/eg_state_inlines.h
++++ b/src/gallium/drivers/r600/eg_state_inlines.h
+@@ -327,6 +327,7 @@ static inline uint32_t r600_translate_colorswap(enum pipe_format format)
+ 		return V_028C70_SWAP_STD;
+ 
+ 	case PIPE_FORMAT_R16_UNORM:
++	case PIPE_FORMAT_R16_FLOAT:
+ 		return V_028C70_SWAP_STD;
+ 
+ 	/* 32-bit buffers. */
+@@ -430,6 +431,9 @@ static INLINE uint32_t r600_translate_colorformat(enum pipe_format format)
+ 	case PIPE_FORMAT_R16_UNORM:
+ 		return V_028C70_COLOR_16;
+ 
++	case PIPE_FORMAT_R16_FLOAT:
++		return V_028C70_COLOR_16_FLOAT;
++
+ 	/* 32-bit buffers. */
+ 	case PIPE_FORMAT_A8B8G8R8_SRGB:
+ 	case PIPE_FORMAT_A8B8G8R8_UNORM:
+diff --git a/src/gallium/drivers/r600/evergreen_state.c b/src/gallium/drivers/r600/evergreen_state.c
+index 0b7deee..50c745f 100644
+--- a/src/gallium/drivers/r600/evergreen_state.c
++++ b/src/gallium/drivers/r600/evergreen_state.c
+@@ -1726,7 +1726,7 @@ void evergreen_pipe_shader_vs(struct pipe_context *ctx, struct r600_pipe_shader
+ 	struct r600_pipe_state *rstate = &shader->rstate;
+ 	struct r600_shader *rshader = &shader->shader;
+ 	unsigned spi_vs_out_id[10];
+-	unsigned i, tmp;
++	unsigned i, tmp, nparams;
+ 
+ 	/* clear previous register */
+ 	rstate->nregs = 0;
+@@ -1745,9 +1745,17 @@ void evergreen_pipe_shader_vs(struct pipe_context *ctx, struct r600_pipe_shader
+ 					spi_vs_out_id[i], 0xFFFFFFFF, NULL);
+ 	}
+ 
++	/* Certain attributes (position, psize, etc.) don't count as params.
++	 * VS is required to export at least one param and r600_shader_from_tgsi()
++	 * takes care of adding a dummy export.
++	 */
++	nparams = rshader->noutput - rshader->npos;
++	if (nparams < 1)
++		nparams = 1;
++
+ 	r600_pipe_state_add_reg(rstate,
+ 			R_0286C4_SPI_VS_OUT_CONFIG,
+-			S_0286C4_VS_EXPORT_COUNT(rshader->noutput - 1),
++			S_0286C4_VS_EXPORT_COUNT(nparams - 1),
+ 			0xFFFFFFFF, NULL);
+ 	r600_pipe_state_add_reg(rstate,
+ 			R_028860_SQ_PGM_RESOURCES_VS,
+diff --git a/src/gallium/drivers/r600/r600.h b/src/gallium/drivers/r600/r600.h
+index 61adc7e..40c754c 100644
+--- a/src/gallium/drivers/r600/r600.h
++++ b/src/gallium/drivers/r600/r600.h
+@@ -94,6 +94,8 @@ struct r600_tiling_info *r600_get_tiling_info(struct radeon *radeon);
+ unsigned r600_get_clock_crystal_freq(struct radeon *radeon);
+ unsigned r600_get_minor_version(struct radeon *radeon);
+ unsigned r600_get_num_backends(struct radeon *radeon);
++unsigned r600_get_num_tile_pipes(struct radeon *radeon);
++unsigned r600_get_backend_map(struct radeon *radeon);
+ 
+ /* r600_bo.c */
+ struct r600_bo;
+@@ -261,6 +263,7 @@ struct r600_context {
+ 	u32			*pm4;
+ 	struct list_head	query_list;
+ 	unsigned		num_query_running;
++	unsigned		backend_mask;
+ 	struct list_head	fenced_bo;
+ 	unsigned                max_db; /* for OQ */
+ 	unsigned                num_dest_buffers;
+@@ -282,6 +285,7 @@ struct r600_draw {
+ 	struct r600_bo		*indices;
+ };
+ 
++void r600_get_backend_mask(struct r600_context *ctx);
+ int r600_context_init(struct r600_context *ctx, struct radeon *radeon);
+ void r600_context_fini(struct r600_context *ctx);
+ void r600_context_pipe_state_set(struct r600_context *ctx, struct r600_pipe_state *state);
+diff --git a/src/gallium/drivers/r600/r600_asm.c b/src/gallium/drivers/r600/r600_asm.c
+index 065f955..34c5ae4 100644
+--- a/src/gallium/drivers/r600/r600_asm.c
++++ b/src/gallium/drivers/r600/r600_asm.c
+@@ -732,15 +732,19 @@ static int check_and_set_bank_swizzle(struct r600_bc *bc,
+ {
+ 	struct alu_bank_swizzle bs;
+ 	int bank_swizzle[5];
+-	int i, r = 0, forced = 0;
++	int i, r = 0, forced = 1;
+ 	boolean scalar_only = bc->chiprev == CHIPREV_CAYMAN ? false : true;
+ 	int max_slots = bc->chiprev == CHIPREV_CAYMAN ? 4 : 5;
+ 
+ 	for (i = 0; i < max_slots; i++) {
+-		if (slots[i] && slots[i]->bank_swizzle_force) {
+-			slots[i]->bank_swizzle = slots[i]->bank_swizzle_force;
+-			forced = 1;
++		if (slots[i]) {
++			if (slots[i]->bank_swizzle_force) {
++				slots[i]->bank_swizzle = slots[i]->bank_swizzle_force;
++			} else {
++				forced = 0;
++			}
+ 		}
++
+ 		if (i < 4 && slots[i])
+ 			scalar_only = false;
+ 	}
+@@ -750,7 +754,11 @@ static int check_and_set_bank_swizzle(struct r600_bc *bc,
+ 	/* Just check every possible combination of bank swizzle.
+ 	 * Not very efficent, but works on the first try in most of the cases. */
+ 	for (i = 0; i < 4; i++)
+-		bank_swizzle[i] = SQ_ALU_VEC_012;
++		if (!slots[i] || !slots[i]->bank_swizzle_force)
++			bank_swizzle[i] = SQ_ALU_VEC_012;
++		else
++			bank_swizzle[i] = slots[i]->bank_swizzle;
++
+ 	bank_swizzle[4] = SQ_ALU_SCL_210;
+ 	while(bank_swizzle[4] <= SQ_ALU_SCL_221) {
+ 
+@@ -787,11 +795,13 @@ static int check_and_set_bank_swizzle(struct r600_bc *bc,
+ 			bank_swizzle[4]++;
+ 		} else {
+ 			for (i = 0; i < max_slots; i++) {
+-				bank_swizzle[i]++;
+-				if (bank_swizzle[i] <= SQ_ALU_VEC_210)
+-					break;
+-				else
+-					bank_swizzle[i] = SQ_ALU_VEC_012;
++				if (!slots[i] || !slots[i]->bank_swizzle_force) {
++					bank_swizzle[i]++;
++					if (bank_swizzle[i] <= SQ_ALU_VEC_210)
++						break;
++					else
++						bank_swizzle[i] = SQ_ALU_VEC_012;
++				}
+ 			}
+ 		}
+ 	}
+@@ -813,7 +823,7 @@ static int replace_gpr_with_pv_ps(struct r600_bc *bc,
+ 		return r;
+ 
+ 	for (i = 0; i < max_slots; ++i) {
+-		if(prev[i] && prev[i]->dst.write && !prev[i]->dst.rel) {
++		if (prev[i] && (prev[i]->dst.write || prev[i]->is_op3) && !prev[i]->dst.rel) {
+ 			gpr[i] = prev[i]->dst.sel;
+ 			/* cube writes more than PV.X */
+ 			if (!is_alu_cube_inst(bc, prev[i]) && is_alu_reduction_inst(bc, prev[i]))
+diff --git a/src/gallium/drivers/r600/r600_pipe.c b/src/gallium/drivers/r600/r600_pipe.c
+index 8f3a175..9f0d375 100644
+--- a/src/gallium/drivers/r600/r600_pipe.c
++++ b/src/gallium/drivers/r600/r600_pipe.c
+@@ -171,7 +171,7 @@ static void r600_destroy_context(struct pipe_context *context)
+ 		free(rctx->states[i]);
+ 	}
+ 
+-	u_vbuf_mgr_destroy(rctx->vbuf_mgr);
++	u_vbuf_destroy(rctx->vbuf_mgr);
+ 	util_slab_destroy(&rctx->pool_transfers);
+ 
+ 	if (rctx->fences.bo) {
+@@ -274,7 +274,7 @@ static struct pipe_context *r600_create_context(struct pipe_screen *screen, void
+ 			 sizeof(struct pipe_transfer), 64,
+ 			 UTIL_SLAB_SINGLETHREADED);
+ 
+-	rctx->vbuf_mgr = u_vbuf_mgr_create(&rctx->context, 1024 * 1024, 256,
++	rctx->vbuf_mgr = u_vbuf_create(&rctx->context, 1024 * 1024, 256,
+ 					   PIPE_BIND_VERTEX_BUFFER |
+ 					   PIPE_BIND_INDEX_BUFFER |
+ 					   PIPE_BIND_CONSTANT_BUFFER,
+diff --git a/src/gallium/drivers/r600/r600_pipe.h b/src/gallium/drivers/r600/r600_pipe.h
+index 2667c80..8ad6895 100644
+--- a/src/gallium/drivers/r600/r600_pipe.h
++++ b/src/gallium/drivers/r600/r600_pipe.h
+@@ -110,7 +110,7 @@ struct r600_vertex_element
+ {
+ 	unsigned			count;
+ 	struct pipe_vertex_element	elements[PIPE_MAX_ATTRIBS];
+-	struct u_vbuf_mgr_elements	*vmgr_elements;
++	struct u_vbuf_elements	*vmgr_elements;
+ 	struct r600_bo			*fetch_shader;
+ 	unsigned			fs_size;
+ 	struct r600_pipe_state		rstate;
+diff --git a/src/gallium/drivers/r600/r600_shader.c b/src/gallium/drivers/r600/r600_shader.c
+index 2f07d59..ad2bfa6 100644
+--- a/src/gallium/drivers/r600/r600_shader.c
++++ b/src/gallium/drivers/r600/r600_shader.c
+@@ -333,6 +333,12 @@ static int tgsi_declaration(struct r600_shader_ctx *ctx)
+ 		ctx->shader->output[i].sid = d->Semantic.Index;
+ 		ctx->shader->output[i].gpr = ctx->file_offset[TGSI_FILE_OUTPUT] + i;
+ 		ctx->shader->output[i].interpolate = d->Declaration.Interpolate;
++		if (ctx->type == TGSI_PROCESSOR_VERTEX) {
++			/* these don't count as vertex param exports */
++			if ((ctx->shader->output[i].name == TGSI_SEMANTIC_POSITION) ||
++			    (ctx->shader->output[i].name == TGSI_SEMANTIC_PSIZE))
++				ctx->shader->npos++;
++		}
+ 		break;
+ 	case TGSI_FILE_CONSTANT:
+ 	case TGSI_FILE_TEMPORARY:
+@@ -2929,25 +2935,34 @@ static int emit_logic_pred(struct r600_shader_ctx *ctx, int opcode)
+ 
+ static int pops(struct r600_shader_ctx *ctx, int pops)
+ {
+-	int alu_pop = 3;
+-	if (ctx->bc->cf_last) {
+-		if (ctx->bc->cf_last->inst == CTX_INST(V_SQ_CF_ALU_WORD1_SQ_CF_INST_ALU) << 3)
+-			alu_pop = 0;
+-		else if (ctx->bc->cf_last->inst == CTX_INST(V_SQ_CF_ALU_WORD1_SQ_CF_INST_ALU_POP_AFTER) << 3)
+-			alu_pop = 1;
+-	}
+-	alu_pop += pops;
+-	if (alu_pop == 1) {
+-		ctx->bc->cf_last->inst = CTX_INST(V_SQ_CF_ALU_WORD1_SQ_CF_INST_ALU_POP_AFTER) << 3;
+-		ctx->bc->force_add_cf = 1;
+-	} else if (alu_pop == 2) {
+-		ctx->bc->cf_last->inst = CTX_INST(V_SQ_CF_ALU_WORD1_SQ_CF_INST_ALU_POP2_AFTER) << 3;
+-		ctx->bc->force_add_cf = 1;
+-	} else {
++	unsigned force_pop = ctx->bc->force_add_cf;
++
++	if (!force_pop) {
++		int alu_pop = 3;
++		if (ctx->bc->cf_last) {
++			if (ctx->bc->cf_last->inst == CTX_INST(V_SQ_CF_ALU_WORD1_SQ_CF_INST_ALU) << 3)
++				alu_pop = 0;
++			else if (ctx->bc->cf_last->inst == CTX_INST(V_SQ_CF_ALU_WORD1_SQ_CF_INST_ALU_POP_AFTER) << 3)
++				alu_pop = 1;
++		}
++		alu_pop += pops;
++		if (alu_pop == 1) {
++			ctx->bc->cf_last->inst = CTX_INST(V_SQ_CF_ALU_WORD1_SQ_CF_INST_ALU_POP_AFTER) << 3;
++			ctx->bc->force_add_cf = 1;
++		} else if (alu_pop == 2) {
++			ctx->bc->cf_last->inst = CTX_INST(V_SQ_CF_ALU_WORD1_SQ_CF_INST_ALU_POP2_AFTER) << 3;
++			ctx->bc->force_add_cf = 1;
++		} else {
++			force_pop = 1;
++		}
++	}
++
++	if (force_pop) {
+ 		r600_bc_add_cfinst(ctx->bc, CTX_INST(V_SQ_CF_WORD1_SQ_CF_INST_POP));
+ 		ctx->bc->cf_last->pop_count = pops;
+ 		ctx->bc->cf_last->cf_addr = ctx->bc->cf_last->id + 2;
+ 	}
++
+ 	return 0;
+ }
+ 
+diff --git a/src/gallium/drivers/r600/r600_shader.h b/src/gallium/drivers/r600/r600_shader.h
+index 76aebf2..43f8141 100644
+--- a/src/gallium/drivers/r600/r600_shader.h
++++ b/src/gallium/drivers/r600/r600_shader.h
+@@ -40,6 +40,7 @@ struct r600_shader {
+ 	struct r600_bc		bc;
+ 	unsigned		ninput;
+ 	unsigned		noutput;
++	unsigned		npos;
+ 	unsigned		nlds;
+ 	struct r600_shader_io	input[32];
+ 	struct r600_shader_io	output[32];
+diff --git a/src/gallium/drivers/r600/r600_state.c b/src/gallium/drivers/r600/r600_state.c
+index 69af3d7..feba804 100644
+--- a/src/gallium/drivers/r600/r600_state.c
++++ b/src/gallium/drivers/r600/r600_state.c
+@@ -1481,7 +1481,7 @@ void r600_pipe_shader_vs(struct pipe_context *ctx, struct r600_pipe_shader *shad
+ 	struct r600_pipe_state *rstate = &shader->rstate;
+ 	struct r600_shader *rshader = &shader->shader;
+ 	unsigned spi_vs_out_id[10];
+-	unsigned i, tmp;
++	unsigned i, tmp, nparams;
+ 
+ 	/* clear previous register */
+ 	rstate->nregs = 0;
+@@ -1503,9 +1503,17 @@ void r600_pipe_shader_vs(struct pipe_context *ctx, struct r600_pipe_shader *shad
+ 					spi_vs_out_id[i], 0xFFFFFFFF, NULL);
+ 	}
+ 
++	/* Certain attributes (position, psize, etc.) don't count as params.
++	 * VS is required to export at least one param and r600_shader_from_tgsi()
++	 * takes care of adding a dummy export.
++	 */
++	nparams = rshader->noutput - rshader->npos;
++	if (nparams < 1)
++		nparams = 1;
++
+ 	r600_pipe_state_add_reg(rstate,
+ 			R_0286C4_SPI_VS_OUT_CONFIG,
+-			S_0286C4_VS_EXPORT_COUNT(rshader->noutput - 1),
++			S_0286C4_VS_EXPORT_COUNT(nparams - 1),
+ 			0xFFFFFFFF, NULL);
+ 	r600_pipe_state_add_reg(rstate,
+ 			R_028868_SQ_PGM_RESOURCES_VS,
+diff --git a/src/gallium/drivers/r600/r600_state_common.c b/src/gallium/drivers/r600/r600_state_common.c
+index d914040..54975c5 100644
+--- a/src/gallium/drivers/r600/r600_state_common.c
++++ b/src/gallium/drivers/r600/r600_state_common.c
+@@ -162,7 +162,7 @@ void r600_bind_vertex_elements(struct pipe_context *ctx, void *state)
+ 
+ 	rctx->vertex_elements = v;
+ 	if (v) {
+-		u_vbuf_mgr_bind_vertex_elements(rctx->vbuf_mgr, state,
++		u_vbuf_bind_vertex_elements(rctx->vbuf_mgr, state,
+ 						v->vmgr_elements);
+ 
+ 		rctx->states[v->rstate.id] = &v->rstate;
+@@ -182,7 +182,7 @@ void r600_delete_vertex_element(struct pipe_context *ctx, void *state)
+ 		rctx->vertex_elements = NULL;
+ 
+ 	r600_bo_reference(rctx->radeon, &v->fetch_shader, NULL);
+-	u_vbuf_mgr_destroy_vertex_elements(rctx->vbuf_mgr, v->vmgr_elements);
++	u_vbuf_destroy_vertex_elements(rctx->vbuf_mgr, v->vmgr_elements);
+ 	FREE(state);
+ }
+ 
+@@ -227,7 +227,7 @@ void r600_set_vertex_buffers(struct pipe_context *ctx, unsigned count,
+ 		}
+ 	}
+ 
+-	u_vbuf_mgr_set_vertex_buffers(rctx->vbuf_mgr, count, buffers);
++	u_vbuf_set_vertex_buffers(rctx->vbuf_mgr, count, buffers);
+ }
+ 
+ void *r600_create_vertex_elements(struct pipe_context *ctx,
+@@ -243,7 +243,7 @@ void *r600_create_vertex_elements(struct pipe_context *ctx,
+ 
+ 	v->count = count;
+ 	v->vmgr_elements =
+-		u_vbuf_mgr_create_vertex_elements(rctx->vbuf_mgr, count,
++		u_vbuf_create_vertex_elements(rctx->vbuf_mgr, count,
+ 						  elements, v->elements);
+ 
+ 	if (r600_vertex_elements_build_fetch_shader(rctx, v)) {
+@@ -507,13 +507,13 @@ static void r600_vertex_buffer_update(struct r600_pipe_context *rctx)
+ 			/* one resource per vertex elements */
+ 			unsigned vbuffer_index;
+ 			vbuffer_index = rctx->vertex_elements->elements[i].vertex_buffer_index;
+-			vertex_buffer = &rctx->vbuf_mgr->vertex_buffer[vbuffer_index];
+-			rbuffer = (struct r600_resource*)rctx->vbuf_mgr->real_vertex_buffer[vbuffer_index];
++			vertex_buffer = &rctx->vbuf_mgr->real_vertex_buffer[vbuffer_index];
++			rbuffer = (struct r600_resource*)vertex_buffer->buffer;
+ 			offset = rctx->vertex_elements->vbuffer_offset[i];
+ 		} else {
+ 			/* bind vertex buffer once */
+-			vertex_buffer = &rctx->vbuf_mgr->vertex_buffer[i];
+-			rbuffer = (struct r600_resource*)rctx->vbuf_mgr->real_vertex_buffer[i];
++			vertex_buffer = &rctx->vbuf_mgr->real_vertex_buffer[i];
++			rbuffer = (struct r600_resource*)vertex_buffer->buffer;
+ 			offset = 0;
+ 		}
+ 		if (vertex_buffer == NULL || rbuffer == NULL)
+@@ -565,10 +565,15 @@ void r600_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info *info)
+ 		if (rctx->have_depth_fb || rctx->have_depth_texture)
+ 			r600_flush_depth_textures(rctx);
+ 	}
+-	u_vbuf_mgr_draw_begin(rctx->vbuf_mgr, info);
++	u_vbuf_draw_begin(rctx->vbuf_mgr, info);
+ 	r600_vertex_buffer_update(rctx);
+ 
+ 	draw.info = *info;
++	if (draw.info.max_index != ~0) {
++		draw.info.min_index += info->index_bias;
++		draw.info.max_index += info->index_bias;
++	}
++
+ 	draw.ctx = ctx;
+ 	draw.index_buffer = NULL;
+ 	if (info->indexed && rctx->index_buffer.buffer) {
+@@ -669,7 +674,7 @@ void r600_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info *info)
+ 
+ 	pipe_resource_reference(&draw.index_buffer, NULL);
+ 
+-	u_vbuf_mgr_draw_end(rctx->vbuf_mgr);
++	u_vbuf_draw_end(rctx->vbuf_mgr);
+ }
+ 
+ void _r600_pipe_state_add_reg(struct r600_context *ctx,
+diff --git a/src/gallium/drivers/r600/r600_state_inlines.h b/src/gallium/drivers/r600/r600_state_inlines.h
+index 5418570..eb6fb65 100644
+--- a/src/gallium/drivers/r600/r600_state_inlines.h
++++ b/src/gallium/drivers/r600/r600_state_inlines.h
+@@ -319,6 +319,7 @@ static inline uint32_t r600_translate_colorswap(enum pipe_format format)
+ 		return V_0280A0_SWAP_STD;
+ 
+ 	case PIPE_FORMAT_R16_UNORM:
++	case PIPE_FORMAT_R16_FLOAT:
+ 		return V_0280A0_SWAP_STD;
+ 
+ 	/* 32-bit buffers. */
+@@ -423,6 +424,9 @@ static INLINE uint32_t r600_translate_colorformat(enum pipe_format format)
+ 	case PIPE_FORMAT_R16_UNORM:
+ 		return V_0280A0_COLOR_16;
+ 
++	case PIPE_FORMAT_R16_FLOAT:
++		return V_0280A0_COLOR_16_FLOAT;
++
+ 	/* 32-bit buffers. */
+ 	case PIPE_FORMAT_A8B8G8R8_SRGB:
+ 	case PIPE_FORMAT_A8B8G8R8_UNORM:
+diff --git a/src/gallium/drivers/softpipe/sp_quad_depth_test.c b/src/gallium/drivers/softpipe/sp_quad_depth_test.c
+index 89b2a91..b8cd90d 100644
+--- a/src/gallium/drivers/softpipe/sp_quad_depth_test.c
++++ b/src/gallium/drivers/softpipe/sp_quad_depth_test.c
+@@ -205,10 +205,9 @@ convert_quad_stencil( struct depth_data *data,
+    case PIPE_FORMAT_Z24_UNORM_S8_USCALED:
+    case PIPE_FORMAT_X8Z24_UNORM:
+    case PIPE_FORMAT_S8_USCALED_Z24_UNORM:
+-      {
+-         for (j = 0; j < QUAD_SIZE; j++) {
+-            data->shader_stencil_refs[j] = ((unsigned)(quad->output.stencil[j]));
+-         }
++   case PIPE_FORMAT_S8_USCALED:
++      for (j = 0; j < QUAD_SIZE; j++) {
++         data->shader_stencil_refs[j] = ((unsigned)(quad->output.stencil[j]));
+       }
+       break;
+    default:
+diff --git a/src/gallium/winsys/r600/drm/evergreen_hw_context.c b/src/gallium/winsys/r600/drm/evergreen_hw_context.c
+index 60d2e28..51bdd25 100644
+--- a/src/gallium/winsys/r600/drm/evergreen_hw_context.c
++++ b/src/gallium/winsys/r600/drm/evergreen_hw_context.c
+@@ -1019,6 +1019,8 @@ int evergreen_context_init(struct r600_context *ctx, struct radeon *radeon)
+ 
+ 	LIST_INITHEAD(&ctx->fenced_bo);
+ 
++	r600_get_backend_mask(ctx);
++
+ 	return 0;
+ out_err:
+ 	r600_context_fini(ctx);
+diff --git a/src/gallium/winsys/r600/drm/r600_drm.c b/src/gallium/winsys/r600/drm/r600_drm.c
+index b5a4d92..1ff3275 100644
+--- a/src/gallium/winsys/r600/drm/r600_drm.c
++++ b/src/gallium/winsys/r600/drm/r600_drm.c
+@@ -50,6 +50,14 @@
+ #define RADEON_INFO_NUM_BACKENDS 0xa
+ #endif
+ 
++#ifndef RADEON_INFO_NUM_TILE_PIPES
++#define RADEON_INFO_NUM_TILE_PIPES 0xb
++#endif
++
++#ifndef RADEON_INFO_BACKEND_MAP
++#define RADEON_INFO_BACKEND_MAP 0xd
++#endif
++
+ enum radeon_family r600_get_family(struct radeon *r600)
+ {
+ 	return r600->family;
+@@ -75,6 +83,16 @@ unsigned r600_get_num_backends(struct radeon *radeon)
+ 	return radeon->num_backends;
+ }
+ 
++unsigned r600_get_num_tile_pipes(struct radeon *radeon)
++{
++	return radeon->num_tile_pipes;
++}
++
++unsigned r600_get_backend_map(struct radeon *radeon)
++{
++	return radeon->backend_map;
++}
++
+ unsigned r600_get_minor_version(struct radeon *radeon)
+ {
+ 	return radeon->minor_version;
+@@ -241,6 +259,42 @@ static int radeon_get_num_backends(struct radeon *radeon)
+ 	return 0;
+ }
+ 
++static int radeon_get_num_tile_pipes(struct radeon *radeon)
++{
++	struct drm_radeon_info info = {};
++	uint32_t num_tile_pipes = 0;
++	int r;
++
++	info.request = RADEON_INFO_NUM_TILE_PIPES;
++	info.value = (uintptr_t)&num_tile_pipes;
++	r = drmCommandWriteRead(radeon->fd, DRM_RADEON_INFO, &info,
++			sizeof(struct drm_radeon_info));
++	if (r)
++		return r;
++
++	radeon->num_tile_pipes = num_tile_pipes;
++	return 0;
++}
++
++static int radeon_get_backend_map(struct radeon *radeon)
++{
++	struct drm_radeon_info info = {};
++	uint32_t backend_map = 0;
++	int r;
++
++	info.request = RADEON_INFO_BACKEND_MAP;
++	info.value = (uintptr_t)&backend_map;
++	r = drmCommandWriteRead(radeon->fd, DRM_RADEON_INFO, &info,
++			sizeof(struct drm_radeon_info));
++	if (r)
++		return r;
++
++	radeon->backend_map = backend_map;
++	radeon->backend_map_valid = TRUE;
++
++	return 0;
++}
++
+ 
+ static int radeon_init_fence(struct radeon *radeon)
+ {
+@@ -362,6 +416,11 @@ static struct radeon *radeon_new(int fd, unsigned device)
+ 	if (radeon->minor_version >= 9)
+ 		radeon_get_num_backends(radeon);
+ 
++	if (radeon->minor_version >= 11) {
++		radeon_get_num_tile_pipes(radeon);
++		radeon_get_backend_map(radeon);
++	}
++
+ 	radeon->bomgr = r600_bomgr_create(radeon, 1000000);
+ 	if (radeon->bomgr == NULL) {
+ 		return NULL;
+diff --git a/src/gallium/winsys/r600/drm/r600_hw_context.c b/src/gallium/winsys/r600/drm/r600_hw_context.c
+index 5c2881a..fe82c6a 100644
+--- a/src/gallium/winsys/r600/drm/r600_hw_context.c
++++ b/src/gallium/winsys/r600/drm/r600_hw_context.c
+@@ -40,6 +40,91 @@
+ 
+ #define GROUP_FORCE_NEW_BLOCK	0
+ 
++/* Get backends mask */
++void r600_get_backend_mask(struct r600_context *ctx)
++{
++	struct r600_bo * buffer;
++	u32 * results;
++	unsigned num_backends = r600_get_num_backends(ctx->radeon);
++	unsigned i, mask = 0;
++
++	/* if backend_map query is supported by the kernel */
++	if (ctx->radeon->backend_map_valid) {
++		unsigned num_tile_pipes = r600_get_num_tile_pipes(ctx->radeon);
++		unsigned backend_map = r600_get_backend_map(ctx->radeon);
++		unsigned item_width, item_mask;
++
++		if (ctx->radeon->chip_class >= EVERGREEN) {
++			item_width = 4;
++			item_mask = 0x7;
++		} else {
++			item_width = 2;
++			item_mask = 0x3;
++		}
++
++		while(num_tile_pipes--) {
++			i = backend_map & item_mask;
++			mask |= (1<<i);
++			backend_map >>= item_width;
++		}
++		if (mask != 0) {
++			ctx->backend_mask = mask;
++			return;
++		}
++	}
++
++	/* otherwise backup path for older kernels */
++
++	/* create buffer for event data */
++	buffer = r600_bo(ctx->radeon, ctx->max_db*16, 1, 0,
++				PIPE_USAGE_STAGING);
++	if (!buffer)
++		goto err;
++
++	/* initialize buffer with zeroes */
++	results = r600_bo_map(ctx->radeon, buffer, PB_USAGE_CPU_WRITE, NULL);
++	if (results) {
++		memset(results, 0, ctx->max_db * 4 * 4);
++		r600_bo_unmap(ctx->radeon, buffer);
++
++		/* emit EVENT_WRITE for ZPASS_DONE */
++		ctx->pm4[ctx->pm4_cdwords++] = PKT3(PKT3_EVENT_WRITE, 2, 0);
++		ctx->pm4[ctx->pm4_cdwords++] = EVENT_TYPE(EVENT_TYPE_ZPASS_DONE) | EVENT_INDEX(1);
++		ctx->pm4[ctx->pm4_cdwords++] = 0;
++		ctx->pm4[ctx->pm4_cdwords++] = 0;
++
++		ctx->pm4[ctx->pm4_cdwords++] = PKT3(PKT3_NOP, 0, 0);
++		ctx->pm4[ctx->pm4_cdwords++] = 0;
++		r600_context_bo_reloc(ctx, &ctx->pm4[ctx->pm4_cdwords - 1], buffer);
++
++		/* execute */
++		r600_context_flush(ctx);
++
++		/* analyze results */
++		results = r600_bo_map(ctx->radeon, buffer, PB_USAGE_CPU_READ, NULL);
++		if (results) {
++			for(i = 0; i < ctx->max_db; i++) {
++				/* at least highest bit will be set if backend is used */
++				if (results[i*4 + 1])
++					mask |= (1<<i);
++			}
++			r600_bo_unmap(ctx->radeon, buffer);
++		}
++	}
++
++	r600_bo_reference(ctx->radeon, &buffer, NULL);
++
++	if (mask != 0) {
++		ctx->backend_mask = mask;
++		return;
++	}
++
++err:
++	/* fallback to old method - set num_backends lower bits to 1 */
++	ctx->backend_mask = (~((u32)0))>>(32-num_backends);
++	return;
++}
++
+ static inline void r600_context_ps_partial_flush(struct r600_context *ctx)
+ {
+ 	if (!(ctx->flags & R600_CONTEXT_DRAW_PENDING))
+@@ -899,6 +984,8 @@ int r600_context_init(struct r600_context *ctx, struct radeon *radeon)
+ 
+ 	ctx->max_db = 4;
+ 
++	r600_get_backend_mask(ctx);
++
+ 	return 0;
+ out_err:
+ 	r600_context_fini(ctx);
+@@ -1731,7 +1818,6 @@ static boolean r600_query_result(struct r600_context *ctx, struct r600_query *qu
+ void r600_query_begin(struct r600_context *ctx, struct r600_query *query)
+ {
+ 	unsigned required_space, new_results_end;
+-	int num_backends = r600_get_num_backends(ctx->radeon);
+ 
+ 	/* query request needs 6/8 dwords for begin + 6/8 dwords for end */
+ 	if (query->type == PIPE_QUERY_TIME_ELAPSED)
+@@ -1777,9 +1863,11 @@ void r600_query_begin(struct r600_context *ctx, struct r600_query *query)
+ 			memset(results, 0, query->result_size);
+ 
+ 			/* Set top bits for unused backends */
+-			for (i = num_backends; i < ctx->max_db; i++) {
+-				results[(i * 4)+1] = 0x80000000;
+-				results[(i * 4)+3] = 0x80000000;
++			for (i = 0; i < ctx->max_db; i++) {
++				if (!(ctx->backend_mask & (1<<i))) {
++					results[(i * 4)+1] = 0x80000000;
++					results[(i * 4)+3] = 0x80000000;
++				}
+ 			}
+ 			r600_bo_unmap(ctx->radeon, query->buffer);
+ 		}
+diff --git a/src/gallium/winsys/r600/drm/r600_priv.h b/src/gallium/winsys/r600/drm/r600_priv.h
+index 69f7251..75115fd 100644
+--- a/src/gallium/winsys/r600/drm/r600_priv.h
++++ b/src/gallium/winsys/r600/drm/r600_priv.h
+@@ -55,6 +55,9 @@ struct radeon {
+ 	struct r600_bo			*fence_bo;
+ 	unsigned			clock_crystal_freq;
+ 	unsigned			num_backends;
++	unsigned			num_tile_pipes;
++	unsigned			backend_map;
++	boolean				backend_map_valid;
+ 	unsigned                        minor_version;
+ 
+         /* List of buffer handles and its mutex. */
+diff --git a/src/gallium/winsys/radeon/drm/radeon_drm_cs.c b/src/gallium/winsys/radeon/drm/radeon_drm_cs.c
+index 0139de1..1dcc7e1 100644
+--- a/src/gallium/winsys/radeon/drm/radeon_drm_cs.c
++++ b/src/gallium/winsys/radeon/drm/radeon_drm_cs.c
+@@ -115,6 +115,7 @@ static void radeon_cs_context_cleanup(struct radeon_cs_context *csc)
+     }
+ 
+     csc->crelocs = 0;
++    csc->validated_crelocs = 0;
+     csc->chunks[0].length_dw = 0;
+     csc->chunks[1].length_dw = 0;
+     csc->used_gart = 0;
+@@ -307,9 +308,37 @@ static void radeon_drm_cs_add_reloc(struct radeon_winsys_cs *rcs,
+ static boolean radeon_drm_cs_validate(struct radeon_winsys_cs *rcs)
+ {
+     struct radeon_drm_cs *cs = radeon_drm_cs(rcs);
++    boolean status =
++        cs->csc->used_gart < cs->ws->gart_size * 0.8 &&
++        cs->csc->used_vram < cs->ws->vram_size * 0.8;
+ 
+-    return cs->csc->used_gart < cs->ws->gart_size * 0.8 &&
+-           cs->csc->used_vram < cs->ws->vram_size * 0.8;
++    if (status) {
++        cs->csc->validated_crelocs = cs->csc->crelocs;
++    } else {
++        /* Remove lately-added relocations. The validation failed with them
++         * and the CS is about to be flushed because of that. Keep only
++         * the already-validated relocations. */
++        unsigned i;
++
++        for (i = cs->csc->validated_crelocs; i < cs->csc->crelocs; i++) {
++            p_atomic_dec(&cs->csc->relocs_bo[i]->num_cs_references);
++            radeon_bo_reference(&cs->csc->relocs_bo[i], NULL);
++        }
++        cs->csc->crelocs = cs->csc->validated_crelocs;
++
++        /* Flush if there are any relocs. Clean up otherwise. */
++        if (cs->csc->crelocs) {
++            cs->flush_cs(cs->flush_data, RADEON_FLUSH_ASYNC);
++        } else {
++            radeon_cs_context_cleanup(cs->csc);
++
++            assert(cs->base.cdw == 0);
++            if (cs->base.cdw != 0) {
++                fprintf(stderr, "radeon: Unexpected error in %s.\n", __func__);
++            }
++        }
++    }
++    return status;
+ }
+ 
+ static void radeon_drm_cs_write_reloc(struct radeon_winsys_cs *rcs,
+diff --git a/src/gallium/winsys/radeon/drm/radeon_drm_cs.h b/src/gallium/winsys/radeon/drm/radeon_drm_cs.h
+index 339beed..fc51f45 100644
+--- a/src/gallium/winsys/radeon/drm/radeon_drm_cs.h
++++ b/src/gallium/winsys/radeon/drm/radeon_drm_cs.h
+@@ -41,6 +41,7 @@ struct radeon_cs_context {
+     /* Relocs. */
+     unsigned                    nrelocs;
+     unsigned                    crelocs;
++    unsigned			validated_crelocs;
+     struct radeon_bo            **relocs_bo;
+     struct drm_radeon_cs_reloc  *relocs;
+ 
+diff --git a/src/gallium/winsys/radeon/drm/radeon_winsys.h b/src/gallium/winsys/radeon/drm/radeon_winsys.h
+index 3a64e4a..41c26c6 100644
+--- a/src/gallium/winsys/radeon/drm/radeon_winsys.h
++++ b/src/gallium/winsys/radeon/drm/radeon_winsys.h
+@@ -271,7 +271,9 @@ struct radeon_winsys {
+ 
+     /**
+      * Return TRUE if there is enough memory in VRAM and GTT for the relocs
+-     * added so far.
++     * added so far. If the validation fails, all the relocations which have
++     * been added since the last call of cs_validate will be removed and
++     * the CS will be flushed (provided there are still any relocations).
+      *
+      * \param cs        A command stream to validate.
+      */
+diff --git a/src/glsl/ast.h b/src/glsl/ast.h
+index 878f48b..d1de227 100644
+--- a/src/glsl/ast.h
++++ b/src/glsl/ast.h
+@@ -730,7 +730,6 @@ _mesa_ast_field_selection_to_hir(const ast_expression *expr,
+ 				 struct _mesa_glsl_parse_state *state);
+ 
+ void
+-emit_function(_mesa_glsl_parse_state *state, exec_list *instructions,
+-	      ir_function *f);
++emit_function(_mesa_glsl_parse_state *state, ir_function *f);
+ 
+ #endif /* AST_H */
+diff --git a/src/glsl/ast_function.cpp b/src/glsl/ast_function.cpp
+index 9aa8556..ed401b1 100644
+--- a/src/glsl/ast_function.cpp
++++ b/src/glsl/ast_function.cpp
+@@ -125,7 +125,7 @@ match_function_by_name(exec_list *instructions, const char *name,
+ 	    if (f == NULL) {
+ 	       f = new(ctx) ir_function(name);
+ 	       state->symbols->add_global_function(f);
+-	       emit_function(state, instructions, f);
++	       emit_function(state, f);
+ 	    }
+ 
+ 	    f->add_signature(sig->clone_prototype(f, NULL));
+@@ -134,6 +134,8 @@ match_function_by_name(exec_list *instructions, const char *name,
+       }
+    }
+ 
++   exec_list post_call_conversions;
++
+    if (sig != NULL) {
+       /* Verify that 'out' and 'inout' actual parameters are lvalues.  This
+        * isn't done in ir_function::matching_signature because that function
+@@ -141,6 +143,12 @@ match_function_by_name(exec_list *instructions, const char *name,
+        *
+        * Also, validate that 'const_in' formal parameters (an extension of our
+        * IR) correspond to ir_constant actual parameters.
++       *
++       * Also, perform implicit conversion of arguments.  Note: to implicitly
++       * convert out parameters, we need to place them in a temporary
++       * variable, and do the conversion after the call takes place.  Since we
++       * haven't emitted the call yet, we'll place the post-call conversions
++       * in a temporary exec_list, and emit them later.
+        */
+       exec_list_iterator actual_iter = actual_parameters->iterator();
+       exec_list_iterator formal_iter = sig->parameters.iterator();
+@@ -185,8 +193,63 @@ match_function_by_name(exec_list *instructions, const char *name,
+ 	 }
+ 
+ 	 if (formal->type->is_numeric() || formal->type->is_boolean()) {
+-	    ir_rvalue *converted = convert_component(actual, formal->type);
+-	    actual->replace_with(converted);
++            switch (formal->mode) {
++            case ir_var_in: {
++               ir_rvalue *converted
++                  = convert_component(actual, formal->type);
++               actual->replace_with(converted);
++               break;
++            }
++            case ir_var_out:
++               if (actual->type != formal->type) {
++                  /* To convert an out parameter, we need to create a
++                   * temporary variable to hold the value before conversion,
++                   * and then perform the conversion after the function call
++                   * returns.
++                   *
++                   * This has the effect of transforming code like this:
++                   *
++                   *   void f(out int x);
++                   *   float value;
++                   *   f(value);
++                   *
++                   * Into IR that's equivalent to this:
++                   *
++                   *   void f(out int x);
++                   *   float value;
++                   *   int out_parameter_conversion;
++                   *   f(out_parameter_conversion);
++                   *   value = float(out_parameter_conversion);
++                   */
++                  ir_variable *tmp =
++                     new(ctx) ir_variable(formal->type,
++                                          "out_parameter_conversion",
++                                          ir_var_temporary);
++                  instructions->push_tail(tmp);
++                  ir_dereference_variable *deref_tmp_1
++                     = new(ctx) ir_dereference_variable(tmp);
++                  ir_dereference_variable *deref_tmp_2
++                     = new(ctx) ir_dereference_variable(tmp);
++                  ir_rvalue *converted_tmp
++                     = convert_component(deref_tmp_1, actual->type);
++                  ir_assignment *assignment
++                     = new(ctx) ir_assignment(actual, converted_tmp);
++                  post_call_conversions.push_tail(assignment);
++                  actual->replace_with(deref_tmp_2);
++               }
++               break;
++            case ir_var_inout:
++               /* Inout parameters should never require conversion, since that
++                * would require an implicit conversion to exist both to and
++                * from the formal parameter type, and there are no
++                * bidirectional implicit conversions.
++                */
++               assert (actual->type == formal->type);
++               break;
++            default:
++               assert (!"Illegal formal parameter mode");
++               break;
++            }
+ 	 }
+ 
+ 	 actual_iter.next();
+@@ -196,11 +259,27 @@ match_function_by_name(exec_list *instructions, const char *name,
+       /* Always insert the call in the instruction stream, and return a deref
+        * of its return val if it returns a value, since we don't know if
+        * the rvalue is going to be assigned to anything or not.
++       *
++       * Also insert any out parameter conversions after the call.
+        */
+       ir_call *call = new(ctx) ir_call(sig, actual_parameters);
++      ir_dereference_variable *deref;
+       if (!sig->return_type->is_void()) {
++         /* If the function call is a constant expression, don't
++          * generate the instructions to call it; just generate an
++          * ir_constant representing the constant value.
++          *
++          * Function calls can only be constant expressions starting
++          * in GLSL 1.20.
++          */
++         if (state->language_version >= 120) {
++            ir_constant *const_val = call->constant_expression_value();
++            if (const_val) {
++               return const_val;
++            }
++         }
++
+ 	 ir_variable *var;
+-	 ir_dereference_variable *deref;
+ 
+ 	 var = new(ctx) ir_variable(sig->return_type,
+ 				    ralloc_asprintf(ctx, "%s_retval",
+@@ -211,15 +290,14 @@ match_function_by_name(exec_list *instructions, const char *name,
+ 	 deref = new(ctx) ir_dereference_variable(var);
+ 	 ir_assignment *assign = new(ctx) ir_assignment(deref, call, NULL);
+ 	 instructions->push_tail(assign);
+-	 if (state->language_version >= 120)
+-	    var->constant_value = call->constant_expression_value();
+ 
+ 	 deref = new(ctx) ir_dereference_variable(var);
+-	 return deref;
+       } else {
+ 	 instructions->push_tail(call);
+-	 return NULL;
++	 deref = NULL;
+       }
++      instructions->append_list(&post_call_conversions);
++      return deref;
+    } else {
+       char *str = prototype_string(NULL, name, actual_parameters);
+ 
+@@ -419,13 +497,21 @@ process_array_constructor(exec_list *instructions,
+       ir_rvalue *ir = (ir_rvalue *) n;
+       ir_rvalue *result = ir;
+ 
+-      /* Apply implicit conversions (not the scalar constructor rules!) */
++      /* Apply implicit conversions (not the scalar constructor rules!). See
++       * the spec quote above. */
+       if (constructor_type->element_type()->is_float()) {
+ 	 const glsl_type *desired_type =
+ 	    glsl_type::get_instance(GLSL_TYPE_FLOAT,
+ 				    ir->type->vector_elements,
+ 				    ir->type->matrix_columns);
+-	 result = convert_component(ir, desired_type);
++	 if (result->type->can_implicitly_convert_to(desired_type)) {
++	    /* Even though convert_component() implements the constructor
++	     * conversion rules (not the implicit conversion rules), its safe
++	     * to use it here because we already checked that the implicit
++	     * conversion is legal.
++	     */
++	    result = convert_component(ir, desired_type);
++	 }
+       }
+ 
+       if (result->type != constructor_type->element_type()) {
+diff --git a/src/glsl/ast_to_hir.cpp b/src/glsl/ast_to_hir.cpp
+index 620286a..2289047 100644
+--- a/src/glsl/ast_to_hir.cpp
++++ b/src/glsl/ast_to_hir.cpp
+@@ -66,6 +66,8 @@ _mesa_ast_to_hir(exec_list *instructions, struct _mesa_glsl_parse_state *state)
+ 
+    state->current_function = NULL;
+ 
++   state->toplevel_ir = instructions;
++
+    /* Section 4.2 of the GLSL 1.20 specification states:
+     * "The built-in functions are scoped in a scope outside the global scope
+     *  users declare global variables in.  That is, a shader's global scope,
+@@ -85,6 +87,8 @@ _mesa_ast_to_hir(exec_list *instructions, struct _mesa_glsl_parse_state *state)
+       ast->hir(instructions, state);
+ 
+    detect_recursion_unlinked(state, instructions);
++
++   state->toplevel_ir = NULL;
+ }
+ 
+ 
+@@ -641,6 +645,16 @@ validate_assignment(struct _mesa_glsl_parse_state *state,
+    return NULL;
+ }
+ 
++static void
++mark_whole_array_access(ir_rvalue *access)
++{
++   ir_dereference_variable *deref = access->as_dereference_variable();
++
++   if (deref && deref->var) {
++      deref->var->max_array_access = deref->type->length - 1;
++   }
++}
++
+ ir_rvalue *
+ do_assignment(exec_list *instructions, struct _mesa_glsl_parse_state *state,
+ 	      ir_rvalue *lhs, ir_rvalue *rhs, bool is_initializer,
+@@ -657,16 +671,20 @@ do_assignment(exec_list *instructions, struct _mesa_glsl_parse_state *state,
+                           lhs->variable_referenced()->name);
+          error_emitted = true;
+ 
++      } else if (state->language_version <= 110 && lhs->type->is_array()) {
++	 /* From page 32 (page 38 of the PDF) of the GLSL 1.10 spec:
++	  *
++	  *    "Other binary or unary expressions, non-dereferenced
++	  *     arrays, function names, swizzles with repeated fields,
++	  *     and constants cannot be l-values."
++	  */
++	 _mesa_glsl_error(&lhs_loc, state, "whole array assignment is not "
++			  "allowed in GLSL 1.10 or GLSL ES 1.00.");
++	 error_emitted = true;
+       } else if (!lhs->is_lvalue()) {
+ 	 _mesa_glsl_error(& lhs_loc, state, "non-lvalue in assignment");
+ 	 error_emitted = true;
+       }
+-
+-      if (state->es_shader && lhs->type->is_array()) {
+-	 _mesa_glsl_error(&lhs_loc, state, "whole array assignment is not "
+-			  "allowed in GLSL ES 1.00.");
+-	 error_emitted = true;
+-      }
+    }
+ 
+    ir_rvalue *new_rhs =
+@@ -701,6 +719,8 @@ do_assignment(exec_list *instructions, struct _mesa_glsl_parse_state *state,
+ 						   rhs->type->array_size());
+ 	 d->type = var->type;
+       }
++      mark_whole_array_access(rhs);
++      mark_whole_array_access(lhs);
+    }
+ 
+    /* Most callers of do_assignment (assign, add_assign, pre_inc/dec,
+@@ -761,16 +781,6 @@ ast_node::hir(exec_list *instructions,
+    return NULL;
+ }
+ 
+-static void
+-mark_whole_array_access(ir_rvalue *access)
+-{
+-   ir_dereference_variable *deref = access->as_dereference_variable();
+-
+-   if (deref) {
+-      deref->var->max_array_access = deref->type->length - 1;
+-   }
+-}
+-
+ static ir_rvalue *
+ do_comparison(void *mem_ctx, int operation, ir_rvalue *op0, ir_rvalue *op1)
+ {
+@@ -880,6 +890,29 @@ get_scalar_boolean_operand(exec_list *instructions,
+    return new(ctx) ir_constant(true);
+ }
+ 
++/**
++ * If name refers to a builtin array whose maximum allowed size is less than
++ * size, report an error and return true.  Otherwise return false.
++ */
++static bool
++check_builtin_array_max_size(const char *name, unsigned size,
++                             YYLTYPE loc, struct _mesa_glsl_parse_state *state)
++{
++   if ((strcmp("gl_TexCoord", name) == 0)
++       && (size > state->Const.MaxTextureCoords)) {
++      /* From page 54 (page 60 of the PDF) of the GLSL 1.20 spec:
++       *
++       *     "The size [of gl_TexCoord] can be at most
++       *     gl_MaxTextureCoords."
++       */
++      _mesa_glsl_error(&loc, state, "`gl_TexCoord' array size cannot "
++                       "be larger than gl_MaxTextureCoords (%u)\n",
++                       state->Const.MaxTextureCoords);
++      return true;
++   }
++   return false;
++}
++
+ ir_rvalue *
+ ast_expression::hir(exec_list *instructions,
+ 		    struct _mesa_glsl_parse_state *state)
+@@ -1537,8 +1570,15 @@ ast_expression::hir(exec_list *instructions,
+ 	     * FINISHME: array access limits be added to ir_dereference?
+ 	     */
+ 	    ir_variable *const v = array->whole_variable_referenced();
+-	    if ((v != NULL) && (unsigned(idx) > v->max_array_access))
++	    if ((v != NULL) && (unsigned(idx) > v->max_array_access)) {
+ 	       v->max_array_access = idx;
++
++               /* Check whether this access will, as a side effect, implicitly
++                * cause the size of a built-in array to be too large.
++                */
++               if (check_builtin_array_max_size(v->name, idx+1, loc, state))
++                  error_emitted = true;
++            }
+ 	 }
+       } else if (array->type->array_size() == 0) {
+ 	 _mesa_glsl_error(&loc, state, "unsized array index must be constant");
+@@ -1757,11 +1797,6 @@ process_array_type(YYLTYPE *loc, const glsl_type *base, ast_node *array_size,
+       ir_rvalue *const ir = array_size->hir(& dummy_instructions, state);
+       YYLTYPE loc = array_size->get_location();
+ 
+-      /* FINISHME: Verify that the grammar forbids side-effects in array
+-       * FINISHME: sizes.   i.e., 'vec4 [x = 12] data'
+-       */
+-      assert(dummy_instructions.is_empty());
+-
+       if (ir != NULL) {
+ 	 if (!ir->type->is_integer()) {
+ 	    _mesa_glsl_error(& loc, state, "array size must be integer type");
+@@ -1778,6 +1813,14 @@ process_array_type(YYLTYPE *loc, const glsl_type *base, ast_node *array_size,
+ 	    } else {
+ 	       assert(size->type == ir->type);
+ 	       length = size->value.u[0];
++
++               /* If the array size is const (and we've verified that
++                * it is) then no instructions should have been emitted
++                * when we converted it to HIR.  If they were emitted,
++                * then either the array size isn't const after all, or
++                * we are emitting unnecessary instructions.
++                */
++               assert(dummy_instructions.is_empty());
+ 	    }
+ 	 }
+       }
+@@ -2054,10 +2097,6 @@ apply_type_qualifier_to_variable(const struct ast_type_qualifier *qual,
+        var->depth_layout = ir_depth_layout_unchanged;
+    else
+        var->depth_layout = ir_depth_layout_none;
+-
+-   if (var->type->is_array() && state->language_version != 110) {
+-      var->array_lvalue = true;
+-   }
+ }
+ 
+ /**
+@@ -2105,18 +2144,9 @@ get_variable_being_redeclared(ir_variable *var, ast_declaration *decl,
+        * FINISHME: required or not.
+        */
+ 
+-      /* From page 54 (page 60 of the PDF) of the GLSL 1.20 spec:
+-       *
+-       *     "The size [of gl_TexCoord] can be at most
+-       *     gl_MaxTextureCoords."
+-       */
+       const unsigned size = unsigned(var->type->array_size());
+-      if ((strcmp("gl_TexCoord", var->name) == 0)
+-	  && (size > state->Const.MaxTextureCoords)) {
+-	 _mesa_glsl_error(& loc, state, "`gl_TexCoord' array size cannot "
+-			  "be larger than gl_MaxTextureCoords (%u)\n",
+-			  state->Const.MaxTextureCoords);
+-      } else if ((size > 0) && (size <= earlier->max_array_access)) {
++      check_builtin_array_max_size(var->name, size, loc, state);
++      if ((size > 0) && (size <= earlier->max_array_access)) {
+ 	 _mesa_glsl_error(& loc, state, "array size must be > %u due to "
+ 			  "previous access",
+ 			  earlier->max_array_access);
+@@ -2391,12 +2421,12 @@ ast_declarator_list::hir(exec_list *instructions,
+ 
+    decl_type = this->type->specifier->glsl_type(& type_name, state);
+    if (this->declarations.is_empty()) {
+-      /* The only valid case where the declaration list can be empty is when
+-       * the declaration is setting the default precision of a built-in type
+-       * (e.g., 'precision highp vec4;').
+-       */
+-
+       if (decl_type != NULL) {
++	 /* Warn if this empty declaration is not for declaring a structure.
++	  */
++	 if (this->type->specifier->structure == NULL) {
++	    _mesa_glsl_warning(&loc, state, "empty declaration");
++	 }
+       } else {
+ 	    _mesa_glsl_error(& loc, state, "incomplete declaration");
+       }
+@@ -2881,6 +2911,26 @@ ast_parameter_declarator::hir(exec_list *instructions,
+       type = glsl_type::error_type;
+    }
+ 
++   /* From page 39 (page 45 of the PDF) of the GLSL 1.10 spec:
++    *
++    *    "When calling a function, expressions that do not evaluate to
++    *     l-values cannot be passed to parameters declared as out or inout."
++    *
++    * From page 32 (page 38 of the PDF) of the GLSL 1.10 spec:
++    *
++    *    "Other binary or unary expressions, non-dereferenced arrays,
++    *     function names, swizzles with repeated fields, and constants
++    *     cannot be l-values."
++    *
++    * So for GLSL 1.10, passing an array as an out or inout parameter is not
++    * allowed.  This restriction is removed in GLSL 1.20, and in GLSL ES.
++    */
++   if ((var->mode == ir_var_inout || var->mode == ir_var_out)
++       && type->is_array() && state->language_version == 110) {
++      _mesa_glsl_error(&loc, state, "Arrays cannot be out or inout parameters in GLSL 1.10");
++      type = glsl_type::error_type;
++   }
++
+    instructions->push_tail(var);
+ 
+    /* Parameter declarations do not have r-values.
+@@ -2918,23 +2968,16 @@ ast_parameter_declarator::parameters_to_hir(exec_list *ast_parameters,
+ 
+ 
+ void
+-emit_function(_mesa_glsl_parse_state *state, exec_list *instructions,
+-	      ir_function *f)
++emit_function(_mesa_glsl_parse_state *state, ir_function *f)
+ {
+-   /* Emit the new function header */
+-   if (state->current_function == NULL) {
+-      instructions->push_tail(f);
+-   } else {
+-      /* IR invariants disallow function declarations or definitions nested
+-       * within other function definitions.  Insert the new ir_function
+-       * block in the instruction sequence before the ir_function block
+-       * containing the current ir_function_signature.
+-       */
+-      ir_function *const curr =
+-	 const_cast<ir_function *>(state->current_function->function());
+-
+-      curr->insert_before(f);
+-   }
++   /* IR invariants disallow function declarations or definitions
++    * nested within other function definitions.  But there is no
++    * requirement about the relative order of function declarations
++    * and definitions with respect to one another.  So simply insert
++    * the new ir_function block at the end of the toplevel instruction
++    * list.
++    */
++   state->toplevel_ir->push_tail(f);
+ }
+ 
+ 
+@@ -3061,7 +3104,7 @@ ast_function::hir(exec_list *instructions,
+ 	 return NULL;
+       }
+ 
+-      emit_function(state, instructions, f);
++      emit_function(state, f);
+    }
+ 
+    /* Verify the return type of main() */
+diff --git a/src/glsl/builtins/ir/asin b/src/glsl/builtins/ir/asin
+index e230ad6..45d9e67 100644
+--- a/src/glsl/builtins/ir/asin
++++ b/src/glsl/builtins/ir/asin
+@@ -5,23 +5,26 @@
+      ((return (expression float *
+ 	       (expression float sign (var_ref x))
+ 	       (expression float -
+-		(expression float *
+-		 (constant float (3.1415926))
+-		 (constant float (0.5)))
++		(constant float (1.5707964))
+ 		(expression float *
+ 		 (expression float sqrt
+ 		  (expression float -
+ 		   (constant float (1.0))
+ 		   (expression float abs (var_ref x))))
+ 		 (expression float +
+-		  (constant float (1.5707288))
++		  (constant float (1.5707964))
+ 		  (expression float *
+ 		   (expression float abs (var_ref x))
+ 		   (expression float +
+-		    (constant float (-0.2121144))
++		    (constant float (-0.21460183))
+ 		    (expression float *
+-		     (constant float (0.0742610))
+-		     (expression float abs (var_ref x))))))))))))
++		     (expression float abs (var_ref x))
++                     (expression float +
++                      (constant float (0.086566724))
++                      (expression float *
++                       (expression float abs (var_ref x))
++                       (constant float (-0.03102955))
++		     ))))))))))))
+ 
+    (signature vec2
+      (parameters
+@@ -29,23 +32,26 @@
+      ((return (expression vec2 *
+ 	       (expression vec2 sign (var_ref x))
+ 	       (expression vec2 -
+-		(expression float *
+-		 (constant float (3.1415926))
+-		 (constant float (0.5)))
++		(constant float (1.5707964))
+ 		(expression vec2 *
+ 		 (expression vec2 sqrt
+ 		  (expression vec2 -
+ 		   (constant float (1.0))
+ 		   (expression vec2 abs (var_ref x))))
+ 		 (expression vec2 +
+-		  (constant float (1.5707288))
++		  (constant float (1.5707964))
+ 		  (expression vec2 *
+ 		   (expression vec2 abs (var_ref x))
+ 		   (expression vec2 +
+-		    (constant float (-0.2121144))
++		    (constant float (-0.21460183))
+ 		    (expression vec2 *
+-		     (constant float (0.0742610))
+-		     (expression vec2 abs (var_ref x))))))))))))
++		     (expression vec2 abs (var_ref x))
++                     (expression vec2 +
++                      (constant float (0.086566724))
++                      (expression vec2 *
++                       (expression vec2 abs (var_ref x))
++                       (constant float (-0.03102955))
++		     ))))))))))))
+ 
+    (signature vec3
+      (parameters
+@@ -53,23 +59,26 @@
+      ((return (expression vec3 *
+ 	       (expression vec3 sign (var_ref x))
+ 	       (expression vec3 -
+-		(expression float *
+-		 (constant float (3.1415926))
+-		 (constant float (0.5)))
++		(constant float (1.5707964))
+ 		(expression vec3 *
+ 		 (expression vec3 sqrt
+ 		  (expression vec3 -
+ 		   (constant float (1.0))
+ 		   (expression vec3 abs (var_ref x))))
+ 		 (expression vec3 +
+-		  (constant float (1.5707288))
++		  (constant float (1.5707964))
+ 		  (expression vec3 *
+ 		   (expression vec3 abs (var_ref x))
+ 		   (expression vec3 +
+-		    (constant float (-0.2121144))
++		    (constant float (-0.21460183))
+ 		    (expression vec3 *
+-		     (constant float (0.0742610))
+-		     (expression vec3 abs (var_ref x))))))))))))
++		     (expression vec3 abs (var_ref x))
++                     (expression vec3 +
++                      (constant float (0.086566724))
++                      (expression vec3 *
++                       (expression vec3 abs (var_ref x))
++                       (constant float (-0.03102955))
++		     ))))))))))))
+ 
+    (signature vec4
+      (parameters
+@@ -77,21 +86,24 @@
+      ((return (expression vec4 *
+ 	       (expression vec4 sign (var_ref x))
+ 	       (expression vec4 -
+-		(expression float *
+-		 (constant float (3.1415926))
+-		 (constant float (0.5)))
++		(constant float (1.5707964))
+ 		(expression vec4 *
+ 		 (expression vec4 sqrt
+ 		  (expression vec4 -
+ 		   (constant float (1.0))
+ 		   (expression vec4 abs (var_ref x))))
+ 		 (expression vec4 +
+-		  (constant float (1.5707288))
++		  (constant float (1.5707964))
+ 		  (expression vec4 *
+ 		   (expression vec4 abs (var_ref x))
+ 		   (expression vec4 +
+-		    (constant float (-0.2121144))
++		    (constant float (-0.21460183))
+ 		    (expression vec4 *
+-		     (constant float (0.0742610))
+-		     (expression vec4 abs (var_ref x))))))))))))
++		     (expression vec4 abs (var_ref x))
++                     (expression vec4 +
++                      (constant float (0.086566724))
++                      (expression vec4 *
++                       (expression vec4 abs (var_ref x))
++                       (constant float (-0.03102955))
++		     ))))))))))))
+ ))
+diff --git a/src/glsl/builtins/ir/atan b/src/glsl/builtins/ir/atan
+index cfecc1f..7b5ea13 100644
+--- a/src/glsl/builtins/ir/atan
++++ b/src/glsl/builtins/ir/atan
+@@ -54,7 +54,9 @@
+     )
+     (
+       (declare () float r)
+-      (if (expression bool > (expression float abs (var_ref x)) (constant float (0.000100))) (
++      (if (expression bool >
++           (expression float abs (var_ref x))
++           (expression float * (constant float (1.0e-8)) (expression float abs (var_ref y)))) (
+         (assign (x) (var_ref r) (call atan ((expression float / (var_ref y) (var_ref x)))))
+         (if (expression bool < (var_ref x) (constant float (0.000000)) ) (
+           (if (expression bool >= (var_ref y) (constant float (0.000000)) )
+diff --git a/src/glsl/builtins/ir/radians b/src/glsl/builtins/ir/radians
+index 6a0f5d2..a419101 100644
+--- a/src/glsl/builtins/ir/radians
++++ b/src/glsl/builtins/ir/radians
+@@ -2,20 +2,20 @@
+    (signature float
+      (parameters
+        (declare (in) float arg0))
+-     ((return (expression float * (var_ref arg0) (constant float (0.017453))))))
++     ((return (expression float * (var_ref arg0) (constant float (0.0174532925))))))
+ 
+    (signature vec2
+      (parameters
+        (declare (in) vec2 arg0))
+-     ((return (expression vec2 * (var_ref arg0) (constant float (0.017453))))))
++     ((return (expression vec2 * (var_ref arg0) (constant float (0.0174532925))))))
+ 
+    (signature vec3
+      (parameters
+        (declare (in) vec3 arg0))
+-     ((return (expression vec3 * (var_ref arg0) (constant float (0.017453))))))
++     ((return (expression vec3 * (var_ref arg0) (constant float (0.0174532925))))))
+ 
+    (signature vec4
+      (parameters
+        (declare (in) vec4 arg0))
+-     ((return (expression vec4 * (var_ref arg0) (constant float (0.017453))))))
++     ((return (expression vec4 * (var_ref arg0) (constant float (0.0174532925))))))
+ ))
+diff --git a/src/glsl/glsl_parser.yy b/src/glsl/glsl_parser.yy
+index 2c0498e..1851f1e 100644
+--- a/src/glsl/glsl_parser.yy
++++ b/src/glsl/glsl_parser.yy
+@@ -971,13 +971,9 @@ single_declaration:
+ 	fully_specified_type
+ 	{
+ 	   void *ctx = state;
+-	   if ($1->specifier->type_specifier != ast_struct) {
+-	      _mesa_glsl_error(& @1, state, "empty declaration list\n");
+-	      YYERROR;
+-	   } else {
+-	      $$ = new(ctx) ast_declarator_list($1);
+-	      $$->set_location(yylloc);
+-	   }
++	   /* Empty declaration list is valid. */
++	   $$ = new(ctx) ast_declarator_list($1);
++	   $$->set_location(yylloc);
+ 	}
+ 	| fully_specified_type any_identifier
+ 	{
+diff --git a/src/glsl/glsl_parser_extras.h b/src/glsl/glsl_parser_extras.h
+index 2f4d3cb..fc392da 100644
+--- a/src/glsl/glsl_parser_extras.h
++++ b/src/glsl/glsl_parser_extras.h
+@@ -129,6 +129,12 @@ struct _mesa_glsl_parse_state {
+     */
+    class ir_function_signature *current_function;
+ 
++   /**
++    * During AST to IR conversion, pointer to the toplevel IR
++    * instruction list being generated.
++    */
++   exec_list *toplevel_ir;
++
+    /** Have we found a return statement in this function? */
+    bool found_return;
+ 
+diff --git a/src/glsl/glsl_types.cpp b/src/glsl/glsl_types.cpp
+index a5e21bb..c94aec0 100644
+--- a/src/glsl/glsl_types.cpp
++++ b/src/glsl/glsl_types.cpp
+@@ -523,3 +523,19 @@ glsl_type::component_slots() const
+       return 0;
+    }
+ }
++
++bool
++glsl_type::can_implicitly_convert_to(const glsl_type *desired) const
++{
++   if (this == desired)
++      return true;
++
++   /* There is no conversion among matrix types. */
++   if (this->matrix_columns > 1 || desired->matrix_columns > 1)
++      return false;
++
++   /* int and uint can be converted to float. */
++   return desired->is_float()
++          && this->is_integer()
++          && this->vector_elements == desired->vector_elements;
++}
+diff --git a/src/glsl/glsl_types.h b/src/glsl/glsl_types.h
+index 87f57e7..0486966 100644
+--- a/src/glsl/glsl_types.h
++++ b/src/glsl/glsl_types.h
+@@ -224,6 +224,41 @@ struct glsl_type {
+     */
+    unsigned component_slots() const;
+ 
++   /**
++    * \brief Can this type be implicitly converted to another?
++    *
++    * \return True if the types are identical or if this type can be converted
++    *         to \c desired according to Section 4.1.10 of the GLSL spec.
++    *
++    * \verbatim
++    * From page 25 (31 of the pdf) of the GLSL 1.50 spec, Section 4.1.10
++    * Implicit Conversions:
++    *
++    *     In some situations, an expression and its type will be implicitly
++    *     converted to a different type. The following table shows all allowed
++    *     implicit conversions:
++    *
++    *     Type of expression | Can be implicitly converted to
++    *     --------------------------------------------------
++    *     int                  float
++    *     uint
++    *
++    *     ivec2                vec2
++    *     uvec2
++    *
++    *     ivec3                vec3
++    *     uvec3
++    *
++    *     ivec4                vec4
++    *     uvec4
++    *
++    *     There are no implicit array or structure conversions. For example,
++    *     an array of int cannot be implicitly converted to an array of float.
++    *     There are no implicit conversions between signed and unsigned
++    *     integers.
++    * \endverbatim
++    */
++   bool can_implicitly_convert_to(const glsl_type *desired) const;
+ 
+    /**
+     * Query whether or not a type is a scalar (non-vector and non-matrix).
+diff --git a/src/glsl/ir.cpp b/src/glsl/ir.cpp
+index 4e4cfdc..66debe5 100644
+--- a/src/glsl/ir.cpp
++++ b/src/glsl/ir.cpp
+@@ -1097,9 +1097,6 @@ ir_dereference::is_lvalue()
+    if ((var == NULL) || var->read_only)
+       return false;
+ 
+-   if (this->type->is_array() && !var->array_lvalue)
+-      return false;
+-
+    /* From page 17 (page 23 of the PDF) of the GLSL 1.20 spec:
+     *
+     *    "Samplers cannot be treated as l-values; hence cannot be used
+@@ -1311,7 +1308,7 @@ ir_swizzle::variable_referenced()
+ ir_variable::ir_variable(const struct glsl_type *type, const char *name,
+ 			 ir_variable_mode mode)
+    : max_array_access(0), read_only(false), centroid(false), invariant(false),
+-     mode(mode), interpolation(ir_var_smooth), array_lvalue(false)
++     mode(mode), interpolation(ir_var_smooth)
+ {
+    this->ir_type = ir_type_variable;
+    this->type = type;
+diff --git a/src/glsl/ir.h b/src/glsl/ir.h
+index ee2de38..dda68d2 100644
+--- a/src/glsl/ir.h
++++ b/src/glsl/ir.h
+@@ -346,14 +346,6 @@ public:
+    unsigned interpolation:2;
+ 
+    /**
+-    * Flag that the whole array is assignable
+-    *
+-    * In GLSL 1.20 and later whole arrays are assignable (and comparable for
+-    * equality).  This flag enables this behavior.
+-    */
+-   unsigned array_lvalue:1;
+-
+-   /**
+     * \name ARB_fragment_coord_conventions
+     * @{
+     */
+@@ -682,7 +674,7 @@ public:
+ 
+ class ir_assignment : public ir_instruction {
+ public:
+-   ir_assignment(ir_rvalue *lhs, ir_rvalue *rhs, ir_rvalue *condition);
++   ir_assignment(ir_rvalue *lhs, ir_rvalue *rhs, ir_rvalue *condition = NULL);
+ 
+    /**
+     * Construct an assignment with an explicit write mask
+diff --git a/src/glsl/ir_clone.cpp b/src/glsl/ir_clone.cpp
+index 069bb85..6a4ddb0 100644
+--- a/src/glsl/ir_clone.cpp
++++ b/src/glsl/ir_clone.cpp
+@@ -47,7 +47,6 @@ ir_variable::clone(void *mem_ctx, struct hash_table *ht) const
+    var->centroid = this->centroid;
+    var->invariant = this->invariant;
+    var->interpolation = this->interpolation;
+-   var->array_lvalue = this->array_lvalue;
+    var->location = this->location;
+    var->warn_extension = this->warn_extension;
+    var->origin_upper_left = this->origin_upper_left;
+diff --git a/src/glsl/ir_function.cpp b/src/glsl/ir_function.cpp
+index 0f2f1a0..dd63e30 100644
+--- a/src/glsl/ir_function.cpp
++++ b/src/glsl/ir_function.cpp
+@@ -24,73 +24,25 @@
+ #include "glsl_types.h"
+ #include "ir.h"
+ 
+-int
+-type_compare(const glsl_type *a, const glsl_type *b)
+-{
+-   /* If the types are the same, they trivially match.
+-    */
+-   if (a == b)
+-      return 0;
+-
+-   switch (a->base_type) {
+-   case GLSL_TYPE_UINT:
+-   case GLSL_TYPE_INT:
+-   case GLSL_TYPE_BOOL:
+-      /* There is no implicit conversion to or from integer types or bool.
+-       */
+-      if ((a->is_integer() != b->is_integer())
+-	  || (a->is_boolean() != b->is_boolean()))
+-	 return -1;
+-
+-      /* FALLTHROUGH */
+-
+-   case GLSL_TYPE_FLOAT:
+-      if ((a->vector_elements != b->vector_elements)
+-	  || (a->matrix_columns != b->matrix_columns))
+-	 return -1;
+-
+-      return 1;
+-
+-   case GLSL_TYPE_SAMPLER:
+-   case GLSL_TYPE_STRUCT:
+-      /* Samplers and structures must match exactly.
+-       */
+-      return -1;
+-
+-   case GLSL_TYPE_ARRAY:
+-      if ((b->base_type != GLSL_TYPE_ARRAY)
+-	  || (a->length != b->length))
+-	 return -1;
+-
+-      /* From GLSL 1.50 spec, page 27 (page 33 of the PDF):
+-       *    "There are no implicit array or structure conversions."
+-       *
+-       * If the comparison of the array element types detects that a conversion
+-       * would be required, the array types do not match.
+-       */
+-      return (type_compare(a->fields.array, b->fields.array) == 0) ? 0 : -1;
+-
+-   case GLSL_TYPE_VOID:
+-   case GLSL_TYPE_ERROR:
+-   default:
+-      /* These are all error conditions.  It is invalid for a parameter to
+-       * a function to be declared as error, void, or a function.
+-       */
+-      return -1;
+-   }
+-
+-   /* This point should be unreachable.
+-    */
+-   assert(0);
+-}
+-
+-
++/**
++ * \brief Check if two parameter lists match.
++ *
++ * \param list_a Parameters of the function definition.
++ * \param list_b Actual parameters passed to the function.
++ * \return If an exact match, return 0.
++ *         If an inexact match requiring implicit conversion, return 1.
++ *         If not a match, return -1.
++ * \see matching_signature()
++ */
+ static int
+ parameter_lists_match(const exec_list *list_a, const exec_list *list_b)
+ {
+    const exec_node *node_a = list_a->head;
+    const exec_node *node_b = list_b->head;
+-   int total_score = 0;
++
++   /* This is set to true if there is an inexact match requiring an implicit
++    * conversion. */
++   bool inexact_match = false;
+ 
+    for (/* empty */
+ 	; !node_a->is_tail_sentinel()
+@@ -106,12 +58,11 @@ parameter_lists_match(const exec_list *list_a, const exec_list *list_b)
+       const ir_variable *const param = (ir_variable *) node_a;
+       const ir_instruction *const actual = (ir_instruction *) node_b;
+ 
+-      /* Determine whether or not the types match.  If the types are an
+-       * exact match, the match score is zero.  If the types don't match
+-       * but the actual parameter can be coerced to the type of the declared
+-       * parameter, the match score is one.
+-       */
+-      int score;
++      if (param->type == actual->type)
++	 continue;
++
++      /* Try to find an implicit conversion from actual to param. */
++      inexact_match = true;
+       switch ((enum ir_variable_mode)(param->mode)) {
+       case ir_var_auto:
+       case ir_var_uniform:
+@@ -125,11 +76,13 @@ parameter_lists_match(const exec_list *list_a, const exec_list *list_b)
+ 
+       case ir_var_const_in:
+       case ir_var_in:
+-	 score = type_compare(param->type, actual->type);
++	 if (!actual->type->can_implicitly_convert_to(param->type))
++	    return -1;
+ 	 break;
+ 
+       case ir_var_out:
+-	 score = type_compare(actual->type, param->type);
++	 if (!param->type->can_implicitly_convert_to(actual->type))
++	    return -1;
+ 	 break;
+ 
+       case ir_var_inout:
+@@ -137,17 +90,12 @@ parameter_lists_match(const exec_list *list_a, const exec_list *list_b)
+ 	  * there is int -> float but no float -> int), inout parameters must
+ 	  * be exact matches.
+ 	  */
+-	 score = (type_compare(actual->type, param->type) == 0) ? 0 : -1;
+-	 break;
++	 return -1;
+ 
+       default:
+ 	 assert(false);
+-      }
+-
+-      if (score < 0)
+ 	 return -1;
+-
+-      total_score += score;
++      }
+    }
+ 
+    /* If all of the parameters from the other parameter list have been
+@@ -157,7 +105,10 @@ parameter_lists_match(const exec_list *list_a, const exec_list *list_b)
+    if (!node_b->is_tail_sentinel())
+       return -1;
+ 
+-   return total_score;
++   if (inexact_match)
++      return 1;
++   else
++      return 0;
+ }
+ 
+ 
+diff --git a/src/glsl/ir_hierarchical_visitor.h b/src/glsl/ir_hierarchical_visitor.h
+index dc177f5..bba046d 100644
+--- a/src/glsl/ir_hierarchical_visitor.h
++++ b/src/glsl/ir_hierarchical_visitor.h
+@@ -178,6 +178,7 @@ void visit_tree(ir_instruction *ir,
+ 		void (*callback)(class ir_instruction *ir, void *data),
+ 		void *data);
+ 
+-ir_visitor_status visit_list_elements(ir_hierarchical_visitor *v, exec_list *l);
++ir_visitor_status visit_list_elements(ir_hierarchical_visitor *v, exec_list *l,
++                                      bool statement_list = true);
+ 
+ #endif /* IR_HIERARCHICAL_VISITOR_H */
+diff --git a/src/glsl/ir_hv_accept.cpp b/src/glsl/ir_hv_accept.cpp
+index 4a607dc..8bb5788 100644
+--- a/src/glsl/ir_hv_accept.cpp
++++ b/src/glsl/ir_hv_accept.cpp
+@@ -30,7 +30,13 @@
+  */
+ 
+ /**
+- * Process a list of nodes using a hierarchical vistor
++ * Process a list of nodes using a hierarchical vistor.
++ *
++ * If statement_list is true (the default), this is a list of statements, so
++ * v->base_ir will be set to point to each statement just before iterating
++ * over it, and restored after iteration is complete.  If statement_list is
++ * false, this is a list that appears inside a statement (e.g. a parameter
++ * list), so v->base_ir will be left alone.
+  *
+  * \warning
+  * This function will operate correctly if a node being processed is removed
+@@ -38,19 +44,22 @@
+  * processed, some of the added nodes may not be processed.
+  */
+ ir_visitor_status
+-visit_list_elements(ir_hierarchical_visitor *v, exec_list *l)
++visit_list_elements(ir_hierarchical_visitor *v, exec_list *l,
++                    bool statement_list)
+ {
+    ir_instruction *prev_base_ir = v->base_ir;
+ 
+    foreach_list_safe(n, l) {
+       ir_instruction *const ir = (ir_instruction *) n;
+-      v->base_ir = ir;
++      if (statement_list)
++         v->base_ir = ir;
+       ir_visitor_status s = ir->accept(v);
+ 
+       if (s != visit_continue)
+ 	 return s;
+    }
+-   v->base_ir = prev_base_ir;
++   if (statement_list)
++      v->base_ir = prev_base_ir;
+ 
+    return visit_continue;
+ }
+@@ -129,7 +138,7 @@ ir_function::accept(ir_hierarchical_visitor *v)
+    if (s != visit_continue)
+       return (s == visit_continue_with_parent) ? visit_continue : s;
+ 
+-   s = visit_list_elements(v, &this->signatures);
++   s = visit_list_elements(v, &this->signatures, false);
+    return (s == visit_stop) ? s : v->visit_leave(this);
+ }
+ 
+@@ -314,7 +323,7 @@ ir_call::accept(ir_hierarchical_visitor *v)
+    if (s != visit_continue)
+       return (s == visit_continue_with_parent) ? visit_continue : s;
+ 
+-   s = visit_list_elements(v, &this->actual_parameters);
++   s = visit_list_elements(v, &this->actual_parameters, false);
+    if (s == visit_stop)
+       return s;
+ 
+diff --git a/src/glsl/lower_instructions.cpp b/src/glsl/lower_instructions.cpp
+index a5f61f2..ab2fc7c 100644
+--- a/src/glsl/lower_instructions.cpp
++++ b/src/glsl/lower_instructions.cpp
+@@ -166,6 +166,10 @@ lower_instructions_visitor::div_to_mul_rcp(ir_expression *ir)
+       else
+ 	 op0 = new(ir) ir_expression(ir_unop_u2f, vec_type, ir->operands[0], NULL);
+ 
++      vec_type = glsl_type::get_instance(GLSL_TYPE_FLOAT,
++					 ir->type->vector_elements,
++					 ir->type->matrix_columns);
++
+       op0 = new(ir) ir_expression(ir_binop_mul, vec_type, op0, op1);
+ 
+       ir->operation = ir_unop_f2i;
+diff --git a/src/glsl/lower_jumps.cpp b/src/glsl/lower_jumps.cpp
+index dd2601d..177b751 100644
+--- a/src/glsl/lower_jumps.cpp
++++ b/src/glsl/lower_jumps.cpp
+@@ -146,16 +146,17 @@ struct function_record
+    ir_function_signature* signature;
+    ir_variable* return_flag; /* used to break out of all loops and then jump to the return instruction */
+    ir_variable* return_value;
+-   bool is_main;
++   bool lower_return;
+    unsigned nesting_depth;
+ 
+-   function_record(ir_function_signature* p_signature = 0)
++   function_record(ir_function_signature* p_signature = 0,
++                   bool lower_return = false)
+    {
+       this->signature = p_signature;
+       this->return_flag = 0;
+       this->return_value = 0;
+       this->nesting_depth = 0;
+-      this->is_main = this->signature && (strcmp(this->signature->function_name(), "main") == 0);
++      this->lower_return = lower_return;
+    }
+ 
+    ir_variable* get_return_flag()
+@@ -218,6 +219,87 @@ struct ir_lower_jumps_visitor : public ir_control_flow_visitor {
+       }
+    }
+ 
++   /**
++    * Insert the instructions necessary to lower a return statement,
++    * before the given return instruction.
++    */
++   void insert_lowered_return(ir_return *ir)
++   {
++      ir_variable* return_flag = this->function.get_return_flag();
++      if(!this->function.signature->return_type->is_void()) {
++         ir_variable* return_value = this->function.get_return_value();
++         ir->insert_before(
++            new(ir) ir_assignment(
++               new (ir) ir_dereference_variable(return_value),
++               ir->value));
++      }
++      ir->insert_before(
++         new(ir) ir_assignment(
++            new (ir) ir_dereference_variable(return_flag),
++            new (ir) ir_constant(true)));
++      this->loop.may_set_return_flag = true;
++   }
++
++   /**
++    * If the given instruction is a return, lower it to instructions
++    * that store the return value (if there is one), set the return
++    * flag, and then break.
++    *
++    * It is safe to pass NULL to this function.
++    */
++   void lower_return_unconditionally(ir_instruction *ir)
++   {
++      if (get_jump_strength(ir) != strength_return) {
++         return;
++      }
++      insert_lowered_return((ir_return*)ir);
++      ir->replace_with(new(ir) ir_loop_jump(ir_loop_jump::jump_break));
++   }
++
++   /**
++    * Create the necessary instruction to replace a break instruction.
++    */
++   ir_instruction *create_lowered_break()
++   {
++      void *ctx = this->function.signature;
++      return new(ctx) ir_assignment(
++          new(ctx) ir_dereference_variable(this->loop.get_break_flag()),
++          new(ctx) ir_constant(true),
++          0);
++   }
++
++   /**
++    * If the given instruction is a break, lower it to an instruction
++    * that sets the break flag, without consulting
++    * should_lower_jump().
++    *
++    * It is safe to pass NULL to this function.
++    */
++   void lower_break_unconditionally(ir_instruction *ir)
++   {
++      if (get_jump_strength(ir) != strength_break) {
++         return;
++      }
++      ir->replace_with(create_lowered_break());
++   }
++
++   /**
++    * If the block ends in a conditional or unconditional break, lower
++    * it, even though should_lower_jump() says it needn't be lowered.
++    */
++   void lower_final_breaks(exec_list *block)
++   {
++      ir_instruction *ir = (ir_instruction *) block->get_tail();
++      lower_break_unconditionally(ir);
++      ir_if *ir_if = ir->as_if();
++      if (ir_if) {
++          lower_break_unconditionally(
++              (ir_instruction *) ir_if->then_instructions.get_tail());
++          lower_break_unconditionally(
++              (ir_instruction *) ir_if->else_instructions.get_tail());
++      }
++   }
++
+    virtual void visit(class ir_loop_jump * ir)
+    {
+       truncate_after_instruction(ir);
+@@ -274,10 +356,8 @@ struct ir_lower_jumps_visitor : public ir_control_flow_visitor {
+          /* never lower return at the end of a this->function */
+          if(this->function.nesting_depth == 0 && ir->get_next()->is_tail_sentinel())
+             lower = false;
+-         else if (this->function.is_main)
+-            lower = lower_main_return;
+          else
+-            lower = lower_sub_return;
++            lower = this->function.lower_return;
+          break;
+       }
+       return lower;
+@@ -285,9 +365,20 @@ struct ir_lower_jumps_visitor : public ir_control_flow_visitor {
+ 
+    block_record visit_block(exec_list* list)
+    {
++      /* Note: since visiting a node may change that node's next
++       * pointer, we can't use visit_exec_list(), because
++       * visit_exec_list() caches the node's next pointer before
++       * visiting it.  So we use foreach_list() instead.
++       *
++       * foreach_list() isn't safe if the node being visited gets
++       * removed, but fortunately this visitor doesn't do that.
++       */
++
+       block_record saved_block = this->block;
+       this->block = block_record();
+-      visit_exec_list(list, this);
++      foreach_list(node, list) {
++         ((ir_instruction *) node)->accept(this);
++      }
+       block_record ret = this->block;
+       this->block = saved_block;
+       return ret;
+@@ -370,13 +461,12 @@ retry: /* we get here if we put code after the if inside a branch */
+             break;
+ 
+          if(jump_strengths[lower] == strength_return) {
+-            ir_variable* return_flag = this->function.get_return_flag();
+-            if(!this->function.signature->return_type->is_void()) {
+-               ir_variable* return_value = this->function.get_return_value();
+-               jumps[lower]->insert_before(new(ir) ir_assignment(new (ir) ir_dereference_variable(return_value), ((ir_return*)jumps[lower])->value, NULL));
+-            }
+-            jumps[lower]->insert_before(new(ir) ir_assignment(new (ir) ir_dereference_variable(return_flag), new (ir) ir_constant(true), NULL));
+-            this->loop.may_set_return_flag = true;
++            /* To lower a return, we create a return flag (if the
++             * function doesn't have one already) and add instructions
++             * that: 1. store the return value (if this function has a
++             * non-void return) and 2. set the return flag
++             */
++            insert_lowered_return((ir_return*)jumps[lower]);
+             if(this->loop.loop) {
+                ir_loop_jump* lowered = 0;
+                lowered = new(ir) ir_loop_jump(ir_loop_jump::jump_break);
+@@ -395,7 +485,7 @@ retry: /* we get here if we put code after the if inside a branch */
+              * Smarter options (such as undoing the increment) are possible but it's not worth implementing them,
+              * because if break is lowered, continue is almost surely lowered too.
+              */
+-            jumps[lower]->insert_before(new(ir) ir_assignment(new (ir) ir_dereference_variable(this->loop.get_break_flag()), new (ir) ir_constant(true), 0));
++            jumps[lower]->insert_before(create_lowered_break());
+             goto lower_continue;
+          } else if(jump_strengths[lower] == strength_continue) {
+ lower_continue:
+@@ -405,7 +495,10 @@ lower_continue:
+             block_records[lower].min_strength = strength_always_clears_execute_flag;
+             block_records[lower].may_clear_execute_flag = true;
+             this->progress = true;
+-            break;
++
++            /* Let the loop run again, in case the other branch of the
++             * if needs to be lowered too.
++             */
+          }
+       }
+ 
+@@ -497,13 +590,50 @@ lower_continue:
+       loop_record saved_loop = this->loop;
+       this->loop = loop_record(this->function.signature, ir);
+ 
++      /* Recursively lower nested jumps.  This satisfies the
++       * CONTAINED_JUMPS_LOWERED postcondition, except in the case of
++       * an unconditional continue or return at the bottom of the
++       * loop, which are handled below.
++       */
+       block_record body = visit_block(&ir->body_instructions);
+ 
++      /* If the loop ends in an unconditional continue, eliminate it
++       * because it is redundant.
++       */
++      ir_instruction *ir_last
++         = (ir_instruction *) ir->body_instructions.get_tail();
++      if (get_jump_strength(ir_last) == strength_continue) {
++         ir_last->remove();
++      }
++
++      /* If the loop ends in an unconditional return, and we are
++       * lowering returns, lower it.
++       */
++      if (this->function.lower_return)
++         lower_return_unconditionally(ir_last);
++
+       if(body.min_strength >= strength_break) {
+          /* FINISHME: turn the this->loop into an if, or replace it with its body */
+       }
+ 
+       if(this->loop.break_flag) {
++         /* We only get here if we are lowering breaks */
++         assert (lower_break);
++
++         /* If a break flag was generated while visiting the body of
++          * the loop, then at least one break was lowered, so we need
++          * to generate an if statement at the end of the loop that
++          * does a "break" if the break flag is set.  The break we
++          * generate won't violate the CONTAINED_JUMPS_LOWERED
++          * postcondition, because should_lower_jump() always returns
++          * false for a break that happens at the end of a loop.
++          *
++          * However, if the loop already ends in a conditional or
++          * unconditional break, then we need to lower that break,
++          * because it won't be at the end of the loop anymore.
++          */
++         lower_final_breaks(&ir->body_instructions);
++
+          ir_if* break_if = new(ir) ir_if(new(ir) ir_dereference_variable(this->loop.break_flag));
+          break_if->then_instructions.push_tail(new(ir) ir_loop_jump(ir_loop_jump::jump_break));
+          ir->body_instructions.push_tail(break_if);
+@@ -530,14 +660,34 @@ lower_continue:
+       assert(!this->function.signature);
+       assert(!this->loop.loop);
+ 
++      bool lower_return;
++      if (strcmp(ir->function_name(), "main") == 0)
++         lower_return = lower_main_return;
++      else
++         lower_return = lower_sub_return;
++
+       function_record saved_function = this->function;
+       loop_record saved_loop = this->loop;
+-      this->function = function_record(ir);
++      this->function = function_record(ir, lower_return);
+       this->loop = loop_record(ir);
+ 
+       assert(!this->loop.loop);
+       visit_block(&ir->body);
+ 
++      /* If the body ended in an unconditional return of non-void,
++       * then we don't need to lower it because it's the one canonical
++       * return.
++       *
++       * If the body ended in a return of void, eliminate it because
++       * it is redundant.
++       */
++      if (ir->return_type->is_void() &&
++          get_jump_strength((ir_instruction *) ir->body.get_tail())) {
++         ir_jump *jump = (ir_jump *) ir->body.get_tail();
++         assert (jump->ir_type == ir_type_return);
++         jump->remove();
++      }
++
+       if(this->function.return_value)
+          ir->body.push_tail(new(ir) ir_return(new (ir) ir_dereference_variable(this->function.return_value)));
+ 
+diff --git a/src/glsl/opt_dead_functions.cpp b/src/glsl/opt_dead_functions.cpp
+index 7c64c61..51c77e3 100644
+--- a/src/glsl/opt_dead_functions.cpp
++++ b/src/glsl/opt_dead_functions.cpp
+@@ -50,7 +50,6 @@ public:
+    ir_dead_functions_visitor()
+    {
+       this->mem_ctx = ralloc_context(NULL);
+-      this->seen_another_function_signature = false;
+    }
+ 
+    ~ir_dead_functions_visitor()
+@@ -65,8 +64,6 @@ public:
+ 
+    bool (*predicate)(ir_instruction *ir);
+ 
+-   bool seen_another_function_signature;
+-
+    /* List of signature_entry */
+    exec_list signature_list;
+    void *mem_ctx;
+@@ -97,13 +94,7 @@ ir_dead_functions_visitor::visit_enter(ir_function_signature *ir)
+       entry->used = true;
+    }
+ 
+-   /* If this is the first signature to look at, no need to descend to see
+-    * if it has calls to another function signature.
+-    */
+-   if (!this->seen_another_function_signature) {
+-      this->seen_another_function_signature = true;
+-      return visit_continue_with_parent;
+-   }
++
+ 
+    return visit_continue;
+ }
+diff --git a/src/glsl/s_expression.cpp b/src/glsl/s_expression.cpp
+index a922a50..e704a3b 100644
+--- a/src/glsl/s_expression.cpp
++++ b/src/glsl/s_expression.cpp
+@@ -25,10 +25,13 @@
+ #include <assert.h>
+ #include "s_expression.h"
+ 
+-s_symbol::s_symbol(const char *tmp, size_t n)
++s_symbol::s_symbol(const char *str, size_t n)
+ {
+-   this->str = ralloc_strndup (this, tmp, n);
+-   assert(this->str != NULL);
++   /* Assume the given string is already nul-terminated and in memory that
++    * will live as long as this node.
++    */
++   assert(str[n] == '\0');
++   this->str = str;
+ }
+ 
+ s_list::s_list()
+@@ -36,22 +39,26 @@ s_list::s_list()
+ }
+ 
+ static void
+-skip_whitespace(const char *& src)
++skip_whitespace(const char *&src, char *&symbol_buffer)
+ {
+-   src += strspn(src, " \v\t\r\n");
++   size_t n = strspn(src, " \v\t\r\n");
++   src += n;
++   symbol_buffer += n;
+    /* Also skip Scheme-style comments: semi-colon 'til end of line */
+    if (src[0] == ';') {
+-      src += strcspn(src, "\n");
+-      skip_whitespace(src);
++      n = strcspn(src, "\n");
++      src += n;
++      symbol_buffer += n;
++      skip_whitespace(src, symbol_buffer);
+    }
+ }
+ 
+ static s_expression *
+-read_atom(void *ctx, const char *& src)
++read_atom(void *ctx, const char *&src, char *&symbol_buffer)
+ {
+    s_expression *expr = NULL;
+ 
+-   skip_whitespace(src);
++   skip_whitespace(src, symbol_buffer);
+ 
+    size_t n = strcspn(src, "( \v\t\r\n);");
+    if (n == 0)
+@@ -70,44 +77,65 @@ read_atom(void *ctx, const char *& src)
+ 	 expr = new(ctx) s_int(i);
+    } else {
+       // Not a number; return a symbol.
+-      expr = new(ctx) s_symbol(src, n);
++      symbol_buffer[n] = '\0';
++      expr = new(ctx) s_symbol(symbol_buffer, n);
+    }
+ 
+    src += n;
++   symbol_buffer += n;
+ 
+    return expr;
+ }
+ 
+-s_expression *
+-s_expression::read_expression(void *ctx, const char *&src)
++static s_expression *
++__read_expression(void *ctx, const char *&src, char *&symbol_buffer)
+ {
+-   assert(src != NULL);
+-
+-   s_expression *atom = read_atom(ctx, src);
++   s_expression *atom = read_atom(ctx, src, symbol_buffer);
+    if (atom != NULL)
+       return atom;
+ 
+-   skip_whitespace(src);
++   skip_whitespace(src, symbol_buffer);
+    if (src[0] == '(') {
+       ++src;
++      ++symbol_buffer;
+ 
+       s_list *list = new(ctx) s_list;
+       s_expression *expr;
+ 
+-      while ((expr = read_expression(ctx, src)) != NULL) {
++      while ((expr = __read_expression(ctx, src, symbol_buffer)) != NULL) {
+ 	 list->subexpressions.push_tail(expr);
+       }
+-      skip_whitespace(src);
++      skip_whitespace(src, symbol_buffer);
+       if (src[0] != ')') {
+ 	 printf("Unclosed expression (check your parenthesis).\n");
+ 	 return NULL;
+       }
+       ++src;
++      ++symbol_buffer;
+       return list;
+    }
+    return NULL;
+ }
+ 
++s_expression *
++s_expression::read_expression(void *ctx, const char *&src)
++{
++   assert(src != NULL);
++
++   /* When we encounter a Symbol, we need to save a nul-terminated copy of
++    * the string.  However, ralloc_strndup'ing every individual Symbol is
++    * extremely expensive.  We could avoid this by simply overwriting the
++    * next character (guaranteed to be whitespace, parens, or semicolon) with
++    * a nul-byte.  But overwriting non-whitespace would mess up parsing.
++    *
++    * So, just copy the whole buffer ahead of time.  Walk both, leaving the
++    * original source string unmodified, and altering the copy to contain the
++    * necessary nul-bytes whenever we encounter a symbol.
++    */
++   char *symbol_buffer = ralloc_strdup(ctx, src);
++   return __read_expression(ctx, src, symbol_buffer);
++}
++
+ void s_int::print()
+ {
+    printf("%d", this->val);
+diff --git a/src/glsl/s_expression.h b/src/glsl/s_expression.h
+index c9dc676..642af19 100644
+--- a/src/glsl/s_expression.h
++++ b/src/glsl/s_expression.h
+@@ -129,7 +129,7 @@ public:
+    void print();
+ 
+ private:
+-   char *str;
++   const char *str;
+ };
+ 
+ /* Lists of expressions: (expr1 ... exprN) */
+diff --git a/src/glx/dri2.c b/src/glx/dri2.c
+index adfd3d1..00adff2 100644
+--- a/src/glx/dri2.c
++++ b/src/glx/dri2.c
+@@ -180,6 +180,15 @@ DRI2Error(Display *display, xError *err, XExtCodes *codes, int *ret_code)
+ 	err->minorCode == X_DRI2DestroyDrawable)
+ 	return True;
+ 
++    /* If the server is non-local DRI2Connect will raise BadRequest.
++     * Swallow this so that DRI2Connect can signal this in its return code */
++    if (err->majorCode == codes->major_opcode &&
++        err->minorCode == X_DRI2Connect &&
++        err->errorCode == BadRequest) {
++	*ret_code = False;
++	return True;
++    }
++
+     return False;
+ }
+ 
+diff --git a/src/glx/dri2_glx.c b/src/glx/dri2_glx.c
+index 80e4da3..2ee3cec 100644
+--- a/src/glx/dri2_glx.c
++++ b/src/glx/dri2_glx.c
+@@ -539,6 +539,15 @@ dri2SwapBuffers(__GLXDRIdrawable *pdraw, int64_t target_msc, int64_t divisor,
+ 	(struct dri2_display *)dpyPriv->dri2Display;
+     CARD64 ret = 0;
+ 
++    /* Check we have the right attachments */
++    if (!priv->have_back)
++	return ret;
++
++    /* Old servers can't handle swapbuffers */
++    if (!pdp->swapAvailable) {
++       dri2CopySubBuffer(pdraw, 0, 0, priv->width, priv->height);
++    } else {
++#ifdef X_DRI2SwapBuffers
+ #ifdef __DRI2_FLUSH
+     if (psc->f) {
+        struct glx_context *gc = __glXGetCurrentContext();
+@@ -549,21 +558,15 @@ dri2SwapBuffers(__GLXDRIdrawable *pdraw, int64_t target_msc, int64_t divisor,
+     }
+ #endif
+ 
++       DRI2SwapBuffers(psc->base.dpy, pdraw->xDrawable,
++		       target_msc, divisor, remainder, &ret);
++#endif
++    }
++
+     /* Old servers don't send invalidate events */
+     if (!pdp->invalidateAvailable)
+        dri2InvalidateBuffers(dpyPriv->dpy, pdraw->xDrawable);
+ 
+-    /* Old servers can't handle swapbuffers */
+-    if (!pdp->swapAvailable) {
+-       dri2CopySubBuffer(pdraw, 0, 0, priv->width, priv->height);
+-       return 0;
+-    }
+-
+-#ifdef X_DRI2SwapBuffers
+-    DRI2SwapBuffers(psc->base.dpy, pdraw->xDrawable, target_msc, divisor,
+-		    remainder, &ret);
+-#endif
+-
+     return ret;
+ }
+ 
+diff --git a/src/glx/drisw_glx.c b/src/glx/drisw_glx.c
+index 07d4955..a57b327 100644
+--- a/src/glx/drisw_glx.c
++++ b/src/glx/drisw_glx.c
+@@ -100,6 +100,13 @@ XCreateDrawable(struct drisw_drawable * pdp,
+                               32,                     /* bitmap_pad */
+                               0);                     /* bytes_per_line */
+ 
++  /**
++   * swrast does not handle 24-bit depth with 24 bpp, so let X do the
++   * the conversion for us.
++   */
++  if (pdp->ximage->bits_per_pixel == 24)
++     pdp->ximage->bits_per_pixel = 32;
++
+    return True;
+ }
+ 
+diff --git a/src/mesa/drivers/common/meta.c b/src/mesa/drivers/common/meta.c
+index 0e58aec..95044d2 100644
+--- a/src/mesa/drivers/common/meta.c
++++ b/src/mesa/drivers/common/meta.c
+@@ -1225,7 +1225,9 @@ blitframebuffer_texture(struct gl_context *ctx,
+ 	    _mesa_TexParameteri(target, GL_TEXTURE_SRGB_DECODE_EXT,
+ 				GL_SKIP_DECODE_EXT);
+ 	 }
+-	 _mesa_Disable(GL_FRAMEBUFFER_SRGB_EXT);
++         if (ctx->Extensions.EXT_framebuffer_sRGB) {
++            _mesa_Disable(GL_FRAMEBUFFER_SRGB_EXT);
++         }
+ 
+          _mesa_TexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+          _mesa_set_enable(ctx, target, GL_TRUE);
+@@ -1291,7 +1293,7 @@ blitframebuffer_texture(struct gl_context *ctx,
+ 	 if (ctx->Extensions.EXT_texture_sRGB_decode) {
+ 	    _mesa_TexParameteri(target, GL_TEXTURE_SRGB_DECODE_EXT, srgbSave);
+ 	 }
+-	 if (ctx->Extensions.EXT_texture_sRGB_decode && fbo_srgb_save) {
++	 if (ctx->Extensions.EXT_framebuffer_sRGB && fbo_srgb_save) {
+ 	    _mesa_Enable(GL_FRAMEBUFFER_SRGB_EXT);
+ 	 }
+ 
+@@ -2292,6 +2294,15 @@ _mesa_meta_check_generate_mipmap_fallback(struct gl_context *ctx, GLenum target,
+       return GL_TRUE;
+    }
+ 
++   if (_mesa_get_format_color_encoding(baseImage->TexFormat) == GL_SRGB &&
++       !ctx->Extensions.EXT_texture_sRGB_decode) {
++      /* The texture format is sRGB but we can't turn off sRGB->linear
++       * texture sample conversion.  So we won't be able to generate the
++       * right colors when rendering.  Need to use a fallback.
++       */
++      return GL_TRUE;
++   }
++
+    /*
+     * Test that we can actually render in the texture's format.
+     */
+@@ -2354,6 +2365,8 @@ _mesa_meta_GenerateMipmap(struct gl_context *ctx, GLenum target,
+    const GLenum wrapSSave = texObj->Sampler.WrapS;
+    const GLenum wrapTSave = texObj->Sampler.WrapT;
+    const GLenum wrapRSave = texObj->Sampler.WrapR;
++   const GLenum srgbDecodeSave = texObj->Sampler.sRGBDecode;
++   const GLenum srgbBufferSave = ctx->Color.sRGBEnabled;
+    const GLuint fboSave = ctx->DrawBuffer->Name;
+    const GLuint original_active_unit = ctx->Texture.CurrentUnit;
+    GLenum faceTarget;
+@@ -2415,6 +2428,15 @@ _mesa_meta_GenerateMipmap(struct gl_context *ctx, GLenum target,
+    _mesa_TexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    _mesa_TexParameteri(target, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+ 
++   /* We don't want to encode or decode sRGB values; treat them as linear */
++   if (ctx->Extensions.EXT_texture_sRGB_decode) {
++      _mesa_TexParameteri(target, GL_TEXTURE_SRGB_DECODE_EXT,
++                          GL_SKIP_DECODE_EXT);
++   }
++   if (ctx->Extensions.EXT_framebuffer_sRGB) {
++      _mesa_Disable(GL_FRAMEBUFFER_SRGB_EXT);
++   }
++
+    _mesa_set_enable(ctx, target, GL_TRUE);
+ 
+    /* setup texcoords once (XXX what about border?) */
+@@ -2630,6 +2652,14 @@ _mesa_meta_GenerateMipmap(struct gl_context *ctx, GLenum target,
+       _mesa_DrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    }
+ 
++   if (ctx->Extensions.EXT_texture_sRGB_decode) {
++      _mesa_TexParameteri(target, GL_TEXTURE_SRGB_DECODE_EXT,
++                          srgbDecodeSave);
++   }
++   if (ctx->Extensions.EXT_framebuffer_sRGB && srgbBufferSave) {
++      _mesa_Enable(GL_FRAMEBUFFER_SRGB_EXT);
++   }
++
+    _mesa_lock_texture(ctx, texObj); /* relock */
+ 
+    _mesa_meta_end(ctx);
+diff --git a/src/mesa/drivers/dri/i915/i830_vtbl.c b/src/mesa/drivers/dri/i915/i830_vtbl.c
+index 3051835..7e982ea 100644
+--- a/src/mesa/drivers/dri/i915/i830_vtbl.c
++++ b/src/mesa/drivers/dri/i915/i830_vtbl.c
+@@ -883,6 +883,12 @@ i830_invalidate_state(struct intel_context *intel, GLuint new_state)
+       i830_update_provoking_vertex(&intel->ctx);
+ }
+ 
++static bool
++i830_is_hiz_depth_format(struct intel_context *intel, gl_format format)
++{
++   return false;
++}
++
+ void
+ i830InitVtbl(struct i830_context *i830)
+ {
+@@ -900,4 +906,5 @@ i830InitVtbl(struct i830_context *i830)
+    i830->intel.vtbl.finish_batch = intel_finish_vb;
+    i830->intel.vtbl.invalidate_state = i830_invalidate_state;
+    i830->intel.vtbl.render_target_supported = i830_render_target_supported;
++   i830->intel.vtbl.is_hiz_depth_format = i830_is_hiz_depth_format;
+ }
+diff --git a/src/mesa/drivers/dri/r300/compiler/radeon_dataflow.c b/src/mesa/drivers/dri/r300/compiler/radeon_dataflow.c
+index b0deb75..a8decac 100644
+--- a/src/mesa/drivers/dri/r300/compiler/radeon_dataflow.c
++++ b/src/mesa/drivers/dri/r300/compiler/radeon_dataflow.c
+@@ -687,7 +687,7 @@ static void get_readers_for_single_write(
+ 	struct rc_instruction * tmp;
+ 	unsigned int branch_depth = 0;
+ 	struct rc_instruction * endloop = NULL;
+-	unsigned int abort_on_read_at_endloop;
++	unsigned int abort_on_read_at_endloop = 0;
+ 	struct get_readers_callback_data * d = userdata;
+ 
+ 	d->ReaderData->Writer = writer;
+diff --git a/src/mesa/drivers/dri/r300/compiler/radeon_optimize.c b/src/mesa/drivers/dri/r300/compiler/radeon_optimize.c
+index ac73608..39dcb21 100644
+--- a/src/mesa/drivers/dri/r300/compiler/radeon_optimize.c
++++ b/src/mesa/drivers/dri/r300/compiler/radeon_optimize.c
+@@ -560,32 +560,30 @@ static int peephole_add_presub_add(
+ 	struct radeon_compiler * c,
+ 	struct rc_instruction * inst_add)
+ {
+-	struct rc_src_register * src0 = NULL;
+-	struct rc_src_register * src1 = NULL;
+-	unsigned int i;
+-
+-	if (!is_presub_candidate(c, inst_add))
+-		return 0;
++	unsigned dstmask = inst_add->U.I.DstReg.WriteMask;
++        unsigned src0_neg = inst_add->U.I.SrcReg[0].Negate & dstmask;
++        unsigned src1_neg = inst_add->U.I.SrcReg[1].Negate & dstmask;
+ 
+ 	if (inst_add->U.I.SrcReg[0].Swizzle != inst_add->U.I.SrcReg[1].Swizzle)
+ 		return 0;
+ 
+-	/* src0 and src1 can't have absolute values only one can be negative and they must be all negative or all positive. */
+-	for (i = 0; i < 2; i++) {
+-		if (inst_add->U.I.SrcReg[i].Abs)
+-			return 0;
+-		if ((inst_add->U.I.SrcReg[i].Negate
+-					& inst_add->U.I.DstReg.WriteMask) ==
+-						inst_add->U.I.DstReg.WriteMask) {
+-			src0 = &inst_add->U.I.SrcReg[i];
+-		} else if (!src1) {
+-			src1 = &inst_add->U.I.SrcReg[i];
+-		} else {
+-			src0 = &inst_add->U.I.SrcReg[i];
+-		}
+-	}
++	/* src0 and src1 can't have absolute values */
++	if (inst_add->U.I.SrcReg[0].Abs || inst_add->U.I.SrcReg[1].Abs)
++	        return 0;
++
++	/* presub_replace_add() assumes only one is negative */
++	if (inst_add->U.I.SrcReg[0].Negate && inst_add->U.I.SrcReg[1].Negate)
++	        return 0;
++
++        /* if src0 is negative, at least all bits of dstmask have to be set */
++        if (inst_add->U.I.SrcReg[0].Negate && src0_neg != dstmask)
++	        return 0;
+ 
+-	if (!src1)
++        /* if src1 is negative, at least all bits of dstmask have to be set */
++        if (inst_add->U.I.SrcReg[1].Negate && src1_neg != dstmask)
++	        return 0;
++
++	if (!is_presub_candidate(c, inst_add))
+ 		return 0;
+ 
+ 	if (presub_helper(c, inst_add, RC_PRESUB_ADD, presub_replace_add)) {
+@@ -618,7 +616,7 @@ static void presub_replace_inv(
+  * of the add instruction must have the constatnt 1 swizzle.  This function
+  * does not check const registers to see if their value is 1.0, so it should
+  * be called after the constant_folding optimization.
+- * @return 
++ * @return
+  * 	0 if the ADD instruction is still part of the program.
+  * 	1 if the ADD instruction is no longer part of the program.
+  */
+diff --git a/src/mesa/drivers/dri/r300/compiler/radeon_variable.c b/src/mesa/drivers/dri/r300/compiler/radeon_variable.c
+index 938fb84..5bfd086 100644
+--- a/src/mesa/drivers/dri/r300/compiler/radeon_variable.c
++++ b/src/mesa/drivers/dri/r300/compiler/radeon_variable.c
+@@ -297,9 +297,12 @@ static void get_variable_helper(
+ {
+ 	struct rc_list * list_ptr;
+ 	for (list_ptr = *variable_list; list_ptr; list_ptr = list_ptr->Next) {
+-		if (readers_intersect(variable, list_ptr->Item)) {
+-			rc_variable_add_friend(list_ptr->Item, variable);
+-			return;
++		struct rc_variable * var;
++		for (var = list_ptr->Item; var; var = var->Friend) {
++			if (readers_intersect(var, variable)) {
++				rc_variable_add_friend(var, variable);
++				return;
++			}
+ 		}
+ 	}
+ 	rc_list_add(variable_list, rc_list(&variable->C->Pool, variable));
+diff --git a/src/mesa/main/arbprogram.c b/src/mesa/main/arbprogram.c
+index 26d7819..b83369d 100644
+--- a/src/mesa/main/arbprogram.c
++++ b/src/mesa/main/arbprogram.c
+@@ -269,6 +269,71 @@ _mesa_IsProgramARB(GLuint id)
+       return GL_FALSE;
+ }
+ 
++static GLboolean
++get_local_param_pointer(struct gl_context *ctx, const char *func,
++			GLenum target, GLuint index, GLfloat **param)
++{
++   struct gl_program *prog;
++   GLuint maxParams;
++
++   if (target == GL_VERTEX_PROGRAM_ARB
++       && ctx->Extensions.ARB_vertex_program) {
++      prog = &(ctx->VertexProgram.Current->Base);
++      maxParams = ctx->Const.VertexProgram.MaxLocalParams;
++   }
++   else if (target == GL_FRAGMENT_PROGRAM_ARB
++            && ctx->Extensions.ARB_fragment_program) {
++      prog = &(ctx->FragmentProgram.Current->Base);
++      maxParams = ctx->Const.FragmentProgram.MaxLocalParams;
++   }
++   else if (target == GL_FRAGMENT_PROGRAM_NV
++            && ctx->Extensions.NV_fragment_program) {
++      prog = &(ctx->FragmentProgram.Current->Base);
++      maxParams = MAX_NV_FRAGMENT_PROGRAM_PARAMS;
++   }
++   else {
++      _mesa_error(ctx, GL_INVALID_ENUM,
++                  "%s(target)", func);
++      return GL_FALSE;
++   }
++
++   if (index >= maxParams) {
++      _mesa_error(ctx, GL_INVALID_VALUE, "%s(index)", func);
++      return GL_FALSE;
++   }
++
++   *param = prog->LocalParams[index];
++   return GL_TRUE;
++}
++
++
++static GLboolean
++get_env_param_pointer(struct gl_context *ctx, const char *func,
++		      GLenum target, GLuint index, GLfloat **param)
++{
++   if (target == GL_FRAGMENT_PROGRAM_ARB
++       && ctx->Extensions.ARB_fragment_program) {
++      if (index >= ctx->Const.FragmentProgram.MaxEnvParams) {
++         _mesa_error(ctx, GL_INVALID_VALUE, "%s(index)", func);
++         return GL_FALSE;
++      }
++      *param = ctx->FragmentProgram.Parameters[index];
++      return GL_TRUE;
++   }
++   else if (target == GL_VERTEX_PROGRAM_ARB &&
++	    (ctx->Extensions.ARB_vertex_program ||
++	     ctx->Extensions.NV_vertex_program)) {
++      if (index >= ctx->Const.VertexProgram.MaxEnvParams) {
++         _mesa_error(ctx, GL_INVALID_VALUE, "%s(index)", func);
++         return GL_FALSE;
++      }
++      *param = ctx->VertexProgram.Parameters[index];
++      return GL_TRUE;
++   } else {
++      _mesa_error(ctx, GL_INVALID_ENUM, "%s(target)", func);
++      return GL_FALSE;
++   }
++}
+ 
+ void GLAPIENTRY
+ _mesa_ProgramStringARB(GLenum target, GLenum format, GLsizei len,
+@@ -383,30 +448,16 @@ void GLAPIENTRY
+ _mesa_ProgramEnvParameter4fARB(GLenum target, GLuint index,
+                                GLfloat x, GLfloat y, GLfloat z, GLfloat w)
+ {
++   GLfloat *param;
++
+    GET_CURRENT_CONTEXT(ctx);
+    ASSERT_OUTSIDE_BEGIN_END(ctx);
+ 
+    FLUSH_VERTICES(ctx, _NEW_PROGRAM_CONSTANTS);
+ 
+-   if (target == GL_FRAGMENT_PROGRAM_ARB
+-       && ctx->Extensions.ARB_fragment_program) {
+-      if (index >= ctx->Const.FragmentProgram.MaxEnvParams) {
+-         _mesa_error(ctx, GL_INVALID_VALUE, "glProgramEnvParameter(index)");
+-         return;
+-      }
+-      ASSIGN_4V(ctx->FragmentProgram.Parameters[index], x, y, z, w);
+-   }
+-   else if (target == GL_VERTEX_PROGRAM_ARB /* == GL_VERTEX_PROGRAM_NV */
+-       && (ctx->Extensions.ARB_vertex_program || ctx->Extensions.NV_vertex_program)) {
+-      if (index >= ctx->Const.VertexProgram.MaxEnvParams) {
+-         _mesa_error(ctx, GL_INVALID_VALUE, "glProgramEnvParameter(index)");
+-         return;
+-      }
+-      ASSIGN_4V(ctx->VertexProgram.Parameters[index], x, y, z, w);
+-   }
+-   else {
+-      _mesa_error(ctx, GL_INVALID_ENUM, "glProgramEnvParameter(target)");
+-      return;
++   if (get_env_param_pointer(ctx, "glProgramEnvParameter",
++			     target, index, &param)) {
++      ASSIGN_4V(param, x, y, z, w);
+    }
+ }
+ 
+@@ -422,32 +473,16 @@ void GLAPIENTRY
+ _mesa_ProgramEnvParameter4fvARB(GLenum target, GLuint index,
+                                 const GLfloat *params)
+ {
++   GLfloat *param;
++
+    GET_CURRENT_CONTEXT(ctx);
+    ASSERT_OUTSIDE_BEGIN_END(ctx);
+ 
+    FLUSH_VERTICES(ctx, _NEW_PROGRAM_CONSTANTS);
+ 
+-   if (target == GL_FRAGMENT_PROGRAM_ARB
+-       && ctx->Extensions.ARB_fragment_program) {
+-      if (index >= ctx->Const.FragmentProgram.MaxEnvParams) {
+-         _mesa_error(ctx, GL_INVALID_VALUE, "glProgramEnvParameter4fv(index)");
+-         return;
+-      }
+-      memcpy(ctx->FragmentProgram.Parameters[index], params,
+-             4 * sizeof(GLfloat));
+-   }
+-   else if (target == GL_VERTEX_PROGRAM_ARB /* == GL_VERTEX_PROGRAM_NV */
+-       && (ctx->Extensions.ARB_vertex_program || ctx->Extensions.NV_vertex_program)) {
+-      if (index >= ctx->Const.VertexProgram.MaxEnvParams) {
+-         _mesa_error(ctx, GL_INVALID_VALUE, "glProgramEnvParameter4fv(index)");
+-         return;
+-      }
+-      memcpy(ctx->VertexProgram.Parameters[index], params,
+-             4 * sizeof(GLfloat));
+-   }
+-   else {
+-      _mesa_error(ctx, GL_INVALID_ENUM, "glProgramEnvParameter4fv(target)");
+-      return;
++   if (get_env_param_pointer(ctx, "glProgramEnvParameter4fv",
++			      target, index, &param)) {
++      memcpy(param, params, 4 * sizeof(GLfloat));
+    }
+ }
+ 
+@@ -496,14 +531,11 @@ _mesa_GetProgramEnvParameterdvARB(GLenum target, GLuint index,
+                                   GLdouble *params)
+ {
+    GET_CURRENT_CONTEXT(ctx);
+-   GLfloat fparams[4];
++   GLfloat *fparam;
+ 
+-   _mesa_GetProgramEnvParameterfvARB(target, index, fparams);
+-   if (ctx->ErrorValue == GL_NO_ERROR) {
+-      params[0] = fparams[0];
+-      params[1] = fparams[1];
+-      params[2] = fparams[2];
+-      params[3] = fparams[3];
++   if (get_env_param_pointer(ctx, "glGetProgramEnvParameterdv",
++			     target, index, &fparam)) {
++      COPY_4V(params, fparam);
+    }
+ }
+ 
+@@ -512,29 +544,15 @@ void GLAPIENTRY
+ _mesa_GetProgramEnvParameterfvARB(GLenum target, GLuint index, 
+                                   GLfloat *params)
+ {
++   GLfloat *param;
++
+    GET_CURRENT_CONTEXT(ctx);
+ 
+    ASSERT_OUTSIDE_BEGIN_END(ctx);
+ 
+-   if (target == GL_FRAGMENT_PROGRAM_ARB
+-       && ctx->Extensions.ARB_fragment_program) {
+-      if (index >= ctx->Const.FragmentProgram.MaxEnvParams) {
+-         _mesa_error(ctx, GL_INVALID_VALUE, "glGetProgramEnvParameter(index)");
+-         return;
+-      }
+-      COPY_4V(params, ctx->FragmentProgram.Parameters[index]);
+-   }
+-   else if (target == GL_VERTEX_PROGRAM_ARB
+-       && ctx->Extensions.ARB_vertex_program) {
+-      if (index >= ctx->Const.VertexProgram.MaxEnvParams) {
+-         _mesa_error(ctx, GL_INVALID_VALUE, "glGetProgramEnvParameter(index)");
+-         return;
+-      }
+-      COPY_4V(params, ctx->VertexProgram.Parameters[index]);
+-   }
+-   else {
+-      _mesa_error(ctx, GL_INVALID_ENUM, "glGetProgramEnvParameter(target)");
+-      return;
++   if (get_env_param_pointer(ctx, "glGetProgramEnvParameterfv",
++			      target, index, &param)) {
++      COPY_4V(params, param);
+    }
+ }
+ 
+@@ -547,39 +565,16 @@ _mesa_ProgramLocalParameter4fARB(GLenum target, GLuint index,
+                                  GLfloat x, GLfloat y, GLfloat z, GLfloat w)
+ {
+    GET_CURRENT_CONTEXT(ctx);
+-   struct gl_program *prog;
++   GLfloat *param;
+    ASSERT_OUTSIDE_BEGIN_END(ctx);
+ 
+    FLUSH_VERTICES(ctx, _NEW_PROGRAM_CONSTANTS);
+ 
+-   if ((target == GL_FRAGMENT_PROGRAM_NV
+-        && ctx->Extensions.NV_fragment_program) ||
+-       (target == GL_FRAGMENT_PROGRAM_ARB
+-        && ctx->Extensions.ARB_fragment_program)) {
+-      if (index >= ctx->Const.FragmentProgram.MaxLocalParams) {
+-         _mesa_error(ctx, GL_INVALID_VALUE, "glProgramLocalParameterARB");
+-         return;
+-      }
+-      prog = &(ctx->FragmentProgram.Current->Base);
+-   }
+-   else if (target == GL_VERTEX_PROGRAM_ARB
+-            && ctx->Extensions.ARB_vertex_program) {
+-      if (index >= ctx->Const.VertexProgram.MaxLocalParams) {
+-         _mesa_error(ctx, GL_INVALID_VALUE, "glProgramLocalParameterARB");
+-         return;
+-      }
+-      prog = &(ctx->VertexProgram.Current->Base);
++   if (get_local_param_pointer(ctx, "glProgramLocalParameterARB",
++			       target, index, &param)) {
++      ASSERT(index < MAX_PROGRAM_LOCAL_PARAMS);
++      ASSIGN_4V(param, x, y, z, w);
+    }
+-   else {
+-      _mesa_error(ctx, GL_INVALID_ENUM, "glProgramLocalParameterARB");
+-      return;
+-   }
+-
+-   ASSERT(index < MAX_PROGRAM_LOCAL_PARAMS);
+-   prog->LocalParams[index][0] = x;
+-   prog->LocalParams[index][1] = y;
+-   prog->LocalParams[index][2] = z;
+-   prog->LocalParams[index][3] = w;
+ }
+ 
+ 
+@@ -667,41 +662,14 @@ void GLAPIENTRY
+ _mesa_GetProgramLocalParameterfvARB(GLenum target, GLuint index,
+                                     GLfloat *params)
+ {
+-   const struct gl_program *prog;
+-   GLuint maxParams;
++   GLfloat *param;
+    GET_CURRENT_CONTEXT(ctx);
+    ASSERT_OUTSIDE_BEGIN_END(ctx);
+ 
+-   if (target == GL_VERTEX_PROGRAM_ARB
+-       && ctx->Extensions.ARB_vertex_program) {
+-      prog = &(ctx->VertexProgram.Current->Base);
+-      maxParams = ctx->Const.VertexProgram.MaxLocalParams;
+-   }
+-   else if (target == GL_FRAGMENT_PROGRAM_ARB
+-            && ctx->Extensions.ARB_fragment_program) {
+-      prog = &(ctx->FragmentProgram.Current->Base);
+-      maxParams = ctx->Const.FragmentProgram.MaxLocalParams;
+-   }
+-   else if (target == GL_FRAGMENT_PROGRAM_NV
+-            && ctx->Extensions.NV_fragment_program) {
+-      prog = &(ctx->FragmentProgram.Current->Base);
+-      maxParams = MAX_NV_FRAGMENT_PROGRAM_PARAMS;
+-   }
+-   else {
+-      _mesa_error(ctx, GL_INVALID_ENUM,
+-                  "glGetProgramLocalParameterARB(target)");
+-      return;
+-   }
+-
+-   if (index >= maxParams) {
+-      _mesa_error(ctx, GL_INVALID_VALUE,
+-                  "glGetProgramLocalParameterARB(index)");
+-      return;
++   if (get_local_param_pointer(ctx, "glProgramLocalParameters4fvEXT",
++				target, index, &param)) {
++      COPY_4V(params, param);
+    }
+-
+-   ASSERT(prog);
+-   ASSERT(index < MAX_PROGRAM_LOCAL_PARAMS);
+-   COPY_4V(params, prog->LocalParams[index]);
+ }
+ 
+ 
+@@ -712,12 +680,13 @@ void GLAPIENTRY
+ _mesa_GetProgramLocalParameterdvARB(GLenum target, GLuint index,
+                                     GLdouble *params)
+ {
++   GLfloat *param;
+    GET_CURRENT_CONTEXT(ctx);
+-   GLfloat floatParams[4];
+-   ASSIGN_4V(floatParams, 0.0F, 0.0F, 0.0F, 0.0F);
+-   _mesa_GetProgramLocalParameterfvARB(target, index, floatParams);
+-   if (ctx->ErrorValue == GL_NO_ERROR) {
+-      COPY_4V(params, floatParams);
++   ASSERT_OUTSIDE_BEGIN_END(ctx);
++
++   if (get_local_param_pointer(ctx, "glProgramLocalParameters4fvEXT",
++				target, index, &param)) {
++      COPY_4V(params, param);
+    }
+ }
+ 
+diff --git a/src/mesa/main/buffers.c b/src/mesa/main/buffers.c
+index a75c9c2..adea0f5 100644
+--- a/src/mesa/main/buffers.c
++++ b/src/mesa/main/buffers.c
+@@ -381,6 +381,7 @@ _mesa_drawbuffers(struct gl_context *ctx, GLuint n, const GLenum *buffers,
+ {
+    struct gl_framebuffer *fb = ctx->DrawBuffer;
+    GLbitfield mask[MAX_DRAW_BUFFERS];
++   GLuint buf;
+ 
+    if (!destMask) {
+       /* compute destMask values now */
+@@ -410,13 +411,10 @@ _mesa_drawbuffers(struct gl_context *ctx, GLuint n, const GLenum *buffers,
+          destMask0 &= ~(1 << bufIndex);
+       }
+       fb->ColorDrawBuffer[0] = buffers[0];
+-      if (fb->_NumColorDrawBuffers != count) {
+-	 updated_drawbuffers(ctx);
+-         fb->_NumColorDrawBuffers = count;
+-      }
++      fb->_NumColorDrawBuffers = count;
+    }
+    else {
+-      GLuint buf, count = 0;
++      GLuint count = 0;
+       for (buf = 0; buf < n; buf++ ) {
+          if (destMask[buf]) {
+             GLint bufIndex = _mesa_ffs(destMask[buf]) - 1;
+@@ -436,21 +434,22 @@ _mesa_drawbuffers(struct gl_context *ctx, GLuint n, const GLenum *buffers,
+          }
+          fb->ColorDrawBuffer[buf] = buffers[buf];
+       }
+-      /* set remaining outputs to -1 (GL_NONE) */
+-      while (buf < ctx->Const.MaxDrawBuffers) {
+-         if (fb->_ColorDrawBufferIndexes[buf] != -1) {
+-	    updated_drawbuffers(ctx);
+-            fb->_ColorDrawBufferIndexes[buf] = -1;
+-         }
+-         fb->ColorDrawBuffer[buf] = GL_NONE;
+-         buf++;
+-      }
+       fb->_NumColorDrawBuffers = count;
+    }
+ 
++   /* set remaining outputs to -1 (GL_NONE) */
++   for (buf = fb->_NumColorDrawBuffers; buf < ctx->Const.MaxDrawBuffers; buf++) {
++      if (fb->_ColorDrawBufferIndexes[buf] != -1) {
++         updated_drawbuffers(ctx);
++         fb->_ColorDrawBufferIndexes[buf] = -1;
++      }
++   }
++   for (buf = n; buf < ctx->Const.MaxDrawBuffers; buf++) {
++      fb->ColorDrawBuffer[buf] = GL_NONE;
++   }
++
+    if (fb->Name == 0) {
+       /* also set context drawbuffer state */
+-      GLuint buf;
+       for (buf = 0; buf < ctx->Const.MaxDrawBuffers; buf++) {
+          if (ctx->Color.DrawBuffer[buf] != fb->ColorDrawBuffer[buf]) {
+ 	    updated_drawbuffers(ctx);
+diff --git a/src/mesa/main/colormac.h b/src/mesa/main/colormac.h
+index a328dcd..223e04a 100644
+--- a/src/mesa/main/colormac.h
++++ b/src/mesa/main/colormac.h
+@@ -188,11 +188,11 @@ do {						\
+ 
+ #define PACK_COLOR_5551( R, G, B, A )					\
+    ((((R) & 0xf8) << 8) | (((G) & 0xf8) << 3) | (((B) & 0xf8) >> 2) |	\
+-    ((A) ? 1 : 0))
++    ((A) >> 7))
+ 
+ #define PACK_COLOR_1555( A, B, G, R )					\
+    ((((B) & 0xf8) << 7) | (((G) & 0xf8) << 2) | (((R) & 0xf8) >> 3) |	\
+-    ((A) ? 0x8000 : 0))
++    (((A) & 0x80) << 8))
+ 
+ #define PACK_COLOR_1555_REV( A, B, G, R )					\
+    ((((B) & 0xf8) >> 1) | (((G) & 0xc0) >> 6) | (((G) & 0x38) << 10) | (((R) & 0xf8) << 5) |	\
+diff --git a/src/mesa/main/condrender.c b/src/mesa/main/condrender.c
+index 352e2e2..57f3715 100644
+--- a/src/mesa/main/condrender.c
++++ b/src/mesa/main/condrender.c
+@@ -44,7 +44,8 @@ _mesa_BeginConditionalRender(GLuint queryId, GLenum mode)
+    struct gl_query_object *q;
+    GET_CURRENT_CONTEXT(ctx);
+ 
+-   if (!ctx->Extensions.NV_conditional_render || ctx->Query.CondRenderQuery) {
++   if (!ctx->Extensions.NV_conditional_render || ctx->Query.CondRenderQuery ||
++       queryId == 0) {
+       _mesa_error(ctx, GL_INVALID_OPERATION, "glBeginConditionalRender()");
+       return;
+    }
+@@ -72,7 +73,7 @@ _mesa_BeginConditionalRender(GLuint queryId, GLenum mode)
+    }
+    ASSERT(q->Id == queryId);
+ 
+-   if (q->Target != GL_SAMPLES_PASSED) {
++   if (q->Target != GL_SAMPLES_PASSED || q->Active) {
+       _mesa_error(ctx, GL_INVALID_OPERATION, "glBeginConditionalRender()");
+       return;
+    }
+diff --git a/src/mesa/main/dlist.c b/src/mesa/main/dlist.c
+index 958f5a6..2e93e20 100644
+--- a/src/mesa/main/dlist.c
++++ b/src/mesa/main/dlist.c
+@@ -459,6 +459,10 @@ typedef enum
+    /* GL_ARB_sync */
+    OPCODE_WAIT_SYNC,
+ 
++   /* GL_NV_conditional_render */
++   OPCODE_BEGIN_CONDITIONAL_RENDER,
++   OPCODE_END_CONDITIONAL_RENDER,
++
+    /* The following three are meta instructions */
+    OPCODE_ERROR,                /* raise compiled-in error */
+    OPCODE_CONTINUE,
+@@ -7372,6 +7376,35 @@ save_WaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout)
+ }
+ 
+ 
++/** GL_NV_conditional_render */
++static void GLAPIENTRY
++save_BeginConditionalRender(GLuint queryId, GLenum mode)
++{
++   GET_CURRENT_CONTEXT(ctx);
++   Node *n;
++   ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
++   n = alloc_instruction(ctx, OPCODE_BEGIN_CONDITIONAL_RENDER, 2);
++   if (n) {
++      n[1].i = queryId;
++      n[2].e = mode;
++   }
++   if (ctx->ExecuteFlag) {
++      CALL_BeginConditionalRenderNV(ctx->Exec, (queryId, mode));
++   }
++}
++
++static void GLAPIENTRY
++save_EndConditionalRender()
++{
++   GET_CURRENT_CONTEXT(ctx);
++   ASSERT_OUTSIDE_SAVE_BEGIN_END_AND_FLUSH(ctx);
++   alloc_instruction(ctx, OPCODE_END_CONDITIONAL_RENDER, 0);
++   if (ctx->ExecuteFlag) {
++      CALL_EndConditionalRenderNV(ctx->Exec, ());
++   }
++}
++
++
+ /**
+  * Save an error-generating command into display list.
+  *
+@@ -8637,6 +8670,14 @@ execute_list(struct gl_context *ctx, GLuint list)
+             }
+             break;
+ 
++         /* GL_NV_conditional_render */
++         case OPCODE_BEGIN_CONDITIONAL_RENDER:
++            CALL_BeginConditionalRenderNV(ctx->Exec, (n[1].i, n[2].e));
++            break;
++         case OPCODE_END_CONDITIONAL_RENDER:
++            CALL_EndConditionalRenderNV(ctx->Exec, ());
++            break;
++
+          case OPCODE_CONTINUE:
+             n = (Node *) n[1].next;
+             break;
+@@ -10341,6 +10382,10 @@ _mesa_create_save_table(void)
+    SET_FramebufferTextureARB(table, save_FramebufferTexture);
+    SET_FramebufferTextureFaceARB(table, save_FramebufferTextureFace);
+ 
++   /* GL_NV_conditional_render */
++   SET_BeginConditionalRenderNV(table, save_BeginConditionalRender);
++   SET_EndConditionalRenderNV(table, save_EndConditionalRender);
++
+    /* GL_ARB_sync */
+    _mesa_init_sync_dispatch(table);
+    SET_WaitSync(table, save_WaitSync);
+diff --git a/src/mesa/main/get.c b/src/mesa/main/get.c
+index 0492e15..d32c68a 100644
+--- a/src/mesa/main/get.c
++++ b/src/mesa/main/get.c
+@@ -1569,11 +1569,11 @@ find_custom_value(struct gl_context *ctx, const struct value_desc *d, union valu
+       break;
+ 
+    case GL_NUM_COMPRESSED_TEXTURE_FORMATS_ARB:
+-      v->value_int = _mesa_get_compressed_formats(ctx, NULL, GL_FALSE);
++      v->value_int = _mesa_get_compressed_formats(ctx, NULL);
+       break;
+    case GL_COMPRESSED_TEXTURE_FORMATS_ARB:
+       v->value_int_n.n = 
+-	 _mesa_get_compressed_formats(ctx, v->value_int_n.ints, GL_FALSE);
++	 _mesa_get_compressed_formats(ctx, v->value_int_n.ints);
+       ASSERT(v->value_int_n.n <= 100);
+       break;
+ 
+diff --git a/src/mesa/main/mtypes.h b/src/mesa/main/mtypes.h
+index f018c75..b881183 100644
+--- a/src/mesa/main/mtypes.h
++++ b/src/mesa/main/mtypes.h
+@@ -1856,7 +1856,7 @@ struct gl_program
+    GLbitfield SystemValuesRead;   /**< Bitmask of SYSTEM_VALUE_x inputs used */
+    GLbitfield InputFlags[MAX_PROGRAM_INPUTS];   /**< PROG_PARAM_BIT_x flags */
+    GLbitfield OutputFlags[MAX_PROGRAM_OUTPUTS]; /**< PROG_PARAM_BIT_x flags */
+-   GLbitfield TexturesUsed[MAX_TEXTURE_UNITS];  /**< TEXTURE_x_BIT bitmask */
++   GLbitfield TexturesUsed[MAX_COMBINED_TEXTURE_IMAGE_UNITS];  /**< TEXTURE_x_BIT bitmask */
+    GLbitfield SamplersUsed;   /**< Bitfield of which samplers are used */
+    GLbitfield ShadowSamplers; /**< Texture units used for shadow sampling. */
+ 
+diff --git a/src/mesa/main/shaderapi.c b/src/mesa/main/shaderapi.c
+index b58e30d..74997ea 100644
+--- a/src/mesa/main/shaderapi.c
++++ b/src/mesa/main/shaderapi.c
+@@ -1032,7 +1032,7 @@ validate_samplers(const struct gl_program *prog, char *errMsg)
+       "TEXTURE_2D",
+       "TEXTURE_1D",
+    };
+-   GLint targetUsed[MAX_TEXTURE_IMAGE_UNITS];
++   GLint targetUsed[MAX_COMBINED_TEXTURE_IMAGE_UNITS];
+    GLbitfield samplersUsed = prog->SamplersUsed;
+    GLuint i;
+ 
+@@ -1050,7 +1050,7 @@ validate_samplers(const struct gl_program *prog, char *errMsg)
+       gl_texture_index target;
+       GLint sampler = _mesa_ffs(samplersUsed) - 1;
+       assert(sampler >= 0);
+-      assert(sampler < MAX_TEXTURE_IMAGE_UNITS);
++      assert(sampler < Elements(prog->SamplerUnits));
+       unit = prog->SamplerUnits[sampler];
+       target = prog->SamplerTargets[sampler];
+       if (targetUsed[unit] != -1 && targetUsed[unit] != (int) target) {
+@@ -1125,7 +1125,7 @@ static void
+ validate_program(struct gl_context *ctx, GLuint program)
+ {
+    struct gl_shader_program *shProg;
+-   char errMsg[100];
++   char errMsg[100] = "";
+ 
+    shProg = _mesa_lookup_shader_program_err(ctx, program, "glValidateProgram");
+    if (!shProg) {
+diff --git a/src/mesa/main/texcompress.c b/src/mesa/main/texcompress.c
+index d820ae9..42bd1ee 100644
+--- a/src/mesa/main/texcompress.c
++++ b/src/mesa/main/texcompress.c
+@@ -40,19 +40,192 @@
+ 
+ 
+ /**
++ * Get the GL base format of a specified GL compressed texture format
++ *
++ * From page 232 of the OpenGL 3.3 (Compatiblity Profile) spec:
++ *
++ *     "Compressed Internal Format      Base Internal Format    Type
++ *     ---------------------------     --------------------    ---------
++ *     COMPRESSED_ALPHA                ALPHA                   Generic
++ *     COMPRESSED_LUMINANCE            LUMINANCE               Generic
++ *     COMPRESSED_LUMINANCE_ALPHA      LUMINANCE_ALPHA         Generic
++ *     COMPRESSED_INTENSITY            INTENSITY               Generic
++ *     COMPRESSED_RED                  RED                     Generic
++ *     COMPRESSED_RG                   RG                      Generic
++ *     COMPRESSED_RGB                  RGB                     Generic
++ *     COMPRESSED_RGBA                 RGBA                    Generic
++ *     COMPRESSED_SRGB                 RGB                     Generic
++ *     COMPRESSED_SRGB_ALPHA           RGBA                    Generic
++ *     COMPRESSED_SLUMINANCE           LUMINANCE               Generic
++ *     COMPRESSED_SLUMINANCE_ALPHA     LUMINANCE_ALPHA         Generic
++ *     COMPRESSED_RED_RGTC1            RED                     Specific
++ *     COMPRESSED_SIGNED_RED_RGTC1     RED                     Specific
++ *     COMPRESSED_RG_RGTC2             RG                      Specific
++ *     COMPRESSED_SIGNED_RG_RGTC2      RG                      Specific"
++ *
++ * \return
++ * The base format of \c format if \c format is a compressed format (either
++ * generic or specific.  Otherwise 0 is returned.
++ */
++GLenum
++_mesa_gl_compressed_format_base_format(GLenum format)
++{
++   switch (format) {
++   case GL_COMPRESSED_RED:
++   case GL_COMPRESSED_RED_RGTC1:
++   case GL_COMPRESSED_SIGNED_RED_RGTC1:
++      return GL_RED;
++
++   case GL_COMPRESSED_RG:
++   case GL_COMPRESSED_RG_RGTC2:
++   case GL_COMPRESSED_SIGNED_RG_RGTC2:
++      return GL_RG;
++
++   case GL_COMPRESSED_RGB:
++   case GL_COMPRESSED_SRGB:
++   case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
++   case GL_COMPRESSED_RGB_FXT1_3DFX:
++   case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:
++      return GL_RGB;
++
++   case GL_COMPRESSED_RGBA:
++   case GL_COMPRESSED_SRGB_ALPHA:
++   case GL_COMPRESSED_RGBA_BPTC_UNORM_ARB:
++   case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM_ARB:
++   case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT_ARB:
++   case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT_ARB:
++   case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
++   case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
++   case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
++   case GL_COMPRESSED_RGBA_FXT1_3DFX:
++   case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT:
++   case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT:
++   case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT:
++      return GL_RGBA;
++
++   case GL_COMPRESSED_ALPHA:
++      return GL_ALPHA;
++
++   case GL_COMPRESSED_LUMINANCE:
++   case GL_COMPRESSED_SLUMINANCE:
++   case GL_COMPRESSED_LUMINANCE_LATC1_EXT:
++   case GL_COMPRESSED_SIGNED_LUMINANCE_LATC1_EXT:
++      return GL_LUMINANCE;
++
++   case GL_COMPRESSED_LUMINANCE_ALPHA:
++   case GL_COMPRESSED_SLUMINANCE_ALPHA:
++   case GL_COMPRESSED_LUMINANCE_ALPHA_LATC2_EXT:
++   case GL_COMPRESSED_SIGNED_LUMINANCE_ALPHA_LATC2_EXT:
++   case GL_COMPRESSED_LUMINANCE_ALPHA_3DC_ATI:
++      return GL_LUMINANCE_ALPHA;
++
++   case GL_COMPRESSED_INTENSITY:
++      return GL_INTENSITY;
++
++   default:
++      return 0;
++   }
++}
++
++/**
+  * Return list of (and count of) all specific texture compression
+  * formats that are supported.
+  *
++ * Some formats are \b not returned by this function.  The
++ * \c GL_COMPRESSED_TEXTURE_FORMATS query only returns formats that are
++ * "suitable for general-purpose usage."  All texture compression extensions
++ * have taken this to mean either linear RGB or linear RGBA.
++ *
++ * The GL_ARB_texture_compress_rgtc spec says:
++ *
++ *    "19) Should the GL_NUM_COMPRESSED_TEXTURE_FORMATS and
++ *        GL_COMPRESSED_TEXTURE_FORMATS queries return the RGTC formats?
++ *
++ *        RESOLVED:  No.
++ *
++ *        The OpenGL 2.1 specification says "The only values returned
++ *        by this query [GL_COMPRESSED_TEXTURE_FORMATS"] are those
++ *        corresponding to formats suitable for general-purpose usage.
++ *        The renderer will not enumerate formats with restrictions that
++ *        need to be specifically understood prior to use."
++ *
++ *        Compressed textures with just red or red-green components are
++ *        not general-purpose so should not be returned by these queries
++ *        because they have restrictions.
++ *
++ *        Applications that seek to use the RGTC formats should do so
++ *        by looking for this extension's name in the string returned by
++ *        glGetString(GL_EXTENSIONS) rather than
++ *        what GL_NUM_COMPRESSED_TEXTURE_FORMATS and
++ *        GL_COMPRESSED_TEXTURE_FORMATS return."
++ *
++ * There is nearly identical wording in the GL_EXT_texture_compression_rgtc
++ * spec.
++ *
++ * The GL_EXT_texture_rRGB spec says:
++ *
++ *    "22) Should the new COMPRESSED_SRGB_* formats be listed in an
++ *        implementation's GL_COMPRESSED_TEXTURE_FORMATS list?
++ *
++ *        RESOLVED:  No.  Section 3.8.1 says formats listed by
++ *        GL_COMPRESSED_TEXTURE_FORMATS are "suitable for general-purpose
++ *        usage."  The non-linear distribution of red, green, and
++ *        blue for these sRGB compressed formats makes them not really
++ *        general-purpose."
++ *
++ * The GL_EXT_texture_compression_latc spec says:
++ *
++ *    "16) Should the GL_NUM_COMPRESSED_TEXTURE_FORMATS and
++ *        GL_COMPRESSED_TEXTURE_FORMATS queries return the LATC formats?
++ *
++ *        RESOLVED:  No.
++ *
++ *        The OpenGL 2.1 specification says "The only values returned
++ *        by this query [GL_COMPRESSED_TEXTURE_FORMATS"] are those
++ *        corresponding to formats suitable for general-purpose usage.
++ *        The renderer will not enumerate formats with restrictions that
++ *        need to be specifically understood prior to use."
++ *
++ *        Historically, OpenGL implementation have advertised the RGB and
++ *        RGBA versions of the S3TC extensions compressed format tokens
++ *        through this mechanism.
++ *
++ *        The specification is not sufficiently clear about what "suitable
++ *        for general-purpose usage" means.  Historically that seems to mean
++ *        unsigned RGB or unsigned RGBA.  The DXT1 format supporting alpha
++ *        (GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) is not exposed in the list (at
++ *        least for NVIDIA drivers) because the alpha is always 1.0 expect
++ *        when it is 0.0 when RGB is required to be black.  NVIDIA's even
++ *        limits itself to true linear RGB or RGBA formats, specifically
++ *        not including EXT_texture_sRGB's sRGB S3TC compressed formats.
++ *
++ *        Adding luminance and luminance-alpha texture formats (and
++ *        certainly signed versions of luminance and luminance-alpha
++ *        formats!) invites potential comptaibility problems with old
++ *        applications using this mechanism since old applications are
++ *        unlikely to expect non-RGB or non-RGBA formats to be advertised
++ *        through this mechanism.  However no specific misinteractions
++ *        with old applications is known.
++ *
++ *        Applications that seek to use the LATC formats should do so
++ *        by looking for this extension's name in the string returned by
++ *        glGetString(GL_EXTENSIONS) rather than
++ *        what GL_NUM_COMPRESSED_TEXTURE_FORMATS and
++ *        GL_COMPRESSED_TEXTURE_FORMATS return."
++ *
++ * There is no formal spec for GL_ATI_texture_compression_3dc.  Since the
++ * formats added by this extension are luminance-alpha formats, it is
++ * reasonable to expect them to follow the same rules as
++ * GL_EXT_texture_compression_latc.  At the very least, Catalyst 11.6 does not
++ * expose the 3dc formats through this mechanism.
++ *
+  * \param ctx  the GL context
+  * \param formats  the resulting format list (may be NULL).
+- * \param all  if true return all formats, even those with  some kind
+- *             of restrictions/limitations (See GL_ARB_texture_compression
+- *             spec for more info).
+  *
+  * \return number of formats.
+  */
+ GLuint
+-_mesa_get_compressed_formats(struct gl_context *ctx, GLint *formats, GLboolean all)
++_mesa_get_compressed_formats(struct gl_context *ctx, GLint *formats)
+ {
+    GLuint n = 0;
+    if (ctx->Extensions.TDFX_texture_compression_FXT1) {
+@@ -64,24 +237,15 @@ _mesa_get_compressed_formats(struct gl_context *ctx, GLint *formats, GLboolean a
+          n += 2;
+       }
+    }
+-   /* don't return RGTC - ARB_texture_compression_rgtc query 19 */
++
+    if (ctx->Extensions.EXT_texture_compression_s3tc) {
+       if (formats) {
+          formats[n++] = GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+-         /* This format has some restrictions/limitations and so should
+-          * not be returned via the GL_COMPRESSED_TEXTURE_FORMATS query.
+-          * Specifically, all transparent pixels become black.  NVIDIA
+-          * omits this format too.
+-          */
+-         if (all)
+-             formats[n++] = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
+          formats[n++] = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
+          formats[n++] = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+       }
+       else {
+          n += 3;
+-         if (all)
+-             n += 1;
+       }
+    }
+    if (ctx->Extensions.S3_s3tc) {
+@@ -95,19 +259,6 @@ _mesa_get_compressed_formats(struct gl_context *ctx, GLint *formats, GLboolean a
+          n += 4;
+       }
+    }
+-#if FEATURE_EXT_texture_sRGB
+-   if (ctx->Extensions.EXT_texture_sRGB) {
+-      if (formats) {
+-         formats[n++] = GL_COMPRESSED_SRGB_S3TC_DXT1_EXT;
+-         formats[n++] = GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT;
+-         formats[n++] = GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT;
+-         formats[n++] = GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT;
+-      }
+-      else {
+-         n += 4;
+-      }
+-   }
+-#endif /* FEATURE_EXT_texture_sRGB */
+    return n;
+ 
+ #if FEATURE_ES1 || FEATURE_ES2
+diff --git a/src/mesa/main/texcompress.h b/src/mesa/main/texcompress.h
+index 19b08bb..375cf90 100644
+--- a/src/mesa/main/texcompress.h
++++ b/src/mesa/main/texcompress.h
+@@ -33,8 +33,11 @@ struct gl_context;
+ 
+ #if _HAVE_FULL_GL
+ 
++extern GLenum
++_mesa_gl_compressed_format_base_format(GLenum format);
++
+ extern GLuint
+-_mesa_get_compressed_formats(struct gl_context *ctx, GLint *formats, GLboolean all);
++_mesa_get_compressed_formats(struct gl_context *ctx, GLint *formats);
+ 
+ extern gl_format
+ _mesa_glenum_to_compressed_format(GLenum format);
+diff --git a/src/mesa/main/texenv.c b/src/mesa/main/texenv.c
+index 9228e35..c0d0f37 100644
+--- a/src/mesa/main/texenv.c
++++ b/src/mesa/main/texenv.c
+@@ -419,7 +419,7 @@ _mesa_TexEnvfv( GLenum target, GLenum pname, const GLfloat *param )
+    ASSERT_OUTSIDE_BEGIN_END(ctx);
+ 
+    maxUnit = (target == GL_POINT_SPRITE_NV && pname == GL_COORD_REPLACE_NV)
+-      ? ctx->Const.MaxTextureCoordUnits : ctx->Const.MaxTextureImageUnits;
++      ? ctx->Const.MaxTextureCoordUnits : ctx->Const.MaxCombinedTextureImageUnits;
+    if (ctx->Texture.CurrentUnit >= maxUnit) {
+       _mesa_error(ctx, GL_INVALID_OPERATION, "glTexEnvfv(current unit)");
+       return;
+@@ -748,7 +748,7 @@ _mesa_GetTexEnvfv( GLenum target, GLenum pname, GLfloat *params )
+    ASSERT_OUTSIDE_BEGIN_END(ctx);
+ 
+    maxUnit = (target == GL_POINT_SPRITE_NV && pname == GL_COORD_REPLACE_NV)
+-      ? ctx->Const.MaxTextureCoordUnits : ctx->Const.MaxTextureImageUnits;
++      ? ctx->Const.MaxTextureCoordUnits : ctx->Const.MaxCombinedTextureImageUnits;
+    if (ctx->Texture.CurrentUnit >= maxUnit) {
+       _mesa_error(ctx, GL_INVALID_OPERATION, "glGetTexEnvfv(current unit)");
+       return;
+@@ -817,7 +817,7 @@ _mesa_GetTexEnviv( GLenum target, GLenum pname, GLint *params )
+    ASSERT_OUTSIDE_BEGIN_END(ctx);
+ 
+    maxUnit = (target == GL_POINT_SPRITE_NV && pname == GL_COORD_REPLACE_NV)
+-      ? ctx->Const.MaxTextureCoordUnits : ctx->Const.MaxTextureImageUnits;
++      ? ctx->Const.MaxTextureCoordUnits : ctx->Const.MaxCombinedTextureImageUnits;
+    if (ctx->Texture.CurrentUnit >= maxUnit) {
+       _mesa_error(ctx, GL_INVALID_OPERATION, "glGetTexEnviv(current unit)");
+       return;
+diff --git a/src/mesa/main/texobj.c b/src/mesa/main/texobj.c
+index 565a3a2..0e84b87 100644
+--- a/src/mesa/main/texobj.c
++++ b/src/mesa/main/texobj.c
+@@ -899,7 +899,7 @@ unbind_texobj_from_texunits(struct gl_context *ctx,
+ {
+    GLuint u, tex;
+ 
+-   for (u = 0; u < MAX_TEXTURE_IMAGE_UNITS; u++) {
++   for (u = 0; u < Elements(ctx->Texture.Unit); u++) {
+       struct gl_texture_unit *unit = &ctx->Texture.Unit[u];
+       for (tex = 0; tex < NUM_TEXTURE_TARGETS; tex++) {
+          if (texObj == unit->CurrentTex[tex]) {
+diff --git a/src/mesa/main/texparam.c b/src/mesa/main/texparam.c
+index 4b9dcb5..aa7a553 100644
+--- a/src/mesa/main/texparam.c
++++ b/src/mesa/main/texparam.c
+@@ -915,9 +915,23 @@ _mesa_GetTexLevelParameteriv( GLenum target, GLint level,
+             *params = _mesa_compressed_format_to_glenum(ctx, texFormat);
+          }
+          else {
+-            /* return the user's requested internal format */
+-            *params = img->InternalFormat;
+-         }
++	    /* If the true internal format is not compressed but the user
++	     * requested a generic compressed format, we have to return the
++	     * generic base format that matches.
++	     *
++	     * From page 119 (page 129 of the PDF) of the OpenGL 1.3 spec:
++	     *
++	     *     "If no specific compressed format is available,
++	     *     internalformat is instead replaced by the corresponding base
++	     *     internal format."
++	     *
++	     * Otherwise just return the user's requested internal format
++	     */
++	    const GLenum f =
++	       _mesa_gl_compressed_format_base_format(img->InternalFormat);
++
++	    *params = (f != 0) ? f : img->InternalFormat;
++	 }
+          break;
+       case GL_TEXTURE_BORDER:
+          *params = img->Border;
+@@ -1252,12 +1266,13 @@ _mesa_GetTexParameterfv( GLenum target, GLenum pname, GLfloat *params )
+          break;
+ 
+       case GL_TEXTURE_CUBE_MAP_SEAMLESS:
+-      if (ctx->Extensions.AMD_seamless_cubemap_per_texture) {
+-         *params = (GLfloat) obj->Sampler.CubeMapSeamless;
+-      }
+-      else {
+-         error = GL_TRUE;
+-      }
++         if (ctx->Extensions.AMD_seamless_cubemap_per_texture) {
++            *params = (GLfloat) obj->Sampler.CubeMapSeamless;
++         }
++         else {
++            error = GL_TRUE;
++         }
++         break;
+ 
+       default:
+ 	 error = GL_TRUE;
+@@ -1427,6 +1442,7 @@ _mesa_GetTexParameteriv( GLenum target, GLenum pname, GLint *params )
+          else {
+             error = GL_TRUE;
+          }
++         break;
+ 
+       default:
+          ; /* silence warnings */
+diff --git a/src/mesa/main/texstore.c b/src/mesa/main/texstore.c
+index 5c925a3..e527981 100644
+--- a/src/mesa/main/texstore.c
++++ b/src/mesa/main/texstore.c
+@@ -3303,8 +3303,7 @@ _mesa_texstore_z24_s8(TEXSTORE_PARAMS)
+ {
+    const GLuint depthScale = 0xffffff;
+    const GLint srcRowStride
+-      = _mesa_image_row_stride(srcPacking, srcWidth, srcFormat, srcType)
+-      / sizeof(GLuint);
++      = _mesa_image_row_stride(srcPacking, srcWidth, srcFormat, srcType);
+    GLint img, row;
+ 
+    ASSERT(dstFormat == MESA_FORMAT_Z24_S8);
+@@ -3332,8 +3331,8 @@ _mesa_texstore_z24_s8(TEXSTORE_PARAMS)
+             + dstImageOffsets[dstZoffset + img]
+             + dstYoffset * dstRowStride / sizeof(GLuint)
+             + dstXoffset;
+-         const GLuint *src
+-            = (const GLuint *) _mesa_image_address(dims, srcPacking, srcAddr,
++         const GLubyte *src
++            = (const GLubyte *) _mesa_image_address(dims, srcPacking, srcAddr,
+                   srcWidth, srcHeight,
+                   srcFormat, srcType,
+                   img, 0, 0);
+@@ -3390,8 +3389,7 @@ _mesa_texstore_s8_z24(TEXSTORE_PARAMS)
+ {
+    const GLuint depthScale = 0xffffff;
+    const GLint srcRowStride
+-      = _mesa_image_row_stride(srcPacking, srcWidth, srcFormat, srcType)
+-      / sizeof(GLuint);
++      = _mesa_image_row_stride(srcPacking, srcWidth, srcFormat, srcType);
+    GLint img, row;
+ 
+    ASSERT(dstFormat == MESA_FORMAT_S8_Z24);
+@@ -3406,8 +3404,8 @@ _mesa_texstore_s8_z24(TEXSTORE_PARAMS)
+ 	 + dstImageOffsets[dstZoffset + img]
+ 	 + dstYoffset * dstRowStride / sizeof(GLuint)
+ 	 + dstXoffset;
+-      const GLuint *src
+-	 = (const GLuint *) _mesa_image_address(dims, srcPacking, srcAddr,
++      const GLubyte *src
++	 = (const GLubyte *) _mesa_image_address(dims, srcPacking, srcAddr,
+ 						srcWidth, srcHeight,
+ 						srcFormat, srcType,
+ 						img, 0, 0);
+@@ -3479,8 +3477,7 @@ _mesa_texstore_s8(TEXSTORE_PARAMS)
+    }
+    else {
+       const GLint srcRowStride
+-	 = _mesa_image_row_stride(srcPacking, srcWidth, srcFormat, srcType)
+-	 / sizeof(GLuint);
++	 = _mesa_image_row_stride(srcPacking, srcWidth, srcFormat, srcType);
+       GLint img, row;
+       
+       for (img = 0; img < srcDepth; img++) {
+@@ -3488,8 +3485,8 @@ _mesa_texstore_s8(TEXSTORE_PARAMS)
+             + dstImageOffsets[dstZoffset + img]
+             + dstYoffset * dstRowStride / sizeof(GLuint)
+             + dstXoffset;
+-         const GLuint *src
+-            = (const GLuint *) _mesa_image_address(dims, srcPacking, srcAddr,
++         const GLubyte *src
++            = (const GLubyte *) _mesa_image_address(dims, srcPacking, srcAddr,
+                                                    srcWidth, srcHeight,
+                                                    srcFormat, srcType,
+                                                    img, 0, 0);
+diff --git a/src/mesa/main/uniforms.c b/src/mesa/main/uniforms.c
+index 1c4fd82..60eb851 100644
+--- a/src/mesa/main/uniforms.c
++++ b/src/mesa/main/uniforms.c
+@@ -55,17 +55,24 @@ static GLenum
+ base_uniform_type(GLenum type)
+ {
+    switch (type) {
+-#if 0 /* not needed, for now */
+    case GL_BOOL:
+    case GL_BOOL_VEC2:
+    case GL_BOOL_VEC3:
+    case GL_BOOL_VEC4:
+       return GL_BOOL;
+-#endif
+    case GL_FLOAT:
+    case GL_FLOAT_VEC2:
+    case GL_FLOAT_VEC3:
+    case GL_FLOAT_VEC4:
++   case GL_FLOAT_MAT2:
++   case GL_FLOAT_MAT2x3:
++   case GL_FLOAT_MAT2x4:
++   case GL_FLOAT_MAT3x2:
++   case GL_FLOAT_MAT3:
++   case GL_FLOAT_MAT3x4:
++   case GL_FLOAT_MAT4x2:
++   case GL_FLOAT_MAT4x3:
++   case GL_FLOAT_MAT4:
+       return GL_FLOAT;
+    case GL_UNSIGNED_INT:
+    case GL_UNSIGNED_INT_VEC2:
+@@ -408,8 +415,12 @@ get_uniform(struct gl_context *ctx, GLuint program, GLint location,
+    else {
+       const struct gl_program_parameter *p =
+          &prog->Parameters->Parameters[paramPos];
++      GLfloat (*values)[4];
+       GLint rows, cols, i, j, k;
+       GLsizei numBytes;
++      GLenum storage_type;
++
++      values = prog->Parameters->ParameterValues + paramPos + offset;
+ 
+       get_uniform_rows_cols(p, &rows, &cols);
+ 
+@@ -421,60 +432,67 @@ get_uniform(struct gl_context *ctx, GLuint program, GLint location,
+          return;
+       }
+ 
+-      switch (returnType) {
+-      case GL_FLOAT:
+-         {
+-            GLfloat *params = (GLfloat *) paramsOut;
+-            k = 0;
+-            for (i = 0; i < rows; i++) {
+-               const int base = paramPos + offset + i;
+-               for (j = 0; j < cols; j++ ) {
+-                  params[k++] = prog->Parameters->ParameterValues[base][j];
+-               }
+-            }
+-         }
+-         break;
+-      case GL_DOUBLE:
+-         {
+-            GLfloat *params = (GLfloat *) paramsOut;
+-            k = 0;
+-            for (i = 0; i < rows; i++) {
+-               const int base = paramPos + offset + i;
+-               for (j = 0; j < cols; j++ ) {
+-                  params[k++] = (GLdouble)
+-                     prog->Parameters->ParameterValues[base][j];
+-               }
+-            }
+-         }
+-         break;
+-      case GL_INT:
+-         {
+-            GLint *params = (GLint *) paramsOut;
+-            k = 0;
+-            for (i = 0; i < rows; i++) {
+-               const int base = paramPos + offset + i;
+-               for (j = 0; j < cols; j++ ) {
+-                  params[k++] = (GLint)
+-                     prog->Parameters->ParameterValues[base][j];
+-               }
+-            }
+-         }
+-         break;
+-      case GL_UNSIGNED_INT:
+-         {
+-            GLuint *params = (GLuint *) paramsOut;
+-            k = 0;
+-            for (i = 0; i < rows; i++) {
+-               const int base = paramPos + offset + i;
+-               for (j = 0; j < cols; j++ ) {
+-                  params[k++] = (GLuint)
+-                     prog->Parameters->ParameterValues[base][j];
+-               }
+-            }
+-         }
+-         break;
+-      default:
+-         _mesa_problem(ctx, "bad returnType in get_uniform()");
++      storage_type = GL_FLOAT;
++
++      k = 0;
++      for (i = 0; i < rows; i++) {
++	 for (j = 0; j < cols; j++ ) {
++	    void *out = (char *)paramsOut + 4 * k;
++
++	    switch (returnType) {
++	    case GL_FLOAT:
++	       switch (storage_type) {
++	       case GL_FLOAT:
++		  *(float *)out = values[i][j];
++		  break;
++	       case GL_INT:
++	       case GL_BOOL: /* boolean is just an integer 1 or 0. */
++		  *(float *)out = values[i][j];
++		  break;
++	       case GL_UNSIGNED_INT:
++		  *(float *)out = values[i][j];
++		  break;
++	       }
++	       break;
++
++	    case GL_INT:
++	    case GL_UNSIGNED_INT:
++	       switch (storage_type) {
++	       case GL_FLOAT:
++		  /* While the GL 3.2 core spec doesn't explicitly
++		   * state how conversion of float uniforms to integer
++		   * values works, in section 6.2 "State Tables" on
++		   * page 267 it says:
++		   *
++		   *     "Unless otherwise specified, when floating
++		   *      point state is returned as integer values or
++		   *      integer state is returned as floating-point
++		   *      values it is converted in the fashion
++		   *      described in section 6.1.2"
++		   *
++		   * That section, on page 248, says:
++		   *
++		   *     "If GetIntegerv or GetInteger64v are called,
++		   *      a floating-point value is rounded to the
++		   *      nearest integer..."
++		   */
++		  *(int *)out = IROUND(values[i][j]);
++		  break;
++
++	       case GL_INT:
++	       case GL_UNSIGNED_INT:
++	       case GL_BOOL:
++		  /* type conversions for these to int/uint are just
++		   * copying the data.
++		   */
++		  *(int *)out = values[i][j];
++		  break;
++	       }
++	       break;
++	    }
++
++	    k++;
++	 }
+       }
+    }
+ }
+@@ -580,7 +598,7 @@ _mesa_update_shader_textures_used(struct gl_program *prog)
+       if (prog->SamplersUsed & (1 << s)) {
+          GLuint unit = prog->SamplerUnits[s];
+          GLuint tgt = prog->SamplerTargets[s];
+-         assert(unit < MAX_TEXTURE_IMAGE_UNITS);
++         assert(unit < Elements(prog->TexturesUsed));
+          assert(tgt < NUM_TEXTURE_TARGETS);
+          prog->TexturesUsed[unit] |= (1 << tgt);
+       }
+@@ -674,7 +692,7 @@ set_program_uniform(struct gl_context *ctx, struct gl_program *program,
+          GLuint texUnit = ((GLuint *) values)[i];
+ 
+          /* check that the sampler (tex unit index) is legal */
+-         if (texUnit >= ctx->Const.MaxTextureImageUnits) {
++         if (texUnit >= ctx->Const.MaxCombinedTextureImageUnits) {
+             _mesa_error(ctx, GL_INVALID_VALUE,
+                         "glUniform1(invalid sampler/tex unit index for '%s')",
+                         param->Name);
+diff --git a/src/mesa/program/prog_statevars.c b/src/mesa/program/prog_statevars.c
+index 16f9690..2d10f72 100644
+--- a/src/mesa/program/prog_statevars.c
++++ b/src/mesa/program/prog_statevars.c
+@@ -664,10 +664,13 @@ _mesa_program_state_flags(const gl_state_index state[STATE_LENGTH])
+ {
+    switch (state[0]) {
+    case STATE_MATERIAL:
++   case STATE_LIGHTPROD:
++   case STATE_LIGHTMODEL_SCENECOLOR:
++      /* these can be effected by glColor when colormaterial mode is used */
++      return _NEW_LIGHT | _NEW_CURRENT_ATTRIB;
++
+    case STATE_LIGHT:
+    case STATE_LIGHTMODEL_AMBIENT:
+-   case STATE_LIGHTMODEL_SCENECOLOR:
+-   case STATE_LIGHTPROD:
+       return _NEW_LIGHT;
+ 
+    case STATE_TEXGEN:
+diff --git a/src/mesa/state_tracker/st_cb_condrender.c b/src/mesa/state_tracker/st_cb_condrender.c
+index 64c6c11..1ced560 100644
+--- a/src/mesa/state_tracker/st_cb_condrender.c
++++ b/src/mesa/state_tracker/st_cb_condrender.c
+@@ -41,6 +41,7 @@
+ #include "st_context.h"
+ #include "st_cb_queryobj.h"
+ #include "st_cb_condrender.h"
++#include "st_cb_bitmap.h"
+ 
+ 
+ /**
+@@ -55,6 +56,8 @@ st_BeginConditionalRender(struct gl_context *ctx, struct gl_query_object *q,
+    struct pipe_context *pipe = st->pipe;
+    uint m;
+ 
++   st_flush_bitmap_cache(st);
++
+    switch (mode) {
+    case GL_QUERY_WAIT:
+       m = PIPE_RENDER_COND_WAIT;
+@@ -90,6 +93,8 @@ st_EndConditionalRender(struct gl_context *ctx, struct gl_query_object *q)
+    struct pipe_context *pipe = st->pipe;
+    (void) q;
+ 
++   st_flush_bitmap_cache(st);
++
+    pipe->render_condition(pipe, NULL, 0);
+    st->render_condition = NULL;
+ }
+diff --git a/src/mesa/state_tracker/st_cb_fbo.c b/src/mesa/state_tracker/st_cb_fbo.c
+index 5b9e203..9fe5d21 100644
+--- a/src/mesa/state_tracker/st_cb_fbo.c
++++ b/src/mesa/state_tracker/st_cb_fbo.c
+@@ -47,6 +47,7 @@
+ #include "st_context.h"
+ #include "st_cb_fbo.h"
+ #include "st_cb_flush.h"
++#include "st_cb_texture.h"
+ #include "st_format.h"
+ #include "st_texture.h"
+ #include "st_manager.h"
+@@ -342,15 +343,17 @@ st_render_texture(struct gl_context *ctx,
+    struct pipe_context *pipe = st->pipe;
+    struct st_renderbuffer *strb;
+    struct gl_renderbuffer *rb;
+-   struct pipe_resource *pt = st_get_texobj_resource(att->Texture);
++   struct pipe_resource *pt;
+    struct st_texture_object *stObj;
+    const struct gl_texture_image *texImage;
+    struct pipe_surface surf_tmpl;
+ 
+-   /* When would this fail?  Perhaps assert? */
+-   if (!pt) 
++   if (!st_finalize_texture(ctx, pipe, att->Texture))
+       return;
+ 
++   pt = st_get_texobj_resource(att->Texture);
++   assert(pt);
++
+    /* get pointer to texture image we're rendeing to */
+    texImage = _mesa_get_attachment_teximage(att);
+ 
+diff --git a/src/mesa/state_tracker/st_cb_queryobj.c b/src/mesa/state_tracker/st_cb_queryobj.c
+index d0ac253..0574996 100644
+--- a/src/mesa/state_tracker/st_cb_queryobj.c
++++ b/src/mesa/state_tracker/st_cb_queryobj.c
+@@ -41,6 +41,7 @@
+ #include "pipe/p_defines.h"
+ #include "st_context.h"
+ #include "st_cb_queryobj.h"
++#include "st_cb_bitmap.h"
+ 
+ 
+ #if FEATURE_queryobj
+@@ -83,6 +84,8 @@ st_BeginQuery(struct gl_context *ctx, struct gl_query_object *q)
+    struct st_query_object *stq = st_query_object(q);
+    unsigned type;
+ 
++   st_flush_bitmap_cache(st_context(ctx));
++
+    /* convert GL query type to Gallium query type */
+    switch (q->Target) {
+    case GL_ANY_SAMPLES_PASSED:
+@@ -128,6 +131,8 @@ st_EndQuery(struct gl_context *ctx, struct gl_query_object *q)
+    struct pipe_context *pipe = st_context(ctx)->pipe;
+    struct st_query_object *stq = st_query_object(q);
+ 
++   st_flush_bitmap_cache(st_context(ctx));
++
+    pipe->end_query(pipe, stq->pq);
+ }
+ 
+diff --git a/src/mesa/state_tracker/st_texture.c b/src/mesa/state_tracker/st_texture.c
+index ffe7e25..f40bbdc 100644
+--- a/src/mesa/state_tracker/st_texture.c
++++ b/src/mesa/state_tracker/st_texture.c
+@@ -367,9 +367,15 @@ st_texture_image_copy(struct pipe_context *pipe,
+    struct pipe_box src_box;
+    GLuint i;
+ 
+-   assert(u_minify(src->width0, srcLevel) == width);
+-   assert(u_minify(src->height0, srcLevel) == height);
+-   assert(u_minify(src->depth0, srcLevel) == depth);
++   if (u_minify(src->width0, srcLevel) != width ||
++       u_minify(src->height0, srcLevel) != height ||
++       u_minify(src->depth0, srcLevel) != depth) {
++      /* The source image size doesn't match the destination image size.
++       * This can happen in some degenerate situations such as rendering to a
++       * cube map face which was set up with mismatched texture sizes.
++       */
++      return;
++   }
+ 
+    src_box.x = 0;
+    src_box.y = 0;
+diff --git a/src/mesa/swrast/s_stencil.c b/src/mesa/swrast/s_stencil.c
+index 5bec71c..fa5093a 100644
+--- a/src/mesa/swrast/s_stencil.c
++++ b/src/mesa/swrast/s_stencil.c
+@@ -462,7 +462,8 @@ stencil_and_ztest_span(struct gl_context *ctx, SWspan *span, GLuint face)
+     * Some fragments passed the stencil test, apply depth test to them
+     * and apply Zpass and Zfail stencil ops.
+     */
+-   if (ctx->Depth.Test == GL_FALSE) {
++   if (ctx->Depth.Test == GL_FALSE ||
++       ctx->DrawBuffer->_DepthBuffer == NULL) {
+       /*
+        * No depth buffer, just apply zpass stencil function to active pixels.
+        */
+diff --git a/src/mesa/vbo/vbo_exec_array.c b/src/mesa/vbo/vbo_exec_array.c
+index 7959337..5903ae23 100644
+--- a/src/mesa/vbo/vbo_exec_array.c
++++ b/src/mesa/vbo/vbo_exec_array.c
+@@ -909,11 +909,10 @@ vbo_exec_DrawRangeElementsBaseVertex(GLenum mode,
+       if (0)
+          _mesa_print_arrays(ctx);
+ 
+-#ifdef DEBUG
+       /* 'end' was out of bounds, but now let's check the actual array
+        * indexes to see if any of them are out of bounds.
+        */
+-      {
++      if (0) {
+          GLuint max = _mesa_max_buffer_index(ctx, count, type, indices,
+                                              ctx->Array.ElementArrayBufferObj);
+          if (max >= ctx->Array.ArrayObj->_MaxElement) {
+@@ -934,7 +933,6 @@ vbo_exec_DrawRangeElementsBaseVertex(GLenum mode,
+           * upper bound wrong.
+           */
+       }
+-#endif
+ 
+       /* Set 'end' to the max possible legal value */
+       assert(ctx->Array.ArrayObj->_MaxElement >= 1);
+diff --git a/src/mesa/x86-64/xform4.S b/src/mesa/x86-64/xform4.S
+index 6141e43..5abd5a2 100644
+--- a/src/mesa/x86-64/xform4.S
++++ b/src/mesa/x86-64/xform4.S
+@@ -118,7 +118,7 @@ p4_constants:
+ .byte  0x00, 0x00, 0x00, 0x00
+ .byte  0x00, 0x00, 0x00, 0x00
+ .byte  0x00, 0x00, 0x00, 0x00
+-.float 0f+1.0
++.float 1.0
+ 
+ .text
+ .align 16
