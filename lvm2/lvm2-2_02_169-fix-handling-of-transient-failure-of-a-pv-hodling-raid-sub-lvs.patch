@@ -1,0 +1,127 @@
+ WHATS_NEW                        |  4 ++++
+ lib/locking/lvmlockd.c           |  2 +-
+ lib/metadata/lv_manip.c          | 44 ++++++++++++++++++++++++++++++++++++----
+ lib/metadata/metadata-exported.h |  2 +-
+ tools/toollib.c                  |  2 +-
+ 5 files changed, 47 insertions(+), 7 deletions(-)
+
+diff --git a/WHATS_NEW b/WHATS_NEW
+index 7a3f9ab..ac6b394 100644
+--- a/WHATS_NEW
++++ b/WHATS_NEW
+@@ -1,3 +1,7 @@
++Version 2.02.169 - 
++=================================
++  Fix handling of transient failure of a PV holding RAID sub LVs.
++
+ Version 2.02.167 - 
+ =================================
+   Prevent non-synced raid1 repair unless --force
+diff --git a/lib/locking/lvmlockd.c b/lib/locking/lvmlockd.c
+index a33544c..cc3cbb3 100644
+--- a/lib/locking/lvmlockd.c
++++ b/lib/locking/lvmlockd.c
+@@ -389,7 +389,7 @@ static int _extend_sanlock_lv(struct cmd_context *cmd, struct volume_group *vg,
+ 
+ static int _refresh_sanlock_lv(struct cmd_context *cmd, struct volume_group *vg)
+ {
+-	if (!lv_refresh_suspend_resume(cmd, vg->sanlock_lv)) {
++	if (!lv_refresh_suspend_resume(vg->sanlock_lv)) {
+ 		log_error("Failed to refresh %s.", vg->sanlock_lv->name);
+ 		return 0;
+ 	}
+diff --git a/lib/metadata/lv_manip.c b/lib/metadata/lv_manip.c
+index 0167a18..a75d286 100644
+--- a/lib/metadata/lv_manip.c
++++ b/lib/metadata/lv_manip.c
+@@ -1358,8 +1358,11 @@ int replace_lv_with_error_segment(struct logical_volume *lv)
+ 	return 1;
+ }
+ 
+-int lv_refresh_suspend_resume(struct cmd_context *cmd, struct logical_volume *lv)
++static int _lv_refresh_suspend_resume(const struct logical_volume *lv)
+ {
++	struct cmd_context *cmd = lv->vg->cmd;
++	int r = 1;
++
+ 	if (!cmd->partial_activation && (lv->status & PARTIAL_LV)) {
+ 		log_error("Refusing refresh of partial LV %s."
+ 			  " Use '--activationmode partial' to override.",
+@@ -1369,15 +1372,48 @@ int lv_refresh_suspend_resume(struct cmd_context *cmd, struct logical_volume *lv
+ 
+ 	if (!suspend_lv(cmd, lv)) {
+ 		log_error("Failed to suspend %s.", display_lvname(lv));
+-		return 0;
++		r = 0;
+ 	}
+ 
+ 	if (!resume_lv(cmd, lv)) {
+ 		log_error("Failed to reactivate %s.", display_lvname(lv));
+-		return 0;
++		r = 0;
+ 	}
+ 
+-	return 1;
++	return r;
++}
++
++int lv_refresh_suspend_resume(const struct logical_volume *lv)
++{
++	/*
++	 * FIXME:
++	 *
++	 * in case of RAID, refresh the SubLVs before
++	 * refreshing the top-level one in order to cope
++	 * with transient failures of SubLVs.
++	 */
++	if (lv_is_raid(lv)) {
++		if (vg_is_clustered(lv->vg) &&
++		    lv_is_active_remotely(lv)) {
++			if (!_lv_refresh_suspend_resume(lv))
++				return 0;
++		} else {
++			uint32_t s;
++			struct lv_segment *seg = first_seg(lv);
++
++			for (s = 0; s < seg->area_count; s++) {
++				if (seg_type(seg, s) == AREA_LV &&
++				    !_lv_refresh_suspend_resume(seg_lv(seg, s)))
++					return 0;
++				if (seg->meta_areas &&
++				    seg_metatype(seg, s) == AREA_LV &&
++				    !_lv_refresh_suspend_resume(seg_metalv(seg, s)))
++					return 0;
++			}
++		}
++	}
++
++	return _lv_refresh_suspend_resume(lv);
+ }
+ 
+ /*
+diff --git a/lib/metadata/metadata-exported.h b/lib/metadata/metadata-exported.h
+index 190e85c..f6c3bf5 100644
+--- a/lib/metadata/metadata-exported.h
++++ b/lib/metadata/metadata-exported.h
+@@ -753,7 +753,7 @@ int lv_empty(struct logical_volume *lv);
+ /* Empty an LV and add error segment */
+ int replace_lv_with_error_segment(struct logical_volume *lv);
+ 
+-int lv_refresh_suspend_resume(struct cmd_context *cmd, struct logical_volume *lv);
++int lv_refresh_suspend_resume(const struct logical_volume *lv);
+ 
+ /* Entry point for all LV extent allocations */
+ int lv_extend(struct logical_volume *lv,
+diff --git a/tools/toollib.c b/tools/toollib.c
+index 22c38a1..4013026 100644
+--- a/tools/toollib.c
++++ b/tools/toollib.c
+@@ -1072,7 +1072,7 @@ int lv_change_activate(struct cmd_context *cmd, struct logical_volume *lv,
+ 
+ int lv_refresh(struct cmd_context *cmd, struct logical_volume *lv)
+ {
+-	if (!lv_refresh_suspend_resume(cmd, lv))
++	if (!lv_refresh_suspend_resume(lv))
+ 		return_0;
+ 
+ 	/*

@@ -1,0 +1,207 @@
+ WHATS_NEW                        |  4 ++
+ lib/metadata/metadata-exported.h |  4 +-
+ lib/metadata/raid_manip.c        | 79 +++++++++++++++++++++++++++-------------
+ tools/lvconvert.c                |  4 +-
+ 4 files changed, 62 insertions(+), 29 deletions(-)
+
+diff --git a/WHATS_NEW b/WHATS_NEW
+index ce58944..98fa03a 100644
+--- a/WHATS_NEW
++++ b/WHATS_NEW
+@@ -1,3 +1,7 @@
++Version 2.02.167 - 
++=================================
++  Prevent non-synced raid1 repair unless --force
++
+ Version 2.02.162 - 
+ =================================
+   Fix automatic updates of PV extension headers to newest version.
+diff --git a/lib/metadata/metadata-exported.h b/lib/metadata/metadata-exported.h
+index fc09e2e..190e85c 100644
+--- a/lib/metadata/metadata-exported.h
++++ b/lib/metadata/metadata-exported.h
+@@ -1140,8 +1140,8 @@ int lv_raid_split_and_track(struct logical_volume *lv,
+ int lv_raid_merge(struct logical_volume *lv);
+ int lv_raid_reshape(struct logical_volume *lv,
+ 		    const struct segment_type *new_segtype);
+-int lv_raid_replace(struct logical_volume *lv, struct dm_list *remove_pvs,
+-		    struct dm_list *allocate_pvs);
++int lv_raid_replace(struct logical_volume *lv, int force,
++		    struct dm_list *remove_pvs, struct dm_list *allocate_pvs);
+ int lv_raid_remove_missing(struct logical_volume *lv);
+ int partial_raid_lv_supports_degraded_activation(const struct logical_volume *lv);
+ /* --  metadata/raid_manip.c */
+diff --git a/lib/metadata/raid_manip.c b/lib/metadata/raid_manip.c
+index 9e26c0e..27e246f 100644
+--- a/lib/metadata/raid_manip.c
++++ b/lib/metadata/raid_manip.c
+@@ -84,35 +84,55 @@ static int _activate_sublv_preserving_excl(struct logical_volume *top_lv,
+  *
+  * Returns: 1 if in-sync, 0 otherwise.
+  */
++#define _RAID_IN_SYNC_RETRIES  6
+ static int _raid_in_sync(struct logical_volume *lv)
+ {
++	int retries = _RAID_IN_SYNC_RETRIES;
+ 	dm_percent_t sync_percent;
+ 
++	if (seg_is_striped(first_seg(lv)))
++		return 1;
++
++	do { 
++	/*   
++	 * FIXME We repeat the status read here to workaround an
++	 * unresolved kernel bug when we see 0 even though the
++	 * the array is 100% in sync.
++	 * https://bugzilla.redhat.com/1210637
++	 */
+ 	if (!lv_raid_percent(lv, &sync_percent)) {
+ 		log_error("Unable to determine sync status of %s/%s.",
+ 			  lv->vg->name, lv->name);
+ 		return 0;
+-	}
+-	if (sync_percent == DM_PERCENT_0) {
+-		/*
+-		 * FIXME We repeat the status read here to workaround an
+-		 * unresolved kernel bug when we see 0 even though the 
+-		 * the array is 100% in sync.
+-		 * https://bugzilla.redhat.com/1210637
+-		 */
+-		if (!lv_raid_percent(lv, &sync_percent)) {
+-			log_error("Unable to determine sync status of %s/%s.",
+-				  lv->vg->name, lv->name);
+-			return 0;
+-		}
+-		if (sync_percent == DM_PERCENT_100)
+-			log_warn("WARNING: Sync status for %s is inconsistent.",
+-				 display_lvname(lv));
+-	}
++	}    
++	if (sync_percent > DM_PERCENT_0)
++		break;
++	if (retries == _RAID_IN_SYNC_RETRIES)
++		log_warn("WARNING: Sync status for %s is inconsistent.",
++			 display_lvname(lv));
++		usleep(500000);
++	} while (--retries);
+ 
+ 	return (sync_percent == DM_PERCENT_100) ? 1 : 0;
+ }
+ 
++/* Check if RaidLV @lv is synced or any raid legs of @lv are not synced */
++static int _raid_devs_sync_healthy(struct logical_volume *lv)
++{
++	char *raid_health;
++
++	if (!_raid_in_sync(lv))
++		return 0;
++
++	if (!seg_is_raid1(first_seg(lv)))
++		return 1;
++
++	if (!lv_raid_dev_health(lv, &raid_health))
++		return_0;
++
++	return (strchr(raid_health, 'a') || strchr(raid_health, 'D')) ? 0 : 1;
++}
++
+ /*
+  * _raid_remove_top_layer
+  * @lv
+@@ -835,6 +855,7 @@ static int _extract_image_components(struct lv_segment *seg, uint32_t idx,
+ /*
+  * _raid_extract_images
+  * @lv
++ * @force: force a replacement in case of primary mirror leg
+  * @new_count:  The absolute count of images (e.g. '2' for a 2-way mirror)
+  * @target_pvs:  The list of PVs that are candidates for removal
+  * @shift:  If set, use _shift_and_rename_image_components().
+@@ -849,7 +870,8 @@ static int _extract_image_components(struct lv_segment *seg, uint32_t idx,
+  *
+  * Returns: 1 on success, 0 on failure
+  */
+-static int _raid_extract_images(struct logical_volume *lv, uint32_t new_count,
++static int _raid_extract_images(struct logical_volume *lv,
++				int force, uint32_t new_count,
+ 			        struct dm_list *target_pvs, int shift,
+ 			        struct dm_list *extracted_meta_lvs,
+ 			        struct dm_list *extracted_data_lvs)
+@@ -917,11 +939,16 @@ static int _raid_extract_images(struct logical_volume *lv, uint32_t new_count,
+ 			    !lv_is_on_pvs(seg_metalv(seg, s), target_pvs))
+ 				continue;
+ 
+-			if (!_raid_in_sync(lv) &&
+-			    (!seg_is_mirrored(seg) || (s == 0))) {
++			/*
++			 * Kernel may report raid LV in-sync but still
++			 * image devices may not be in-sync or faulty.
++			 */
++			if (!_raid_devs_sync_healthy(lv) &&
++			    (!seg_is_mirrored(seg) || (s == 0 && !force))) {
+ 				log_error("Unable to extract %sRAID image"
+-					  " while RAID array is not in-sync",
+-					  seg_is_mirrored(seg) ? "primary " : "");
++					  " while RAID array is not in-sync%s",
++					  seg_is_mirrored(seg) ? "primary " : "",
++					  seg_is_mirrored(seg) ? " (use --force option to replace)" : "");
+ 				return 0;
+ 			}
+ 		}
+@@ -962,7 +989,7 @@ static int _raid_remove_images(struct logical_volume *lv,
+ 
+ 	dm_list_init(&removal_list);
+ 
+-	if (!_raid_extract_images(lv, new_count, pvs, 1,
++	if (!_raid_extract_images(lv, 0, new_count, pvs, 1,
+ 				 &removal_list, &removal_list)) {
+ 		log_error("Failed to extract images from %s/%s",
+ 			  lv->vg->name, lv->name);
+@@ -1148,7 +1175,7 @@ int lv_raid_split(struct logical_volume *lv, const char *split_name,
+ 			return_0;
+ 	}
+ 
+-	if (!_raid_extract_images(lv, new_count, splittable_pvs, 1,
++	if (!_raid_extract_images(lv, 0, new_count, splittable_pvs, 1,
+ 				 &removal_list, &data_list)) {
+ 		log_error("Failed to extract images from %s/%s",
+ 			  lv->vg->name, lv->name);
+@@ -1602,6 +1629,7 @@ static int _avoid_pvs_with_other_images_of_lv(struct logical_volume *lv, struct
+  * Replace the specified PVs.
+  */
+ int lv_raid_replace(struct logical_volume *lv,
++		    int force,
+ 		    struct dm_list *remove_pvs,
+ 		    struct dm_list *allocate_pvs)
+ {
+@@ -1762,7 +1790,8 @@ try_again:
+ 	 *   supplied - knowing that only the image with the error target
+ 	 *   will be affected.
+ 	 */
+-	if (!_raid_extract_images(lv, raid_seg->area_count - match_count,
++	if (!_raid_extract_images(lv, force,
++				  raid_seg->area_count - match_count,
+ 				  partial_segment_removed ?
+ 				  &lv->vg->pvs : remove_pvs, 0,
+ 				  &old_lvs, &old_lvs)) {
+diff --git a/tools/lvconvert.c b/tools/lvconvert.c
+index e7394c0..751c0bc 100644
+--- a/tools/lvconvert.c
++++ b/tools/lvconvert.c
+@@ -1774,7 +1774,7 @@ static int _lvconvert_raid(struct logical_volume *lv, struct lvconvert_params *l
+ 		return lv_raid_reshape(lv, lp->segtype);
+ 
+ 	if (arg_count(cmd, replace_ARG))
+-		return lv_raid_replace(lv, lp->replace_pvh, lp->pvh);
++		return lv_raid_replace(lv, lp->force, lp->replace_pvh, lp->pvh);
+ 
+ 	if (arg_count(cmd, repair_ARG)) {
+ 		if (!lv_is_active_exclusive_locally(lv_lock_holder(lv))) {
+@@ -1810,7 +1810,7 @@ static int _lvconvert_raid(struct logical_volume *lv, struct lvconvert_params *l
+ 			if (!(failed_pvs = _failed_pv_list(lv->vg)))
+ 				return_0;
+ 
+-			if (!lv_raid_replace(lv, failed_pvs, lp->pvh)) {
++			if (!lv_raid_replace(lv, lp->force, failed_pvs, lp->pvh)) {
+ 				log_error("Failed to replace faulty devices in"
+ 					  " %s/%s.", lv->vg->name, lv->name);
+ 				return 0;

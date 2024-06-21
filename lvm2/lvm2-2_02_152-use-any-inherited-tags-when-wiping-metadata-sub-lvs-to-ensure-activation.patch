@@ -1,0 +1,113 @@
+commit e23aac9850d0a0eda7d5624630ddbda0599496e8
+Author: Peter Rajnoha <prajnoha@redhat.com>
+Date:   Thu Nov 10 09:51:22 2016 +0100
+
+    0
+---
+ WHATS_NEW                 |  4 ++++
+ lib/datastruct/str_list.c | 18 +++++++++++++-----
+ lib/datastruct/str_list.h |  1 +
+ lib/metadata/lv_manip.c   | 13 +++++++++++++
+ 4 files changed, 31 insertions(+), 5 deletions(-)
+
+diff --git a/WHATS_NEW b/WHATS_NEW
+index 98fa03a..cc40991 100644
+--- a/WHATS_NEW
++++ b/WHATS_NEW
+@@ -6,6 +6,10 @@ Version 2.02.162 -
+ =================================
+   Fix automatic updates of PV extension headers to newest version.
+ 
++Version 2.02.152 - 
++==================================
++  Use any inherited tags when wiping metadata sub LVs to ensure activation.
++
+ Version 2.02.150 - 
+ ==================================
+   Fix flushing of outstanding IO for mirror target (2.02.133).
+diff --git a/lib/datastruct/str_list.c b/lib/datastruct/str_list.c
+index 3dfc6d7..6fe5672 100644
+--- a/lib/datastruct/str_list.c
++++ b/lib/datastruct/str_list.c
+@@ -92,7 +92,15 @@ void str_list_del(struct dm_list *sll, const char *str)
+ 
+ 	dm_list_iterate_safe(slh, slht, sll)
+ 		if (!strcmp(str, dm_list_item(slh, struct dm_str_list)->str))
+-			 dm_list_del(slh);
++			dm_list_del(slh);
++}
++
++void str_list_wipe(struct dm_list *sll)
++{
++	struct dm_list *slh, *slht;
++
++	dm_list_iterate_safe(slh, slht, sll)
++		dm_list_del(slh);
+ }
+ 
+ int str_list_dup(struct dm_pool *mem, struct dm_list *sllnew,
+@@ -118,8 +126,8 @@ int str_list_match_item(const struct dm_list *sll, const char *str)
+ 	struct dm_str_list *sl;
+ 
+ 	dm_list_iterate_items(sl, sll)
+-	    if (!strcmp(str, sl->str))
+-		return 1;
++		if (!strcmp(str, sl->str))
++			return 1;
+ 
+ 	return 0;
+ }
+@@ -153,8 +161,8 @@ int str_list_lists_equal(const struct dm_list *sll, const struct dm_list *sll2)
+ 		return 0;
+ 
+ 	dm_list_iterate_items(sl, sll)
+-	    if (!str_list_match_item(sll2, sl->str))
+-		return 0;
++		if (!str_list_match_item(sll2, sl->str))
++			return 0;
+ 
+ 	return 1;
+ }
+diff --git a/lib/datastruct/str_list.h b/lib/datastruct/str_list.h
+index 82807f3..9f6d331 100644
+--- a/lib/datastruct/str_list.h
++++ b/lib/datastruct/str_list.h
+@@ -25,6 +25,7 @@ int str_list_add_list(struct dm_pool *mem, struct dm_list *sll, struct dm_list *
+ int str_list_add_no_dup_check(struct dm_pool *mem, struct dm_list *sll, const char *str);
+ int str_list_add_h_no_dup_check(struct dm_pool *mem, struct dm_list *sll, const char *str);
+ void str_list_del(struct dm_list *sll, const char *str);
++void str_list_wipe(struct dm_list *sll);
+ int str_list_match_item(const struct dm_list *sll, const char *str);
+ int str_list_match_list(const struct dm_list *sll, const struct dm_list *sll2, const char **tag_matched);
+ int str_list_lists_equal(const struct dm_list *sll, const struct dm_list *sll2);
+diff --git a/lib/metadata/lv_manip.c b/lib/metadata/lv_manip.c
+index c2afc40..0167a18 100644
+--- a/lib/metadata/lv_manip.c
++++ b/lib/metadata/lv_manip.c
+@@ -3760,6 +3760,16 @@ static int _lv_extend_layered_lv(struct alloc_handle *ah,
+ 				return 0;
+ 			}
+ 			lv_set_visible(meta_lv);
++
++			/*
++			 * Copy any tags from the new LV to the metadata LV so
++			 * it can be activated temporarily.
++			 */
++			if (!str_list_dup(meta_lv->vg->vgmem, &meta_lv->tags, &lv->tags)) {
++				log_error("Failed to copy tags onto LV %s to clear metadata.", display_lvname(meta_lv));
++				return 0;
++			}
++
+ 			clear_metadata = 1;
+ 		}
+ 
+@@ -3808,6 +3818,9 @@ static int _lv_extend_layered_lv(struct alloc_handle *ah,
+ 				return 0;
+ 			}
+ 			lv_set_hidden(meta_lv);
++
++			/* Wipe any temporary tags required for activation. */
++			str_list_wipe(&meta_lv->tags);
+ 		}
+ 	}
+ 

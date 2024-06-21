@@ -1,0 +1,92 @@
+ WHATS_NEW               |  4 ++++
+ lib/metadata/lv_manip.c | 43 ++++++++++++++++++++++++++++---------------
+ 2 files changed, 32 insertions(+), 15 deletions(-)
+
+diff --git a/WHATS_NEW b/WHATS_NEW
+index c61a173..cdc6894 100644
+--- a/WHATS_NEW
++++ b/WHATS_NEW
+@@ -1,3 +1,7 @@
++Version 2.02.147 - 
++=====================================
++  Fix resize of stacked raid thin data volume (2.02.141).
++
+ Version 2.02.146 - 
+ =====================================
+   Allow for raid leg replacement if not both data and metadata image are on pvs.
+diff --git a/lib/metadata/lv_manip.c b/lib/metadata/lv_manip.c
+index 5e4a81f..c2afc40 100644
+--- a/lib/metadata/lv_manip.c
++++ b/lib/metadata/lv_manip.c
+@@ -1630,6 +1630,28 @@ static int _log_parallel_areas(struct dm_pool *mem, struct dm_list *parallel_are
+ 	return 1;
+ }
+ 
++/* Handles also stacking */
++static int _setup_lv_size(struct logical_volume *lv, uint32_t extents)
++{
++	struct lv_segment *thin_pool_seg;
++
++	lv->le_count = extents;
++	lv->size = (uint64_t) extents * lv->vg->extent_size;
++
++	if (lv_is_thin_pool_data(lv)) {
++		if (!(thin_pool_seg = get_only_segment_using_this_lv(lv)))
++			return_0;
++
++		/* Update thin pool segment from the layered LV */
++		thin_pool_seg->lv->le_count =
++			thin_pool_seg->len =
++			thin_pool_seg->area_len = lv->le_count;
++		thin_pool_seg->lv->size = lv->size;
++	}
++
++	return 1;
++}
++
+ static int _setup_alloced_segment(struct logical_volume *lv, uint64_t status,
+ 				  uint32_t area_count,
+ 				  uint32_t stripe_size,
+@@ -1638,7 +1660,7 @@ static int _setup_alloced_segment(struct logical_volume *lv, uint64_t status,
+ 				  uint32_t region_size)
+ {
+ 	uint32_t s, extents, area_multiple;
+-	struct lv_segment *seg, *thin_pool_seg;
++	struct lv_segment *seg;
+ 
+ 	area_multiple = _calc_area_multiple(segtype, area_count, 0);
+ 	extents = aa[0].len * area_multiple;
+@@ -1658,19 +1680,9 @@ static int _setup_alloced_segment(struct logical_volume *lv, uint64_t status,
+ 	dm_list_add(&lv->segments, &seg->list);
+ 
+ 	extents = aa[0].len * area_multiple;
+-	lv->le_count += extents;
+-	lv->size += (uint64_t) extents * lv->vg->extent_size;
+-
+-	if (lv_is_thin_pool_data(lv)) {
+-		if (!(thin_pool_seg = get_only_segment_using_this_lv(lv)))
+-			return_0;
+ 
+-		/* Update thin pool segment from the layered LV */
+-		thin_pool_seg->lv->le_count =
+-			thin_pool_seg->len =
+-			thin_pool_seg->area_len = lv->le_count;
+-		thin_pool_seg->lv->size = lv->size;
+-	}
++	if (!_setup_lv_size(lv, lv->le_count + extents))
++		return_0;
+ 
+ 	return 1;
+ }
+@@ -3801,8 +3813,9 @@ static int _lv_extend_layered_lv(struct alloc_handle *ah,
+ 
+ 	seg->area_len += extents;
+ 	seg->len += extents;
+-	lv->le_count += extents;
+-	lv->size += (uint64_t) extents * lv->vg->extent_size;
++
++	if (!_setup_lv_size(lv, lv->le_count + extents))
++		return_0;
+ 
+ 	/*
+ 	 * The MD bitmap is limited to being able to track 2^21 regions.
