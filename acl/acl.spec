@@ -10,23 +10,23 @@ Requires: libacl = %{version}-%{release}
 Source: https://download.savannah.gnu.org/releases/acl/acl-%{version}.src.tar.gz
 #backup
 #Source: https://github.com/andykimpe/myrpmspec/releases/download/el6-archive/acl-%{version}.src.tar.gz
-Patch0: acl-2.2.3-multilib.patch
-Patch1: acl-2.2.39-build.patch
-Patch2: acl-2.2.49-setfacl-walk.patch
-Patch3: acl-2.2.49-bz467936.patch
-Patch4: acl-2.2.49-tests.patch
-Patch5: acl-2.2.49-setfacl-restore.patch
-Patch6: acl-2.2.49-bz658734.patch
-Patch7: acl-2.2.49-bz720318.patch
+Patch0: https://github.com/andykimpe/myrpmspec/raw/el6/acl/acl-2.2.3-multilib.patch
+Patch1: https://github.com/andykimpe/myrpmspec/raw/el6/acl/acl-2.2.39-build.patch
+Patch2: https://github.com/andykimpe/myrpmspec/raw/el6/acl/acl-2.2.49-setfacl-walk.patch
+Patch3: https://github.com/andykimpe/myrpmspec/raw/el6/acl/acl-2.2.49-bz467936.patch
+Patch4: https://github.com/andykimpe/myrpmspec/raw/el6/acl/acl-2.2.49-tests.patch
+Patch5: https://github.com/andykimpe/myrpmspec/raw/el6/acl/acl-2.2.49-setfacl-restore.patch
+Patch6: https://github.com/andykimpe/myrpmspec/raw/el6/acl/acl-2.2.49-bz658734.patch
+Patch7: https://github.com/andykimpe/myrpmspec/raw/el6/acl/acl-2.2.49-bz720318.patch
 
 # fix test-suite failure on a repeated run (#743847)
-Patch8: acl-2.2.49-bz743847.patch
+Patch8: https://github.com/andykimpe/myrpmspec/raw/el6/acl/acl-2.2.49-bz743847.patch
 
 # fix SIGSEGV of getfacl -e on overly long group name (#1025246)
-Patch9: acl-2.2.49-bz1025246.patch
+Patch9: https://github.com/andykimpe/myrpmspec/raw/el6/acl/acl-2.2.49-bz1025246.patch
 
 # fix spurious acl_check() failure on setfacl --restore (#1451801)
-Patch10: acl-2.2.52-setfacl-restore-initialize.patch
+Patch10: https://github.com/andykimpe/myrpmspec/raw/el6/acl/acl-2.2.52-setfacl-restore-initialize.patch
 
 License: GPLv2+
 Group: System Environment/Base
