@@ -1,0 +1,859 @@
+diff -ru planner-0.14.4.foo/eds-backend/e-cal-backend-planner.c planner-0.14.4/eds-backend/e-cal-backend-planner.c
+--- planner-0.14.4.foo/eds-backend/e-cal-backend-planner.c	2010-07-19 10:51:35.000000000 +0100
++++ planner-0.14.4/eds-backend/e-cal-backend-planner.c	2010-07-19 11:47:55.000000000 +0100
+@@ -31,6 +31,8 @@
+ #include <libplanner/mrp-project.h>
+ #include <libplanner/mrp-task.h>
+ 
++#define EDC_ERROR(_code) e_data_cal_create_error (_code, NULL)
++
+ /* Private part of the ECalBackendPlanner structure */
+ struct _ECalBackendPlannerPrivate {
+ 	/* uri to get planner data from */
+@@ -58,97 +60,115 @@
+ /* Backend implementation */
+ static void                  cbp_dispose                 (GObject          *object);
+ static void                  cbp_finalize                (GObject          *object);
+-static ECalBackendSyncStatus cbp_is_read_only            (ECalBackendSync  *backend, 
++static void                  cbp_is_read_only            (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+-							  gboolean         *read_only);
+-static ECalBackendSyncStatus cbp_get_cal_address         (ECalBackendSync  *backend, 
++							  gboolean         *read_only,
++							  GError          **perror);
++static void                  cbp_get_cal_address         (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+-							  char            **address);
+-static ECalBackendSyncStatus cbp_get_ldap_attribute      (ECalBackendSync  *backend, 
++							  char            **address,
++							  GError          **perror);
++static void                  cbp_get_ldap_attribute      (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+-							  char            **attribute);
+-static ECalBackendSyncStatus cbp_get_alarm_email_address (ECalBackendSync  *backend, 
++							  char            **attribute,
++							  GError          **perror);
++static void                  cbp_get_alarm_email_address (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+-							  char            **address);
+-static ECalBackendSyncStatus cbp_get_static_capabilities (ECalBackendSync  *backend, 
++							  char            **address,
++							  GError          **perror);
++static void                  cbp_get_static_capabilities (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+-							  char            **capabilities);
++							  char            **capabilities,
++							  GError          **perror);
+ 
+-static ECalBackendSyncStatus cbp_open                    (ECalBackendSync  *backend, 
++static void                  cbp_open                    (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+ 							  gboolean          only_if_exists,
+ 							  const gchar      *username, 
+-							  const gchar      *password);
+-static ECalBackendSyncStatus cbp_remove                  (ECalBackendSync  *backend, 
+-							  EDataCal         *cal);
++							  const gchar      *password,
++							  GError          **perror);
++static void                  cbp_remove                  (ECalBackendSync  *backend, 
++							  EDataCal         *cal,
++							  GError          **perror);
+ static gboolean              cbp_is_loaded               (ECalBackend      *backend);
+ static CalMode               cbp_get_mode                (ECalBackend      *backend);
+ static void                  cbp_set_mode                (ECalBackend      *backend, 
+ 							  CalMode           mode);
+-static ECalBackendSyncStatus cbp_get_default_object      (ECalBackendSync  *backend, 
++static void                  cbp_get_default_object      (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+-							  char            **object);
+-static ECalBackendSyncStatus cbp_get_object              (ECalBackendSync  *backend, 
++							  char            **object,
++							  GError          **perror);
++static void                  cbp_get_object              (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+ 							  const gchar      *uid, 
+ 							  const gchar      *rid, 
+-							  gchar           **object);
+-static ECalBackendSyncStatus cbp_get_timezone            (ECalBackendSync  *backend, 
+-							  EDataCal         *cal, 
+-							  const gchar      *tzid, 
+-							  char            **object);
+-static ECalBackendSyncStatus cbp_add_timezone            (ECalBackendSync  *backend, 
++							  gchar           **object,
++							  GError          **error);
++static void                  cbp_add_timezone            (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+-							  const gchar      *tzobj);
+-static ECalBackendSyncStatus cbp_set_default_timezone    (ECalBackendSync  *backend, 
+-							  EDataCal         *cal, 
+-							  const gchar      *tzid);
+-static ECalBackendSyncStatus cbp_get_object_list         (ECalBackendSync  *backend, 
++							  const gchar      *tzobj,
++							  GError          **perror);
++static void                  cbp_set_default_zone_sync   (ECalBackendSync  *backend, 
++                                                          EDataCal         *cal, 
++                                                          const gchar      *tzid,
++                                                          GError          **perror);
++static void                  cbp_get_object_list         (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+ 							  const gchar      *sexp, 
+-							  GList           **objects);
+-static void cbp_start_query                              (ECalBackend      *backend, 
++							  GList           **objects,
++							  GError          **perror);
++static void                  cbp_start_query             (ECalBackend      *backend, 
+ 							  EDataCalView     *query);
+-static ECalBackendSyncStatus cbp_get_free_busy           (ECalBackendSync  *backend, 
++static void                  cbp_get_free_busy           (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+ 							  GList            *users,
+ 							  time_t            start, 
+ 							  time_t            end, 
+-							  GList           **freebusy);
+-static ECalBackendSyncStatus cbp_get_changes             (ECalBackendSync  *backend, 
++							  GList           **freebusy,
++							  GError          **perror);
++static void                  cbp_get_changes             (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+ 							  const char       *change_id,
+ 							  GList           **adds, 
+ 							  GList           **modifies, 
+-							  GList           **deletes);
+-static ECalBackendSyncStatus cbp_discard_alarm           (ECalBackendSync  *backend, 
++							  GList           **deletes,
++							  GError          **perror);
++static void                  cbp_discard_alarm           (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+ 							  const gchar      *uid, 
+-							  const gchar      *auid);
+-static ECalBackendSyncStatus cbp_create_object           (ECalBackendSync  *backend, 
++							  const gchar      *auid,
++							  GError          **perror);
++static void                  cbp_create_object           (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+ 							  gchar           **calobj, 
+-							  gchar           **uid);
+-static ECalBackendSyncStatus cbp_modify_object           (ECalBackendSync  *backend, 
++							  gchar           **uid,
++							  GError          **perror);
++static void                  cbp_modify_object           (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+ 							  const gchar      *calobj, 
+ 							  CalObjModType     mod, 
+-							  char            **old_object);
+-static ECalBackendSyncStatus cbp_remove_object           (ECalBackendSync  *backend, 
++							  char            **old_object,
++							  char            **new_object,
++							  GError          **perror);
++static void                  cbp_remove_object           (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal,
+ 							  const gchar      *uid, 
+ 							  const gchar      *rid,
+ 							  CalObjModType     mod, 
+-							  gchar           **object);
+-static ECalBackendSyncStatus cbp_receive_objects         (ECalBackendSync  *backend, 
++							  gchar           **old_object,
++							  gchar           **object,
++							  GError          **perror);
++static void                  cbp_receive_objects         (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+-							  const gchar      *calobj);
++							  const gchar      *calobj,
++							  GError          **perror);
+ 
+-static ECalBackendSyncStatus cbp_send_objects            (ECalBackendSync  *backend, 
++static void                  cbp_send_objects            (ECalBackendSync  *backend, 
+ 							  EDataCal         *cal, 
+ 							  const gchar      *calobj, 
+ 							  GList           **users,
+-							  gchar           **modified_calobj);
++							  gchar           **modified_calobj,
++							  GError          **perror);
+ static icaltimezone * cbp_internal_get_default_timezone  (ECalBackend      *backend);
+ 
+ static icaltimezone * cbp_internal_get_timezone          (ECalBackend      *backend, 
+@@ -374,56 +394,51 @@
+ 
+ /* Is_read_only handler for the file backend */
+ /* It will be read and write in the future */
+-static ECalBackendSyncStatus
++static void
+ cbp_is_read_only (ECalBackendSync *backend, 
+ 				    EDataCal        *cal, 
+-				    gboolean        *read_only)
++				    gboolean        *read_only,
++				    GError         **perror)
+ {
+ 	*read_only = FALSE;
+-	
+-	return GNOME_Evolution_Calendar_Success;
+ }
+ 
+ /* FIXME: The only address for the Planner backend is the file 
+    for the moment. Later we will have a URI */
+-static ECalBackendSyncStatus
++static void
+ cbp_get_cal_address (ECalBackendSync *backend, 
+ 				       EDataCal        *cal, 
+-				       char           **address)
++				       char           **address,
++				       GError         **perror)
+ {
+ 	*address = NULL;
+-
+-	return GNOME_Evolution_Calendar_Success;
+ }
+ 
+-static ECalBackendSyncStatus
++static void
+ cbp_get_ldap_attribute (ECalBackendSync *backend, 
+ 					  EDataCal        *cal, 
+-					  char           **attribute)
++					  char           **attribute,
++					  GError         **perror)
+ {
+ 	*attribute = NULL;
+-	
+-	return GNOME_Evolution_Calendar_Success;
+ }
+ 
+-static ECalBackendSyncStatus
++static void
+ cbp_get_alarm_email_address (ECalBackendSync *backend, 
+ 					       EDataCal        *cal, 
+-					       char           **address)
++					       char           **address,
++					       GError         **perror)
+ {
+ 	*address = NULL;
+-	
+-	return GNOME_Evolution_Calendar_Success;
+ }
+ 
+-static ECalBackendSyncStatus
++static void
+ cbp_get_static_capabilities (ECalBackendSync *backend, 
+ 					       EDataCal        *cal, 
+-					       char           **capabilities)
++					       char           **capabilities,
++					       GError         **perror)
+ {
+ 	*capabilities = g_strdup (CAL_STATIC_CAPABILITY_NO_EMAIL_ALARMS);
+-
+-	return GNOME_Evolution_Calendar_Success;
+ }
+ 
+ static ECalComponent *
+@@ -805,12 +820,13 @@
+ }
+ 
+ /* Open handler for the file backend */
+-static ECalBackendSyncStatus
++static void
+ cbp_open (ECalBackendSync *backend, 
+ 	  EDataCal        *cal, 
+ 	  gboolean         only_if_exists,
+ 	  const gchar     *username, 
+-	  const gchar     *password)
++	  const gchar     *password,
++	  GError         **perror)
+ {
+ 	ECalBackendPlanner        *cbplanner;
+ 	ECalBackendPlannerPrivate *priv;
+@@ -827,7 +843,8 @@
+ 	}
+ 	if (!uri) {
+ 		e_cal_backend_notify_error (E_CAL_BACKEND (backend), _("Invalid server URI"));
+-		return GNOME_Evolution_Calendar_NoSuchCal;
++		g_propagate_error (perror, EDC_ERROR (NoSuchCal));
++		return;
+ 	}
+ 	
+ 	cbplanner = E_CAL_BACKEND_PLANNER (backend);
+@@ -835,7 +852,7 @@
+ 
+ 	if (priv->project_loaded) {
+ 		g_warning ("Reopening project ... we need to check for new tasks ...");
+-		return GNOME_Evolution_Calendar_Success;	
++		return;
+ 	} else {
+ 		g_warning ("Openinig project for the first time ...");
+ 	}
+@@ -848,17 +865,19 @@
+ 		task_add_properties (priv->project);
+ 		g_idle_add ((GSourceFunc) get_planner_tasks_cb, cbplanner);
+ 		priv->project_loaded = TRUE;
+-		return GNOME_Evolution_Calendar_Success;
++		return;
+ 	} else {
+ 		g_warning ("Problem opening planner project: %s", error->message);
+ 		g_error_free (error);
+-		return GNOME_Evolution_Calendar_ObjectNotFound;
++		g_propagate_error (perror, EDC_ERROR (ObjectNotFound));
++		return;
+ 	}
+ }
+ 
+-static ECalBackendSyncStatus
++static void
+ cbp_remove (ECalBackendSync *backend, 
+-			      EDataCal        *cal)
++			      EDataCal        *cal,
++			      GError         **perror)
+ {
+ 	ECalBackendPlanner        *cbplanner;
+ 	ECalBackendPlannerPrivate *priv;
+@@ -868,7 +887,7 @@
+ 
+ 	/* e_file_cache_remove (E_FILE_CACHE (priv->cache)); */
+ 	/* FIXME: we need to remove the task from Planner */
+-	return GNOME_Evolution_Calendar_Success;
++	return;
+ }
+ 
+ /* is_loaded handler for the planner backend */
+@@ -904,7 +923,7 @@
+ {
+ 	ECalBackendPlanner               *cbplanner;
+ 	ECalBackendPlannerPrivate        *priv;
+-	GNOME_Evolution_Calendar_CalMode  set_mode;
++	EDataCalMode                      set_mode;
+ 
+ 	cbplanner = E_CAL_BACKEND_PLANNER (backend);
+ 	priv = cbplanner->priv;
+@@ -917,27 +936,28 @@
+ 			break;
+ 		case CAL_MODE_ANY:
+ 			priv->mode = CAL_MODE_REMOTE;
+-			set_mode = GNOME_Evolution_Calendar_MODE_REMOTE;
++			set_mode = Remote;
+ 			break;
+ 		default:
+-			set_mode = GNOME_Evolution_Calendar_MODE_ANY;
++			set_mode = AnyMode;
+ 			break;
+ 	}
+ 
+-	if (set_mode == GNOME_Evolution_Calendar_MODE_ANY)
++	if (set_mode == AnyMode)
+ 		e_cal_backend_notify_mode (backend,
+-					   GNOME_Evolution_Calendar_CalListener_MODE_NOT_SUPPORTED,
++					   ModeNotSupported,
+ 					   cal_mode_to_corba (priv->mode));
+ 	else
+ 		e_cal_backend_notify_mode (backend,
+-					   GNOME_Evolution_Calendar_CalListener_MODE_SET,
++					   ModeSet,
+ 					   set_mode);
+ }
+ 
+-static ECalBackendSyncStatus
++static void
+ cbp_get_default_object (ECalBackendSync *backend, 
+ 					  EDataCal        *cal, 
+-					  char           **object)
++					  char           **object,
++					  GError         **perror)
+ {
+ 	ECalBackendPlanner        *cbplanner;
+ 	ECalBackendPlannerPrivate *priv;
+@@ -951,17 +971,16 @@
+ 	icalcomp = e_cal_util_new_component (kind);
+ 	*object = g_strdup (icalcomponent_as_ical_string (icalcomp));
+ 	icalcomponent_free (icalcomp);
+-
+-	return GNOME_Evolution_Calendar_Success;
+ }
+ 
+ /* Get_object_component handler for the planner backend */
+-static ECalBackendSyncStatus
++static void
+ cbp_get_object (ECalBackendSync *backend, 
+ 				  EDataCal        *cal, 
+ 				  const gchar     *uid, 
+ 				  const gchar     *rid, 
+-				  gchar          **object)
++				  gchar          **object,
++				  GError         **perror)
+ {
+ 	ECalBackendPlanner        *cbplanner;
+ 	ECalBackendPlannerPrivate *priv;
+@@ -970,83 +989,56 @@
+ 	cbplanner = E_CAL_BACKEND_PLANNER (backend);
+ 	priv = cbplanner->priv;
+ 
+-	g_return_val_if_fail (uid != NULL, GNOME_Evolution_Calendar_ObjectNotFound);
++	if (uid == NULL)
++	{
++		g_propagate_error (perror, EDC_ERROR (ObjectNotFound));
++		return;
++	}
+ 
+ 	comp = g_hash_table_lookup (priv->tasks_comp, uid); 
+ 	/* comp = e_cal_backend_cache_get_component (priv->cache, uid, rid); */
+ 	/* We take the comp directly from libplanner */
+ 	if (!comp)
+-		return GNOME_Evolution_Calendar_ObjectNotFound;
++	{
++		g_propagate_error (perror, EDC_ERROR (ObjectNotFound));
++		return;
++	}
+ 
+ 	*object = e_cal_component_get_as_string (comp);
+-
+-	return GNOME_Evolution_Calendar_Success;
+-}
+-
+-/* Get_timezone_object handler for the file backend */
+-static ECalBackendSyncStatus
+-cbp_get_timezone (ECalBackendSync *backend, 
+-				    EDataCal        *cal, 
+-				    const gchar     *tzid, 
+-				    char           **object)
+-{
+-	ECalBackendPlanner *cbplanner;
+-	ECalBackendPlannerPrivate *priv;
+-	icaltimezone *zone;
+-	icalcomponent *icalcomp;
+-
+-	cbplanner = E_CAL_BACKEND_PLANNER (backend);
+-	priv = cbplanner->priv;
+-
+-	g_return_val_if_fail (tzid != NULL, GNOME_Evolution_Calendar_ObjectNotFound);
+-
+-	zone = icaltimezone_get_builtin_timezone_from_tzid (tzid);
+-	if (!zone)
+-		return GNOME_Evolution_Calendar_ObjectNotFound;
+-
+-	icalcomp = icaltimezone_get_component (zone);
+-	if (!icalcomp)
+-		return GNOME_Evolution_Calendar_InvalidObject;
+-
+-	*object = g_strdup (icalcomponent_as_ical_string (icalcomp));
+-
+-	return GNOME_Evolution_Calendar_Success;
+ }
+ 
+ /* Add_timezone handler for the file backend */
+-static ECalBackendSyncStatus
++static void
+ cbp_add_timezone (ECalBackendSync *backend, 
+ 				    EDataCal        *cal, 
+-				    const gchar     *tzobj)
++				    const gchar     *tzobj,
++				    GError         **perror)
+ {
+ 	ECalBackendPlanner *cbplanner;
+ 	ECalBackendPlannerPrivate *priv;
+ 
+ 	cbplanner = (ECalBackendPlanner *) backend;
+ 
+-	g_return_val_if_fail (E_IS_CAL_BACKEND_PLANNER (cbplanner), 
+-			      GNOME_Evolution_Calendar_OtherError);
+-	g_return_val_if_fail (tzobj != NULL, GNOME_Evolution_Calendar_OtherError);
++	if (!E_IS_CAL_BACKEND_PLANNER (cbplanner) || tzobj == NULL)
++	{
++		g_propagate_error (perror, EDC_ERROR (OtherError));
++		return;
++	}
+ 
+ 	priv = cbplanner->priv;
+-
+-	/* FIXME: add the timezone to the cache */
+-	return GNOME_Evolution_Calendar_Success;
+ }
+ 
+-static ECalBackendSyncStatus
+-cbp_set_default_timezone (ECalBackendSync *backend, 
+-					    EDataCal        *cal, 
+-					    const gchar     *tzid)
++static void
++cbp_set_default_zone_sync (ECalBackendSync *backend, 
++                                           EDataCal        *cal, 
++                                           const gchar     *tzid,
++                                           GError          **perror)
+ {
+-	ECalBackendPlanner *cbplanner;
+-	ECalBackendPlannerPrivate *priv;
++       ECalBackendPlanner *cbplanner;
++       ECalBackendPlannerPrivate *priv;
+ 
+-	cbplanner = E_CAL_BACKEND_PLANNER (backend);
+-	priv = cbplanner->priv;
+-	
+-	/* FIXME */
+-	return GNOME_Evolution_Calendar_Success;
++       cbplanner = E_CAL_BACKEND_PLANNER (backend);
++       priv = cbplanner->priv;
+ }
+ 
+ static void
+@@ -1061,11 +1053,12 @@
+ 
+ 
+ /* Get_objects_in_range handler for the planner backend */
+-static ECalBackendSyncStatus
++static void
+ cbp_get_object_list (ECalBackendSync *backend, 
+ 				       EDataCal        *cal, 
+ 				       const gchar     *sexp, 
+-				       GList          **objects)
++				       GList          **objects,
++				       GError         **perror)
+ {
+ 	ECalBackendPlanner         *cbplanner;
+ 	ECalBackendPlannerPrivate  *priv;
+@@ -1092,7 +1085,6 @@
+ 	g_list_free (comps);
+ 	g_object_unref (cbsexp);
+ 
+-	return GNOME_Evolution_Calendar_Success;
+ }
+ 
+ /* get_query handler for the planner backend */
+@@ -1133,17 +1125,18 @@
+ 	g_list_free (objects);
+ 	g_object_unref (cbsexp);
+ 
+-	e_data_cal_view_notify_done (query, GNOME_Evolution_Calendar_Success);
++	e_data_cal_view_notify_done (query, NULL /* Success */);
+ }
+ 
+ /* Get_free_busy handler for the planner backend */
+-static ECalBackendSyncStatus
++static void
+ cbp_get_free_busy (ECalBackendSync *backend, 
+ 				     EDataCal        *cal, 
+ 				     GList           *users,
+ 				     time_t           start, 
+ 				     time_t           end, 
+-				     GList          **freebusy)
++				     GList          **freebusy,
++				     GError         **perror)
+ {
+ 	ECalBackendPlanner        *cbplanner;
+ 	ECalBackendPlannerPrivate *priv;
+@@ -1151,22 +1144,19 @@
+ 	cbplanner = E_CAL_BACKEND_PLANNER (backend);
+ 	priv = cbplanner->priv;
+ 
+-	g_return_val_if_fail (start != -1 && end != -1, 
+-			      GNOME_Evolution_Calendar_InvalidRange);
+-	g_return_val_if_fail (start <= end, GNOME_Evolution_Calendar_InvalidRange);
+-
+-	/* FIXME */
+-	return GNOME_Evolution_Calendar_Success;
++        if (start == -1 || end == -1 || start > end)
++		g_propagate_error (perror, EDC_ERROR (InvalidRange));
+ }
+ 
+ /* Get_changes handler for the planner backend */
+-static ECalBackendSyncStatus
++static void
+ cbp_get_changes (ECalBackendSync *backend, 
+ 				   EDataCal        *cal, 
+ 				   const char      *change_id,
+ 				   GList          **adds, 
+ 				   GList          **modifies, 
+-				   GList          **deletes)
++				   GList          **deletes,
++				   GError         **perror)
+ {
+ 	ECalBackendPlanner        *cbplanner;
+ 	ECalBackendPlannerPrivate *priv;
+@@ -1174,34 +1164,31 @@
+ 	cbplanner = E_CAL_BACKEND_PLANNER (backend);
+ 	priv = cbplanner->priv;
+ 
+-	g_return_val_if_fail (change_id != NULL, GNOME_Evolution_Calendar_ObjectNotFound);
+-
+-	/* FIXME */
+-	return GNOME_Evolution_Calendar_Success;
++	if (change_id == NULL)
++		g_propagate_error (perror, EDC_ERROR (ObjectNotFound));
+ }
+ 
+ /* Discard_alarm handler for the planner backend */
+-static ECalBackendSyncStatus
++static void
+ cbp_discard_alarm (ECalBackendSync *backend, 
+ 				     EDataCal        *cal, 
+ 				     const gchar     *uid, 
+-				     const gchar     *auid)
++				     const gchar     *auid,
++				     GError         **perror)
+ {
+ 	ECalBackendPlanner        *cbplanner;
+ 	ECalBackendPlannerPrivate *priv;
+ 
+ 	cbplanner = E_CAL_BACKEND_PLANNER (backend);
+ 	priv = cbplanner->priv;
+-
+-	/* FIXME */
+-	return GNOME_Evolution_Calendar_Success;
+ }
+ 
+-static ECalBackendSyncStatus
++static void
+ cbp_create_object (ECalBackendSync *backend, 
+ 				     EDataCal        *cal, 
+ 				     gchar          **calobj, 
+-				     gchar          **uid)
++				     gchar          **uid,
++				     GError         **perror)
+ {
+ 	ECalBackendPlanner        *cbplanner;
+ 	ECalBackendPlannerPrivate *priv;
+@@ -1215,17 +1202,29 @@
+ 	cbplanner = E_CAL_BACKEND_PLANNER (backend);
+ 	priv = cbplanner->priv;
+ 
+-	g_return_val_if_fail (E_IS_CAL_BACKEND_PLANNER (backend), GNOME_Evolution_Calendar_InvalidObject);
+-	g_return_val_if_fail (*calobj != NULL, GNOME_Evolution_Calendar_ObjectNotFound);
++	if (!E_IS_CAL_BACKEND_PLANNER (backend))
++	{
++		g_propagate_error (perror, EDC_ERROR (InvalidObject));
++		return;
++	}
++	if (*calobj == NULL)
++	{
++		g_propagate_error (perror, EDC_ERROR (ObjectNotFound));
++		return;
++	}
+ 
+ 	icalcomp = icalparser_parse_string (*calobj);
+ 	if (!icalcomp)
+-		return GNOME_Evolution_Calendar_InvalidObject;
++	{
++		g_propagate_error (perror, EDC_ERROR (InvalidObject));
++		return;
++	}
+ 
+ 	/* Check kind with the parent */
+ 	if (icalcomponent_isa (icalcomp) != e_cal_backend_get_kind (E_CAL_BACKEND (backend))) {
+ 		icalcomponent_free (icalcomp);
+-		return GNOME_Evolution_Calendar_InvalidObject;
++		g_propagate_error (perror, EDC_ERROR (InvalidObject));
++		return;
+ 	}
+ 
+ 	/* Get the UID to try to find the object */
+@@ -1236,7 +1235,8 @@
+ 		new_uid = e_cal_component_gen_uid ();
+ 		if (!new_uid) {
+ 			icalcomponent_free (icalcomp);
+-			return GNOME_Evolution_Calendar_InvalidObject;
++			g_propagate_error (perror, EDC_ERROR (InvalidObject));
++			return;
+ 		}
+ 
+ 		icalcomponent_set_uid (icalcomp, new_uid);
+@@ -1251,7 +1251,8 @@
+ 	/* check the object is not in our cache */
+ 	if (lookup_component (cbplanner, comp_uid)) {
+ 		icalcomponent_free (icalcomp);
+-		return GNOME_Evolution_Calendar_ObjectIdAlreadyExists;
++		g_propagate_error (perror, EDC_ERROR (ObjectIdAlreadyExists));
++		return;
+ 	}
+ 
+ 	/* Create the cal component */
+@@ -1271,21 +1272,20 @@
+ 
+ 	/* Save the planner project */
+ 	mrp_project_save (priv->project, TRUE, &error);
+-
+-	return GNOME_Evolution_Calendar_Success;
+-	/* return GNOME_Evolution_Calendar_PermissionDenied; */
+ }
+ 
+ /* FIXME: not finished. 
+    This method is called for the moment when:
+    - You check the done checkbox
+  */
+-static ECalBackendSyncStatus
++static void
+ cbp_modify_object (ECalBackendSync *backend, 
+ 				     EDataCal        *cal, 
+ 				     const gchar     *calobj, 
+ 				     CalObjModType    mod, 
+-				     char           **old_object)
++				     char           **old_object,
++				     char           **new_object,
++				     GError         **perror)
+ {
+ 	ECalBackendPlanner        *cbplanner;
+ 	ECalBackendPlannerPrivate *priv;
+@@ -1300,14 +1300,24 @@
+ 	cbplanner = E_CAL_BACKEND_PLANNER (backend);
+ 	priv = cbplanner->priv;
+ 
+-	g_return_val_if_fail (E_IS_CAL_BACKEND_PLANNER (cbplanner), 
+-			      GNOME_Evolution_Calendar_InvalidObject);
+-	g_return_val_if_fail (calobj != NULL, GNOME_Evolution_Calendar_ObjectNotFound);
++	if (!E_IS_CAL_BACKEND_PLANNER (cbplanner))
++	{
++		g_propagate_error (perror, EDC_ERROR (InvalidObject));
++		return;
++	}
++	if (calobj == NULL)
++	{
++		g_propagate_error (perror, EDC_ERROR (ObjectNotFound));
++		return;
++	}
+ 
+ 	/* check the component for validity */
+ 	icalcomp = icalparser_parse_string (calobj);
+ 	if (!icalcomp)
+-		return GNOME_Evolution_Calendar_InvalidObject;
++	{
++		g_propagate_error (perror, EDC_ERROR (InvalidObject));
++		return;
++	}
+ 
+ 	comp_uid = icalcomponent_get_uid (icalcomp);
+ 	g_message ("Modifying calendar object %s\n%s", comp_uid, calobj);
+@@ -1318,7 +1328,8 @@
+ 	if (!(cache_comp = lookup_component (cbplanner, comp_uid))) {
+ 		g_message ("CRITICAL : Could not find the object in cache %s", comp_uid);
+ 		icalcomponent_free (icalcomp);
+-		return GNOME_Evolution_Calendar_ObjectNotFound;
++		g_propagate_error (perror, EDC_ERROR (ObjectNotFound));
++		return;
+ 	} else {
+ 		g_message ("Cache object found %s... modifying it", comp_uid);
+ 	}
+@@ -1330,13 +1341,15 @@
+ 	if (task == NULL) {
+ 		g_message ("Cache fail: can't find task for component %s", comp_uid);
+ 		g_object_unref (cache_comp);
+-		return GNOME_Evolution_Calendar_InvalidObject;
++		g_propagate_error (perror, EDC_ERROR (InvalidObject));
++		return;
+ 	}
+ 	task_new = comp_to_task (priv->project, comp);
+ 	if (task_new == NULL) {
+ 		g_message ("Can't create a task from %s", comp_uid);
+ 		g_object_unref (cache_comp);
+-		return GNOME_Evolution_Calendar_InvalidObject;
++		g_propagate_error (perror, EDC_ERROR (InvalidObject));
++		return;
+ 	}
+ 	g_hash_table_replace (priv->tasks_comp, (gpointer) comp_uid, comp);
+ 	task_replace (priv->project, task, task_new);
+@@ -1349,19 +1362,18 @@
+ 
+ 	*old_object = e_cal_component_get_as_string (cache_comp);
+ 	g_object_unref (cache_comp);
+-
+-	/* return GNOME_Evolution_Calendar_PermissionDenied; */
+-	return GNOME_Evolution_Calendar_Success;
+ }
+ 
+ /* Remove_object handler for the planner backend */
+-static ECalBackendSyncStatus
++static void
+ cbp_remove_object (ECalBackendSync *backend, 
+ 				     EDataCal        *cal,
+ 				     const gchar     *uid, 
+ 				     const gchar     *rid,
+ 				     CalObjModType    mod, 
+-				     gchar          **object)
++				     gchar          **old_object,
++				     gchar          **object,
++				     GError         **perror)
+ {
+ 	ECalBackendPlanner        *cbplanner;
+ 	ECalBackendPlannerPrivate *priv;
+@@ -1372,7 +1384,11 @@
+ 	cbplanner = E_CAL_BACKEND_PLANNER (backend);
+ 	priv = cbplanner->priv;
+ 
+-	g_return_val_if_fail (uid != NULL, GNOME_Evolution_Calendar_ObjectNotFound);
++	if (uid == NULL)
++	{
++		g_propagate_error (perror, EDC_ERROR (ObjectNotFound));
++		return;
++	}
+ 
+ 	g_message ("Removing object %s ...", uid);
+ 	comp = lookup_component (cbplanner, uid);
+@@ -1382,15 +1398,14 @@
+ 	mrp_project_remove_task (priv->project, task);
+ 	g_object_unref (task);
+ 	mrp_project_save (priv->project, TRUE, &error);
+-
+-	return GNOME_Evolution_Calendar_Success;;
+ }
+ 
+ /* Update_objects handler for the planner backend. */
+-static ECalBackendSyncStatus
++static void
+ cbp_receive_objects (ECalBackendSync *backend, 
+ 				       EDataCal        *cal, 
+-				       const gchar     *calobj)
++				       const gchar     *calobj,
++				       GError         **perror)
+ {
+ 	ECalBackendPlanner        *cbplanner;
+ 	ECalBackendPlannerPrivate *priv;
+@@ -1400,26 +1415,29 @@
+ 	cbplanner = E_CAL_BACKEND_PLANNER (backend);
+ 	priv = cbplanner->priv;
+ 
+-	g_return_val_if_fail (calobj != NULL, GNOME_Evolution_Calendar_InvalidObject);
++	if (calobj == NULL)
++	{
++		g_propagate_error (perror, EDC_ERROR (InvalidObject));
++		return;
++	}
+ 
+ 	icalcomp = icalparser_parse_string (calobj);
+ 	if (!icalcomp)
+-		return GNOME_Evolution_Calendar_InvalidObject;
++	{
++		g_propagate_error (perror, EDC_ERROR (InvalidObject));
++		return;
++	}
+ 
+ 	g_message ("Modifying object: %s", calobj);
+-	
+-
+-	/* return GNOME_Evolution_Calendar_PermissionDenied;*/
+-	return GNOME_Evolution_Calendar_Success;
+-	
+ }
+ 
+-static ECalBackendSyncStatus
++static void
+ cbp_send_objects (ECalBackendSync *backend, 
+ 				    EDataCal        *cal, 
+ 				    const gchar     *calobj, 
+ 				    GList          **users,
+-				    gchar          **modified_calobj)
++				    gchar          **modified_calobj,
++				    GError         **perror)
+ {
+ 	ECalBackendPlanner        *cbplanner;
+ 	ECalBackendPlannerPrivate *priv;
+@@ -1432,7 +1450,7 @@
+ 
+ 	g_message ("Sending objects ...");
+ 
+-	return GNOME_Evolution_Calendar_PermissionDenied;
++	g_propagate_error (perror, EDC_ERROR (PermissionDenied));
+ }
+ 
+ static icaltimezone *
+@@ -1518,9 +1536,9 @@
+  	sync_class->get_default_object_sync = cbp_get_default_object;
+ 	sync_class->get_object_sync = cbp_get_object;
+ 	sync_class->get_object_list_sync = cbp_get_object_list;
+-	sync_class->get_timezone_sync = cbp_get_timezone;
+ 	sync_class->add_timezone_sync = cbp_add_timezone;
+-	sync_class->set_default_timezone_sync = cbp_set_default_timezone;
++        sync_class->set_default_zone_sync = cbp_set_default_zone_sync;
++
+ 	sync_class->get_freebusy_sync = cbp_get_free_busy;
+ 	sync_class->get_changes_sync = cbp_get_changes;
+ 
