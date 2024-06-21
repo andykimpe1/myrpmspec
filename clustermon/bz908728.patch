@@ -1,0 +1,242 @@
+diff -urN a/ricci/common/ServerSocket.cpp b/ricci/common/ServerSocket.cpp
+--- a/ricci/common/ServerSocket.cpp	2013-08-13 18:19:42.793319402 +0200
++++ b/ricci/common/ServerSocket.cpp	2013-08-13 21:55:21.676439104 +0200
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2009
++** Copyright Red Hat, Inc. 2013
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -10,10 +10,9 @@
+ ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ ** General Public License for more details.
+ **
+-** You should have received a copy of the GNU General Public License
+-** along with this program; see the file COPYING. If not, write to the
+-** Free Software Foundation, Inc., 675 Mass Ave, Cambridge,
+-** MA 02139, USA.
++** You should have received a copy of the GNU General Public License along
++** with this program; if not, write to the Free Software Foundation, Inc.,
++** 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+ 
+ /*
+@@ -21,7 +20,8 @@
+  */
+ 
+ #include "Socket.h"
+-#include "Logger.h"
++#include "String.h"
++#include "Logger.h"  // questionable functionality split (+ op. separated here)
+ 
+ #include <unistd.h>
+ #include <errno.h>
+@@ -29,7 +29,6 @@
+ #include <sys/socket.h>
+ #include <sys/un.h>
+ #include <netinet/in.h>
+-#include "String.h"
+ #include <arpa/inet.h>
+ 
+ 
+@@ -36,9 +35,7 @@
+ ServerSocket::ServerSocket(const String& sock_path) :
+ 	Socket(-1),
+ 	_unix_sock(true),
+-	_sock_path(sock_path),
+-	sa_addr(NULL),
+-	sa_len(0)
++	_sock_path(sock_path)
+ {
+ 	_sock = socket(PF_UNIX, SOCK_STREAM, 0);
+ 	if (_sock == -1) {
+@@ -77,65 +74,69 @@
+ 	_unix_sock(false),
+ 	_sock_path("")
+ {
++	/* Drop to pure IPv4 if IPv6 not applicable or cannot rely on dual
++	   stack as indicated by getsockopt/setsockopt with IPV6_V6ONLY.
++	   As a last resort, try pure IPv6 if still possible. */
++	struct sockaddr_storage sa_addr;
++	bool include_ip6 = true;
+ 	_sock = socket(PF_INET6, SOCK_STREAM, 0);
+-
++	if (_sock != -1) {
++		int i = -1;
++		socklen_t il = sizeof(i);
++		errno = 0;
++		if (getsockopt(_sock, IPPROTO_IPV6, IPV6_V6ONLY, &i, &il) || i) {
++			i = 0;
++			if (errno
++			  || setsockopt(_sock, IPPROTO_IPV6, IPV6_V6ONLY, &i, il)) {
++				while (::close(_sock) && (errno == EINTR));
++				_sock = -1;  // forget about IPv6 dual stack
++			}  // otherwise we made dual stack ready for us
++		}  // otherwise dual stack was already in place
++	} else {
++		include_ip6 = false;  // forget about IPv6
++	}
+ 	if (_sock == -1) {
+ 		_sock = socket(PF_INET, SOCK_STREAM, 0);
+-		if (_sock == -1) {
+-			throw String("ServerSocket(port=") + port
+-				+ "): socket() failed: " + String(strerror(errno));
+-		} else {
+-			int t = 1;
+-			if (setsockopt(_sock, SOL_SOCKET, SO_REUSEADDR, &t, sizeof(t))) {
+-				throw String("ServerSocket(port=") + port
+-					+ "): set SO_REUSEADDR, failed: " + String(strerror(errno));
+-			}
+-
+-
+-			sa_family = AF_INET;
+-			sa_len = sizeof(struct sockaddr_in);
+-			struct sockaddr_in sa_addr4;
+-			sa_addr4.sin_family = AF_INET;
+-			sa_addr4.sin_port = htons(port);
+-			sa_addr4.sin_addr.s_addr = INADDR_ANY;
+-
+-			if (bind(_sock, (struct sockaddr*)&sa_addr4, sa_len)) {
+-				throw String("ServerSocket(port=") + port
+-					+ "): bind() failed: " + String(strerror(errno));
+-			}
+-
+-			if (listen(_sock, 5)) {
+-				throw String("ServerSocket(port=") + port
+-					+ "): listen() failed: " + String(strerror(errno));
+-			}
++		if (_sock != -1) {
++			include_ip6 = false;  // IPv4 wins
++		} else if (include_ip6) {
++			_sock = socket(PF_INET6, SOCK_STREAM, 0);  // last resort
+ 		}
+-	} else {
+-		int t = 1;
+-		if (setsockopt(_sock, SOL_SOCKET, SO_REUSEADDR, &t, sizeof(t))) {
++		if (_sock == -1)
+ 			throw String("ServerSocket(port=") + port
+-				+ "): set SO_REUSEADDR, failed: " + String(strerror(errno));
+-		}
++				+ "): socket() failed: " + String(strerror(errno));
++	}
+ 
+-		sa_family = AF_INET6;
+-		sa_len = sizeof(struct sockaddr_in6);
+-		sa_addr = (struct sockaddr *) calloc(1, sa_len);
+-		if (sa_addr == NULL)
+-			throw String("ServerSocket(port=") + port + "): OOM";
+-		((struct sockaddr_in6 *) sa_addr)->sin6_family = AF_INET6;
+-		((struct sockaddr_in6 *) sa_addr)->sin6_port = htons(port);
+-		((struct sockaddr_in6 *) sa_addr)->sin6_addr = in6addr_any;
++	int t = 1;
++	if (setsockopt(_sock, SOL_SOCKET, SO_REUSEADDR, &t, sizeof(t))) {
++		throw String("ServerSocket(port=") + port
++			+ "): set SO_REUSEADDR, failed: " + String(strerror(errno));
++	}
+ 
+-		if (bind(_sock, sa_addr, sa_len)) {
+-			throw String("ServerSocket(port=") + port
+-				+ "): bind() failed: " + String(strerror(errno));
+-		}
++	if (!include_ip6) {
++		struct sockaddr_in sin = {0};
++		sin.sin_family = AF_INET;
++		sin.sin_port = htons(port);
++		sin.sin_addr.s_addr = INADDR_ANY;
++		memcpy(&sa_addr, &sin, sizeof(sin));
++	} else {
++		struct sockaddr_in6 sin6 = {0};
++		sin6.sin6_family = AF_INET6;
++		sin6.sin6_port = htons(port);
++		sin6.sin6_addr = in6addr_any;
++		memcpy(&sa_addr, &sin6, sizeof(sin6));
++	}
+ 
+-		if (listen(_sock, 5)) {
+-			throw String("ServerSocket(port=") + port
+-				+ "): listen() failed: " + String(strerror(errno));
+-		}
+-	} 
++	if (bind(_sock, (const struct sockaddr *) &sa_addr, include_ip6
++	         ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in))) {
++		throw String("ServerSocket(port=") + port
++			+ "): bind() failed: " + String(strerror(errno));
++	}
+ 
++	if (listen(_sock, 5)) {
++		throw String("ServerSocket(port=") + port
++			+ "): listen() failed: " + String(strerror(errno));
++	}
+ 
+ 	//String msg = String("created tcp server socket, ")
+ 	//				+ _sock + ", port " + port;
+@@ -145,10 +146,7 @@
+ ServerSocket::ServerSocket(const ServerSocket& s) :
+ 	Socket(s),
+ 	_unix_sock(s._unix_sock),
+-	_sock_path(s._sock_path),
+-	sa_addr(s.sa_addr),
+-	sa_family(s.sa_family),
+-	sa_len(s.sa_len)
++	_sock_path(s._sock_path)
+ {}
+ 
+ ServerSocket&
+@@ -158,14 +156,6 @@
+ 		this->Socket::operator= (s);
+ 		_unix_sock = s._unix_sock;
+ 		_sock_path = s._sock_path;
+-		sa_family = s.sa_family;
+-		sa_len = s.sa_len;
+-		if (s.sa_len > 0) {
+-			sa_addr = (struct sockaddr *) malloc(s.sa_len);
+-			if (sa_addr == NULL)
+-				throw String("Out of memory");
+-			memcpy(sa_addr, s.sa_addr, s.sa_len);
+-		}
+ 	}
+ 
+ 	return *this;
+@@ -176,7 +166,6 @@
+ 	if (*_counter == 1) {
+ 		if (_unix_sock)
+ 			unlink(_sock_path.c_str());
+-		free(sa_addr);
+ 	}
+ }
+ 
+diff -urN a/ricci/include/Socket.h b/ricci/include/Socket.h
+--- a/ricci/include/Socket.h	2013-08-13 18:19:42.866319395 +0200
++++ b/ricci/include/Socket.h	2013-08-13 20:32:47.936289255 +0200
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2011
++** Copyright Red Hat, Inc. 2013
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -10,10 +10,9 @@
+ ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ ** General Public License for more details.
+ **
+-** You should have received a copy of the GNU General Public License
+-** along with this program; see the file COPYING. If not, write to the
+-** Free Software Foundation, Inc., 675 Mass Ave, Cambridge,
+-** MA 02139, USA.
++** You should have received a copy of the GNU General Public License along
++** with this program; if not, write to the Free Software Foundation, Inc.,
++** 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+ 
+ /*
+@@ -175,9 +174,6 @@
+ 	private:
+ 		bool _unix_sock;
+ 		String _sock_path;
+-		struct sockaddr *sa_addr;
+-		int sa_family;
+-		size_t sa_len;
+ };
+ 
+ #endif

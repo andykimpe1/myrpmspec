@@ -1,0 +1,195 @@
+diff -ur a/ricci/common/XML.cpp b/ricci/common/XML.cpp
+--- a/ricci/common/XML.cpp	2012-02-26 14:46:59.314470934 -0500
++++ b/ricci/common/XML.cpp	2012-02-26 14:47:27.627769382 -0500
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2011
++** Copyright (C) Red Hat, Inc. 2005-2012
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -38,14 +38,16 @@
+ 
+ XMLObject::XMLObject(const String& elem_name) :
+ 	_tag(elem_name)
+-{}
++{
++	_node_type = XML_ELEMENT_NODE;
++}
+ 
+ XMLObject::~XMLObject()
+ {}
+ 
+ 
+ // Compare attributes against a different XMLObject
+-// Make a copy of the right side's attrs and remove 
++// Make a copy of the right side's attrs and remove
+ // any duplicates found.
+ //
+ // If the list is nonempty when we're done, the lists
+@@ -85,7 +87,7 @@
+ 	if (compare_attrs(obj) != true) {
+ 		return false;
+ 	}
+-	
++
+ 	if (children() != obj.children())
+ 		return false;
+ 	return true;
+@@ -112,30 +114,36 @@
+ void
+ XMLObject::generate_xml(String& xml, const String& indent) const
+ {
+-	xml += indent + "<" + _tag;
+-	for (map<String, String>::const_iterator
+-		iter = attrs().begin() ;
+-		iter != attrs().end() ;
+-		iter++)
+-	{
+-		const String& name = iter->first;
+-		const String value = escape_chars(iter->second);
+-		xml += " " + name + "=\"" + value + "\"";
+-	}
+-
+-	if (children().empty())
+-		xml += "/>\n";
+-	else {
+-		xml += ">\n";
+-		for (list<XMLObject>::const_iterator
+-				iter = children().begin() ;
+-				iter != children().end() ;
+-				iter++)
++	if (_node_type == XML_ELEMENT_NODE) {
++		xml += indent + "<" + _tag;
++		for (map<String, String>::const_iterator
++			iter = attrs().begin() ;
++			iter != attrs().end() ;
++			iter++)
+ 		{
+-			iter->generate_xml(xml, indent + "\t");
++			const String& name = iter->first;
++			const String value = escape_chars(iter->second);
++			xml += " " + name + "=\"" + value + "\"";
+ 		}
+ 
+-		xml += indent + "</" + _tag + ">\n";
++		if (children().empty())
++			xml += "/>\n";
++		else {
++			xml += ">\n";
++
++			for (list<XMLObject>::const_iterator
++				 iter = children().begin() ;
++				 iter != children().end() ;
++				 iter++)
++			{
++				iter->generate_xml(xml, indent + "\t");
++			}
++			xml += indent + "</" + _tag + ">\n";
++		}
++	} else if (_node_type == XML_COMMENT_NODE) {
++		xml += indent + "<!-- " + _text + " -->\n";
++	} else if (_node_type == XML_TEXT_NODE) {
++		xml += _text;
+ 	}
+ }
+ 
+@@ -149,6 +157,24 @@
+ 		if (curr_node->type == XML_ELEMENT_NODE) {
+ 			XMLObject me((const char *) curr_node->name);
+ 
++			if (curr_node->nsDef) {
++				const struct _xmlNs *cur_def;
++
++				for (cur_def = curr_node->nsDef ;
++					 cur_def != NULL ;
++					 cur_def = cur_def->next)
++				{
++					if (cur_def->prefix) {
++						me.set_attr("xmlns:" +
++									String((const char *) cur_def->prefix),
++							String((const char *) cur_def->href));
++					} else {
++						me.set_attr("xmlns",
++							String((const char *) cur_def->href));
++					}
++				}
++			}
++
+ 			// attrs
+ 			for (xmlAttr* curr_attr = curr_node->properties ;
+ 					curr_attr ;
+@@ -157,12 +183,16 @@
+ 				if (curr_attr->type == XML_ATTRIBUTE_NODE) {
+ 					const xmlChar *name = curr_attr->name;
+ 					const xmlChar *value = xmlGetProp(curr_node, name);
++					String prefix = "";
+ 
+ 					if (!value)
+ 						throw String("xmlGetProp() returned NULL");
+ 
++					if (curr_attr->ns)
++						prefix = (const char *) curr_attr->ns->prefix + String(":");
++
+ 					try {
+-						const String name_str((const char *) name);
++						const String name_str = prefix + String((const char *) name);
+ 						const String value_str =
+ 							invert_chars((const char *) value);
+ 
+@@ -178,6 +208,29 @@
+ 			// kids
+ 			_parseXML(me, curr_node->children);
+ 			parent.add_child(me);
++		} else if (curr_node->type == XML_COMMENT_NODE) {
++			xmlChar *comment_content = xmlNodeGetContent(curr_node);
++
++			if (comment_content) {
++				String text((const char *) comment_content);
++				xmlFree((void *) comment_content);
++
++				XMLObject me("COMMENT");
++				me.set_node_type(XML_COMMENT_NODE);
++				me.set_text(text);
++				parent.add_child(me);
++			}
++		} else if (curr_node->type == XML_TEXT_NODE && !xmlIsBlankNode(curr_node)) {
++			xmlChar *content = xmlNodeGetContent(curr_node);
++			if (content) {
++				String node_content((const char *) content);
++				xmlFree(content);
++
++				XMLObject me("TEXT");
++				me.set_node_type(XML_TEXT_NODE);
++				me.set_text(node_content);
++				parent.add_child(me);
++			}
+ 		}
+ 	}
+ }
+diff -ur a/ricci/include/XML.h b/ricci/include/XML.h
+--- a/ricci/include/XML.h	2012-02-26 14:46:59.314470934 -0500
++++ b/ricci/include/XML.h	2012-02-26 14:47:34.711593866 -0500
+@@ -68,12 +68,22 @@
+ 
+ 		bool remove_child(const XMLObject& child);
+ 
++		void set_node_type(int node_type) {
++			_node_type = node_type;
++		}
++
++		void set_text(String& text) {
++			_text = text;
++		}
++
+ 		const std::list<XMLObject>& children() const {
+ 			return _kids;
+ 		}
+ 
+ 	private:
++		int _node_type;
+ 		String _tag;
++		String _text;
+ 		std::list<XMLObject> _kids;
+ 		std::map<String, String> _attrs;
+ 		void generate_xml(String& xml, const String& indent) const;

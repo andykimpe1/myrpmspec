@@ -1,0 +1,123 @@
+--- a/ricci/modules/cluster/Clusvcadm.h.orig	2015-03-05 21:58:26.837294028 +0100
++++ b/ricci/modules/cluster/Clusvcadm.h	2015-03-05 21:59:20.604345051 +0100
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2009
++** Copyright 2015 Red Hat, Inc.
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -31,7 +31,7 @@
+ 		static void start(const String& servicename, const String& nodename);
+ 		static void migrate(const String& servicename, const String& nodename);
+ 		static void restart(const String& servicename);
+-		static void stop(const String& servicename);
++		static void stop(const String& servicename, bool temporary = false);
+ };
+ 
+ #endif
+--- a/ricci/modules/cluster/Clusvcadm.cpp.orig	2015-04-20 18:29:34.921255819 +0200
++++ b/ricci/modules/cluster/Clusvcadm.cpp	2015-04-20 18:31:54.082453726 +0200
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2009
++** Copyright 2015 Red Hat, Inc.
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -255,7 +255,7 @@
+ 	throw String(servicename + ": no such virtual machine service");
+ }
+ 
+-void Clusvcadm::stop(const String& servicename) {
++void Clusvcadm::stop(const String& servicename, bool temporary) {
+ 	pair<list<String>, list<ServiceStatus> > info = service_states();
+ 	list<String> nodes = info.first;
+ 	list<ServiceStatus> services = info.second;
+@@ -268,15 +268,21 @@
+ 		if (iter->name != servicename)
+ 			continue;
+ 
++		if (iter->status == ServiceStatus::RG_STATE_FAILED && temporary)
++			throw String(servicename +
++					" is failed, disable it first");
++
+ 		if (iter->status == ServiceStatus::RG_STATE_STARTING ||
+ 			iter->status == ServiceStatus::RG_STATE_FAILED ||
+-			iter->status == ServiceStatus::RG_STATE_STARTED)
++			iter->status == ServiceStatus::RG_STATE_STARTED ||
++			iter->status == ServiceStatus::RG_STATE_STOPPED ||
++			iter->status == ServiceStatus::RG_STATE_DISABLED)
+ 		{
+ 			String out, err;
+ 			int status;
+ 			vector<String> args;
+ 
+-			args.push_back("-d");
++			args.push_back(temporary ? "-s" : "-d");
+ 			if (iter->vm)
+ 				args.push_back("vm:" + servicename);
+ 			else
+@@ -286,8 +292,14 @@
+ 				throw command_not_found_error_msg(CLUSVCADM_TOOL_PATH);
+ 
+ 			if (status != 0) {
+-				throw String("clusvcadm failed to stop "
+-						+ servicename + ": " + err);
++				if (iter->status == ServiceStatus::RG_STATE_FAILED &&
++					!temporary)
++					throw String("clusvcadm disabling failed resource"
++							" " + servicename + ": " + err);
++				else
++					throw String((temporary ? "clusvcadm failed to stop "
++							: "clusvcadm failed to disable ")
++							+ servicename + ": " + err);
+ 			}
+ 			return;
+ 		}
+--- a/ricci/modules/cluster/ClusterModule.cpp.orig	2015-03-05 21:46:58.625645768 +0100
++++ b/ricci/modules/cluster/ClusterModule.cpp	2015-03-05 22:07:02.172783060 +0100
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2006-2009
++** Copyright 2015 Red Hat, Inc.
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -96,6 +96,9 @@
+ 
+ 	ApiFcnMap api_fcn_map;
+ 	api_fcn_map["1.0"] = api_1_0;
++	/* this is to painlessly and reliably detect support for
++	   stop_service(temporary="true") by trying 1.1 API first */
++	api_fcn_map["1.1"] = api_1_0;
+ 
+ 	return api_fcn_map;
+ }
+@@ -181,18 +184,24 @@
+ service_stop(const VarMap& args)
+ {
+ 	String name;
++	bool temporary = false;
+ 
+ 	try {
+ 		VarMap::const_iterator iter = args.find("servicename");
+ 		if (iter == args.end())
+ 			throw APIerror("missing servicename variable");
+ 		name = iter->second.get_string();
++
++		iter = args.find("temporary");
++		if (iter != args.end())
++			temporary = iter->second.get_bool();
+ 	} catch ( String e ) {
+ 		throw APIerror(e);
+ 	}
+ 
+-	syslog (LOG_NOTICE, "Stopping service: %s",name.c_str());
+-	Clusvcadm::stop(name);
++	syslog(LOG_NOTICE, "Stopping%sservice: %s",
++	       temporary ? " (temporarily) " : " ", name.c_str());
++	Clusvcadm::stop(name, temporary);
+ 	VarMap ret;
+ 	return ret;
+ }

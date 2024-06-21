@@ -1,0 +1,90 @@
+From 5a14900b842758be391da8afd7aa2b320f0874ec Mon Sep 17 00:00:00 2001
+From: Jan Pokorny <jpokorny@redhat.com>
+Date: Thu, 24 Nov 2011 13:25:45 +0100
+Subject: modclusterd: avoid XMLObject::operator== in the Monitor
+
+...which recursively (indirectly though) triggers XMLObject::compare_attrs
+which itself has quadratic complexity.  So "==" has quadratic complexity
+at best, but in most cases this will be much worse (depending on how many
+overall children XMLObject has).
+
+In this particular case, "==" was being triggered by
+list::remove(XMLObject& instance) which internally runs series of "=="
+operations making it even worse.
+
+The commit BTW. solves the performance problem (compare_attrs positioned
+near the top in the profiler's output) mentioned by the commit
+0de3f1ce9ede28bf8bf7bf98b99ebd2286750be4 and yields another 0.5 - 0.7 %
+global CPU utilization improvement in my tests (per modclusterd instance
+under conditions mentioned with that commit).
+
+Morals of the story: think about complexities first, then program!
+
+Signed-off-by: Jan Pokorny <jpokorny@redhat.com>
+---
+ .../modules/cluster/clumon/src/daemon/Monitor.cpp  |   29 +++++++++++---------
+ 1 files changed, 16 insertions(+), 13 deletions(-)
+
+diff --git a/ricci/modules/cluster/clumon/src/daemon/Monitor.cpp b/ricci/modules/cluster/clumon/src/daemon/Monitor.cpp
+index 17a918e..a7deb47 100644
+--- a/ricci/modules/cluster/clumon/src/daemon/Monitor.cpp
++++ b/ricci/modules/cluster/clumon/src/daemon/Monitor.cpp
+@@ -921,20 +921,21 @@ merge_xmls(const XMLObject& what, const XMLObject& with)
+ 		}
+ 	}
+ 
+-	list<XMLObject> kids_left = with.children();
++	const list<XMLObject>& children_with = with.children();
++	vector<list<XMLObject>::const_iterator> matched;
+ 
+ 	for (list<XMLObject>::const_iterator
+-			iter_o = what.children().begin() ;
+-			iter_o != what.children().end() ;
+-			iter_o++)
++			iter_what = what.children().begin() ;
++			iter_what != what.children().end() ;
++			iter_what++)
+ 	{
+-		XMLObject new_kid(*iter_o);
++		XMLObject new_kid(*iter_what);
+ 		for (list<XMLObject>::const_iterator
+-				iter = with.children().begin() ;
+-				iter != with.children().end() ;
+-				iter++)
++				iter_with = children_with.begin() ;
++				iter_with != children_with.end() ;
++				iter_with++)
+ 		{
+-			const XMLObject& kid = *iter;
++			const XMLObject& kid = *iter_with;
+ 			if (kid.tag() == new_kid.tag() &&
+ 				kid.has_attr("name") &&
+ 				new_kid.has_attr("name") &&
+@@ -942,18 +943,20 @@ merge_xmls(const XMLObject& what, const XMLObject& with)
+ 			{
+ 				// same tag and name -->> merge
+ 				new_kid = merge_xmls(new_kid, kid);
+-				kids_left.remove(kid);
++				matched.push_back(iter_with);
+ 			}
+ 		}
+ 		new_xml.add_child(new_kid);
+ 	}
+ 
+ 	for (list<XMLObject>::const_iterator
+-			iter = kids_left.begin() ;
+-			iter != kids_left.end() ;
++			iter = children_with.begin() ;
++			iter != children_with.end() ;
+ 			iter++)
+ 	{
+-		new_xml.add_child(*iter);
++		// add yet-unmatched children of "with" (i.e., those not in matched)
++		if (find(matched.begin(), matched.end(), iter) == matched.end())
++			new_xml.add_child(*iter);
+ 	}
+ 
+ 	return new_xml;
+-- 
+1.7.7.3
+

@@ -1,0 +1,123 @@
+From: Jan Pokorny <jpokorny@redhat.com>
+Date: Wed, 18 Nov 2011 19:33:50 +0200
+Subject: [PATCH 6/6] fix bz742431: turn off Nagle's alg. in peers' communication
+
+The reason behind that is that we are sending the whole messages
+(cluster XML updates) and want to achieve immediate transport
+to the other peer that conversely wants to read the whole
+message.
+
+Also expose respective Socket's methods as in "nonblocking" case.
+
+Also remove duplicate "nonblocking" setting (will be set in Peer's
+constructor anyway).
+
+Signed-off-by: Jan Pokorny <jpokorny@redhat.com>
+
+diff -ur a/ricci/common/Socket.cpp b/ricci/common/Socket.cpp
+--- a/ricci/common/Socket.cpp	2008-07-31 00:48:30.000000000 +0200
++++ b/ricci/common/Socket.cpp	2011-11-16 22:33:30.272181066 +0100
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2009
++** Copyright (C) Red Hat, Inc. 2005-2011
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -31,6 +31,7 @@
+ #include <arpa/inet.h>
+ #include <netdb.h>
+ #include <netinet/in.h>
++#include <netinet/tcp.h>
+ #include <fcntl.h>
+ 
+ #include <sys/poll.h>
+@@ -140,6 +141,45 @@
+ 	return (old_flags & O_NONBLOCK) != 0;
+ }
+ 
++bool
++Socket::nondelaying()
++{
++	if (!valid())
++		throw String("socket not valid");
++
++	int ret;
++	socklen_t ret_len;
++
++	/* sanity check that we use right domain (AF_INET*) and type (SOCK_STREAM) */
++	ret_len = sizeof(ret);
++	if (getsockopt(_sock, SOL_SOCKET, SO_DOMAIN, &ret, &ret_len) == -1)
++		throw String("getsockopt(SOL_SOCKET, SO_DOMAIN): " + String(strerror(errno)));
++	if (ret != AF_INET && ret != AF_INET6)
++		throw String("nondelaying(): called for socket domain other than AF_INET*");
++	ret_len = sizeof(ret);
++	if (getsockopt(_sock, SOL_SOCKET, SO_TYPE, &ret, &ret_len) == -1)
++		throw String("getsockopt(SOL_SOCKET, SO_TYPE): " + String(strerror(errno)));
++	if (ret != SOCK_STREAM)
++		throw String("nondelaying(): called for socket type other than SOCK_STREAM");
++
++	ret_len = sizeof(ret);
++	if (getsockopt(_sock, SOL_TCP, TCP_NODELAY, &ret, &ret_len) == -1)
++		throw String("getsockopt(SOL_TCP, TCP_NODELAY): " + String(strerror(errno)));
++	return ret;
++}
++
++bool
++Socket::nondelaying(bool mode)
++{
++	bool ret = this->nondelaying();
++	if (ret != mode) {
++		int flag = mode;
++		if (setsockopt(_sock, SOL_TCP, TCP_NODELAY, &flag, sizeof(flag)) == -1)
++			throw String("getsockopt(SOL_TCP, TCP_NODELAY): " + String(strerror(errno)));
++	}
++	return ret;
++}
++
+ void
+ Socket::poll(bool& read, bool& write, int timeout)
+ {
+diff -ur a/ricci/include/Socket.h b/ricci/include/Socket.h
+--- a/ricci/include/Socket.h	2011-11-16 19:55:56.000000000 +0100
++++ b/ricci/include/Socket.h	2011-11-16 22:33:59.635540583 +0100
+@@ -50,6 +50,9 @@
+ 		bool nonblocking(); // return whether O_NONBLOCK is set
+ 		bool nonblocking(bool mode); // set O_NONBLOCK, return old state
+ 
++		bool nondelaying(); // return whether TCP_NODELAY is set
++		bool nondelaying(bool mode); // set TCP_NODELAY, return old state
++
+ 	protected:
+ 		Socket(int sock); // takes ownership of sock
+ 		int _sock;
+diff -ur a/ricci/modules/cluster/clumon/src/daemon/Communicator.cpp b/ricci/modules/cluster/clumon/src/daemon/Communicator.cpp
+--- a/ricci/modules/cluster/clumon/src/daemon/Communicator.cpp	2011-11-16 22:16:43.494341589 +0100
++++ b/ricci/modules/cluster/clumon/src/daemon/Communicator.cpp	2011-11-16 22:34:59.539274056 +0100
+@@ -222,7 +222,6 @@
+ 	if (revents & POLLIN) {
+ 		try {
+ 			ClientSocket sock = _serv_sock.accept();
+-			sock.nonblocking(true);
+ 			String hostname;
+ 
+ 			for (vector<String>::const_iterator
+diff -ur a/ricci/modules/cluster/clumon/src/daemon/Peer.cpp b/ricci/modules/cluster/clumon/src/daemon/Peer.cpp
+--- a/ricci/modules/cluster/clumon/src/daemon/Peer.cpp	2011-11-16 21:37:18.000000000 +0100
++++ b/ricci/modules/cluster/clumon/src/daemon/Peer.cpp	2011-11-16 22:38:14.662663034 +0100
+@@ -41,6 +41,7 @@
+ 	_out(new String())
+ {
+ 	_sock->nonblocking(true);
++	_sock->nondelaying(true);
+ }
+ 
+ Peer::Peer(const String& hostname, unsigned short port) :
+@@ -50,6 +51,7 @@
+ 	_out(new String())
+ {
+ 	_sock->nonblocking(true);
++	_sock->nondelaying(true);
+ }
+ 
+ Peer::~Peer()

@@ -1,0 +1,235 @@
+From: Jan Pokorny <jpokorny@redhat.com>
+Date: Wed, 24 Nov 2011 14:09:41 +0200
+Subject: [PATCH 1/6] fix bz742431: clarify recv/read_restart+send/write_restart
+
+In fact, {read,write}_restart will never return -EAGAIN/-EWOULDBLOCK
+(and never did before).
+
+Signed-off-by: Jan Pokorny <jpokorny@redhat.com>
+
+diff -ur a/ricci/common/ClientSocket.cpp b/ricci/common/ClientSocket.cpp
+--- a/ricci/common/ClientSocket.cpp	2008-07-31 00:48:30.000000000 +0200
++++ b/ricci/common/ClientSocket.cpp	2011-11-16 20:00:24.513782940 +0100
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2009
++** Copyright (C) Red Hat, Inc. 2005-2011
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -171,13 +171,11 @@
+ 	if (_sock == -1)
+ 		throw String("ClientSocket::recv(): socket already closed");
+ 
+-	char buffer[4096];
++	char buffer[SOCKET_RECV_BUFFER];
+ 	int ret;
+ 
+ 	ret = read_restart(_sock, buffer, sizeof(buffer));
+ 	if (ret < 0) {
+-		if (ret == -EAGAIN)
+-			return "";
+ 		throw String("ClientSocket::recv(): recv error: ")
+ 				+ String(strerror(-ret));
+ 	}
+@@ -214,8 +212,6 @@
+ 
+ 	int ret = write_restart(_sock, msg.c_str(), msg.size());
+ 	if (ret < 0) {
+-		if (ret == -EAGAIN || ret == -EWOULDBLOCK)
+-			return msg;
+ 		throw String("ClientSocket::send(): socket error: ")
+ 				+ String(strerror(-ret));
+ 	}
+diff -ur a/ricci/common/sys_util.c b/ricci/common/sys_util.c
+--- a/ricci/common/sys_util.c	2008-07-31 00:48:30.000000000 +0200
++++ b/ricci/common/sys_util.c	2011-11-24 14:05:52.359252872 +0100
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2007-2009
++** Copyright (C) Red Hat, Inc. 2007-2011
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as published
+@@ -36,7 +36,16 @@
+ 		if (ret < 0) {
+ 			if (errno == EINTR)
+ 				continue;
+-			if (errno == EAGAIN)
++			if (errno == EAGAIN || errno == EWOULDBLOCK)
++				// nonblocking descriptors only;
++				// a. POLLIN event registered with fd beforehand:
++				//    something has been already read (0 < buf-buf_orig < len)
++				//    and thus the caller is always returned a positive number
++				//    (less than len) in case of EAGAIN/EWOULDBLOCK;  this
++				//    aliases with read()==0 after something has been read
++				// b. otherwise:
++				//    caller can additionally be returned zero;  this aliases
++				//    with read()==0 while nothing has been read so far
+ 				break;
+ 			return -errno;
+ 		}
+@@ -58,7 +67,16 @@
+ 		if (ret < 0) {
+ 			if (errno == EINTR)
+ 				continue;
+-			if (errno == EAGAIN)
++			if (errno == EAGAIN || errno == EWOULDBLOCK)
++				// nonblocking descriptors only;
++				// a. POLLOUT event registered with fd beforehand:
++				//    something has been already written (0 < buf-buf_orig < len)
++				//    and thus the caller is always returned a positive number
++				//    (less than len) in case of EAGAIN/EWOULDBLOCK;  this
++				//    aliases with write()==0 after something has been written
++				// b. otherwise:
++				//    caller can additionally be returned zero;  this aliases
++				//    with write()==0 while nothing has been written so far
+ 				break;
+ 			return -errno;
+ 		}
+diff -ur a/ricci/common/sys_util.h b/ricci/common/sys_util.h
+--- a/ricci/common/sys_util.h	2008-07-31 00:48:30.000000000 +0200
++++ b/ricci/common/sys_util.h	2011-11-24 13:59:31.794514226 +0100
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2007-2009
++** Copyright (C) Red Hat, Inc. 2007-2011
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as published
+@@ -21,7 +21,49 @@
+ #ifndef __CONGA_SYS_UTIL_H
+ #define __CONGA_SYS_UTIL_H
+ 
++/*
++** Try to read @len bytes to buffer @buf from descriptor @fd.
++**
++** Return values:
++** <0      non-recoverable error (i.e., apart from EAGAIN/EWOULDBLOCK
++**         and EINTR), negating this value yields disastrous errno
++**         - content of @buf undefined
++**  0      @len == 0, EOF reached or possibly EAGAIN/EWOULDBLOCK encountered
++**         with a nonblocking descriptor (the latter shall not happen when @fd
++**         was successfully poll'd for POLLIN event beforehand, see Note 2)
++**         - content of @buf untouched
++** (0,len) less than @len bytes read due to EOF reached or possibly
++**         EAGAIN/EWOULDBLOCK encountered with a nonblocking descriptor
++**         - content of @buf defined in the range [0,ret)
++** =len    read operation was successful and can presumably be repeated
++**         - content of @buf fully defined
++**
++** Note 1: EINTR error state as well as a signal receipt while something has
++**         already been read are handled internally (interrupted reading
++**         is continued, so these events shall not be propagated to caller).
++**
++** Note 2: When EOF ahead, POLLIN still may be indicated for the descriptor,
++**         see <http://www.greenend.org.uk/rjk/2001/06/poll.html>.
++*/
+ ssize_t read_restart(int fd, void *buf, size_t len);
++
++/*
++** Try to write @len bytes of the buffer @buf to descriptor @fd.
++**
++** Return values:
++** <0      non-recoverable error (i.e., apart from EAGAIN/EWOULDBLOCK
++**         and EINTR), negating this value yields disastrous errno
++**  0      @len == 0 or possibly EAGAIN/EWOULDBLOCK encountered with
++**         a nonblocking descriptor (the latter shall not happen when @fd
++**         was successfully poll'd for POLLOUT event beforehand)
++** (0,len) less than @len bytes written due to possibly EAGAIN/EWOULDBLOCK
++**         encountered with a nonblocking descriptor
++** =len    write operation was successful and can presumably be repeated
++**
++** Note 1: EINTR error state as well as a signal receipt while something has
++**         already been written are handled internally (interrupted writing
++**         is continued, so these events shall not be propagated to caller).
++*/
+ ssize_t write_restart(int fd, const void *buf, size_t len);
+ 
+ void *mallock(size_t len);
+diff -ur a/ricci/include/Socket.h b/ricci/include/Socket.h
+--- a/ricci/include/Socket.h	2008-07-31 00:48:30.000000000 +0200
++++ b/ricci/include/Socket.h	2011-11-24 14:08:39.433333215 +0100
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2009
++** Copyright (C) Red Hat, Inc. 2005-2011
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -31,6 +31,9 @@
+ // NOT THREAD SAFE
+ // provide external locking
+ 
++// buffer size for a finest granularity "recv" operation
++#define SOCKET_RECV_BUFFER	4096
++
+ class Socket
+ {
+ 	public:
+@@ -76,12 +79,64 @@
+ 		virtual ClientSocket& operator= (const ClientSocket&);
+ 		virtual ~ClientSocket();
+ 
++		/*
++		** Try to receive SOCKET_RECV_BUFFER bytes and return them as String.
++		**
++		** In case of a nonblocking socket, this method expects that _sock is
++		** successfully poll'd for POLLIN event prior to being called,
++		** otherwise its behavior can be unexpected (specifically, socket
++		** can be closed prematurely upon immediate EAGAIN/EWOULDBLOCK).
++		**
++		** Return value:
++		** ret.length() == SOCKET_RECV_BUFFER
++		**                the whole buffer received
++		** ret.length() < SOCKET_RECV_BUFFER
++		**                only the part of the buffer received due to EOF
++		**                or possibly EAGAIN/EWOULDBLOCK if the contained
++		**                socket is set as nonblocking
++		**                (subsequent recv/poll will decide)
++		**
++		** Note: ret.length() == 0 (ret=="") never occurs; if EOF is apparent,
++		**       contained socket is closed and the exception is raised.
++		**
++		** Upon non-recoverable condition (incl. closing the socket, see note),
++		** exception is raised.  Possible interruptions upon signal receipt are
++		** handled internally.
++		*/
+ 		virtual String recv();
++
++		/*
++		** Timeout-version of @recv.
++		**
++		** If timeout passes by, returns "".
++		*/
+ 		virtual String recv(int timeout);
+ 
+-		// return what is left to send
++		/*
++		** Try to send @msg.length() bytes of @msg and return what is left.
++		**
++		** Return value:
++		** ""             the whole @msg has been sent or @msg == ""
++		** ret.length() < @msg.length()
++		**                only the part of @msg has been sent due to possibly
++		**                EAGAIN/EWOULDBLOCK if the contained socket is set
++		**                as nonblocking
++		**
++		** Note: ret == @msg shall not ever occur upon successfully polling
++		**       for POLLOUT event beforehand (unless @msg == "").
++		**
++		** Upon non-recoverable condition, exception is raised.  Possible
++		** interruptions upon signal receipt are handled internally.
++		*/
+ 		virtual String send(const String& msg);
+ 
++		/*
++		** Timeout-version of @send.
++		**
++		** If timeout passes by, returns @msg.  In case of a nonblocking
++		** socket, this is distinguishable only when polling for POLLOUT
++		** event beforehand, see note by the base version of send().
++		*/
+ 		virtual String send(const String& msg, int timeout);
+ 
+ 		virtual void ready(bool& recv, bool& send, int timeout);

@@ -1,0 +1,274 @@
+diff -urN a/ricci/modules/cluster/clumon/src/snmp-agent/clusterMonitorSnmp.cpp b/ricci/modules/cluster/clumon/src/snmp-agent/clusterMonitorSnmp.cpp
+--- a/ricci/modules/cluster/clumon/src/snmp-agent/clusterMonitorSnmp.cpp	2012-12-18 19:07:35.178462210 +0100
++++ b/ricci/modules/cluster/clumon/src/snmp-agent/clusterMonitorSnmp.cpp	2012-12-18 21:17:29.935920218 +0100
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2008
++** Copyright Red Hat, Inc. 2013
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -37,6 +37,7 @@
+ using namespace std;
+ 
+ ClusterMonitoring::ClusterMonitor monitor;
++static unsigned int alarm_reg;
+ 
+ /* From nodesMIB_access.cpp */
+ String getNodeStatusDescription(unsigned int code);
+@@ -270,12 +270,21 @@
+ 		// and will have to be rewritten eventually.
+ 		monitor.expire_cache((unsigned int)-1);
+ 
+-    		snmp_alarm_register(5, SA_REPEAT, check_cluster_state, NULL);
++		alarm_reg = snmp_alarm_register(5, SA_REPEAT, check_cluster_state, NULL);
+ 
+ 	} catch ( ... ) {}
+ }
+ 
++
++/* This is to cleanup allocated resources properly, especially upon reload. */
+ void
+-init_redhatCluster(void) {
+-	init_RedHatCluster();
+-}
++deinit_RedHatCluster(void) {
++	snmp_alarm_unregister(alarm_reg);
++
++#define RHC_OIDS_UNREGISTER(_NAME, ...) \
++	unregister_mib(rhc##_NAME##_oid, rhc##_NAME##_len);
++
++RHC_OIDS(RHC_OIDS_UNREGISTER)
++
++#undef RHC_OIDS_UNREGISTER
++}
+diff -urN a/ricci/modules/cluster/clumon/src/snmp-agent/clusterMonitorSnmp.h b/ricci/modules/cluster/clumon/src/snmp-agent/clusterMonitorSnmp.h
+--- a/ricci/modules/cluster/clumon/src/snmp-agent/clusterMonitorSnmp.h	2008-07-31 00:48:30.000000000 +0200
++++ b/ricci/modules/cluster/clumon/src/snmp-agent/clusterMonitorSnmp.h	2012-12-18 20:44:39.618147032 +0100
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2008
++** Copyright Red Hat, Inc. 2013
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -31,7 +31,8 @@
+ 
+ extern ClusterMonitoring::ClusterMonitor monitor;
+ 
+-// called by snmpd
++// called by snmpd (dlmod agent)
+ extern "C" void init_RedHatCluster(void);
++extern "C" void deinit_RedHatCluster(void);
+ 
+ #endif
+diff -urN a/ricci/modules/cluster/clumon/src/snmp-agent/Makefile b/ricci/modules/cluster/clumon/src/snmp-agent/Makefile
+--- a/ricci/modules/cluster/clumon/src/snmp-agent/Makefile	2012-12-18 19:07:35.166462058 +0100
++++ b/ricci/modules/cluster/clumon/src/snmp-agent/Makefile	2012-12-18 20:09:09.315659792 +0100
+@@ -56,21 +56,11 @@
+ 	${UNINSTALL} ${TARGET} ${libdir}/cluster-snmp
+ 
+ clean:
+-	rm -f rhc_oid.h
+ 	rm -f $(OBJECTS) $(TARGET)
+ 
+-rhc_oid.h: rhc_oid.cpp
+-	echo "// Automatically generated " > rhc_oid.h
+-	echo "#ifndef _RHC_OID_H" >> rhc_oid.h
+-	echo "#define _RHC_OID_H" >> rhc_oid.h
+-	echo "extern \"C\" {" >> rhc_oid.h
+-	sed -e 's/^#.*//' -e 's/^\([a-zA-Z]\)/extern \1/' -e 's/].*;/\];/' -e 's/_len.*;/_len;/' rhc_oid.cpp >> rhc_oid.h
+-	echo "};" >> rhc_oid.h
+-	echo "#endif" >> rhc_oid.h
+-
+ check:
+ 
+ rebuild: clean all
+ 
+-$(TARGET): rhc_oid.h $(OBJECTS)
++$(TARGET): $(OBJECTS)
+ 	$(CXX) $(LDFLAGS) -o $@ $(OBJECTS)
+diff -urN a/ricci/modules/cluster/clumon/src/snmp-agent/rhc_oid.cpp b/ricci/modules/cluster/clumon/src/snmp-agent/rhc_oid.cpp
+--- a/ricci/modules/cluster/clumon/src/snmp-agent/rhc_oid.cpp	2012-12-18 19:07:35.167462071 +0100
++++ b/ricci/modules/cluster/clumon/src/snmp-agent/rhc_oid.cpp	2012-12-18 18:58:18.913724998 +0100
+@@ -1,97 +1,11 @@
+-#include <net-snmp/net-snmp-config.h>
+-#include <net-snmp/net-snmp-includes.h>
+-#include <net-snmp/agent/net-snmp-agent-includes.h>
+-
+-/* NOTE: rhc_oid.cpp is used for automatic generation of rhc_oid.h;
+- * utilize the same format when editing rhc_oid.cpp */
++#include "rhc_oid.h"
+ 
+ /* SNMP OIDs we need to know about */
+-oid snmp_trap[]				= { 1, 3, 6, 1, 6, 3, 1, 1, 4, 1, 0 };
+-size_t snmp_trap_len			= OID_LENGTH(snmp_trap);
++oid snmp_trap[]      = { 1, 3, 6, 1, 6, 3, 1, 1, 4, 1, 0 };
++size_t snmp_trap_len = OID_LENGTH(snmp_trap);
+ 
+ /* Traps */
+-oid rhcConfigVersion_trap[]		= { 1, 3, 6, 1, 4, 1, 2312, 8, 0, 1 };
+-size_t rhcConfigVersion_len		= OID_LENGTH(rhcConfigVersion_trap);
+-
+-oid rhcQuorumState_trap[]		= { 1, 3, 6, 1, 4, 1, 2312, 8, 0, 2 };
+-size_t rhcQuorumState_len		= OID_LENGTH(rhcQuorumState_trap);
+-
+-oid rhcNodeState_trap[]			= { 1, 3, 6, 1, 4, 1, 2312, 8, 0, 3 };
+-size_t rhcNodeState_len			= OID_LENGTH(rhcNodeState_trap);
+-
+-oid rhcServiceState_trap[]		= { 1, 3, 6, 1, 4, 1, 2312, 8, 0, 4 };
+-size_t rhcServiceState_len		= OID_LENGTH(rhcServiceState_trap);
+-
+-/* Objects */
+-oid rhcMIBVersion_oid[]			= { 1, 3, 6, 1, 4, 1, 2312, 8, 1, 1 };
+-size_t rhcMIBVersion_len		= OID_LENGTH(rhcMIBVersion_oid);
+-
+-oid rhcClusterName_oid[]		= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 1 };
+-size_t rhcClusterName_len		= OID_LENGTH(rhcClusterName_oid);
+-
+-oid rhcClusterStatusCode_oid[]		= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 2 };
+-size_t rhcClusterStatusCode_len		= OID_LENGTH(rhcClusterStatusCode_oid);
+-
+-oid rhcClusterStatusDesc_oid[]		= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 3 };
+-size_t rhcClusterStatusDesc_len		= OID_LENGTH(rhcClusterStatusDesc_oid);
+-
+-oid rhcClusterVotesNeededForQuorum_oid[] = { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 4 };
+-size_t rhcClusterVotesNeededForQuorum_len = OID_LENGTH(rhcClusterVotesNeededForQuorum_oid);
+-
+-oid rhcClusterVotes_oid[]		= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 5 };
+-size_t rhcClusterVotes_len		= OID_LENGTH(rhcClusterVotes_oid);
+-
+-oid rhcClusterQuorate_oid[]		= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 6 };
+-size_t rhcClusterQuorate_len		= OID_LENGTH(rhcClusterQuorate_oid);
+-
+-oid rhcClusterNodesNum_oid[]		= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 7 };
+-size_t rhcClusterNodesNum_len		= OID_LENGTH(rhcClusterNodesNum_oid);
+-
+-oid rhcClusterNodesNames_oid[]		= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 8 };
+-size_t rhcClusterNodesNames_len		= OID_LENGTH(rhcClusterNodesNames_oid);
+-
+-oid rhcClusterAvailNodesNum_oid[]	= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 9 };
+-size_t rhcClusterAvailNodesNum_len	= OID_LENGTH(rhcClusterAvailNodesNum_oid);
+-
+-oid rhcClusterAvailNodesNames_oid[]	= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 10 };
+-size_t rhcClusterAvailNodesNames_len	= OID_LENGTH(rhcClusterAvailNodesNames_oid);
+-
+-oid rhcClusterUnavailNodesNum_oid[]	= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 11 };
+-size_t rhcClusterUnavailNodesNum_len	= OID_LENGTH(rhcClusterUnavailNodesNum_oid);
+-
+-oid rhcClusterUnavailNodesNames_oid[]	= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 12 };
+-size_t rhcClusterUnavailNodesNames_len	= OID_LENGTH(rhcClusterUnavailNodesNames_oid);
+-
+-oid rhcClusterServicesNum_oid[]		= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 13 };
+-size_t rhcClusterServicesNum_len	= OID_LENGTH(rhcClusterServicesNum_oid);
+-
+-oid rhcClusterServicesNames_oid[]	= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 14 };
+-size_t rhcClusterServicesNames_len	= OID_LENGTH(rhcClusterServicesNames_oid);
+-
+-oid rhcClusterRunningServicesNum_oid[]	= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 15 };
+-size_t rhcClusterRunningServicesNum_len	= OID_LENGTH(rhcClusterRunningServicesNum_oid);
+-
+-oid rhcClusterRunningServicesNames_oid[] = { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 16 };
+-size_t rhcClusterRunningServicesNames_len = OID_LENGTH(rhcClusterRunningServicesNames_oid);
+-
+-oid rhcClusterStoppedServicesNum_oid[]	= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 17 };
+-size_t rhcClusterStoppedServicesNum_len	= OID_LENGTH(rhcClusterStoppedServicesNum_oid);
+-
+-oid rhcClusterStoppedServicesNames_oid[] = { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 18 };
+-size_t rhcClusterStoppedServicesNames_len = OID_LENGTH(rhcClusterStoppedServicesNames_oid);
+-
+-oid rhcClusterFailedServicesNum_oid[]	= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 19 };
+-size_t rhcClusterFailedServicesNum_len	= OID_LENGTH(rhcClusterFailedServicesNum_oid);
+-
+-oid rhcClusterFailedServicesNames_oid[]	= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 20 };
+-size_t rhcClusterFailedServicesNames_len = OID_LENGTH(rhcClusterFailedServicesNames_oid);
+-
+-oid rhcClusterConfigVersion_oid[]	= { 1, 3, 6, 1, 4, 1, 2312, 8, 2, 21 };
+-size_t rhcClusterConfigVersion_len	= OID_LENGTH(rhcClusterConfigVersion_oid);
+-
+-/* Tables */
+-oid rhcNodesTable_oid[]			= { 1, 3, 6, 1, 4, 1, 2312, 8, 3, 1 };
+-size_t rhcNodesTable_len		= OID_LENGTH(rhcNodesTable_oid);
++RHC_TRAPS(RHC_TRAPS_DEFINE)
+ 
+-oid rhcServicesTable_oid[]		= { 1, 3, 6, 1, 4, 1, 2312, 8, 3, 2 };
+-size_t rhcServicesTable_len		= OID_LENGTH(rhcServicesTable_oid);
++/* Objects and tables */
++RHC_OIDS(RHC_OIDS_DEFINE)
+diff -urN a/ricci/modules/cluster/clumon/src/snmp-agent/rhc_oid.h b/ricci/modules/cluster/clumon/src/snmp-agent/rhc_oid.h
+--- a/ricci/modules/cluster/clumon/src/snmp-agent/rhc_oid.h	2012-12-18 20:10:11.815407631 +0100
++++ b/ricci/modules/cluster/clumon/src/snmp-agent/rhc_oid.h	2012-12-18 18:57:58.241477308 +0100
+@@ -0,0 +1,73 @@
++#ifndef RHC_OID_H_GUARD
++#define RHC_OID_H_GUARD
++
++#include <net-snmp/net-snmp-config.h>
++#include <net-snmp/net-snmp-includes.h>
++#include <net-snmp/agent/net-snmp-agent-includes.h>
++
++/* SNMP OIDs we need to know about */
++extern oid snmp_trap[];
++extern size_t snmp_trap_len;
++
++/* Cluster traps */
++#define RHC_TRAPS(X) \
++	X(ConfigVersion,               1, 3, 6, 1, 4, 1, 2312, 8, 0,  1 ) \
++	X(QuorumState,                 1, 3, 6, 1, 4, 1, 2312, 8, 0,  2 ) \
++	X(NodeState,                   1, 3, 6, 1, 4, 1, 2312, 8, 0,  3 ) \
++	X(ServiceState,                1, 3, 6, 1, 4, 1, 2312, 8, 0,  4 )
++
++/* Objects and tables */
++#define RHC_OIDS(X) \
++	/* Objects */                                                     \
++	X(MIBVersion,                  1, 3, 6, 1, 4, 1, 2312, 8, 1,  1 ) \
++	X(ClusterName,                 1, 3, 6, 1, 4, 1, 2312, 8, 2,  1 ) \
++	X(ClusterStatusCode,           1, 3, 6, 1, 4, 1, 2312, 8, 2,  2 ) \
++	X(ClusterStatusDesc,           1, 3, 6, 1, 4, 1, 2312, 8, 2,  3 ) \
++	X(ClusterVotesNeededForQuorum, 1, 3, 6, 1, 4, 1, 2312, 8, 2,  4 ) \
++	X(ClusterVotes,                1, 3, 6, 1, 4, 1, 2312, 8, 2,  5 ) \
++	X(ClusterQuorate,              1, 3, 6, 1, 4, 1, 2312, 8, 2,  6 ) \
++	X(ClusterNodesNum,             1, 3, 6, 1, 4, 1, 2312, 8, 2,  7 ) \
++	X(ClusterNodesNames,           1, 3, 6, 1, 4, 1, 2312, 8, 2,  8 ) \
++	X(ClusterAvailNodesNum,        1, 3, 6, 1, 4, 1, 2312, 8, 2,  9 ) \
++	X(ClusterAvailNodesNames,      1, 3, 6, 1, 4, 1, 2312, 8, 2, 10 ) \
++	X(ClusterUnavailNodesNum,      1, 3, 6, 1, 4, 1, 2312, 8, 2, 11 ) \
++	X(ClusterUnavailNodesNames,    1, 3, 6, 1, 4, 1, 2312, 8, 2, 12 ) \
++	X(ClusterServicesNum,          1, 3, 6, 1, 4, 1, 2312, 8, 2, 13 ) \
++	X(ClusterServicesNames,        1, 3, 6, 1, 4, 1, 2312, 8, 2, 14 ) \
++	X(ClusterRunningServicesNum,   1, 3, 6, 1, 4, 1, 2312, 8, 2, 15 ) \
++	X(ClusterRunningServicesNames, 1, 3, 6, 1, 4, 1, 2312, 8, 2, 16 ) \
++	X(ClusterStoppedServicesNum,   1, 3, 6, 1, 4, 1, 2312, 8, 2, 17 ) \
++	X(ClusterStoppedServicesNames, 1, 3, 6, 1, 4, 1, 2312, 8, 2, 18 ) \
++	X(ClusterFailedServicesNum,    1, 3, 6, 1, 4, 1, 2312, 8, 2, 19 ) \
++	X(ClusterFailedServicesNames,  1, 3, 6, 1, 4, 1, 2312, 8, 2, 20 ) \
++	X(ClusterConfigVersion,        1, 3, 6, 1, 4, 1, 2312, 8, 2, 21 ) \
++	/* Tables */                                                      \
++	X(NodesTable,                  1, 3, 6, 1, 4, 1, 2312, 8, 3,  1 ) \
++	X(ServicesTable,               1, 3, 6, 1, 4, 1, 2312, 8, 3,  2 )
++
++
++
++#define RHC_TRAPS_DEFINE(_NAME, ...) \
++	oid rhc##_NAME##_trap[] = { __VA_ARGS__ };               \
++	size_t rhc##_NAME##_len = OID_LENGTH(rhc##_NAME##_trap);
++
++#define RHC_OIDS_DEFINE(_NAME, ...) \
++	oid rhc##_NAME##_oid[] = { __VA_ARGS__ };               \
++	size_t rhc##_NAME##_len = OID_LENGTH(rhc##_NAME##_oid);
++
++
++/* declare in-situ as it was here verbatim */
++
++#define RHC_TRAPS_DECLARE(_NAME, ...) \
++	extern oid rhc##_NAME##_trap[]; extern size_t rhc##_NAME##_len;
++
++#define RHC_OIDS_DECLARE(_NAME, ...) \
++	extern oid rhc##_NAME##_oid[]; extern size_t rhc##_NAME##_len;
++
++RHC_TRAPS(RHC_TRAPS_DECLARE)
++RHC_OIDS(RHC_OIDS_DECLARE)
++
++#undef RHC_TRAPS_DECLARE
++#undef RHC_OIDS_DECLARE
++
++#endif

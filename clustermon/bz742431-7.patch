@@ -1,0 +1,193 @@
+From 0de3f1ce9ede28bf8bf7bf98b99ebd2286750be4 Mon Sep 17 00:00:00 2001
+From: Jan Pokorny <jpokorny@redhat.com>
+Date: Wed, 23 Nov 2011 22:45:32 +0100
+Subject: XML class: make frequented small methods inlined (optimization)
+
+Previous changes related directly to bz618321 [*] exposed unexpected
+performance behaviour (in the deployment simulation, but I consider
+this as a credible model) -- now the Monitor part of the program
+is much more busy as the input is not so (undesirably) constrained
+as it used to be (such contraint was part of the problem).
+
+My profiling has shown that some XML-related methods figure near
+the top in both the most frequently called functions and the functions
+that summarily take significant part of the CPU time.  As they were
+mostly the short ones, they were turned to inline methods, and setters
+were removed semantics of returning the old value (as I checked,
+this is not being used, anyway).
+Additionally, I avoided some unnecessary object constructions, but
+some are presumably still present (not easy to find).
+
+During my tests, these changes resulted in 3-4% global CPU utilization
+decrease per instance (16 instances altogether using the same CPU
+[regardless cores etc.] with Monitor iterations 10x shorter than in
+normal deployment, testing cluster.conf containing a lot of services
+[9000 B]).
+
+To be noted that XMLObject::compare_attrs is also a pretty resource
+eater, but there is probably not much to optimize (maybe some kind of
+hashing, but I guess this won't be so necessary).
+
+[*] specifically:
+    poll_data[i].events = POLLOUT -> poll_data[i].events |= POLLOUT
+
+Signed-off-by: Jan Pokorny <jpokorny@redhat.com>
+---
+ ricci/common/XML.cpp |   44 +++++---------------------------------------
+ ricci/include/XML.h  |   34 +++++++++++++++++++++++-----------
+ 2 files changed, 28 insertions(+), 50 deletions(-)
+
+diff --git a/ricci/common/XML.cpp b/ricci/common/XML.cpp
+index cf4d8ab..d4b990e 100644
+--- a/ricci/common/XML.cpp
++++ b/ricci/common/XML.cpp
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2009
++** Copyright (C) Red Hat, Inc. 2005-2011
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -53,14 +53,14 @@ XMLObject::~XMLObject()
+ bool
+ XMLObject::compare_attrs(const XMLObject& other) const
+ {
+-	std::map<String, String> left = attrs();
+-	std::map<String, String> right = other.attrs();
++	const std::map<String, String>& left = attrs();
++	const std::map<String, String>& right = other.attrs();
+ 
+ 	if (left.size() != right.size())
+-	    	return false;
++		return false;
+ 
+ 	for (map<String, String>::const_iterator x = left.begin();
+-	     x != left.end(); x++) {
++		x != left.end(); x++) {
+ 
+ 		map<String, String>::const_iterator y = right.find(x->first);
+ 
+@@ -75,7 +75,6 @@ XMLObject::compare_attrs(const XMLObject& other) const
+ 	return true;
+ }
+ 
+-
+ bool
+ XMLObject::operator== (const XMLObject& obj) const
+ {
+@@ -92,45 +91,12 @@ XMLObject::operator== (const XMLObject& obj) const
+ 	return true;
+ }
+ 
+-
+ bool
+ XMLObject::operator!= (const XMLObject& obj) const
+ {
+ 	return !(operator==(obj));
+ }
+ 
+-
+-bool
+-XMLObject::has_attr(const String& attr_name) const
+-{
+-	return _attrs.find(attr_name) != _attrs.end();
+-}
+-
+-String
+-XMLObject::set_attr(const String& attr_name, const String& value)
+-{
+-	String ret = _attrs[attr_name];
+-	_attrs[attr_name] = value;
+-	return ret;
+-}
+-
+-String
+-XMLObject::get_attr(const String& attr_name) const
+-{
+-	map<String, String>::const_iterator iter = _attrs.find(attr_name);
+-	if (iter == _attrs.end())
+-		return "";
+-	else
+-		return iter->second;
+-}
+-
+-XMLObject&
+-XMLObject::add_child(const XMLObject& child)
+-{
+-	_kids.push_back(child);
+-	return _kids.back();
+-}
+-
+ bool
+ XMLObject::remove_child(const XMLObject& child)
+ {
+diff --git a/ricci/include/XML.h b/ricci/include/XML.h
+index 7fd9634..534d5b0 100644
+--- a/ricci/include/XML.h
++++ b/ricci/include/XML.h
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2009
++** Copyright (C) Red Hat, Inc. 2005-2011
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -33,33 +33,45 @@ class XMLObject
+ 		XMLObject(const String& elem_name = "TagName");
+ 		virtual ~XMLObject();
+ 
++		bool operator== (const XMLObject&) const;
++		bool operator!= (const XMLObject&) const;
++
++
+ 		String tag() const {
+ 			return _tag;
+ 		};
+ 
+-		// attributes
+-		bool has_attr(const String& attr_name) const;
++		/* attributes */
+ 
+-		// return old value
+-		String set_attr(const String& attr_name, const String& value);
++		bool has_attr(const String& attr_name) const {
++			return _attrs.find(attr_name) != _attrs.end();
++		}
++
++		String get_attr(const String& attr_name) const {
++			std::map<String, String>::const_iterator iter = _attrs.find(attr_name);
++			return (iter == _attrs.end()) ? "" : iter->second;
++		}
+ 
+-		String get_attr(const String& attr_name) const;
++		void set_attr(const String& attr_name, const String& value) {
++			_attrs[attr_name] = value;
++		}
+ 
+ 		const std::map<String, String>& attrs() const {
+ 			return _attrs;
+ 		}
+ 
+-		// kids
+-		XMLObject& add_child(const XMLObject& child);
++		/* kids */
++
++		void add_child(const XMLObject& child) {
++			_kids.push_back(child);
++		}
++
+ 		bool remove_child(const XMLObject& child);
+ 
+ 		const std::list<XMLObject>& children() const {
+ 			return _kids;
+ 		}
+ 
+-		bool operator== (const XMLObject&) const;
+-		bool operator!= (const XMLObject&) const;
+-
+ 	private:
+ 		String _tag;
+ 		std::list<XMLObject> _kids;
+-- 
+1.7.7.3
+

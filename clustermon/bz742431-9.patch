@@ -1,0 +1,55 @@
+From 7a682ea666c17bafab286f5ebba0d5eab3cd0f5a Mon Sep 17 00:00:00 2001
+From: Jan Pokorny <jpokorny@redhat.com>
+Date: Wed, 7 Dec 2011 21:29:09 +0100
+Subject: fix bz742431 (superset of bz618321): get rid of a minor memleak
+
+The cause can be understood reading the in-code comment and watching
+the change being done.
+
+Signed-off-by: Jan Pokorny <jpokorny@redhat.com>
+---
+ ricci/modules/cluster/clumon/src/daemon/main.cpp |   17 ++++++++++++++++-
+ 1 files changed, 16 insertions(+), 1 deletions(-)
+
+diff --git a/ricci/modules/cluster/clumon/src/daemon/main.cpp b/ricci/modules/cluster/clumon/src/daemon/main.cpp
+index eb40c43..5a32b58 100644
+--- a/ricci/modules/cluster/clumon/src/daemon/main.cpp
++++ b/ricci/modules/cluster/clumon/src/daemon/main.cpp
+@@ -69,6 +69,25 @@ class ClientInfo
+ 		ClientInfo(ClientSocket& sock, String str="") :
+ 			sock(sock), str(str) {}
+ 
++		// this is to avoid (at least from the caller's point of view) using
++		// ClientSocket assignment operator and thus malloc'ing a new struct
++		// sockaddr and memcpy'ing the rhs' one -- the one nobody would
++		// possibly care about afterwards (i.e., possible memory leak)
++		//
++		// the rhs_sock object is acquired, i.e. this object takes the
++		// full control over it
++		//
++		// the old value ClientSocket object is swapped into the rhs_sock,
++		// which is expected to be a temporary object destroyed shortly anyway
++		// (with the end of the block or so)
++		//
++		// \note
++		// the caller should make sure that msg member is empty ("") to avoid
++		// unexpected behavior (satisfied, e.g., with empty-constructed object)
++		void acquire_socket(ClientSocket& rhs_sock) {
++			swap(sock, rhs_sock);
++		}
++
+ 		ClientSocket sock;
+ 		String str;
+ };
+@@ -235,7 +250,7 @@ serve_clients(Monitor& monitor, ServerSocket& server)
+ 					try {
+ 						ClientSocket sock = server.accept();
+ 						sock.nonblocking(true);
+-						clients[sock.get_sock()] = ClientInfo(sock);
++						clients[sock.get_sock()].acquire_socket(sock);
+ 					} catch ( ... ) {}
+ 				}
+ 				if (poll_info.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+-- 
+1.7.7.4
+

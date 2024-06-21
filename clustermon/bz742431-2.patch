@@ -1,0 +1,182 @@
+From: Jan Pokorny <jpokorny@redhat.com>
+Date: Wed, 24 Nov 2011 14:14:29 +0200
+Subject: [PATCH 2/6] fix bz742431: introduce per-peer outgoing queue pruning
+
+There is a new "_prune_peer_queues" attribute serving as a flag to mark
+per-peer outgoing queues eligible for pruning [*].  It is _set_ in "update"
+method called by the Monitor every ca. 5 seconds (its intentional iteration
+period).  The flag is _cleared_ after every iteration of appending particular
+XML status update ("message") from the global queue to the peer-local queues,
+i.e., the first such iteration may lead to pruning the queues if flag
+previously set.  This (at least partially) ensures the queues are not
+accumulated infinitely under jarring conditions.
+
+As the bool value is switched "atomically" from our point of view and
+in addition, we do not require absolute sychronization, accesses to
+the flag are not guarded by mutex (pros: no blocking) leading to
+"react immediatelly (in the mentioned loops)" behavior.
+
+Additionally, merge "update_peers" and "send" into a single method
+as these are always used together (also avoids split of mutex usage).
+
+[*] with pruning, I mean "keep possible half-proceeded XML status update
+    in, but drop any subsequent ones"
+
+Signed-off-by: Jan Pokorny <jpokorny@redhat.com>
+
+diff -ur a/ricci/modules/cluster/clumon/src/daemon/Communicator.cpp b/ricci/modules/cluster/clumon/src/daemon/Communicator.cpp
+--- a/ricci/modules/cluster/clumon/src/daemon/Communicator.cpp	2008-07-31 00:48:30.000000000 +0200
++++ b/ricci/modules/cluster/clumon/src/daemon/Communicator.cpp	2011-11-16 20:23:24.882904664 +0100
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2008
++** Copyright (C) Red Hat, Inc. 2005-2011
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -61,21 +61,19 @@
+ }
+ 
+ void
+-Communicator::send(const String& msg)
++Communicator::update(const String& self, const std::vector<String>& hosts, const String& msg)
+ {
+ 	MutexLocker l(_mutex);
+-	_out_q.push_back(msg);
+-}
+ 
+-void
+-Communicator::update_peers(const String& self, const std::vector<String>& hosts)
+-{
+-	MutexLocker l(_mutex);
+ 	_my_hostname = self;
+-	_peer_hostnames.clear();
+ 
++	_peer_hostnames.clear();
+ 	for (unsigned int i = 0 ; i < hosts.size() ; i++)
+ 		_peer_hostnames.push_back(hosts[i]);
++
++	// mark peer queues for pruning with the update from monitor (every ~5 s.)
++	_out_q.push_back(msg);
++	_prune_peer_queues = true;
+ }
+ 
+ void
+@@ -148,8 +146,12 @@
+ 					iter_p != _peers.end();
+ 					iter_p++)
+ 			{
+-				iter_p->second.append(msg);
++				iter_p->second.append(msg, _prune_peer_queues);
+ 			}
++			// clear this so we won't drop just appended items
++			// (unless monitor iteration is done in between)
++			// note: not locked (here+above) as synchronization is not so important
++			_prune_peer_queues = false;
+ 		}
+ 
+ 		serve_sockets(names);
+diff -ur a/ricci/modules/cluster/clumon/src/daemon/Communicator.h b/ricci/modules/cluster/clumon/src/daemon/Communicator.h
+--- a/ricci/modules/cluster/clumon/src/daemon/Communicator.h	2008-07-31 00:48:30.000000000 +0200
++++ b/ricci/modules/cluster/clumon/src/daemon/Communicator.h	2011-11-16 20:23:56.912201641 +0100
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2008
++** Copyright (C) Red Hat, Inc. 2005-2011
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -52,8 +52,7 @@
+ 		Communicator(unsigned short port, CommDP& delivery_point);
+ 		virtual ~Communicator();
+ 
+-		void send(const String& msg);
+-		void update_peers(const String& self, const std::vector<String>& peers);
++		void update(const String& self, const std::vector<String>& peers, const String& msg);
+ 
+ 	private:
+ 		unsigned short _port;
+@@ -62,6 +61,7 @@
+ 		CommDP& _delivery_point;
+ 
+ 		std::map<String, Peer> _peers;
++		volatile bool _prune_peer_queues;
+ 
+ 		Mutex _mutex;
+ 		String _my_hostname;
+diff -ur a/ricci/modules/cluster/clumon/src/daemon/Monitor.cpp b/ricci/modules/cluster/clumon/src/daemon/Monitor.cpp
+--- a/ricci/modules/cluster/clumon/src/daemon/Monitor.cpp	2011-11-07 21:46:48.000000000 +0100
++++ b/ricci/modules/cluster/clumon/src/daemon/Monitor.cpp	2011-11-16 20:24:36.916697426 +0100
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2009
++** Copyright (C) Red Hat, Inc. 2005-2011
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -100,8 +100,7 @@
+ 											clustername, msg);
+ 
+ 			// publish it
+-			_comm.update_peers(my_nodename, nodenames);
+-			_comm.send(msg + '\n');
++			_comm.update(my_nodename, nodenames, msg + '\n');
+ 
+ 			// merge data from all nodes (removing stale entries)
+ 			// and update _cluster
+diff -ur a/ricci/modules/cluster/clumon/src/daemon/Peer.cpp b/ricci/modules/cluster/clumon/src/daemon/Peer.cpp
+--- a/ricci/modules/cluster/clumon/src/daemon/Peer.cpp	2008-07-31 00:48:30.000000000 +0200
++++ b/ricci/modules/cluster/clumon/src/daemon/Peer.cpp	2011-11-16 20:16:23.133676041 +0100
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2008
++** Copyright (C) Red Hat, Inc. 2005-2011
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -96,9 +96,24 @@
+ }
+ 
+ void
+-Peer::append(const String& msg)
++Peer::append(const String& msg, bool prune_queue)
+ {
+-	_out->append(msg);
++	String& out = *_out;
++
++	if (prune_queue) {
++		// keep the possible half-proceeded XML status update in the queue,
++		// but remove any others as a preventive measure against queue
++		// cluterring;  log each such intervention as it is highly undesired
++		// compared to naturally sustainable communication of peers
++		String::size_type idx = out.find("\n\n");
++		if (idx != out.npos  &&  idx+2 != out.length()) {
++			log("Peer (" + _hostname + "): pruning queue " + out.length() + "->" + (idx+2),
++				LogLevel(LogBasic|LogTransfer));
++			out = out.substr(0, idx+2);
++		}
++	}
++
++	out.append(msg);
+ }
+ 
+ int
+diff -ur a/ricci/modules/cluster/clumon/src/daemon/Peer.h b/ricci/modules/cluster/clumon/src/daemon/Peer.h
+--- a/ricci/modules/cluster/clumon/src/daemon/Peer.h	2008-07-31 00:48:30.000000000 +0200
++++ b/ricci/modules/cluster/clumon/src/daemon/Peer.h	2011-11-16 20:17:05.966207072 +0100
+@@ -1,5 +1,5 @@
+ /*
+-** Copyright (C) Red Hat, Inc. 2005-2008
++** Copyright (C) Red Hat, Inc. 2005-2011
+ **
+ ** This program is free software; you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License version 2 as
+@@ -46,7 +46,7 @@
+ 
+ 		bool outq_empty() { return _out->empty(); }
+ 
+-		void append(const String& msg);
++		void append(const String& msg, bool prune_queue = false);
+ 
+ 		int get_sock_fd();
+ 

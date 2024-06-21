@@ -1,0 +1,126 @@
+diff -ur a/ricci/common/executils.cpp b/ricci/common/executils.cpp
+--- a/ricci/common/executils.cpp	2010-01-15 01:38:30.000000000 -0500
++++ b/ricci/common/executils.cpp	2011-09-16 09:00:46.457916343 -0400
+@@ -37,6 +37,8 @@
+ static void read_data(struct pollfd& poll_info, bool& fd_closed, String& data);
+ static void close_fd(int fd);
+ 
++// NOTE: Execution of multi-process programs "parent exits, child continues"
++//       requires caution (see "Since bz564490" comment/consult executils.h).
+ int
+ execute(const String& path,
+ 		const std::vector<String>& args,
+@@ -175,9 +177,42 @@
+ 
+ 		// wait for events
+ 		int ret = poll(poll_data, s, 500);
+-		if (ret == 0)
++		if (ret == 0) {
++			// Since bz564490, we no longer rely on "pipes closed iff exit status ready"
++			// (easy counterexample: parent in multi-process program exits while its
++			// child keeps the descriptors unclosed; FD_CLOEXEC is not a remedy) and
++			// thus we keep watching here whether the main process of executed program
++			// has exited and once it has, we are done (no waiting for any child/ren).
++			//
++			// Rationale 1 behind taking care of the main process only:
++			// a. common case -- exit on behalf of main process (single/multi-process)
++			// b. multi-process program with child surviving main process
++			//    -- rare case, we prefer exit~returned exit status (as with old virsh)
++			//
++			// Rationale 2 behind taking the test right here:
++			// This branch guarantees that we don't miss any data yet to be read
++			// (POLLIN -> has to read first even if the process has already exited);
++			// POLLERR|POLLHUP|POLLNVAL cases for particular descriptor mean a half-way
++			// pass the infloop where another, blocking, waitpid takes care, anyway.
++			//
++			// Note 1: Placing the test here causes two issues (solving of which is
++			// not worth the code complexity growth or even possible code break):
++			// a. the captured stdout/stderr may contain data produced by the child
++			//    as per Rationale 1b. generated even AFTER the point parent exited
++			//    (more writers in such case is strange, still parent data not missed)
++			// b. child as per Rationale 1b. could prevent this branch to be taken by
++			//    consistently generating data on stdin/stderr (even stranger scenario).
++			//
++			// Note 2: Preferred scenario as per Rationale 1b. will cause issues in
++			// case child process, survived its parent, will try to use stdout/stderr
++			// as these were initially (before local exec) turned into write ends of
++			// respective pipes -- child's write will generate SIGPIPE signal
++			// and further run may fail (depending on the child's robustness).
++			int status;
++			if (waitpid(pid, &status, WNOHANG) > 0 && WIFEXITED(status))
++				break;
+ 			continue;
+-		else if (ret == -1) {
++		} else if (ret == -1) {
+ 			if (errno == EINTR)
+ 				continue;
+ 			else {
+@@ -234,19 +269,45 @@
+ 			char data_in[4096];
+ 			int ret = read(fd, data_in, sizeof(data_in));
+ 			if (ret < 0)
++				// if it was errno==EINTR, POLLIN event will be kept, otherwise
++				// presumably cleared and problem indicated with POLLERR|POLNVAL
+ 				return;
+ 			if (ret == 0) {
++				// EOF;  it may be (without guarantees) accompanied with POLLHUP event
++				// upon current/next poll (see [1]), but handle this safely in any case
++				// [1] http://www.greenend.org.uk/rjk/2001/06/poll.html
+ 				close_fd(fd);
+ 				fd_closed = true;
+ 				return;
+ 			}
+ 			data.append(data_in, ret);
+-			if (ret == sizeof(data_in))
+-				return;
+ 		} catch ( ... ) {
+ 			close_fd(fd);
+ 			fd_closed = true;
+ 		}
++		// At this point, we have successfully read some data.
++		// But in POLLIN|POLLHUP case, we cannot be sure whether we have already
++		// read all:
++		// a. ret == sizeof(data_in)
++		//	  -> trivially, we have no idea whether we read all yet, need to continue
++		// b. 0 < ret < sizeof(data_in)
++		//    -> as per READ(3P) man page, it could have been the fact that current
++		//       read() was	interrupted by signal (e.g., inevitable SIGCHLD) or
++		//       simply there were less bytes immediately available (not probable
++		//       in this context due to temporal order) that caused less bytes read
++		//       than was ready in the pipe (i.e., one cannot put equal sign
++		//       between "not a full buffer read" and "certain EOF ahead")
++		// thus in such case, we have to return right now and let subsequent poll
++		// or read (see comment for "ret == 0" branch above) decide
++		// (POLLIN will remain set if we have still something to read; apparently,
++		// POLLHUP will remain set until we close the descriptor).
++		//
++		// This way, we can be sure that we do not miss any data due to finishing
++		// with POLLHUP handling (below) prematurely.
++		// If we ignore POLLERR|POLLNVAL this time (not probable), the right branch
++		// should be taken the next iteration (with POLLIN presumably cleared).
++		if (poll_info.revents & POLLHUP)
++			return;
+ 	}
+ 
+ 	if (poll_info.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+diff -ur a/ricci/include/executils.h b/ricci/include/executils.h
+--- a/ricci/include/executils.h	2010-01-15 01:38:30.000000000 -0500
++++ b/ricci/include/executils.h	2011-09-16 09:00:02.812991467 -0400
+@@ -30,6 +30,17 @@
+ ** return 0 on success, non-zero on failure
+ ** Kill the child process after @timeout ms has elapsed,
+ ** if @timeout is negative, there's no no timeout
++**
++** /note
++** Execution of multi-process programs "parent exits, child continues"
++** requires caution.  This function returns when main process of such executed
++** program exits (i.e., no waiting for any child/ren) and this may lead
++** to unexpected results.
++** If any child produces something on its stdout/stderr (presumably inherited
++** from parent) AFTER the point the parent exited, a portion of such data may
++** still be captured in @out/@err buffer.  In addition, child surviving its
++** parent may fail when trying to write to its stdout/stderr (effectively
++** pipes with as-of-now closed read ends).
+ */
+ int execute(const String& path,
+ 			const std::vector<String>& args,

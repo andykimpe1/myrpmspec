@@ -1,0 +1,56 @@
+From: Jan Pokorny <jpokorny@redhat.com>
+Date: Wed, 16 Nov 2011 21:22:51 +0200
+Subject: [PATCH 3/6] fix bz742431: limit peer's send() to one message only
+
+The commented out assert is meant as note that such condition should always
+hold (contrary to previous explicit check, which was a no-op anyway).
+
+Signed-off-by: Jan Pokorny <jpokorny@redhat.com>
+
+diff -ur a/ricci/modules/cluster/clumon/src/daemon/Peer.cpp b/ricci/modules/cluster/clumon/src/daemon/Peer.cpp
+--- a/ricci/modules/cluster/clumon/src/daemon/Peer.cpp	2011-11-16 20:53:54.345243279 +0100
++++ b/ricci/modules/cluster/clumon/src/daemon/Peer.cpp	2011-11-16 21:16:29.402789607 +0100
+@@ -67,12 +67,21 @@
+ void
+ Peer::send()
+ {
+-	if (_out->empty())
+-		return;
+-
+ 	log("sending data to " + _hostname, LogTransfer);
+-	String rest = _sock->send(*_out);
+-	*_out = rest;
++
++	String& out = *_out;
++	String& to_send = *_out;
++	String rest("");
++
++	//assert(!out.empty())
++
++	String::size_type idx = out.find("\n\n");
++	if (idx != out.npos  &&  idx+2 != out.length()) {
++		to_send = out.substr(0, idx+2);
++		rest = out.substr(idx+2);
++	}
++
++	out = _sock->send(to_send) + rest;
+ }
+ 
+ vector<String>
+diff -ur a/ricci/modules/cluster/clumon/src/daemon/Peer.h b/ricci/modules/cluster/clumon/src/daemon/Peer.h
+--- a/ricci/modules/cluster/clumon/src/daemon/Peer.h	2011-11-16 20:17:05.966207072 +0100
++++ b/ricci/modules/cluster/clumon/src/daemon/Peer.h	2011-11-16 21:17:44.888723521 +0100
+@@ -41,7 +41,13 @@
+ 		Peer(const String& hostname, unsigned short port);
+ 		virtual ~Peer();
+ 
++		/*
++		** Try to send exactly one XML update of possibly more in _out queue.
++		**
++		** Then, adjust _out to be consisted of "yet unsent" + the rest of queue.
++		*/
+ 		void send();
++
+ 		std::vector<String> receive();
+ 
+ 		bool outq_empty() { return _out->empty(); }
