@@ -1,0 +1,143 @@
+2013-05-03  Jakub Jelinek  <jakub@redhat.com>
+
+	* src/cache.c (prelink_save_cache_check): For ET_CACHE_DYN
+	or ET_UNPRELINKABLE dependencies, call prelink_save_cache_check
+	recursively.
+	* testsuite/Makefile.am (TESTS): Add unprel1.sh.
+	* testsuite/Makefile.in: Regenerated.
+	* testsuite/unprel1.sh: New test.
+	* testsuite/unprel1.c: New file.
+	* testsuite/unprel1lib1.c: New file.
+	* testsuite/unprel1lib2.c: New file.
+
+--- prelink/src/cache.c	(revision 204)
++++ prelink/src/cache.c	(revision 205)
+@@ -1,4 +1,4 @@
+-/* Copyright (C) 2001, 2002, 2003, 2004, 2006 Red Hat, Inc.
++/* Copyright (C) 2001, 2002, 2003, 2004, 2006, 2013 Red Hat, Inc.
+    Written by Jakub Jelinek <jakub@redhat.com>, 2001.
+ 
+    This program is free software; you can redistribute it and/or modify
+@@ -566,10 +566,14 @@ prelink_save_cache_check (struct prelink
+ 	  return 1;
+ 	break;
+       case ET_CACHE_DYN:
++	if (prelink_save_cache_check (ent->depends[i]))
++	  return 1;
+ 	break;
+       case ET_UNPRELINKABLE:
+ 	if (ent->type != ET_UNPRELINKABLE)
+ 	  return 1;
++	if (prelink_save_cache_check (ent->depends[i]))
++	  return 1;
+ 	break;
+       default:
+ 	return 1;
+--- prelink/testsuite/unprel1lib2.c	(revision 0)
++++ prelink/testsuite/unprel1lib2.c	(revision 205)
+@@ -0,0 +1,7 @@
++extern int baz ();
++
++int
++bar ()
++{
++  return baz ();
++}
+--- prelink/testsuite/Makefile.in	(revision 204)
++++ prelink/testsuite/Makefile.in	(revision 205)
+@@ -105,7 +105,7 @@ TESTS = movelibs.sh \
+ 	reloc7.sh reloc8.sh reloc9.sh reloc10.sh reloc11.sh \
+ 	shuffle1.sh shuffle2.sh shuffle3.sh shuffle4.sh shuffle5.sh \
+ 	shuffle6.sh shuffle7.sh shuffle8.sh shuffle9.sh undo1.sh \
+-	layout1.sh layout2.sh \
++	layout1.sh layout2.sh unprel1.sh \
+ 	tls1.sh tls2.sh tls3.sh tls4.sh tls5.sh tls6.sh tls7.sh \
+ 	cxx1.sh cxx2.sh cxx3.sh quick1.sh quick2.sh quick3.sh \
+ 	cycle1.sh cycle2.sh \
+--- prelink/testsuite/unprel1lib1.c	(revision 0)
++++ prelink/testsuite/unprel1lib1.c	(revision 205)
+@@ -0,0 +1,5 @@
++int
++baz ()
++{
++  return 42;
++}
+--- prelink/testsuite/unprel1.sh	(revision 0)
++++ prelink/testsuite/unprel1.sh	(revision 205)
+@@ -0,0 +1,55 @@
++#!/bin/bash
++. `dirname $0`/functions.sh
++PRELINK=`echo $PRELINK \
++	 | sed -e 's, \./\(prelink\.\(cache\|conf\)\), unprel1.tree/etc/\1,g' \
++	       -e 's,path=\.,path=unprel1.tree/opt:unprel1.tree/lib,' \
++	       -e 's,linker=\./,linker=unprel1.tree/lib/,'`
++CCLINK=`echo $CCLINK \
++	| sed -e 's,linker=\./,linker=unprel1.tree/lib/,'`
++rm -rf unprel1.tree
++rm -f unprel1.log
++mkdir -p unprel1.tree/{lib,etc,opt,bin}
++$CC -shared -O2 -fpic -o unprel1.tree/lib/lib1.so $srcdir/unprel1lib1.c
++cp -a unprel1.tree/{lib,opt}/lib1.so
++$CC -shared -O2 -fpic -o unprel1.tree/lib/lib2.so $srcdir/unprel1lib2.c \
++    -L unprel1.tree/lib -l1
++$CCLINK -o unprel1.tree/bin/bin1 $srcdir/unprel1.c \
++    -Wl,-rpath,unprel1.tree/lib -L unprel1.tree/lib -l2
++cat > unprel1.tree/etc/prelink.conf <<EOF
++unprel1.tree/bin
++unprel1.tree/lib
++EOF
++for lib in `cat syslib.list`; do
++  cp -p $lib.orig unprel1.tree/lib/$lib
++  cp -p $lib.orig unprel1.tree/lib/$lib.orig
++done
++for lib in `cat syslnk.list`; do
++  cp -dp $lib unprel1.tree/lib
++done
++LIBS="unprel1.tree/lib/lib1.so unprel1.tree/lib/lib2.so"
++LIBS="$LIBS unprel1.tree/opt/lib1.so"
++BINS="unprel1.tree/bin/bin1"
++savelibs
++chmod -x unprel1.tree/bin/bin1.orig
++echo $PRELINK ${PRELINK_OPTS--vm} unprel1.tree/{bin,lib} > unprel1.log
++$PRELINK ${PRELINK_OPTS--vm} unprel1.tree/{bin,lib} >> unprel1.log 2>&1 || exit 1
++grep -v 'opt/lib1.so is not present in any config file directories' unprel1.log \
++  | grep -v 'lib/lib2.so because its dependency unprel1.tree/opt/lib1.so could not be prelinked' \
++  | grep -v 'bin/bin1 because its dependency unprel1.tree/lib/lib2.so could not be prelinked' \
++  | grep -q ^`echo $PRELINK | sed 's/ .*$/: /'` && exit 2
++grep -q 'opt/lib1.so is not present in any config file directories' \
++  unprel1.log || exit 3
++grep -q 'lib/lib2.so because its dependency unprel1.tree/opt/lib1.so could not be prelinked' \
++  unprel1.log || exit 4
++grep -q 'bin/bin1 because its dependency unprel1.tree/lib/lib2.so could not be prelinked' \
++  unprel1.log || exit 5
++unprel1.tree/bin/bin1 || exit 6
++# So that it is not prelinked again
++chmod -x unprel1.tree/bin/bin1
++LIBS=unprel1.tree/lib/lib1.so
++BINS=
++comparelibs >> unprel1.log 2>&1 || exit 7
++for i in unprel1.tree/lib/lib2.so unprel1.tree/opt/lib1.so unprel1.tree/bin/bin1; do
++  cmp -s $i $i.orig || exit 8
++done
++exit 0
+--- prelink/testsuite/unprel1.c	(revision 0)
++++ prelink/testsuite/unprel1.c	(revision 205)
+@@ -0,0 +1,7 @@
++extern int bar ();
++
++int
++main ()
++{
++  return bar () - 42;
++}
+--- prelink/testsuite/Makefile.am	(revision 204)
++++ prelink/testsuite/Makefile.am	(revision 205)
+@@ -10,7 +10,7 @@ TESTS = movelibs.sh \
+ 	reloc7.sh reloc8.sh reloc9.sh reloc10.sh reloc11.sh \
+ 	shuffle1.sh shuffle2.sh shuffle3.sh shuffle4.sh shuffle5.sh \
+ 	shuffle6.sh shuffle7.sh shuffle8.sh shuffle9.sh undo1.sh \
+-	layout1.sh layout2.sh \
++	layout1.sh layout2.sh unprel1.sh \
+ 	tls1.sh tls2.sh tls3.sh tls4.sh tls5.sh tls6.sh tls7.sh \
+ 	cxx1.sh cxx2.sh cxx3.sh quick1.sh quick2.sh quick3.sh \
+ 	cycle1.sh cycle2.sh \
