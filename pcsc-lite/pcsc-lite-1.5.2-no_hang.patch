@@ -1,0 +1,90 @@
+diff -up ./src/utils.c.no_hang ./src/utils.c
+--- ./src/utils.c.no_hang	2013-05-10 15:41:22.000000000 -0700
++++ ./src/utils.c	2013-05-10 15:44:03.000000000 -0700
+@@ -169,7 +169,13 @@ int StatSynchronizeContext(SCARDCONTEXT 
+ 	(void)snprintf(filename, sizeof(filename), "%s/event.%d.%ld",
+ 		PCSCLITE_EVENTS_DIR, SYS_GetPID(), hContext);
+ 	(void)mkfifo(filename, 0644);
+-	fd = SYS_OpenFile(filename, O_WRONLY, 0);
++	fd = SYS_OpenFile(filename, O_WRONLY | O_APPEND | O_NONBLOCK, 0);
++	if (fd < 0) {
++	    /* give up the cpu and try again just incase WaitStatus was.
++	     * racing us */
++	    sleep(1);
++	    fd = SYS_OpenFile(filename, O_WRONLY | O_APPEND | O_NONBLOCK, 0);
++	}
+ 
+ 	if (fstat(fd, &fstat_buf))
+ 	{
+diff -up ./src/winscard_clnt.c.no_hang ./src/winscard_clnt.c
+--- ./src/winscard_clnt.c.no_hang	2013-05-10 15:40:18.000000000 -0700
++++ ./src/winscard_clnt.c	2013-05-10 15:40:18.000000000 -0700
+@@ -45,6 +45,8 @@
+ /** used for backward compatibility */
+ #define SCARD_PROTOCOL_ANY_OLD	0x1000
+ 
++#define BLOCK_STATUS_CANCEL 0x0001
++
+ #ifndef TRUE
+ #define TRUE 1
+ #define FALSE 0
+@@ -1735,12 +1737,11 @@ static long WaitForPcscdEvent(SCARDCONTE
+ 	(void)snprintf(filename, sizeof(filename), "%s/event.%d.%ld",
+ 		PCSCLITE_EVENTS_DIR, SYS_GetPID(), hContext);
+ 	r = mkfifo(filename, 0644);
+- 	if (-1 == r)
++ 	if ((-1 == r) && (errno != EEXIST))
+  	{
+  		Log2(PCSC_LOG_CRITICAL, "Can't create event fifo: %s", strerror(errno));
+  		goto exit;
+  	}
+- 
+ 
+ 	fd = SYS_OpenFile(filename, O_RDONLY | O_NONBLOCK, 0);
+ 
+@@ -1973,6 +1974,12 @@ LONG SCardGetStatusChange(SCARDCONTEXT h
+ 	/* Now is where we start our event checking loop */
+ 	Log1(PCSC_LOG_DEBUG, "Event Loop Start");
+ 
++        if (psContextMap[dwContextIndex].contextBlockStatus == BLOCK_STATUS_CANCEL) {
++		psContextMap[dwContextIndex].contextBlockStatus = BLOCK_STATUS_RESUME;
++		rv = SCARD_E_CANCELLED;
++		goto end;
++	}
++
+ 	psContextMap[dwContextIndex].contextBlockStatus = BLOCK_STATUS_BLOCKING;
+ 
+ 	/* Get the initial reader count on the system */
+@@ -2248,8 +2255,8 @@ LONG SCardGetStatusChange(SCARDCONTEXT h
+ 			if (dwBreakFlag == 1)
+ 				break;
+ 
+-			if (BLOCK_STATUS_RESUME
+-				== psContextMap[dwContextIndex].contextBlockStatus)
++			if (BLOCK_STATUS_BLOCKING
++				!= psContextMap[dwContextIndex].contextBlockStatus)
+ 				break;
+ 
+ 			/* Only sleep once for each cycle of reader checks. */
+@@ -2270,9 +2277,11 @@ LONG SCardGetStatusChange(SCARDCONTEXT h
+ 	}
+ 	while (1);
+ 
+-	if (psContextMap[dwContextIndex].contextBlockStatus == BLOCK_STATUS_RESUME)
++	if (psContextMap[dwContextIndex].contextBlockStatus != BLOCK_STATUS_BLOCKING)
+ 		rv = SCARD_E_CANCELLED;
+ 
++	psContextMap[dwContextIndex].contextBlockStatus = BLOCK_STATUS_RESUME;
++
+ end:
+ 	Log1(PCSC_LOG_DEBUG, "Event Loop End");
+ 
+@@ -3479,7 +3488,7 @@ LONG SCardCancel(SCARDCONTEXT hContext)
+ 	 * Set the block status for this Context so blocking calls will
+ 	 * complete
+ 	 */
+-	psContextMap[dwContextIndex].contextBlockStatus = BLOCK_STATUS_RESUME;
++	psContextMap[dwContextIndex].contextBlockStatus = BLOCK_STATUS_CANCEL;
+ 
+ 	if (StatSynchronizeContext(hContext))
+ 		rv = SCARD_F_INTERNAL_ERROR;

@@ -1,0 +1,69 @@
+Patch by Robert Scheck <robert@fedoraproject.org> for pcsc-lite <= 1.5.2 which backports
+the additional try to use the libusb scheme before giving up. This was added in 1.6.x and
+is a 1:1 backport. This patch adds the missing support for the Reiner SCT cyberJack® RFID
+standard card reader. See https://bugzilla.redhat.com/show_bug.cgi?id=1092751 for further
+information.
+
+--- pcsc-lite-1.5.2/src/hotplug_libhal.c		2009-02-06 09:46:20.000000000 +0100
++++ pcsc-lite-1.5.2/src/hotplug_libhal.c.libusb-scheme	2014-04-30 00:16:37.921265557 +0200
+@@ -392,15 +392,53 @@
+ 
+ 	ret = RFAddReader(readerTracker[i].fullName, PCSCLITE_HP_BASE_PORT + i,
+ 		driver->libraryPath, deviceName);
+-	if (SCARD_S_SUCCESS != ret)
++	if ((SCARD_S_SUCCESS != ret) && (SCARD_E_UNKNOWN_READER != ret))
+ 	{
+-		Log2(PCSC_LOG_ERROR, "Failed adding USB device: %s", short_name(udi));
+-		free(readerTracker[i].fullName);
+-		readerTracker[i].fullName = NULL;
+-		free(readerTracker[i].udi);
+-		readerTracker[i].udi = NULL;
++		char *parent, *device_file;
+ 
+-		(void)CheckForOpenCT();
++		/* get the parent descriptor, without the '_if0' */
++		parent = libhal_device_get_property_string(ctx, udi,
++			"info.parent", NULL);
++		if (! parent)
++			goto error;
++
++		/* get the linux device file: i.e. '/dev/bus/usb/002/012' */
++		device_file = libhal_device_get_property_string(ctx, parent,
++			"linux.device_file", NULL);
++		if (! device_file)
++			goto error;
++
++		/* check the format looks correct */
++#define LIBUSB_HEADER "/dev/bus/usb/"
++		if (strncmp(device_file, LIBUSB_HEADER, strlen(LIBUSB_HEADER)))
++			goto error;
++
++		device_file += strlen(LIBUSB_HEADER);
++
++		(void)snprintf(deviceName, sizeof(deviceName),
++			"usb:%04x/%04x:libusb:%s",
++			driver->manuID, driver->productID, device_file);
++		deviceName[sizeof(deviceName) -1] = '\0';
++
++		/* replace the libusb separator '/' by ':' */
++		if ('/' == deviceName[strlen(deviceName)-3-1])
++			deviceName[strlen(deviceName)-3-1] = ':';
++
++		Log2(PCSC_LOG_INFO, "trying libusb scheme with: %s", deviceName);
++		ret = RFAddReader(readerTracker[i].fullName, PCSCLITE_HP_BASE_PORT + i,
++			driver->libraryPath, deviceName);
++
++		if (SCARD_S_SUCCESS != ret)
++		{
++error:
++			Log2(PCSC_LOG_ERROR, "Failed adding USB device: %s", short_name(udi));
++			free(readerTracker[i].fullName);
++			readerTracker[i].fullName = NULL;
++			free(readerTracker[i].udi);
++			readerTracker[i].udi = NULL;
++
++			(void)CheckForOpenCT();
++		}
+ 	}
+ 
+ 	(void)SYS_MutexUnLock(&usbNotifierMutex);
