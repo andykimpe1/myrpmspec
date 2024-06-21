@@ -1,0 +1,82 @@
+From 4fb4a8a3d327fcb77ecb2f24126599b1b03d5cfb Mon Sep 17 00:00:00 2001
+From: "Alan T. DeKok" <aland@freeradius.org>
+Date: Mon, 3 Jul 2017 12:34:00 -0400
+Subject: [PATCH] FR-GV-202 - check for "too long" attributes, too
+
+---
+ src/lib/dhcp.c   | 10 ++++------
+ src/lib/radius.c | 15 ++++++++++++---
+ 2 files changed, 16 insertions(+), 9 deletions(-)
+
+diff --git a/src/lib/dhcp.c b/src/lib/dhcp.c
+index b8d78ffef..9f3aa79bb 100644
+--- a/src/lib/dhcp.c
++++ b/src/lib/dhcp.c
+@@ -494,19 +494,17 @@ static int decode_tlv(VALUE_PAIR *tlv, const uint8_t *data, size_t data_len)
+ 	if (head) {
+ 		memcpy(tlv, head, sizeof(*tlv));
+ 		head->next = NULL;
++		if (head->type == PW_TYPE_TLV) head->vp_tlv = NULL;
+ 		pairfree(&head);
+ 	}
+ 
+ 	return 0;
+ 
+ make_tlv:
+-	tlv->vp_tlv = malloc(data_len);
+-	if (!tlv->vp_tlv) {
+-		fr_strerror_printf("No memory");
+-		return -1;
+-	}
+-	memcpy(tlv->vp_tlv, data, data_len);
++	if (data_len > sizeof(tlv->vp_octets)) data_len = sizeof(tlv->vp_octets);
++	memcpy(tlv->vp_octets, data, data_len);
+ 	tlv->length = data_len;
++	tlv->type = PW_TYPE_OCTETS;
+ 
+ 	return 0;
+ }
+diff --git a/src/lib/radius.c b/src/lib/radius.c
+index 5cb0cd368..8c8749ee9 100644
+--- a/src/lib/radius.c
++++ b/src/lib/radius.c
+@@ -2544,8 +2544,10 @@ static uint8_t *rad_coalesce(unsigned int attribute, size_t length,
+ 	uint8_t *ptr, *tlv, *tlv_data;
+ 
+ 	for (ptr = data + length;
+-	     ptr != (data + packet_length);
++	     ptr < (data + packet_length);
+ 	     ptr += ptr[1]) {
++		if ((ptr + 2) > (data + length)) return NULL;
++
+ 		if ((ptr[0] != PW_VENDOR_SPECIFIC) ||
+ 		    (ptr[1] < (2 + 4 + 3)) || /* WiMAX VSA with continuation */
+ 		    (ptr[2] != 0) || (ptr[3] != 0)) { /* our requirement */
+@@ -2562,7 +2564,14 @@ static uint8_t *rad_coalesce(unsigned int attribute, size_t length,
+ 		 *	If the vendor-length is too small, it's badly
+ 		 *	formed, so we stop.
+ 		 */
+-		if ((ptr[2 + 4 + 1]) < 3) break;
++		if ((ptr[2 + 4 + 1]) < 3) return NULL;
++
++		/*
++		 *	If it overflows the packet, it's bad.
++		 */
++		if ((ptr + ptr[2 + 4 + 1]) > (data + packet_length)) {
++			return NULL;
++		}
+ 
+ 		tlv_length += ptr[2 + 4 + 1] - 3;
+ 		if ((ptr[2 + 4 + 1 + 1] & 0x80) == 0) break;
+@@ -2579,7 +2588,7 @@ static uint8_t *rad_coalesce(unsigned int attribute, size_t length,
+ 	 *	our newly created memory.
+ 	 */
+ 	for (ptr = data + length;
+-	     ptr != (data + packet_length);
++	     ptr < (data + packet_length);
+ 	     ptr += ptr[1]) {
+ 		int this_length;
+ 
+-- 
+2.13.2
+
