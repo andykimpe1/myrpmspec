@@ -1,0 +1,177 @@
+diff -up rds-tools-2.0.6/rds-ping.c.segfault rds-tools-2.0.6/rds-ping.c
+--- rds-tools-2.0.6/rds-ping.c.segfault	2010-11-02 00:37:01.000000000 -0400
++++ rds-tools-2.0.6/rds-ping.c	2012-05-04 14:19:49.272963203 -0400
+@@ -78,8 +78,8 @@ static struct in_addr	opt_dstaddr;
+ struct socket {
+ 	int fd;
+ 	unsigned int sent_id;
++	unsigned int recv_id;
+ 	struct timeval sent_ts;
+-	unsigned int nreplies;
+ };
+ 
+ 
+@@ -138,11 +138,16 @@ static int
+ do_ping(void)
+ {
+ 	struct sockaddr_in sin;
++	struct sockaddr_storage from;
++	socklen_t	alen = sizeof(from);
+ 	unsigned int	sent = 0, recv = 0;
+ 	struct timeval	next_ts;
+ 	struct socket	socket[NSOCKETS];
+ 	struct pollfd	pfd[NSOCKETS];
+ 	int		i, next = 0;
++	struct timeval	now;
++	long		deadline;
++	int		ret;
+ 
+ 	for (i = 0; i < NSOCKETS; ++i) {
+ 		int fd;
+@@ -150,6 +155,8 @@ do_ping(void)
+ 		fd = rds_socket(&opt_srcaddr, &opt_dstaddr);
+ 
+ 		socket[i].fd = fd;
++		socket[i].recv_id = -1;
++		socket[i].sent_id = -1;
+ 		pfd[i].fd = fd;
+ 		pfd[i].events = POLLIN;
+ 	}
+@@ -158,46 +165,70 @@ do_ping(void)
+ 	sin.sin_family = AF_INET;
+ 	sin.sin_addr = opt_dstaddr;
+ 
++	/* Need to clear out the pollin status for the connection complete event */
++	poll(pfd, NSOCKETS, 1);
++	for (i = 0; i < NSOCKETS; ++i) {
++		struct socket *sp = &socket[i];
++
++		if (!(pfd[i].revents & POLLIN))
++			continue;
++		alen = sizeof(from);
++		recvfrom(sp->fd, NULL, 0, MSG_DONTWAIT,
++			 (struct sockaddr *) &from, &alen);
++	}
++
+ 	gettimeofday(&next_ts, NULL);
+ 	while (1) {
+-		struct timeval	now;
+-		struct sockaddr_in from;
+-		socklen_t	alen = sizeof(from);
+-		long		deadline;
+-		int		ret;
+ 
+ 		/* Fast way out - if we have received all packets, bail now.
+ 		 * If we're still waiting for some to come back, we need
+ 		 * to do the poll() below */
+-		if (opt_count && recv >= opt_count)
++		if (opt_count && (recv >= opt_count || sent >= opt_count))
+ 			break;
+ 
+ 		gettimeofday(&now, NULL);
++		// Find a free socket...if we don't have one, we'll fall
++		// through the send portion and wait in the poll portion
++		// until a socket frees up
+ 		if (timercmp(&now, &next_ts, >=)) {
+-			struct socket *sp = &socket[next];
+-			int err = 0;
++			for (next = 0; next < NSOCKETS; next++) {
++				struct socket *sp = &socket[next];
+ 
+-			if (opt_count && sent >= opt_count)
+-				break;
++				if (sp->sent_id != sp->recv_id)
++					continue;
+ 
+-			timeradd(&next_ts, &opt_wait, &next_ts);
+-			if (sendto(sp->fd, NULL, 0, 0, (struct sockaddr *) &sin, sizeof(sin)))
+-				err = errno;
+-			sp->sent_id = ++sent;
+-			sp->sent_ts = now;
+-			sp->nreplies = 0;
+-			next = (next + 1) % NSOCKETS;
+-
+-			if (err) {
+-				static unsigned int nerrs = 0;
+-
+-				report_packet(sp, NULL, NULL, err);
+-				if (err == EINVAL && nerrs++ == 0)
+-					printf("      Maybe your kernel does not support rds ping yet\n");
++				timeradd(&now, &opt_wait, &next_ts);
++				if (sendto(sp->fd, NULL, 0, 0, (struct sockaddr *) &sin, sizeof(sin))) {
++					static unsigned int nerrs = 0;
++
++					printf("     Error sending on fd(%d), family(%d), port(%d), \n"
++						"       address(%d:%d:%d:%d), size(%ld)\n",
++						sp->fd, sin.sin_family, sin.sin_port, sin.sin_addr.s_addr >> 24,
++						sin.sin_addr.s_addr >> 16 & 0xff, sin.sin_addr.s_addr >> 8 & 0xff,
++						sin.sin_addr.s_addr & 0xff, sizeof(sin));
++					if (errno == EINVAL && nerrs++ == 0)
++						printf("      Maybe your kernel does not support rds ping yet\n");
++					report_packet(sp, NULL, NULL, errno);
++				} else {
++					sp->sent_id = ++sent;
++					sp->sent_ts = now;
++					break;
++				}
++			}
++			if (next == NSOCKETS) {
++				/* We failed to send even though we wanted to...
++				 * update the timeout timer
++				 */
++				timeradd(&now, &opt_wait, &next_ts);
+ 			}
+ 		}
+ 
+ 		deadline = usec_sub(&next_ts, &now);
++		/* Never allow the poll to have a 0 timeout or it can hang if no rds
++		 * packets come in
++		 */
++		if (deadline <= 1000)
++			deadline = 1000;
+ 		ret = poll(pfd, NSOCKETS, deadline / 1000);
+ 		if (ret < 0) {
+ 			if (errno == EINTR)
+@@ -213,6 +244,7 @@ do_ping(void)
+ 			if (!(pfd[i].revents & POLLIN))
+ 				continue;
+ 
++			alen = sizeof(from);
+ 			ret = recvfrom(sp->fd, NULL, 0, MSG_DONTWAIT,
+ 					(struct sockaddr *) &from, &alen);
+ 			gettimeofday(&now, NULL);
+@@ -222,7 +254,8 @@ do_ping(void)
+ 				    errno != EINTR)
+ 					report_packet(sp, &now, NULL, errno);
+ 			} else {
+-				report_packet(sp, &now, &from.sin_addr, 0);
++				report_packet(sp, &now, &((struct sockaddr_in *)&from)->sin_addr, 0);
++				sp->recv_id = sp->sent_id;
+ 				recv++;
+ 			}
+ 		}
+@@ -241,13 +274,11 @@ report_packet(struct socket *sp, const s
+ 		printf(" %ld usec", usec_sub(now, &sp->sent_ts));
+ 	if (from_addr && from_addr->s_addr != opt_dstaddr.s_addr)
+ 		printf(" (%s)", inet_ntoa(*from_addr));
+-	if (sp->nreplies)
++	if (sp->recv_id == sp->sent_id)
+ 		printf(" DUP!");
+ 	if (err)
+ 		printf(" ERROR: %s", strerror(err));
+ 	printf("\n");
+-
+-	sp->nreplies++;
+ }
+ 
+ static int
+@@ -309,7 +340,8 @@ usage(const char *complaint)
+ 		"%s\nUsage: rds-ping [options] dst_addr\n"
+ 		"Options:\n"
+ 		" -c count      limit packet count\n"
+-		" -I interface  source IP address\n",
++		" -I interface  source IP address\n"
++		" -i delay      time to wait between ping packets (times < the ping time are not recommended)\n",
+ 		complaint);
+ 	exit(1);
+ }
