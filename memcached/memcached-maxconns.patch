@@ -1,0 +1,123 @@
+commit ac939723874f1ebe1f0738af3855e81c026e9bc4
+Author: dormando <dormando@rydia.net>
+Date:   Tue Jul 12 00:26:54 2011 -0700
+
+    fix race crash for accepting new connections
+    
+    Inspired by a patch by Kazuki Ohta.
+    
+    Summary from a mail sent to the list by Shigeki:
+    [Example Scenario]
+     1. throw alot clients (well over connection limit) to connect to
+    memcached.
+     2. memcached's file descriptors reaches maximum setting
+     3. main thread calls accept_new_conns(false) to stop polling sfd
+     4. main thread's event_base_loop stops accepting incoming request
+     5. main thread stops to acceess main_base at this point
+     6. a client disconnects
+     7. worker thread calls accept_new_conns(true) to start polling sfd
+     8. accept_new_conns uses mutex to protect main_base's race condition
+     9. worker thread starts loop with listen_conn
+    10. worker thread calls update_event with first conn
+    11. after first update_event(), main thread start polling sfd and
+        starts to access main_base <- PROBLEM
+    12. Worker thread continues to call update_event() with second conn
+    
+    At this point, worker thread and main thread both acccess and modify
+    main_base.
+    ---
+    
+    The original patch coupled polling with the once-per-second clock timer. My
+    patch creates a 10ms poller which kicks off after the listener is disabled.
+    Switching for a conditional would be too much rewiring for 1.4, as 1.6 solves
+    this in a better way.
+
+diff --git a/memcached.c b/memcached.c
+index df1ee7b..39012b0 100644
+--- a/memcached.c
++++ b/memcached.c
+@@ -120,6 +120,27 @@ enum transmit_result {
+ 
+ static enum transmit_result transmit(conn *c);
+ 
++/* This reduces the latency without adding lots of extra wiring to be able to
++ * notify the listener thread of when to listen again.
++ * Also, the clock timer could be broken out into its own thread and we
++ * can block the listener via a condition.
++ */
++static volatile bool allow_new_conns = true;
++static struct event maxconnsevent;
++static void maxconns_handler(const int fd, const short which, void *arg) {
++    struct timeval t = {.tv_sec = 0, .tv_usec = 10000};
++
++    if (allow_new_conns == false) {
++        /* reschedule in 10ms if we need to keep polling */
++        evtimer_set(&maxconnsevent, maxconns_handler, 0);
++        event_base_set(main_base, &maxconnsevent);
++        evtimer_add(&maxconnsevent, &t);
++    } else {
++        evtimer_del(&maxconnsevent);
++        accept_new_conns(true);
++    }
++}
++
+ #define REALTIME_MAXDELTA 60*60*24*30
+ 
+ /*
+@@ -509,7 +530,9 @@ static void conn_close(conn *c) {
+ 
+     MEMCACHED_CONN_RELEASE(c->sfd);
+     close(c->sfd);
+-    accept_new_conns(true);
++    pthread_mutex_lock(&conn_lock);
++    allow_new_conns = true;
++    pthread_mutex_unlock(&conn_lock);
+     conn_cleanup(c);
+ 
+     /* if the connection has big buffers, just free it */
+@@ -3363,6 +3386,8 @@ void do_accept_new_conns(const bool do_accept) {
+         stats.accepting_conns = false;
+         stats.listen_disabled_num++;
+         STATS_UNLOCK();
++        allow_new_conns = false;
++        maxconns_handler(0, 0, 0);
+     }
+ }
+ 
+
+commit 2c56090933e01ea5ab7d0c6e6530ea73b0933cf9
+Author: dormando <dormando@rydia.net>
+Date:   Wed Jul 27 08:46:24 2011 -0700
+
+    Fix incredibly slim race for maxconns handler
+    
+    I am an idiot: inbetween setting allow_new_conns -> false and calling the
+    maxconns subroutine, another thread could have already flipped it back. This
+    is probably due to a lack of strict memory barriers allowing the assignments
+    to the allow_new_conns variable to be reordered outside of the lock.
+    
+    Instead of copy/pasting the handler enabler code, we now treat an fd argument
+    of -42 as special and force the callback to run once. Normally fd is -1 since there's no associated socket for the callback.
+
+diff --git a/memcached.c b/memcached.c
+index 7905e6c..c82f5c5 100644
+--- a/memcached.c
++++ b/memcached.c
+@@ -130,7 +130,7 @@ static struct event maxconnsevent;
+ static void maxconns_handler(const int fd, const short which, void *arg) {
+     struct timeval t = {.tv_sec = 0, .tv_usec = 10000};
+ 
+-    if (allow_new_conns == false) {
++    if (fd == -42 || allow_new_conns == false) {
+         /* reschedule in 10ms if we need to keep polling */
+         evtimer_set(&maxconnsevent, maxconns_handler, 0);
+         event_base_set(main_base, &maxconnsevent);
+@@ -3386,7 +3386,7 @@ void do_accept_new_conns(const bool do_accept) {
+         stats.listen_disabled_num++;
+         STATS_UNLOCK();
+         allow_new_conns = false;
+-        maxconns_handler(0, 0, 0);
++        maxconns_handler(-42, 0, 0);
+     }
+ }
+ 
