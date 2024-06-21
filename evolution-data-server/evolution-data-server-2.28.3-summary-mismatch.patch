@@ -1,0 +1,185 @@
+diff -up evolution-data-server-2.32.2/camel/providers/local/camel-mbox-summary.c.locking evolution-data-server-2.32.2/camel/providers/local/camel-mbox-summary.c
+--- evolution-data-server-2.32.2/camel/providers/local/camel-mbox-summary.c.locking	2011-05-02 08:32:53.058921938 +0200
++++ evolution-data-server-2.32.2/camel/providers/local/camel-mbox-summary.c	2011-05-02 08:38:55.216277920 +0200
+@@ -463,10 +463,12 @@ summary_update(CamelLocalSummary *cls, g
+ 	cls->index_force = FALSE;
+ 
+ 	camel_operation_start(NULL, _("Storing folder"));
++	camel_folder_summary_lock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 
+ 	fd = g_open(cls->folder_path, O_LARGEFILE | O_RDONLY | O_BINARY, 0);
+ 	if (fd == -1) {
+ 		d(printf("%s failed to open: %s\n", cls->folder_path, g_strerror (errno)));
++		camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 		g_set_error (
+ 			error, G_IO_ERROR,
+ 			g_io_error_from_errno (errno),
+@@ -591,6 +593,7 @@ summary_update(CamelLocalSummary *cls, g
+ 	}
+ 
+ 	camel_operation_end(NULL);
++	camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 
+ 	return ok;
+ }
+@@ -606,9 +609,12 @@ mbox_summary_check(CamelLocalSummary *cl
+ 
+ 	d(printf("Checking summary\n"));
+ 
++	camel_folder_summary_lock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
++
+ 	/* check if the summary is up-to-date */
+ 	if (g_stat(cls->folder_path, &st) == -1) {
+ 		camel_folder_summary_clear(s);
++		camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 		g_set_error (
+ 			error, G_IO_ERROR,
+ 			g_io_error_from_errno (errno),
+@@ -662,6 +668,8 @@ mbox_summary_check(CamelLocalSummary *cl
+ 		}
+ 	}
+ 
++	camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
++
+ 	return ret;
+ }
+ 
+@@ -670,6 +678,7 @@ static gint
+ mbox_summary_sync_full(CamelMboxSummary *mbs, gboolean expunge, CamelFolderChangeInfo *changeinfo, GError **error)
+ {
+ 	CamelLocalSummary *cls = (CamelLocalSummary *)mbs;
++	CamelFolderSummary *s = CAMEL_FOLDER_SUMMARY (mbs);
+ 	gint fd = -1, fdout = -1;
+ 	gchar *tmpname = NULL;
+ 	guint32 flags = (expunge?1:0);
+@@ -677,9 +686,11 @@ mbox_summary_sync_full(CamelMboxSummary 
+ 	d(printf("performing full summary/sync\n"));
+ 
+ 	camel_operation_start(NULL, _("Storing folder"));
++	camel_folder_summary_lock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 
+ 	fd = g_open(cls->folder_path, O_LARGEFILE | O_RDONLY | O_BINARY, 0);
+ 	if (fd == -1) {
++		camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 		g_set_error (
+ 			error, G_IO_ERROR,
+ 			g_io_error_from_errno (errno),
+@@ -747,6 +758,7 @@ mbox_summary_sync_full(CamelMboxSummary 
+ 	tmpname = NULL;
+ 
+ 	camel_operation_end(NULL);
++	camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 
+ 	return 0;
+  error:
+@@ -760,6 +772,7 @@ mbox_summary_sync_full(CamelMboxSummary 
+ 		g_unlink(tmpname);
+ 
+ 	camel_operation_end(NULL);
++	camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 
+ 	return -1;
+ }
+@@ -807,9 +820,11 @@ mbox_summary_sync_quick(CamelMboxSummary
+ 	d(printf("Performing quick summary sync\n"));
+ 
+ 	camel_operation_start(NULL, _("Storing folder"));
++	camel_folder_summary_lock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 
+ 	fd = g_open(cls->folder_path, O_LARGEFILE|O_RDWR|O_BINARY, 0);
+ 	if (fd == -1) {
++		camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 		g_set_error (
+ 			error, G_IO_ERROR,
+ 			g_io_error_from_errno (errno),
+@@ -823,6 +838,7 @@ mbox_summary_sync_quick(CamelMboxSummary
+ 	/* need to dup since mime parser closes its fd once it is finalized */
+ 	pfd = dup(fd);
+ 	if (pfd == -1) {
++		camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 		g_set_error (
+ 			error, G_IO_ERROR,
+ 			g_io_error_from_errno (errno),
+@@ -837,7 +853,6 @@ mbox_summary_sync_quick(CamelMboxSummary
+ 	camel_mime_parser_scan_pre_from(mp, TRUE);
+ 	camel_mime_parser_init_with_fd(mp, pfd);
+ 
+-	camel_folder_summary_lock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 	/* Sync only the changes */
+ 	summary = camel_folder_summary_get_changed ((CamelFolderSummary *)mbs);
+ 	if (summary->len)
+@@ -972,9 +987,13 @@ mbox_summary_sync(CamelLocalSummary *cls
+ 	gint ret;
+ 	GPtrArray *summary = NULL;
+ 
++	camel_folder_summary_lock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
++
+ 	/* first, sync ourselves up, just to make sure */
+-	if (camel_local_summary_check(cls, changeinfo, error) == -1)
++	if (camel_local_summary_check(cls, changeinfo, error) == -1) {
++		camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 		return -1;
++	}
+ 
+ 	full_name = camel_folder_get_full_name (s->folder);
+ 	parent_store = camel_folder_get_parent_store (s->folder);
+@@ -999,8 +1018,10 @@ mbox_summary_sync(CamelLocalSummary *cls
+ 	if (quick && expunge) {
+ 		guint32 dcount =0;
+ 
+-		if (camel_db_count_deleted_message_info (parent_store->cdb_w, full_name, &dcount, error) == -1)
++		if (camel_db_count_deleted_message_info (parent_store->cdb_w, full_name, &dcount, error) == -1) {
++			camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 			return -1;
++		}
+ 		if (dcount)
+ 			quick = FALSE;
+ 	}
+@@ -1019,10 +1040,13 @@ mbox_summary_sync(CamelLocalSummary *cls
+ 
+ 	if (ret == -1)
+ 		ret = CAMEL_MBOX_SUMMARY_GET_CLASS (cls)->sync_full (mbs, expunge, changeinfo, error);
+-	if (ret == -1)
++	if (ret == -1) {
++		camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 		return -1;
++	}
+ 
+ 	if (g_stat(cls->folder_path, &st) == -1) {
++		camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 		g_set_error (
+ 			error, G_IO_ERROR,
+ 			g_io_error_from_errno (errno),
+@@ -1036,7 +1060,10 @@ mbox_summary_sync(CamelLocalSummary *cls
+ 		camel_folder_summary_touch(s);
+ 	}
+ 
+-	return CAMEL_LOCAL_SUMMARY_CLASS (camel_mbox_summary_parent_class)->sync(cls, expunge, changeinfo, error);
++	ret = CAMEL_LOCAL_SUMMARY_CLASS (camel_mbox_summary_parent_class)->sync(cls, expunge, changeinfo, error);
++	camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
++
++	return ret;
+ }
+ 
+ gint
+@@ -1061,9 +1088,12 @@ camel_mbox_summary_sync_mbox(CamelMboxSu
+ 
+ 	d(printf("performing full summary/sync\n"));
+ 
++	camel_folder_summary_lock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
++
+ 	/* need to dup this because the mime-parser owns the fd after we give it to it */
+ 	fd = dup(fd);
+ 	if (fd == -1) {
++		camel_folder_summary_unlock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 		g_set_error (
+ 			error, G_IO_ERROR,
+ 			g_io_error_from_errno (errno),
+@@ -1077,7 +1107,6 @@ camel_mbox_summary_sync_mbox(CamelMboxSu
+ 	camel_mime_parser_scan_pre_from(mp, TRUE);
+ 	camel_mime_parser_init_with_fd(mp, fd);
+ 
+-	camel_folder_summary_lock (s, CAMEL_FOLDER_SUMMARY_SUMMARY_LOCK);
+ 	camel_folder_summary_prepare_fetch_all (s, NULL);
+ 	count = camel_folder_summary_count(s);
+ 	for (i = 0; i < count; i++) {
