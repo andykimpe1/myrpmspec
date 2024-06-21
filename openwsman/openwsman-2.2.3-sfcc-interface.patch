@@ -1,0 +1,208 @@
+diff -up openwsman-2.2.3/src/plugins/cim/sfcc-interface.c.old openwsman-2.2.3/src/plugins/cim/sfcc-interface.c
+--- openwsman-2.2.3/src/plugins/cim/sfcc-interface.c.old	2010-08-23 14:59:56.000000000 +0200
++++ openwsman-2.2.3/src/plugins/cim/sfcc-interface.c	2010-08-23 14:31:33.000000000 +0200
+@@ -206,7 +206,7 @@ path2xml(CimClientInfo * client,
+ 		WsXmlNodeH s = NULL;
+ 		CMPIData data = objectpath->ft->getKeyAt(objectpath, i,
+ 				&keyname, NULL);
+-		cv = (char *) value2Chars(data.  type, &data.  value);
++		cv = (char *) value2Chars(data.  type, &data.value);
+ 		s = ws_xml_add_child(wsman_selector_set, XML_NS_WS_MAN,
+ 				WSM_SELECTOR, cv );
+ 		ws_xml_add_node_attr(s, NULL, "Name", CMGetCharPtr(keyname));
+@@ -540,7 +540,7 @@ comparef(const void *key1, const void *k
+ }
+ 
+ 
+-static void
++static int
+ cim_add_args(CimClientInfo * client, CMPIObjectPath *op,
+ 		CMPIArgs * argsin)
+ {
+@@ -548,6 +548,7 @@ cim_add_args(CimClientInfo * client, CMP
+ 	hnode_t *hn;
+ 	hash_scan_begin(&hs, client->method_args);
+ 	list_t *arglist = NULL;
++	int res = 0;
+ 
+ 	debug("cim_add_args:");
+ 	while ((hn = hash_scan_next(&hs))) {
+@@ -563,7 +564,7 @@ cim_add_args(CimClientInfo * client, CMP
+ 		// sort the list first then tag arrays
+ 		debug("cim_add_args: list count: %u", listcount);
+ 		if (0 >= listcount) {
+-			return; // nothing to do so return
++			return res; // nothing to do so return
+ 		}
+ 		list_sort(arglist, comparef);
+ 		argnode = list_first(arglist);
+@@ -599,6 +600,10 @@ cim_add_args(CimClientInfo * client, CMP
+ 					debug("cim_add_args: array %u object: %p", jj, sentry);
+ 					if (0 != arraytype) {
+ 						value.ref = cim_epr_to_objectpath(client, sentry->entry.eprp);
++						if (value.ref == NULL) {
++						        res = 1;
++							break;
++						}
+ 						CMSetArrayElementAt(arraydata, jj, &value, CMPI_ref);
+ 					} else {
+ 						value.string = native_new_CMPIString((char *)sentry->entry.text, NULL);
+@@ -618,6 +623,10 @@ cim_add_args(CimClientInfo * client, CMP
+ 				debug("cim_add_args: single key: %s type: %u", node_val->key, sentry->type);
+ 				if (0 != sentry->type) {
+ 					epr_t *eprp = sentry->entry.eprp;
++					if (eprp == NULL) {
++						res = 1;
++						break;
++					}
+ 					debug("epr_t: selectorcount: %u", eprp->refparams.selectorset.count);
+ 					value.ref = cim_epr_to_objectpath(client, sentry->entry.eprp);
+ 					CMAddArg(argsin, node_val->key, &value, CMPI_ref);
+@@ -631,8 +640,10 @@ cim_add_args(CimClientInfo * client, CMP
+ 	} else {
+ 		debug("cim_add_args: did not find any argument list");
+ 	}
++	return res;
+ }
+ 
++
+ static void
+ cim_add_keys(CMPIObjectPath * objectpath, hash_t * keys)
+ {
+@@ -763,9 +774,6 @@ cim_verify_keys(CMPIObjectPath * objectp
+ 		count = (int) hash_count(keys);
+ 	}
+ 	opcount = CMGetKeyCount(objectpath, &rc);
+-	debug("getKeyCount rc=%d, msg=%s",
+-			rc.rc, (rc.msg) ? CMGetCharPtr(rc.msg) : NULL);
+-
+ 
+ 	debug("selector count from user: %d, in object path: %d", count,
+ 			opcount);
+@@ -787,7 +795,7 @@ cim_verify_keys(CMPIObjectPath * objectp
+ 		if (rc.rc != 0) {	// key not found
+ 			statusP->fault_code = WSMAN_INVALID_SELECTORS;
+ 			statusP->fault_detail_code = WSMAN_DETAIL_UNEXPECTED_SELECTORS;
+-			debug("unexpcted selectors");
++			debug("unexpected selectors");
+ 			break;
+ 		}
+ 		selector_entry *sentry = (selector_entry*)hnode_get(hn);
+@@ -802,7 +810,7 @@ cim_verify_keys(CMPIObjectPath * objectp
+ 				statusP->fault_code = WSA_DESTINATION_UNREACHABLE;
+ 				statusP->fault_detail_code = WSMAN_DETAIL_INVALID_RESOURCEURI;
+ 				debug("selector '%s', value: [ %s ] not matched", hnode_getkey(hn), sentry->entry.text);
+-			        debug("data.type 0x%x, cv '%s'", data.type, cv?cv:"<NULL>");
++			        debug("data.type 0x%04x, cv '%s'", data.type, cv?cv:"<NULL>");
+ 				u_free(cv);
+ 				break;
+ 			}
+@@ -978,6 +986,13 @@ instance2xml(CimClientInfo * client,
+ 
+ 
+ 
++/*
++ * An operation (for a concrete instance) is given only the abstract base class
++ * 
++ * Enumerate through all instances of the base class, comparing keys to identify
++ * the matching instance
++ *
++ */
+ 
+ static CMPIObjectPath *
+ cim_get_op_from_enum(CimClientInfo * client,
+@@ -1543,7 +1558,7 @@ cim_connect_to_cimom(char *cim_host,
+ 			cim_host_passwd, &rc);
+ 
+ 	if (cimclient == NULL) {
+-	        debug( "*** Connection to CIMOM %s://%s:%s failed with %d:%s", frontend, cim_host, cim_port, rc.rc, CMGetCharPtr(rc.msg));
++	        debug( "*** Connection to CIMOM %s://%s:%s failed with %d:%s", frontend, cim_host, cim_port, rc.rc, rc.msg ? CMGetCharPtr(rc.msg) : "?");
+ 	} else {
+ 		debug("new cimclient: 0x%8x", cimclient);
+ 		debug("new cimclient: %d", cimclient->ft->ftVersion);
+@@ -1560,6 +1575,40 @@ cim_release_client(CimClientInfo * cimcl
+ 	}
+ }
+ 
++void
++release_cmpi_data(CMPIData data)
++{
++        if (data.state == CMPI_nullValue)
++                return;
++        debug("release_cmpi_data, type = 0x%04x", data.type);
++        switch(data.type)
++        {
++                case CMPI_string:
++                        debug("release String");
++                        CMRelease(data.value.string);
++                        break;
++                case CMPI_chars:
++                        debug("free chars");
++                        free (data.value.chars);
++                        break;
++                case CMPI_instance:
++                        debug("release instance");
++                        CMRelease(data.value.inst);
++                        break;
++                case CMPI_ref:
++                        debug("release ref");
++                        CMRelease(data.value.ref);
++                        break;
++                case CMPI_dateTime:
++                        debug("release datetime");
++                        CMRelease(data.value.dateTime);
++                        break;
++                default:
++                        break;
++        }
++}
++
++
+ /*
+  * Invoke 'EnumerateClassNames' intrinsic method
+  *
+@@ -1652,10 +1701,12 @@ cim_invoke_method(CimClientInfo * client
+ 
+ 	if (client->resource_uri
+ 	    && strstr(client->resource_uri, XML_NS_CIM_CLASS) != NULL) {
+-	        /* uri specifies class */
++	        /* Generic CIM uri given (pointing to abstract CIM_xxx class
++		 * enumerate through all instances of this class to
++		 * get the correct instance matching the selectors
++		 */
+ 		objectpath = cim_get_op_from_enum(client, status);
+ 	} else {
+-		debug("no base class, getting instance directly with getInstance");
+ 		objectpath = newCMPIObjectPath(client->cim_namespace,
+ 				client->requested_class, NULL);
+ 		if (objectpath != NULL)
+@@ -1674,7 +1725,11 @@ cim_invoke_method(CimClientInfo * client
+ 
+ 		if (client->method_args && hash_count(client->method_args) > 0) {
+ 			debug("adding method arguments");
+-			cim_add_args(client, objectpath, argsin);
++			if (0 != cim_add_args(client, objectpath, argsin)) {
++				status->fault_code = WSMAN_INVALID_PARAMETER;
++				status->fault_detail_code = WSMAN_DETAIL_INVALID_VALUE;
++				goto cleanup;
++			}
+ 		}
+ 
+ 	        if (strstr(client->resource_uri, XML_NS_CIM_INTRINSIC) != NULL) {
+@@ -1705,6 +1760,8 @@ cim_invoke_method(CimClientInfo * client
+ 					method_node, client->resource_uri, 0, 1);
+ 			}
+ 
++		        release_cmpi_data(data);
++
+ 			if (argsout) {
+ 				int count = CMGetArgCount(argsout, NULL);
+ 				int i = 0;
+@@ -1722,6 +1779,7 @@ cim_invoke_method(CimClientInfo * client
+ 		cim_to_wsman_status(rc, status);
+ 		if (rc.msg)
+ 			CMRelease(rc.msg);
++cleanup:
+ 		if (argsin)
+ 			CMRelease(argsin);
+ 		if (argsout)

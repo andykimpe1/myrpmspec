@@ -1,0 +1,125 @@
+diff -up openwsman-2.2.3/etc/openwsman.conf.orig openwsman-2.2.3/etc/openwsman.conf
+--- openwsman-2.2.3/etc/openwsman.conf.orig	2015-02-09 13:29:43.634011585 +0100
++++ openwsman-2.2.3/etc/openwsman.conf	2015-02-09 13:30:24.128168463 +0100
+@@ -32,6 +32,10 @@ ssl_key_file = /etc/openwsman/serverkey.
+ digest_password_file = /etc/openwsman/digest_auth.passwd
+ basic_password_file = /etc/openwsman/simple_auth.passwd
+ 
++# space-separated list of SSL protocols to *dis*able
++# possible values: SSLv2 SSLv3 TLSv1 TLSv1_1 TLSv1_2
++ssl_disabled_protocols = SSLv2 SSLv3
++
+ min_threads = 4
+ max_threads = 0
+ max_connections_per_thread=20
+diff -up openwsman-2.2.3/src/server/shttpd/config.c.orig openwsman-2.2.3/src/server/shttpd/config.c
+--- openwsman-2.2.3/src/server/shttpd/config.c.orig	2015-02-09 13:34:14.673061805 +0100
++++ openwsman-2.2.3/src/server/shttpd/config.c	2015-02-09 13:42:16.797930995 +0100
+@@ -87,6 +87,7 @@ set_ssl(struct shttpd_ctx *ctx, void *ar
+ 	SSL_CTX		*CTX;
+ 	void		*lib;
+ 	struct ssl_func	*fp;
++	char *ssl_disabled_protocols = wsmand_options_get_ssl_disabled_protocols();
+ 
+ 	arg = NULL;	/* Unused */
+ 
+@@ -111,6 +112,38 @@ set_ssl(struct shttpd_ctx *ctx, void *ar
+ 		elog(E_FATAL, NULL, "cannot open %s", pem);
+ 	else if (wsmand_options_get_ssl_key_file() && SSL_CTX_use_PrivateKey_file(CTX, wsmand_options_get_ssl_key_file(), SSL_FILETYPE_PEM) == 0)
+ 		elog(E_FATAL, NULL, "cannot open %s", pem);
++	while (ssl_disabled_protocols) {
++		struct ctx_opts_t {
++			char *name;
++			long opt;
++		} protocols[] = {
++			{ "SSLv2", SSL_OP_NO_SSLv2 },
++			{ "SSLv3", SSL_OP_NO_SSLv3 },
++			{ "TLSv1", SSL_OP_NO_TLSv1 },
++# if OPENSSL_VERSION_NUMBER >= 0x10001000L
++			{ "TLSv1_1", SSL_OP_NO_TLSv1_1 },
++			{ "TLSv1_2", SSL_OP_NO_TLSv1_2 },
++# endif
++			{ NULL, 0 }
++		};
++		char *blank_ptr;
++		int idx;
++		if (*ssl_disabled_protocols == 0)
++			break;
++		blank_ptr = strchr(ssl_disabled_protocols, ' ');
++		if (blank_ptr == NULL)
++			blank_ptr = ssl_disabled_protocols + strlen(ssl_disabled_protocols);
++		for (idx = 0; protocols[idx].name ; ++idx) {
++			if (strncasecmp(protocols[idx].name, ssl_disabled_protocols, blank_ptr-ssl_disabled_protocols) == 0) {
++				debug("SSL: disable %s protocol", protocols[idx].name);
++				SSL_CTX_ctrl(CTX, SSL_CTRL_OPTIONS, protocols[idx].opt, NULL);                      
++				break;
++			}
++		}
++		if (*blank_ptr == 0)
++			break;
++		ssl_disabled_protocols = blank_ptr + 1;          
++	}
+ 	ctx->ssl_ctx = CTX;
+ }
+ #endif /* NO_SSL */
+diff -up openwsman-2.2.3/src/server/shttpd/io_ssl.c.orig openwsman-2.2.3/src/server/shttpd/io_ssl.c
+--- openwsman-2.2.3/src/server/shttpd/io_ssl.c.orig	2015-02-09 13:27:27.122482723 +0100
++++ openwsman-2.2.3/src/server/shttpd/io_ssl.c	2015-02-09 13:27:52.000579106 +0100
+@@ -28,6 +28,7 @@ struct ssl_func	ssl_sw[] = {
+ 	{"SSL_CTX_free", {0}},
+ 	{"SSL_pending", {0}},
+ 	{"SSL_CTX_use_certificate_chain_file",{0}},
++	{"SSL_CTX_ctrl", {0}},
+ 	{NULL,				{0}}
+ };
+ 
+diff -up openwsman-2.2.3/src/server/shttpd/ssl.h.orig openwsman-2.2.3/src/server/shttpd/ssl.h
+--- openwsman-2.2.3/src/server/shttpd/ssl.h.orig	2015-02-09 13:28:44.593782858 +0100
++++ openwsman-2.2.3/src/server/shttpd/ssl.h	2015-02-09 13:29:09.551879547 +0100
+@@ -63,3 +63,4 @@ extern struct ssl_func	ssl_sw[];
+ 		const char *)) FUNC(15))((x), (y))
+ #define	SSL_CTX_free(x)	(*(void (*)(SSL_CTX *)) FUNC(13))(x)
+ #define	SSL_pending(x) (*(int (*)(SSL *)) FUNC(14))(x)
++#define SSL_CTX_ctrl(w,x,y,z) (*(long (*)(SSL_CTX *,int,long,void *)) FUNC(16))((w),(x),(y),(z))
+diff -up openwsman-2.2.3/src/server/wsmand-daemon.c.orig openwsman-2.2.3/src/server/wsmand-daemon.c
+--- openwsman-2.2.3/src/server/wsmand-daemon.c.orig	2015-02-09 13:30:41.506235788 +0100
++++ openwsman-2.2.3/src/server/wsmand-daemon.c	2015-02-09 13:32:50.655736126 +0100
+@@ -78,6 +78,7 @@ static int use_digest = 0;
+ static char *ssl_key_file = NULL;
+ static char *service_path = DEFAULT_SERVICE_PATH;
+ static char *ssl_cert_file = NULL;
++static char *ssl_disabled_protocols = NULL;
+ static char *pid_file = DEFAULT_PID_PATH;
+ static char *uri_subscription_repository = DEFAULT_SUBSCRIPTION_REPOSITORY;
+ static int daemon_flag = 0;
+@@ -170,6 +171,7 @@ int wsmand_read_config(dictionary * ini)
+ 	    iniparser_getstring(ini, "server:service_path", "/wsman");
+ 	ssl_key_file = iniparser_getstr(ini, "server:ssl_key_file");
+ 	ssl_cert_file = iniparser_getstr(ini, "server:ssl_cert_file");
++	ssl_disabled_protocols = iniparser_getstr(ini, "server:ssl_disabled_protocols");
+ 	use_ipv4 = iniparser_getboolean(ini, "server:ipv4", 1);
+ #ifdef ENABLE_IPV6
+         use_ipv6 = iniparser_getboolean(ini, "server:ipv6", 1);
+@@ -336,6 +338,11 @@ char *wsmand_options_get_ssl_cert_file(v
+ 	return ssl_cert_file;
+ }
+ 
++char *wsmand_options_get_ssl_disabled_protocols(void)
++{
++	return ssl_disabled_protocols;
++}
++
+ int wsmand_options_get_digest(void)
+ {
+ 	return use_digest;
+diff -up openwsman-2.2.3/src/server/wsmand-daemon.h.orig openwsman-2.2.3/src/server/wsmand-daemon.h
+--- openwsman-2.2.3/src/server/wsmand-daemon.h.orig	2015-02-09 13:33:07.937803078 +0100
++++ openwsman-2.2.3/src/server/wsmand-daemon.h	2015-02-09 13:33:47.806957645 +0100
+@@ -76,6 +76,7 @@ int wsmand_options_get_server_port(void)
+ int wsmand_options_get_server_ssl_port(void);
+ char *wsmand_options_get_ssl_key_file(void);
+ char *wsmand_options_get_ssl_cert_file(void);
++char *wsmand_options_get_ssl_disabled_protocols(void);
+ int wsmand_options_get_digest(void);
+ char *wsmand_options_get_digest_password_file(void);
+ char *wsmand_options_get_basic_password_file(void);
