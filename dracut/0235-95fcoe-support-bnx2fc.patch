@@ -1,0 +1,68 @@
+From b74e7abd6c6c2eca93c67393852e3e4fd47e7956 Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Fri, 9 Sep 2011 13:44:13 -0700
+Subject: [PATCH] 95fcoe: support bnx2fc
+
+To start bnx2fc, we need to run fipvlan only and not dcbtool.  DCBX is run
+automatically in the hardware, but VLAN discovery needs to be started by
+fipvlan.
+
+https://bugzilla.redhat.com/show_bug.cgi?id=736094
+---
+ modules.d/95fcoe/fcoe-up       | 6 ++++++
+ modules.d/95fcoe/install       | 1 +
+ modules.d/95fcoe/parse-fcoe.sh | 5 ++++-
+ 3 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/modules.d/95fcoe/fcoe-up b/modules.d/95fcoe/fcoe-up
+index 7a89e3e..6640200 100755
+--- a/modules.d/95fcoe/fcoe-up
++++ b/modules.d/95fcoe/fcoe-up
+@@ -21,6 +21,9 @@ dcb=$2
+ /sbin/ip link set "$netif" up
+ wait_for_if_up "$netif"
+ 
++netdriver=$(readlink -f /sys/class/net/$netif/device/driver)
++netdriver=${netdriver##*/}
++
+ if [ "$dcb" = "dcb" ]; then
+     # Note lldpad will stay running after switchroot, the system initscripts
+     # are to kill it and start a new lldpad to take over. Data is transfered
+@@ -33,6 +36,9 @@ if [ "$dcb" = "dcb" ]; then
+     dcbtool sc "$netif" app:fcoe e:1 a:1 w:1
+     sleep 1
+     fipvlan "$netif" -c -s
++elif [ "$netdriver" = "bnx2x" ]; then
++    # If driver is bnx2x, do not use /sys/module/fcoe/parameters/create but fipvlan
++    fipvlan "$netif" -c -s
+ else
+     echo -n "$netif" > /sys/module/fcoe/parameters/create
+ fi
+diff --git a/modules.d/95fcoe/install b/modules.d/95fcoe/install
+index 9248de9..aacc216 100755
+--- a/modules.d/95fcoe/install
++++ b/modules.d/95fcoe/install
+@@ -5,6 +5,7 @@ inst dcbtool
+ inst fipvlan
+ inst lldpad
+ inst vconfig
++inst readlink
+ 
+ mkdir -p "$initdir/var/lib/lldpad"
+ 
+diff --git a/modules.d/95fcoe/parse-fcoe.sh b/modules.d/95fcoe/parse-fcoe.sh
+index 84da44a..3827cbb 100755
+--- a/modules.d/95fcoe/parse-fcoe.sh
++++ b/modules.d/95fcoe/parse-fcoe.sh
+@@ -19,7 +19,10 @@
+ [ -z "$fcoe" ] && return
+ 
+ # FCoE actually supported?
+-[ -e /sys/module/fcoe/parameters/create ] || modprobe fcoe || die "FCoE requested but kernel/initrd does not support FCoE"
++# BRCM: Later, should check whether bnx2x is loaded first before loading bnx2fc so do not load bnx2fc when there are no Broadcom adapters
++[ -e /sys/module/fcoe/parameters/create ] || modprobe -a fcoe || die "FCoE requested but kernel/initrd does not support FCoE"
++
++modprobe bnx2fc >/dev/null 2>&1
+ 
+ parse_fcoe_opts() {
+     local IFS=:

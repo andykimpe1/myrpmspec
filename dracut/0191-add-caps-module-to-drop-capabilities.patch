@@ -1,0 +1,192 @@
+From 3bc65506b0c657a334be6d615fc9554b72bbefa6 Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Wed, 9 Mar 2011 18:10:54 +0100
+Subject: [PATCH] add caps module, to drop capabilities
+
+This adds the following parameters:
+rd.caps=1
+	turn the caps module on/off
+rd.caps.initdrop=cap_sys_module,cap_sys_rawio
+	drop the specified comma seperated capabilities
+rd.caps.disablemodules=1
+	turn off module loading
+rd.caps.disablekexec=1
+	turn off the kexec functionality
+
+If module loading is turned off, all modules have to be loaded in the
+initramfs, which are used later on. This can be done with
+"rdloaddriver="
+rdloaddriver=autofs4,sunrpc,ipt_REJECT,nf_conntrack_ipv4,....
+
+Because the kernel command line would get huge with all those drivers, I
+recommend to make use of $initramfs/etc/cmdline.
+
+So, all rd.caps.* and rdloaddriver arguments are in caps.conf can be
+copied to $initramfs/etc/cmdline with "-i caps.conf /etc/cmdline".
+
+Also all modules have to be loaded in the initramfs via "--add-drivers".
+
+The resulting initramfs creation would look like this:
+
+  --add-drivers "autofs4 sunrpc ipt_REJECT nf_conntrack_ipv4 \
+  nf_defrag_ipv4 iptable_filter ip_tables
+  ip6t_REJECT nf_conntrack_ipv6 nf_defrag_ipv6 xt_state nf_conntrack
+  ip6table_filter ip6_tables dm_mirror dm_region_hash dm_log uinput ppdev
+  parport_pc parport ipv6 sg 8139too 8139cp mii i2c_piix4 i2c_core ext3
+  jbd mbcache sd_mod crc_t10dif sr_mod cdrom ata_generic pata_acpi ata_piix
+  dm_mod" \
+  /boot/initramfs-caps.img
+---
+ modules.d/02caps/README  | 33 +++++++++++++++++++++++++++++++++
+ modules.d/02caps/caps.sh | 36 ++++++++++++++++++++++++++++++++++++
+ modules.d/02caps/check   |  8 ++++++++
+ modules.d/02caps/install | 10 ++++++++++
+ modules.d/99base/init    | 21 ++++++++++++++++-----
+ 5 files changed, 103 insertions(+), 5 deletions(-)
+ create mode 100644 modules.d/02caps/README
+ create mode 100755 modules.d/02caps/caps.sh
+ create mode 100755 modules.d/02caps/check
+ create mode 100755 modules.d/02caps/install
+
+diff --git a/modules.d/02caps/README b/modules.d/02caps/README
+new file mode 100644
+index 0000000..770db3f
+--- /dev/null
++++ b/modules.d/02caps/README
+@@ -0,0 +1,33 @@
++This adds the following parameters:
++rd.caps=1
++        turn the caps module on/off
++rd.caps.initdrop=cap_sys_module,cap_sys_rawio
++        drop the specified comma seperated capabilities
++rd.caps.disablemodules=1
++        turn off module loading
++rd.caps.disablekexec=1
++        turn off the kexec functionality
++
++If module loading is turned off, all modules have to be loaded in the
++initramfs, which are used later on. This can be done with
++"rdloaddriver="
++rdloaddriver=autofs4,sunrpc,ipt_REJECT,nf_conntrack_ipv4,....
++
++Because the kernel command line would get huge with all those drivers, I
++recommend to make use of $initramfs/etc/cmdline.
++
++So, all rd.caps.* and rdloaddriver arguments are in caps.conf can be
++copied to $initramfs/etc/cmdline with "-i caps.conf /etc/cmdline".
++
++Also all modules have to be loaded in the initramfs via "--add-drivers".
++
++The resulting initramfs creation would look like this:
++
++  --add-drivers "autofs4 sunrpc ipt_REJECT nf_conntrack_ipv4 \
++  nf_defrag_ipv4 iptable_filter ip_tables
++  ip6t_REJECT nf_conntrack_ipv6 nf_defrag_ipv6 xt_state nf_conntrack
++  ip6table_filter ip6_tables dm_mirror dm_region_hash dm_log uinput ppdev
++  parport_pc parport ipv6 sg 8139too 8139cp mii i2c_piix4 i2c_core ext3
++  jbd mbcache sd_mod crc_t10dif sr_mod cdrom ata_generic pata_acpi ata_piix
++  dm_mod" \
++  /boot/initramfs-caps.img
+diff --git a/modules.d/02caps/caps.sh b/modules.d/02caps/caps.sh
+new file mode 100755
+index 0000000..1732b70
+--- /dev/null
++++ b/modules.d/02caps/caps.sh
+@@ -0,0 +1,36 @@
++#!/bin/bash
++# -*- mode: shell-script; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
++# ex: ts=8 sw=4 sts=4 et filetype=sh
++
++capsmode=$(getarg rd.caps)
++
++if [ "$capsmode" = "1" ]; then
++    CAPS_INIT_DROP=$(getarg rd.caps.initdrop=)
++    CAPS_USERMODEHELPER_BSET=$(capsh --drop="$CAPS_INIT_DROP" -- -c 'while read a b ; do [ "$a" = "CapBnd:" ] && echo $((0x${b:$((${#b}-8)):8})) $((0x${b:$((${#b}-16)):8})) && break; done < /proc/self/status')
++    CAPS_MODULES_DISABLED=$(getarg rd.caps.disablemodules=)
++    CAPS_KEXEC_DISABLED=$(getarg rd.caps.disablekexec=)
++
++    info "Loading CAPS_MODULES $CAPS_MODULES"
++    for i in $CAPS_MODULES;do modprobe $i 2>&1 >/dev/null | vinfo; done
++    
++    if [ "$CAPS_MODULES_DISABLED" = "1" -a -e /proc/sys/kernel/modules_disabled ]; then
++        info "Disabling module loading."
++        echo $CAPS_MODULES_DISABLED > /proc/sys/kernel/modules_disabled
++    fi
++
++    if [ "$CAPS_KEXEC_DISABLED" = "1" -a -e /proc/sys/kernel/kexec_disabled ]; then
++        info "Disabling kexec."
++        echo $CAPS_KEXEC_DISABLED > /proc/sys/kernel/kexec_disabled
++    fi
++
++    info "CAPS_USERMODEHELPER_BSET=$CAPS_USERMODEHELPER_BSET"
++    if [ -e /proc/sys/kernel/usermodehelper/bset ]; then
++        info "Setting usermode helper bounding set."
++        echo $CAPS_USERMODEHELPER_BSET > /proc/sys/kernel/usermodehelper/bset
++        echo $CAPS_USERMODEHELPER_BSET > /proc/sys/kernel/usermodehelper/inheritable
++    fi
++    
++    echo "CAPS_INIT_DROP=\"$CAPS_INIT_DROP\"" > /etc/capsdrop
++    info "Will drop capabilities $CAPS_INIT_DROP from init."
++fi
++
+diff --git a/modules.d/02caps/check b/modules.d/02caps/check
+new file mode 100755
+index 0000000..4f2d0b5
+--- /dev/null
++++ b/modules.d/02caps/check
+@@ -0,0 +1,8 @@
++#!/bin/bash
++
++[[ $1 = -d ]] && exit 0
++
++type -P capsh >/dev/null 2>&1 || exit 1
++
++exit 0
++
+diff --git a/modules.d/02caps/install b/modules.d/02caps/install
+new file mode 100755
+index 0000000..9cef575
+--- /dev/null
++++ b/modules.d/02caps/install
+@@ -0,0 +1,10 @@
++#!/bin/bash
++# -*- mode: shell-script; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
++# ex: ts=8 sw=4 sts=4 et filetype=sh
++
++inst_hook pre-pivot 99 "$moddir/caps.sh"
++dracut_install capsh
++# capsh wants bash and we need bash also
++inst /bin/bash && ln -sf bash "${initdir}/bin/sh"
++
++
+diff --git a/modules.d/99base/init b/modules.d/99base/init
+index a59d4c4..25a338b 100755
+--- a/modules.d/99base/init
++++ b/modules.d/99base/init
+@@ -315,10 +315,21 @@ info "Switching root"
+ 
+ wait_for_loginit
+ 
+-exec switch_root "$NEWROOT" "$INIT" $initargs || {
+-    echo "Something went very badly wrong in the initramfs.  Please "
+-    echo "file a bug against dracut."
+-    emergency_shell
+-}
++if [ -f /etc/capsdrop ]; then
++    . /etc/capsdrop
++    info "Calling $INIT with capabilities $CAPS_INIT_DROP dropped."
++    exec capsh --drop="$CAPS_INIT_DROP" -- -c "exec switch_root \"$NEWROOT\" \"$INIT\" $initargs" || {
++	warn "Command:"
++	warn capsh --drop=$CAPS_INIT_DROP -- -c "'"exec switch_root "$NEWROOT" "$INIT" $initargs"'"
++	warn "failed."
++	emergency_shell
++    }
++else
++    exec switch_root "$NEWROOT" "$INIT" $initargs || {
++	warn "Something went very badly wrong in the initramfs.  Please "
++	warn "file a bug against dracut."
++	emergency_shell
++    }
++fi
+ # vim:ts=8:sw=4:sts=4:et
+ 

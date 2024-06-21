@@ -1,0 +1,129 @@
+From 51b048c3e4960eabadb9fd3387f0e4f7a3c2b39d Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Thu, 19 Apr 2012 11:30:54 +0200
+Subject: [PATCH] use git to apply specfile patches
+
+---
+ Makefile    | 12 ++++++------
+ dracut.spec | 12 ++++++++++++
+ git2spec.pl | 28 ++++++----------------------
+ 3 files changed, 24 insertions(+), 28 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 4484e9e..3fc4226 100644
+--- a/Makefile
++++ b/Makefile
+@@ -76,13 +76,13 @@ dracut-$(VERSION)-$(GITVERSION).tar.bz2:
+ 
+ 
+ rpm: dracut-$(VERSION).tar.bz2
+-	mkdir -p rpmbuild
+-	cp dracut-$(VERSION).tar.bz2 rpmbuild
+-	cd rpmbuild; ../git2spec.pl $(VERSION) < ../dracut.spec > dracut.spec; \
+-	rpmbuild --define "_topdir $$PWD" --define "_sourcedir $$PWD" \
++	rpmbuild=$$(mktemp -d -t rpmbuild-dracut.XXXXXX); src=$$(pwd); \
++	cp dracut-$(VERSION).tar.bz2 "$$rpmbuild"; \
++	$$src/git2spec.pl $(VERSION) "$$rpmbuild" < dracut.spec > $$rpmbuild/dracut.spec; \
++	(cd "$$rpmbuild"; rpmbuild --define "_topdir $$PWD" --define "_sourcedir $$PWD" \
+ 	        --define "_specdir $$PWD" --define "_srcrpmdir $$PWD" \
+-		--define "_rpmdir $$PWD" -ba dracut.spec && \
+-	( cd ..; mv rpmbuild/noarch/*.rpm .; mv rpmbuild/*.src.rpm .;rm -fr rpmbuild; ls *.rpm )
++		--define "_rpmdir $$PWD" -ba dracut.spec; ) && \
++	( mv "$$rpmbuild"/noarch/*.rpm .; mv "$$rpmbuild"/*.src.rpm .;rm -fr "$$rpmbuild"; ls *.rpm )
+ 
+ syncheck:
+ 	@ret=0;for i in modules.d/99base/init modules.d/*/*.sh; do \
+diff --git a/dracut.spec b/dracut.spec
+index 9e53453..7b2eaa7 100644
+--- a/dracut.spec
++++ b/dracut.spec
+@@ -61,6 +61,7 @@ BuildArch: noarch
+ %endif
+ 
+ BuildRequires: docbook-style-xsl docbook-dtds libxslt
++BuildRequires: dash bash git
+ 
+ %description
+ dracut is a new, event-driven initramfs infrastructure based around udev.
+@@ -146,6 +147,17 @@ This package contains tools to assemble the local initrd and host configuration.
+ %prep
+ %setup -q -n %{name}-%{version}
+ 
++%if %{defined PATCH1}
++git init
++git config user.email "dracut-maint@redhat.com"
++git config user.name "Fedora dracut team"
++git add .
++git commit -a -q -m "%{version} baseline."
++
++# Apply all the patches.
++git am -p1 %{patches}
++%endif
++
+ chmod 0755 modules.d/*/check
+ # make rpmlint happy
+ chmod 0755 modules.d/*/install
+diff --git a/git2spec.pl b/git2spec.pl
+index 1f21067..9f12577 100755
+--- a/git2spec.pl
++++ b/git2spec.pl
+@@ -18,30 +18,24 @@ sub last_tag {
+ 
+ sub create_patches {
+     my $tag=shift;
++    my $pdir=shift;
+     my $num=0;
+-    open( GIT, 'git format-patch --no-renames -N --no-signature '.$tag.' |');
++    open( GIT, 'git format-patch -M -N --no-signature -o "'.$pdir.'" '.$tag.' |');
+     @lines=<GIT>;
+     close GIT;         # be done
+     return @lines;
+ };
+ 
+-sub filter_patch {
+-	my $patch=shift;
+-	open(P, $patch);
+-	@lines=<P>;
+-	close(P);
+-	grep (/^ 0 files changed/, @lines);
+-}
+-
+ use POSIX qw(strftime);
+ my $datestr = strftime "%Y%m%d", gmtime;
+ 
+ my $tag=shift;
++my $pdir=shift;
+ $tag=&last_tag if not defined $tag;
+-my @patches=&create_patches($tag);
++my @patches=&create_patches($tag, $pdir);
+ my $num=$#patches + 2;
+ $tag=~s/[^0-9]+?([0-9]+)/$1/;
+-my $release="$num";
++my $release="$num.git$datestr";
+ $release="1" if $num == 1;
+ 
+ while(<>) {
+@@ -55,22 +49,12 @@ while(<>) {
+ 	print $_;
+ 	$num=1;
+ 	for(@patches) {
+-	    next if filter_patch $_;
++	    s/.*\///g;
+ 	    print "Patch$num: $_";
+ 	    $num++;
+ 	}
+ 	print "\n";
+     }
+-    elsif (/^%setup/) {
+-	print $_;
+-	$num=1;
+-	for(@patches) {
+-	    next if filter_patch $_;
+-	    print "%patch$num -p1\n";
+-	    $num++;
+-	}
+-	print "\n";
+-    }
+     else {
+ 	print $_;
+     }

@@ -1,0 +1,97 @@
+From d3b8ab77830741a6de0fc405d7199ce9e2348a71 Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Fri, 5 Sep 2014 11:30:08 +0200
+Subject: [PATCH] fcoe: support multiple fcoe parameters
+
+Fixed rule generation by appending to the rules file.
+Allow additional fcoe parameters after fcoe=edd.
+---
+ modules.d/95fcoe/fcoe-edd.sh      | 10 +++++-----
+ modules.d/95fcoe/fcoe-genrules.sh |  6 +++---
+ modules.d/95fcoe/parse-fcoe.sh    | 26 ++++++++++++--------------
+ 3 files changed, 20 insertions(+), 22 deletions(-)
+
+diff --git a/modules.d/95fcoe/fcoe-edd.sh b/modules.d/95fcoe/fcoe-edd.sh
+index 96c52ad..c3c5b43 100755
+--- a/modules.d/95fcoe/fcoe-edd.sh
++++ b/modules.d/95fcoe/fcoe-edd.sh
+@@ -12,11 +12,11 @@ for disk in /sys/firmware/edd/int13_*; do
+     for nic in ${disk}/pci_dev/net/*; do
+         [ -d $nic ] || continue
+         if [ -e ${nic}/address ]; then
+-	    fcoe_interface=${nic##*/}
+-	    if ! [ -e "/tmp/.fcoe-$fcoe_interface" ]; then
+-		/sbin/fcoe-up $fcoe_interface $dcb
+-		> "/tmp/.fcoe-$fcoe_interface"
+-	    fi
++            fcoe_interface=${nic##*/}
++            if ! [ -e "/tmp/.fcoe-$fcoe_interface" ]; then
++                /sbin/fcoe-up $fcoe_interface $dcb
++                > "/tmp/.fcoe-$fcoe_interface"
++            fi
+         fi
+     done
+ done
+diff --git a/modules.d/95fcoe/fcoe-genrules.sh b/modules.d/95fcoe/fcoe-genrules.sh
+index 5750bd1..97a0b6d 100755
+--- a/modules.d/95fcoe/fcoe-genrules.sh
++++ b/modules.d/95fcoe/fcoe-genrules.sh
+@@ -7,8 +7,8 @@
+ # Write udev rules
+ {
+     if [ -n "$fcoe_mac" ] ; then
+-	printf 'ACTION=="add", SUBSYSTEM=="net", ATTR{address}=="%s", RUN+="/sbin/initqueue --onetime --unique --name fcoe-up-$env{INTERFACE} /sbin/fcoe-up $env{INTERFACE} %s"\n' "$fcoe_mac" "$fcoe_dcb"
++        printf 'ACTION=="add", SUBSYSTEM=="net", ATTR{address}=="%s", RUN+="/sbin/initqueue --onetime --unique --name fcoe-up-$env{INTERFACE} /sbin/fcoe-up $env{INTERFACE} %s"\n' "$fcoe_mac" "$fcoe_dcb"
+     else
+-	printf 'ACTION=="add", SUBSYSTEM=="net", NAME=="%s", RUN+="/sbin/initqueue --onetime --unique --name fcoe-up-$env{INTERFACE} /sbin/fcoe-up $env{INTERFACE} %s"\n' "$fcoe_interface" "$fcoe_dcb"
++        printf 'ACTION=="add", SUBSYSTEM=="net", NAME=="%s", RUN+="/sbin/initqueue --onetime --unique --name fcoe-up-$env{INTERFACE} /sbin/fcoe-up $env{INTERFACE} %s"\n' "$fcoe_interface" "$fcoe_dcb"
+     fi
+-} > /etc/udev/rules.d/60-fcoe.rules
++} >> /etc/udev/rules.d/60-fcoe.rules
+diff --git a/modules.d/95fcoe/parse-fcoe.sh b/modules.d/95fcoe/parse-fcoe.sh
+index fa16440..2fb9b25 100755
+--- a/modules.d/95fcoe/parse-fcoe.sh
++++ b/modules.d/95fcoe/parse-fcoe.sh
+@@ -21,7 +21,6 @@
+ [ -e /sys/module/fcoe/parameters/create ] || modprobe -a fcoe || die "FCoE requested but kernel/initrd does not support FCoE"
+ 
+ modprobe bnx2fc >/dev/null 2>&1
+-udevadm settle --timeout=30 >/dev/null 2>&1
+ 
+ parse_fcoe_opts() {
+     local IFS=:
+@@ -45,22 +44,21 @@ parse_fcoe_opts() {
+     esac
+ }
+ 
+-parse_fcoe_opts
++for fcoe in $(getargs fcoe=); do
++    unset fcoe_mac
++    unset fcoe_interface
++    parse_fcoe_opts
+ 
+-if [ "$fcoe_interface" = "edd" ]; then
+-    if [ "$fcoe_dcb" != "nodcb" -a "$fcoe_dcb" != "dcb" ] ; then
+-        warn "Invalid FCoE DCB option: $fcoe_dcb"
+-    fi
+-    /sbin/initqueue --settled --unique /sbin/fcoe-edd $fcoe_dcb
+-else
+-    for fcoe in $(getargs fcoe=); do
+-        unset fcoe_mac
+-        unset fcoe_interface
+-        parse_fcoe_opts
++    if [ "$fcoe_interface" = "edd" ]; then
++        if [ "$fcoe_dcb" != "nodcb" -a "$fcoe_dcb" != "dcb" ] ; then
++            warn "Invalid FCoE DCB option: $fcoe_dcb"
++        fi
++        /sbin/initqueue --settled --unique /sbin/fcoe-edd $fcoe_dcb
++    else
+         if [ "$fcoe_dcb" != "nodcb" -a "$fcoe_dcb" != "dcb" ] ; then
+             warn "Invalid FCoE DCB option: $fcoe_dcb"
+         fi
+         . /sbin/fcoe-genrules.sh
+-    done
+-fi
++    fi
++done
+ 

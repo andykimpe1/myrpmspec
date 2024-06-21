@@ -1,0 +1,96 @@
+From 1cb33f3954aca437f9b1e992dad991f078b013e5 Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Thu, 18 Jul 2013 12:05:19 +0200
+Subject: [PATCH] Start iscsi regardless of network, if requested
+
+https://bugzilla.redhat.com/show_bug.cgi?id=813687
+---
+ modules.d/95iscsi/iscsiroot          |  9 +++++++++
+ modules.d/95iscsi/parse-iscsiroot.sh | 10 ++++++++++
+ modules.d/99base/dracut-lib.sh       | 18 ++++++++++++++++++
+ 3 files changed, 37 insertions(+)
+
+diff --git a/modules.d/95iscsi/iscsiroot b/modules.d/95iscsi/iscsiroot
+index bea831d..dce081d 100755
+--- a/modules.d/95iscsi/iscsiroot
++++ b/modules.d/95iscsi/iscsiroot
+@@ -51,6 +51,10 @@ if getarg iscsi_firmware ; then
+     done
+ 
+     iscsistart -b $iscsi_param
++
++    echo 'started' > "/tmp/iscsistarted-iscsi"
++    echo 'started' > "/tmp/iscsistarted-firmware"
++
+     exit 0
+ fi
+ 
+@@ -154,6 +158,11 @@ handle_netroot()
+ 	${iscsi_param} \
+ 	|| :
+ 
++
++    netroot_enc=$(str_replace "$1" '/' '\2f')
++    echo 'started' > "/tmp/iscsistarted-iscsi:${netroot_enc}"
++
++
+ # install mount script
+     if [ -n "${root%%block:*}" ]; then
+     # if root is not specified try to mount the whole iSCSI LUN
+diff --git a/modules.d/95iscsi/parse-iscsiroot.sh b/modules.d/95iscsi/parse-iscsiroot.sh
+index 18e2373..939bd2c 100755
+--- a/modules.d/95iscsi/parse-iscsiroot.sh
++++ b/modules.d/95iscsi/parse-iscsiroot.sh
+@@ -64,6 +64,7 @@ if [ -n "$iscsi_firmware" ] ; then
+     netroot=${netroot:-iscsi}
+     modprobe -q iscsi_ibft
+     modprobe -q iscsi_boot_sysfs 2>/dev/null
++    echo "[ -f '/tmp/iscsistarted-firmware' ]" > /initqueue-finished/iscsi_firmware_started.sh
+ fi
+ 
+ # If it's not iscsi we don't continue
+@@ -78,6 +79,15 @@ if ! [ -e /sys/module/iscsi_tcp ]; then
+     modprobe -q iscsi_tcp || die "iscsiroot requested but kernel/initrd does not support iscsi"
+ fi
+ 
++if [ -n "$netroot" ] && [ "$root" != "/dev/root" ] && [ "$root" != "dhcp" ]; then
++    if ! getarg "ip="; then
++        initqueue --onetime --settled /sbin/iscsiroot dummy "$netroot" "$NEWROOT"
++    fi
++fi
++
++netroot_enc=$(str_replace "$netroot" '/' '\2f')
++echo "[ -f '/tmp/iscsistarted-$netroot_enc' ]" > initqueue-finished/iscsi_started.sh
++
+ # Done, all good!
+ rootok=1
+ 
+diff --git a/modules.d/99base/dracut-lib.sh b/modules.d/99base/dracut-lib.sh
+index f29e719..3b081e8 100644
+--- a/modules.d/99base/dracut-lib.sh
++++ b/modules.d/99base/dracut-lib.sh
+@@ -4,6 +4,24 @@ strstr() {
+   [ "${1#*$2*}" != "$1" ]
+ }
+ 
++# replaces all occurrences of 'search' in 'str' with 'replacement'
++#
++# str_replace str search replacement
++#
++# example:
++# str_replace '  one two  three  ' ' ' '_'
++str_replace() {
++    local in="$1"; local s="$2"; local r="$3"
++    local out=''
++
++    while strstr "${in}" "$s"; do
++        chop="${in%%$s*}"
++        out="${out}${chop}$r"
++        in="${in#*$s}"
++    done
++    echo "${out}${in}"
++}
++
+ getarg() {
+     set +x 
+     local o line

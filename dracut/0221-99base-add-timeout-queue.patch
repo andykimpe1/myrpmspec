@@ -1,0 +1,92 @@
+From ff349b081207b57c84b23a2933c1298bb0288101 Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Fri, 5 Aug 2011 11:53:41 +0200
+Subject: [PATCH] 99base: add timeout queue
+
+timeout queue is executed after half of the maximum retry count and if
+jobs are found there, the counter is reset to zero.
+---
+ modules.d/99base/init      | 21 ++++++++++++++++-----
+ modules.d/99base/initqueue |  8 +++++---
+ modules.d/99base/install   |  1 +
+ 3 files changed, 22 insertions(+), 8 deletions(-)
+
+diff --git a/modules.d/99base/init b/modules.d/99base/init
+index 25a338b..7e83dfc 100755
+--- a/modules.d/99base/init
++++ b/modules.d/99base/init
+@@ -158,8 +158,9 @@ getarg 'rdbreak=initqueue' && emergency_shell -n initqueue "Break before initque
+ RDRETRY=$(getarg 'rd_retry=')
+ RDRETRY=${RDRETRY:-20}
+ RDRETRY=$(($RDRETRY*2))
+-
+-i=0
++export RDRETRY
++main_loop=0
++export main_loop
+ while :; do
+ 
+     check_finished && break
+@@ -205,13 +206,23 @@ while :; do
+ 	    ID_CDROM_MEDIA && continue
+         echo change > "$cdrom/uevent"        
+     done
+-    
+-    i=$(($i+1))
+-    [ $i -gt $RDRETRY ] \
++
++    if [ $main_loop -gt $(($RDRETRY/2)) ]; then
++	for job in /initqueue-timeout/*.sh; do
++            [ -e "$job" ] || break
++            job=$job . $job
++            main_loop=0
++	done
++    fi
++
++    main_loop=$(($main_loop+1))
++    [ $main_loop -gt $RDRETRY ] \
+         && { flock -s 9 ; emergency_shell "No root device \"$root\" found"; } 9>/.console_lock
+ done
+ unset job
+ unset queuetriggered
++unset main_loop
++unset RDRETRY
+ 
+ # pre-mount happens before we try to mount the root filesystem,
+ # and happens once.
+diff --git a/modules.d/99base/initqueue b/modules.d/99base/initqueue
+index cc6e7a8..cc5ae37 100755
+--- a/modules.d/99base/initqueue
++++ b/modules.d/99base/initqueue
+@@ -7,7 +7,9 @@ while [ $# -gt 0 ]; do
+ 	--onetime)
+ 	    onetime="yes";;
+ 	--settled)
+-	    settled="-settled";;
++	    queue="-settled";;
++	--timeout)
++	    queue="-timeout";;
+ 	--unique)
+ 	    unique="yes";;
+ 	--name)
+@@ -35,6 +37,6 @@ else
+    echo "$@" > "/tmp/$$-${job}.sh"
+ fi
+ 
+-mv -f "/tmp/$$-${job}.sh" "/initqueue${settled}/${job}.sh"
+-[ -z "$settled" ] && >> /initqueue/work
++mv -f "/tmp/$$-${job}.sh" "/initqueue${queue}/${job}.sh"
++[ -z "$queue" ] && >> /initqueue/work
+ 
+diff --git a/modules.d/99base/install b/modules.d/99base/install
+index a317442..bf51fc5 100755
+--- a/modules.d/99base/install
++++ b/modules.d/99base/install
+@@ -13,6 +13,7 @@ inst "$moddir/loginit" "/sbin/loginit"
+ mkdir -p ${initdir}/initqueue
+ mkdir -p ${initdir}/initqueue-finished
+ mkdir -p ${initdir}/initqueue-settled
++mkdir -p ${initdir}/initqueue-timeout
+ mkdir -p ${initdir}/tmp
+ # Bail out if switch_root does not exist
+ if which switch_root >/dev/null 2>&1; then

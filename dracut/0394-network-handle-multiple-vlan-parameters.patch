@@ -1,0 +1,215 @@
+From fa870823fec763712b645b94db3452c296d1e6d0 Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Tue, 19 Jan 2016 17:06:37 +0100
+Subject: [PATCH] network: handle multiple vlan parameters
+
+---
+ modules.d/40network/ifup          | 61 ++++++++++++++++++++-------------------
+ modules.d/40network/parse-vlan.sh | 30 +++++++------------
+ modules.d/45ifcfg/write-ifcfg.sh  | 23 ++++++++++-----
+ 3 files changed, 57 insertions(+), 57 deletions(-)
+
+diff --git a/modules.d/40network/ifup b/modules.d/40network/ifup
+index 501d074..183a9cf 100755
+--- a/modules.d/40network/ifup
++++ b/modules.d/40network/ifup
+@@ -98,12 +98,41 @@ do_static() {
+     /sbin/initqueue --onetime --name netroot-$netif  /sbin/netroot $netif 
+ }
+ 
++get_vid() {
++    case "$1" in
++        vlan*)
++            return ${1#vlan}
++            ;;
++        *.*)
++            return ${1##*.}
++            ;;
++    esac
++}
++
+ # Huh? No $1?
+ [ -z "$1" ] && exit 1
+ 
+ # $netif reads easier than $1
+ netif=$1
+ 
++# check, if we need VLAN's for this interface
++if [ -z "$DO_VLAN_PHY" ] && [ -e /tmp/vlan.${netif}.phy ]; then
++    NO_AUTO_DHCP=yes DO_VLAN_PHY=yes ifup "$netif"
++    modprobe -b -q 8021q
++
++    for i in /tmp/vlan.*.${netif}; do
++        [ -e "$i" ] || continue
++        read vlanname < "$i"
++        if [ -n "$vlanname" ]; then
++	    ip link set "$phydevice" up
++	    wait_for_if_up "$phydevice"
++            ip link add dev "$vlanname" link "$phydevice" type vlan id "$(get_vid $vlanname)"
++            ifup "$vlanname"
++        fi
++    done
++    exit 0
++fi
++
+ # enslave this interface to bond?
+ if [ -e /tmp/bond.info ]; then
+     . /tmp/bond.info
+@@ -126,17 +155,6 @@ if [ -e /tmp/bridge.info ]; then
+     fi
+ fi
+ 
+-if [ -e /tmp/vlan.info ]; then
+-    . /tmp/vlan.info
+-    if [ "$netif" = "$phydevice" ]; then
+-        if [ "$netif" = "$bondname" ] && [ -n "$DO_BOND_SETUP" ] ; then
+-            : # We need to really setup bond (recursive call)
+-        else
+-            netif="$vlanname"
+-        fi
+-    fi
+-fi
+-
+ 
+ # bail immediately if the interface is already up
+ # or we don't need the network
+@@ -217,28 +235,11 @@ if [ "$netif" = "$bridgename" ] && [ ! -e /tmp/net.$bridgename.up ]; then
+     brctl addif $bridgename $ethname
+ fi
+ 
+-get_vid() {
+-    case "$1" in
+-        vlan*)
+-            return ${1#vlan}
+-            ;;
+-        *.*)
+-            return ${1##*.}
+-            ;;
+-    esac
+-}
+-
+-if [ "$netif" = "$vlanname" ] && [ ! -e /tmp/net.$vlanname.up ]; then
+-    modprobe 8021q
+-    ip link set "$phydevice" up
+-    wait_for_if_up "$phydevice"
+-    ip link add dev "$vlanname" link "$phydevice" type vlan id "$(get_vid $vlanname; echo $?)"
+-fi
+ 
+ # No ip lines default to dhcp
+ ip=$(getarg ip)
+ 
+-if [ -z "$ip" ]; then
++if [ -z "$NO_AUTO_DHCP" ] && [ -z "$ip" ]; then
+     if [ "$netroot" = "dhcp6" ]; then
+ 	do_dhcp -6
+     else
+@@ -280,7 +281,7 @@ for p in $(getargs ip=); do
+ 		do_dhcp -6 ;;
+ 	    auto6)
+ 		do_ipv6auto ;;
+-            *) 
++            *)
+ 		do_static ;;
+ 	esac
+     done
+diff --git a/modules.d/40network/parse-vlan.sh b/modules.d/40network/parse-vlan.sh
+index 3ba2289..0d21222 100755
+--- a/modules.d/40network/parse-vlan.sh
++++ b/modules.d/40network/parse-vlan.sh
+@@ -4,14 +4,6 @@
+ #	vlan=<vlanname>:<phydevice>
+ #
+ 
+-# return if vlan already parsed
+-[ -n "$vlanname" ] && return
+-
+-# Check if vlan parameter is valid
+-if getarg vlan= >/dev/null ; then
+-    :
+-fi
+-
+ parsevlan() {
+     local v=${1}:
+     set --
+@@ -20,23 +12,21 @@ parsevlan() {
+         v=${v#*:}
+     done
+ 
+-    unset vlanname phydevice
+     case $# in
+-    2)  vlanname=$1; phydevice=$2 ;;
++    2)  vlanname=$1; phydevice=$2 ; return 0 ;;
+     *)  die "vlan= requires two parameters" ;;
+     esac
++    return 1
+ }
+ 
+ unset vlanname phydevice
+ 
+-if getarg vlan >/dev/null; then
+-    # Read vlan= parameters if they exist
+-    vlan="$(getarg vlan=)"
+-    if [ ! "$vlan" = "vlan" ]; then
+-        parsevlan "$(getarg vlan=)"
++for vlan in $(getargs vlan); do
++    [ "$vlan" = "vlan" ] && continue
++    unset vlanname phydevice
++    if parsevlan "$(getarg vlan=)"; then
++        echo "$phydevice" > /tmp/vlan.${phydevice}.phy
++        echo "$phydevice" >> /tmp/net.ifaces
++        echo "$vlanname" > /tmp/vlan.${vlanname}.${phydevice}
+     fi
+-
+-    echo "vlanname=\"$vlanname\"" > /tmp/vlan.info
+-    echo "phydevice=\"$phydevice\"" >> /tmp/vlan.info
+-    return
+-fi
++done
+diff --git a/modules.d/45ifcfg/write-ifcfg.sh b/modules.d/45ifcfg/write-ifcfg.sh
+index 30a934d..ec4bbf8 100644
+--- a/modules.d/45ifcfg/write-ifcfg.sh
++++ b/modules.d/45ifcfg/write-ifcfg.sh
+@@ -17,27 +17,36 @@ if [ -e /tmp/bridge.info ]; then
+     . /tmp/bridge.info
+ fi
+ 
+-if [ -e /tmp/vlan.info ]; then
+-    . /tmp/vlan.info
+-fi
+-
+ mkdir -p /tmp/ifcfg/
+ 
+ for netif in $IFACES ; do
+-    # bridge?
+     unset bridge
+     unset bond
+     unset vlan
++    unset phydevice
++    unset vlanname
++    unset uuid
++    unset ip
++    unset gw
++    unset mtu
++    unset mask
++    unset macaddr
+ 
++    # bridge?
+     if [ "$netif" = "$bridgename" ]; then
+         bridge=yes
+     elif [ "$netif" = "$bondname" ]; then
+     # $netif can't be bridge and bond at the same time
+         bond=yes
+     fi
+-    if [ "$netif" = "$vlanname" ]; then
++
++    for i in /tmp/vlan.${netif}.*; do
++        [ ! -e "$i" ] && continue
++        . "$i"
+         vlan=yes
+-    fi
++        break
++    done
++
+     cat /sys/class/net/$netif/address > /tmp/net.${netif}.hwaddr
+     {
+         echo "# Generated by dracut initrd"

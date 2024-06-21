@@ -1,0 +1,287 @@
+From e654485a8e119c25578d3af7170a171ca332f404 Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Thu, 18 Jul 2013 13:26:07 +0200
+Subject: [PATCH] Improve lsinitrd and add lsinitrd manpage
+
+---
+ Makefile    |   3 +-
+ dracut.spec |   2 +
+ lsinitrd    | 140 ++++++++++++++++++++++++++++++++++++++++++++++--------------
+ lsinitrd.1  |  73 +++++++++++++++++++++++++++++++
+ 4 files changed, 184 insertions(+), 34 deletions(-)
+ create mode 100644 lsinitrd.1
+
+diff --git a/Makefile b/Makefile
+index c2e8e4a..64f1220 100644
+--- a/Makefile
++++ b/Makefile
+@@ -33,7 +33,7 @@ install:
+ 	mkdir -p $(DESTDIR)$(sbindir)
+ 	mkdir -p $(DESTDIR)$(sysconfdir)
+ 	mkdir -p $(DESTDIR)$(pkglibdir)/modules.d
+-	mkdir -p $(DESTDIR)$(mandir)/man{5,8}
++	mkdir -p $(DESTDIR)$(mandir)/man{1,5,8}
+ 	install -m 0755 dracut $(DESTDIR)$(sbindir)/dracut
+ 	install -m 0755 dracut-gencmdline $(DESTDIR)$(sbindir)/dracut-gencmdline
+ 	install -m 0755 dracut-catimages $(DESTDIR)$(sbindir)/dracut-catimages
+@@ -48,6 +48,7 @@ endif
+ 	cp -arx modules.d $(DESTDIR)$(pkglibdir)
+ 	install -m 0644 dracut.8 $(DESTDIR)$(mandir)/man8
+ 	install -m 0644 mkinitrd.8 $(DESTDIR)$(mandir)/man8
++	install -m 0644 lsinitrd.1 $(DESTDIR)$(mandir)/man1
+ 	install -m 0644 dracut-catimages.8 $(DESTDIR)$(mandir)/man8
+ 	install -m 0644 dracut-gencmdline.8 $(DESTDIR)$(mandir)/man8
+ 	install -m 0644 dracut.conf.5 $(DESTDIR)$(mandir)/man5
+diff --git a/dracut.spec b/dracut.spec
+index 8cf470c..10a1f90 100644
+--- a/dracut.spec
++++ b/dracut.spec
+@@ -210,6 +210,8 @@ rm -rf $RPM_BUILD_ROOT
+ %config(noreplace) /etc/dracut.conf
+ %dir /etc/dracut.conf.d
+ %config(noreplace) /etc/logrotate.d/dracut
++%{_mandir}/man1/lsinitrd.1*
++%{_mandir}/man8/mkinitrd.8*
+ %{_mandir}/man8/dracut.8*
+ %{_mandir}/man5/dracut.conf.5*
+ %{_datadir}/dracut/modules.d/00dash
+diff --git a/lsinitrd b/lsinitrd
+index 0ee827a..3a1ccf4 100755
+--- a/lsinitrd
++++ b/lsinitrd
+@@ -19,49 +19,123 @@
+ # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ #
+ 
+-[[ $# -le 2 ]] || { echo "Usage: $(basename $0) [-s] [<initramfs file> [<filename>]]" ; exit 1 ; }
++usage()
++{
++    {
++        echo "Usage: ${0##*/} [options] [<initramfs file> [<filename> [<filename> [...] ]]]"
++        echo "Usage: ${0##*/} [options] -k <kernel version>"
++        echo
++        echo "-h, --help                  print a help message and exit."
++        echo "-s, --size                  sort the contents of the initramfs by size."
++        echo "-f, --file <filename>       print the contents of <filename>."
++        echo "-k, --kver <kernel version> inspect the initramfs of <kernel version>."
++        echo
++    } >&2
++}
+ 
+ sorted=0
+-while getopts "s" opt; do
+-    case $opt in
+-        s)  sorted=1;;
+-        \?) exit 1;;
++declare -A filenames
++
++unset POSIXLY_CORRECT
++TEMP=$(getopt \
++    -o "shf:k:" \
++    --long kver: \
++    --long file: \
++    --long help \
++    --long size \
++    -- "$@")
++
++if (( $? != 0 )); then
++    usage
++    exit 1
++fi
++
++eval set -- "$TEMP"
++
++while (($# > 0)); do
++    case $1 in
++        -k|--kver)  KERNEL_VERSION="$2"; shift;;
++        -f|--file)  filenames[${2#/}]=1; shift;;
++        -s|--size)  sorted=1;;
++        -h|--help)  usage; exit 0;;
++        --)         shift;break;;
++        *)          usage; exit 1;;
+     esac
++    shift
+ done
+-shift $((OPTIND-1))
+-
+-image="${1:-/boot/initramfs-$(uname -r).img}"
+-[[ -f "$image" ]]    || { echo "$image does not exist" ; exit 1 ; }
+ 
+-CAT=zcat
+-FILE_T=$(file "$image")
++[[ $KERNEL_VERSION ]] || KERNEL_VERSION="$(uname -r)"
+ 
+-if command -v xz >/dev/null && echo "test"|xz|xz -dc --single-stream >/dev/null 2>&1; then
+-    XZ_SINGLE_STREAM="--single-stream"
++if [[ $1 ]]; then
++    image="$1"
++    if ! [[ -f "$image" ]]; then
++        {
++            echo "$image does not exist"
++            echo
++        } >&2
++        usage
++        exit 1
++    fi
++else
++    image="/boot/initramfs-${KERNEL_VERSION}.img"
+ fi
+ 
+-if [[ "$FILE_T" =~ ": gzip compressed data" ]]; then
+-    CAT=zcat
+-elif [[ "$FILE_T" =~ ": xz compressed data" ]]; then
+-    CAT="xzcat $XZ_SINGLE_STREAM"
+-elif [[ "$FILE_T" =~ ": XZ compressed data" ]]; then
+-    CAT="xzcat $XZ_SINGLE_STREAM"
+-elif [[ "$FILE_T" =~ ": data" ]]; then
+-    CAT=lzcat
+-fi
++shift
++while (($# > 0)); do
++    filenames[${1#/}]=1;
++    shift
++done
+ 
+-if [[ $# -eq 2 ]]; then
+-    $CAT $image | cpio --extract --verbose --quiet --to-stdout ${2#/} 2>/dev/null
+-    exit $?
++if ! [[ -f "$image" ]]; then
++    {
++        echo "No <initramfs file> specified and the default image '$image' cannot be accessed!"
++        echo
++    } >&2
++    usage
++    exit 1
+ fi
+ 
+-echo "$image: $(du -h $image | awk '{print $1}')"
+-echo "========================================================================"
+-$CAT "$image" | cpio --extract --verbose --quiet --to-stdout 'lib/dracut/dracut-*' 2>/dev/null
+-echo "========================================================================"
+-if [ "$sorted" -eq 1 ]; then
+-    $CAT "$image" | cpio --extract --verbose --quiet --list | sort -n -k5
++read -N 6 bin < "$image"
++case $bin in
++    $'\x1f\x8b'*)
++        CAT="zcat";;
++    BZh*)
++        CAT="bzcat";;
++    070701)
++        CAT="cat";;
++    *)
++        CAT="xzcat";
++        if echo "test"|xz|xzcat --single-stream >/dev/null 2>&1; then
++            CAT="xzcat --single-stream"
++        fi
++        ;;
++esac
++
++ret=0
++
++if (( ${#filenames[@]} > 0 )); then
++    (( ${#filenames[@]} == 1 )) && nofileinfo=1
++    for f in ${!filenames[@]}; do
++        [[ $nofileinfo ]] || echo "initramfs:/$f"
++        [[ $nofileinfo ]] || echo "========================================================================"
++        $CAT -- $image | cpio --extract --verbose --quiet --to-stdout $f 2>/dev/null
++        ((ret+=$?))
++        [[ $nofileinfo ]] || echo "========================================================================"
++        [[ $nofileinfo ]] || echo
++    done
+ else
+-    $CAT "$image" | cpio --extract --verbose --quiet --list
++    echo "Image: $image: $(du -h $image | while read a b; do echo $a;done)"
++    echo "========================================================================"
++    $CAT -- "$image" | cpio --extract --verbose --quiet --to-stdout -- 'dracut-*' 2>/dev/null
++    ((ret+=$?))
++    echo "========================================================================"
++    if [ "$sorted" -eq 1 ]; then
++        $CAT -- "$image" | cpio --extract --verbose --quiet --list | sort -n -k5
++    else
++        $CAT -- "$image" | cpio --extract --verbose --quiet --list | sort -k9
++    fi
++    ((ret+=$?))
++    echo "========================================================================"
+ fi
+-echo "========================================================================"
++
++exit $ret
+diff --git a/lsinitrd.1 b/lsinitrd.1
+new file mode 100644
+index 0000000..5509be2
+--- /dev/null
++++ b/lsinitrd.1
+@@ -0,0 +1,73 @@
++'\" t
++.\"     Title: lsinitrd
++.\"    Author: [see the "AUTHORS" section]
++.\" Generator: DocBook XSL Stylesheets v1.78.1 <http://docbook.sf.net/>
++.\"      Date: 07/17/2013
++.\"    Manual: dracut
++.\"    Source: dracut
++.\"  Language: English
++.\"
++.TH "LSINITRD" "1" "07/17/2013" "dracut" "dracut"
++.\" -----------------------------------------------------------------
++.\" * Define some portability stuff
++.\" -----------------------------------------------------------------
++.\" ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++.\" http://bugs.debian.org/507673
++.\" http://lists.gnu.org/archive/html/groff/2009-02/msg00013.html
++.\" ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++.ie \n(.g .ds Aq \(aq
++.el       .ds Aq '
++.\" -----------------------------------------------------------------
++.\" * set default formatting
++.\" -----------------------------------------------------------------
++.\" disable hyphenation
++.nh
++.\" disable justification (adjust text to left margin only)
++.ad l
++.\" -----------------------------------------------------------------
++.\" * MAIN CONTENT STARTS HERE *
++.\" -----------------------------------------------------------------
++.SH "NAME"
++lsinitrd \- tool to show the contents of an initramfs image
++.SH "SYNOPSIS"
++.sp
++\fBlsinitrd\fR [\fIOPTION\&...\fR] [<image> [<filename> [<filename> [\&...] ]]]
++.sp
++\fBlsinitrd\fR [\fIOPTION\&...\fR] \-k <kernel\-version>
++.SH "DESCRIPTION"
++.sp
++lsinitrd shows the contents of an initramfs image\&. if <image> is omitted, then lsinitrd uses the default image \fI/boot/<machine\-id>/<kernel\-version>/initrd\fR or \fI/boot/initramfs\-<kernel\-version>\&.img\fR\&.
++.SH "OPTIONS"
++.PP
++\fB\-h, \-\-help\fR
++.RS 4
++print a help message and exit\&.
++.RE
++.PP
++\fB\-s, \-\-size\fR
++.RS 4
++sort the contents of the initramfs by size\&.
++.RE
++.PP
++\fB\-f, \-\-file\fR\ \&\fI<filename>\fR
++.RS 4
++print the contents of <filename>\&.
++.RE
++.PP
++\fB\-k, \-\-kver\fR\ \&\fI<kernel version>\fR
++.RS 4
++inspect the initramfs of <kernel version>\&.
++.RE
++.SH "AVAILABILITY"
++.sp
++The lsinitrd command is part of the dracut package and is available from \m[blue]\fBhttps://dracut\&.wiki\&.kernel\&.org\fR\m[]
++.SH "AUTHORS"
++.sp
++Harald Hoyer
++.sp
++Amerigo Wang
++.sp
++Nikoli
++.SH "SEE ALSO"
++.sp
++\fBdracut\fR(8)

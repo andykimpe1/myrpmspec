@@ -1,0 +1,114 @@
+From 5018463c5e9bd271548f69027027a58b4b4168ff Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Mon, 18 Apr 2011 18:03:47 +0200
+Subject: [PATCH] fips: also support FIPS on separate LVM partition
+
+---
+ modules.d/01fips/fips-boot.sh   |  4 +++-
+ modules.d/01fips/fips-noboot.sh |  3 ++-
+ modules.d/01fips/fips.sh        | 33 ++++++++++++++++-----------------
+ 3 files changed, 21 insertions(+), 19 deletions(-)
+
+diff --git a/modules.d/01fips/fips-boot.sh b/modules.d/01fips/fips-boot.sh
+index 8e99e5e..a2f64ec 100755
+--- a/modules.d/01fips/fips-boot.sh
++++ b/modules.d/01fips/fips-boot.sh
+@@ -6,5 +6,7 @@ if ! fipsmode=$(getarg fips) || [ $fipsmode = "0" ]; then
+     rm -f /etc/modprobe.d/fips.conf >/dev/null 2>&1
+ elif getarg boot= >/dev/null; then
+     . /sbin/fips.sh
+-    do_fips || die "FIPS integrity test failed"
++    if mount_boot; then
++        do_fips || die "FIPS integrity test failed"
++    fi
+ fi
+diff --git a/modules.d/01fips/fips-noboot.sh b/modules.d/01fips/fips-noboot.sh
+index 107728c..8c4ac0b 100755
+--- a/modules.d/01fips/fips-noboot.sh
++++ b/modules.d/01fips/fips-noboot.sh
+@@ -4,7 +4,8 @@
+ 
+ if ! fipsmode=$(getarg fips) || [ $fipsmode = "0" ]; then
+     rm -f /etc/modprobe.d/fips.conf >/dev/null 2>&1
+-elif ! getarg boot= >/dev/null; then
++elif ! [ -f /tmp/fipsdone ]; then
+     . /sbin/fips.sh
++    mount_boot
+     do_fips || die "FIPS integrity test failed"
+ fi
+diff --git a/modules.d/01fips/fips.sh b/modules.d/01fips/fips.sh
+index 012c4a0..67eefb8 100755
+--- a/modules.d/01fips/fips.sh
++++ b/modules.d/01fips/fips.sh
+@@ -1,13 +1,12 @@
+ #!/bin/sh
+ # -*- mode: shell-script; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
+ # ex: ts=8 sw=4 sts=4 et filetype=sh
+-do_fipskernel()
++
++mount_boot()
+ {
+     boot=$(getarg boot=)
+-    newroot=$NEWROOT
+ 
+     if [ -n "$boot" ]; then
+-        KERNEL=$(uname -r)
+         case "$boot" in
+         LABEL=*)
+             boot="$(echo $boot | sed 's,/,\\x2f,g')"
+@@ -42,14 +41,20 @@ do_fipskernel()
+         fi
+ 
+         [ -e "$boot" ] || return 1
+-        
++
+         mkdir /boot
+         info "Mounting $boot as /boot"
+         mount -oro "$boot" /boot || return 1
+-        unset newroot
+     fi
++}
+ 
++do_fips()
++{
+     info "Checking integrity of kernel"
++    newroot=$NEWROOT
++    KERNEL=$(uname -r)
++
++    [ -e "$newroot/boot/.vmlinuz-${KERNEL}.hmac" ] || unset newroot
+ 
+     if ! [ -e "$newroot/boot/.vmlinuz-${KERNEL}.hmac" ]; then
+         warn "$newroot/boot/.vmlinuz-${KERNEL}.hmac does not exist"
+@@ -58,18 +63,8 @@ do_fipskernel()
+ 
+     sha512hmac -c "$newroot/boot/.vmlinuz-${KERNEL}.hmac" || return 1
+ 
+-    if [ -z "$newroot" ]; then
+-        info "Umounting /boot"
+-        umount /boot
+-    fi
+-}
+-
+-do_fips()
+-{
+-    do_fipskernel || return 1
+-
+     FIPSMODULES=$(cat /etc/fipsmodules)
+-    
++
+     info "Loading and integrity checking all crypto modules"
+     for module in $FIPSMODULES; do
+         if [ "$module" != "tcrypt" ]; then
+@@ -79,7 +74,11 @@ do_fips()
+     info "Self testing crypto algorithms"
+     modprobe tcrypt || return 1
+     rmmod tcrypt
+-    info "All initrd crypto checks done"  
++    info "All initrd crypto checks done"
++
++    > /tmp/fipsdone
++
++    umount /boot >/dev/null 2>&1
+ 
+     return 0
+ }

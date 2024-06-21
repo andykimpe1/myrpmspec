@@ -1,0 +1,63 @@
+From 7ceaad340004d6c5b8027e763dfa96818d07a341 Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Thu, 7 Apr 2016 11:18:44 +0200
+Subject: [PATCH] iscsi/iscsiroot: don't evaluate iscsistart -N return value
+
+Start iscsistart -b in the background and wait for the forked shell to
+set the marker in tmp in initqueue-finished.
+---
+ modules.d/95iscsi/iscsiroot | 28 ++++++++++++++++------------
+ 1 file changed, 16 insertions(+), 12 deletions(-)
+
+diff --git a/modules.d/95iscsi/iscsiroot b/modules.d/95iscsi/iscsiroot
+index e444121..51fd977 100755
+--- a/modules.d/95iscsi/iscsiroot
++++ b/modules.d/95iscsi/iscsiroot
+@@ -35,23 +35,27 @@ iroot=${iroot#iscsi:}
+ 
+ [ -e /sys/module/bnx2i ] && iscsiuio
+ 
+-if getarg iscsi_firmware && ! [ -f /tmp/iscsistarted-firmware ]; then
++if getarg iscsi_firmware && ! [ -f /tmp/iscsistarted-firmware-ok ]; then
+     for p in $(getargs iscsi_param); do
+         iscsi_param="$iscsi_param --param $p"
+     done
+ 
+-    if iscsistart -N; then
+-        if [ -n "${root%%block:*}" ]; then
+-            # if root is not specified try to mount the whole iSCSI LUN
+-            printf 'ENV{DEVTYPE}!="partition", SYMLINK=="disk/by-path/*-iscsi-*-*", SYMLINK+="root"\n' >> /etc/udev/rules.d/99-iscsi-root.rules
+-        fi
+-
+-        iscsistart -b $iscsi_param </dev/null >>/tmp/iscsiroot.out 2>&1 &
++    if [ -n "${root%%block:*}" ]; then
++        # if root is not specified try to mount the whole iSCSI LUN
++        printf 'ENV{DEVTYPE}!="partition", SYMLINK=="disk/by-path/*-iscsi-*-*", SYMLINK+="root"\n' > /etc/udev/rules.d/99-iscsi-root.rules
++    fi
+ 
+-        echo '! pidof iscsistart >/dev/null 2>&1' > /initqueue-finished/iscsistart_stopped.sh
+-        echo 'started' > "/tmp/iscsistarted-iscsi"
++    # start it in the background and wait for it in initqueue-finished
++    (
++        echo "[ -f \"/tmp/iscsistarted-iscsi-$$\" ]" > /initqueue-finished/iscsistarted-iscsi-$$.sh
++        iscsistart -N
++        if iscsistart -b $iscsi_param </dev/null >>/tmp/iscsiroot.out 2>&1; then
++            echo 'started' > "/tmp/iscsistarted-firmware-ok"
++        fi
+         echo 'started' > "/tmp/iscsistarted-firmware"
+-    fi
++        echo 'started' > "/tmp/iscsistarted-iscsi-$$"
++        echo 'started' > "/tmp/iscsistarted-iscsi"
++    ) &
+ 
+     exit 0
+ fi
+@@ -135,7 +139,7 @@ handle_netroot()
+ 
+     if [ -n "${root%%block:*}" ]; then
+     # if root is not specified try to mount the whole iSCSI LUN
+-	printf 'SYMLINK=="disk/by-path/*-iscsi-*-%s", SYMLINK+="root"\n' $iscsi_lun >> /etc/udev/rules.d/99-iscsi-root.rules
++	printf 'SYMLINK=="disk/by-path/*-iscsi-*-%s", SYMLINK+="root"\n' $iscsi_lun >> /etc/udev/rules.d/99-iscsi-root-lun.rules
+     fi
+ 
+     # inject new exit_if_exists

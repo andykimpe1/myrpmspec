@@ -1,0 +1,113 @@
+From 0cd940614906bac57e2d8ee5888dcb777154c6e2 Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Wed, 15 Feb 2012 09:06:35 +0100
+Subject: [PATCH] redirect "udevadm settle" output to /dev/null
+
+https://bugzilla.redhat.com/show_bug.cgi?id=747840
+---
+ modules.d/01fips/fips.sh                    | 4 ++--
+ modules.d/45ifcfg/write-ifcfg.sh            | 2 +-
+ modules.d/50plymouth/plymouth-pretrigger.sh | 2 +-
+ modules.d/95fcoe/fcoe-up                    | 2 +-
+ modules.d/95fcoe/parse-fcoe.sh              | 2 +-
+ modules.d/95nbd/nbdroot                     | 2 +-
+ modules.d/99base/dracut-lib.sh              | 4 ++--
+ 7 files changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/modules.d/01fips/fips.sh b/modules.d/01fips/fips.sh
+index 67eefb8..904ad98 100755
+--- a/modules.d/01fips/fips.sh
++++ b/modules.d/01fips/fips.sh
+@@ -27,9 +27,9 @@ mount_boot()
+             i=0
+             while ! [ -e $boot ]; do
+                 if [ $UDEVVERSION -ge 143 ]; then
+-                    udevadm settle --exit-if-exists=$boot
++                    udevadm settle --exit-if-exists=$boot >/dev/null 2>&1
+                 else
+-                    udevadm settle --timeout=30
++                    udevadm settle --timeout=30 >/dev/null 2>&1
+                 fi
+                 [ -e $boot ] && break
+                 modprobe scsi_wait_scan && rmmod scsi_wait_scan
+diff --git a/modules.d/45ifcfg/write-ifcfg.sh b/modules.d/45ifcfg/write-ifcfg.sh
+index b7148d8..d0af214 100644
+--- a/modules.d/45ifcfg/write-ifcfg.sh
++++ b/modules.d/45ifcfg/write-ifcfg.sh
+@@ -1,7 +1,7 @@
+ #!/bin/sh
+ 
+ # NFS root might have reached here before /tmp/net.ifaces was written
+-udevadm settle --timeout=30
++udevadm settle --timeout=30 >/dev/null 2>&1
+ # Don't write anything if we don't know our bootdev
+ [ -f /tmp/net.ifaces ] || return 1
+ 
+diff --git a/modules.d/50plymouth/plymouth-pretrigger.sh b/modules.d/50plymouth/plymouth-pretrigger.sh
+index 34d60df..725d7e7 100755
+--- a/modules.d/50plymouth/plymouth-pretrigger.sh
++++ b/modules.d/50plymouth/plymouth-pretrigger.sh
+@@ -7,7 +7,7 @@ if ! getarg rd_NO_PLYMOUTH; then
+     # first trigger graphics and tty subsystem
+     udevadm trigger --subsystem-match=graphics --subsystem-match=drm --subsystem-match=tty >/dev/null 2>&1
+ 
+-    udevadm settle --timeout=30 2>&1 | vinfo
++    udevadm settle --timeout=30 >/dev/null 2>&1
+     [ -c /dev/zero ] || mknod -m 0666 /dev/zero c 1 5
+     [ -c /dev/tty0 ] || mknod -m 0620 /dev/tty0 c 4 0
+     [ -e /dev/systty ] || ln -s tty0 /dev/systty
+diff --git a/modules.d/95fcoe/fcoe-up b/modules.d/95fcoe/fcoe-up
+index 28f7556..89783d4 100755
+--- a/modules.d/95fcoe/fcoe-up
++++ b/modules.d/95fcoe/fcoe-up
+@@ -39,7 +39,7 @@ if [ "$dcb" = "dcb" ]; then
+ elif [ "$netdriver" = "bnx2x" ]; then
+     # If driver is bnx2x, do not use /sys/module/fcoe/parameters/create but fipvlan
+     modprobe 8021q
+-    udevadm settle --timeout=30
++    udevadm settle --timeout=30 >/dev/null 2>&1
+     fipvlan "$netif" -c -s
+ else
+     echo -n "$netif" > /sys/module/fcoe/parameters/create
+diff --git a/modules.d/95fcoe/parse-fcoe.sh b/modules.d/95fcoe/parse-fcoe.sh
+index 8c3c61e..4ac0f58 100755
+--- a/modules.d/95fcoe/parse-fcoe.sh
++++ b/modules.d/95fcoe/parse-fcoe.sh
+@@ -23,7 +23,7 @@
+ [ -e /sys/module/fcoe/parameters/create ] || modprobe -a fcoe || die "FCoE requested but kernel/initrd does not support FCoE"
+ 
+ modprobe bnx2fc >/dev/null 2>&1
+-udevadm settle --timeout=30
++udevadm settle --timeout=30 >/dev/null 2>&1
+ 
+ parse_fcoe_opts() {
+     local IFS=:
+diff --git a/modules.d/95nbd/nbdroot b/modules.d/95nbd/nbdroot
+index 51a1a94..f41ee35 100755
+--- a/modules.d/95nbd/nbdroot
++++ b/modules.d/95nbd/nbdroot
+@@ -81,7 +81,7 @@ i=0
+ while [ ! -b /dev/nbd0 ]; do
+     [ $i -ge 20 ] && exit 1
+     if [ $UDEVVERSION -ge 143 ]; then
+-        udevadm settle --exit-if-exists=/dev/nbd0
++        udevadm settle --exit-if-exists=/dev/nbd0 >/dev/null 2>&1
+     else
+         sleep 0.1
+     fi
+diff --git a/modules.d/99base/dracut-lib.sh b/modules.d/99base/dracut-lib.sh
+index c4f353d..0887bd2 100644
+--- a/modules.d/99base/dracut-lib.sh
++++ b/modules.d/99base/dracut-lib.sh
+@@ -158,9 +158,9 @@ udevsettle() {
+     [ -z "$UDEVVERSION" ] && UDEVVERSION=$(udevadm --version)
+ 
+     if [ $UDEVVERSION -ge 143 ]; then
+-        udevadm settle --exit-if-exists=/initqueue/work $settle_exit_if_exists
++        udevadm settle --exit-if-exists=/initqueue/work $settle_exit_if_exists >/dev/null 2>&1
+     else
+-        udevadm settle --timeout=30
++        udevadm settle --timeout=30 >/dev/null 2>&1
+     fi
+ }
+ 

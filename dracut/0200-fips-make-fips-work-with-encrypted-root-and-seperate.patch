@@ -1,0 +1,106 @@
+From 6ff9d5e0869c800f8e43264bd46fd24fba3e3b77 Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Mon, 11 Apr 2011 11:54:01 +0200
+Subject: [PATCH] fips: make fips work with encrypted root and seperate boot
+
+---
+ dracut.8                        |  2 ++
+ modules.d/01fips/fips-boot.sh   | 12 ++++++++++++
+ modules.d/01fips/fips-noboot.sh | 12 ++++++++++++
+ modules.d/01fips/fips.sh        | 12 +++---------
+ modules.d/01fips/install        |  4 +++-
+ 5 files changed, 32 insertions(+), 10 deletions(-)
+ create mode 100755 modules.d/01fips/fips-boot.sh
+ create mode 100755 modules.d/01fips/fips-noboot.sh
+
+diff --git a/dracut.8 b/dracut.8
+index 0b53c85..96aa767 100644
+--- a/dracut.8
++++ b/dracut.8
+@@ -258,6 +258,8 @@ specify the device, where /boot is located
+   boot=UUID=<uuid>
+   boot=LABEL=<label>
+ 
++If the root device is encrypted, the /boot partition must reside on a seperate partition and has to be specified.
++
+ .SS Network
+ .TP
+ .BR ip= {dhcp|on|any|dhcp6|auto6|ibft}
+diff --git a/modules.d/01fips/fips-boot.sh b/modules.d/01fips/fips-boot.sh
+new file mode 100755
+index 0000000..fcae157
+--- /dev/null
++++ b/modules.d/01fips/fips-boot.sh
+@@ -0,0 +1,12 @@
++#!/bin/sh
++# -*- mode: shell-script; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
++# ex: ts=8 sw=4 sts=4 et filetype=sh
++
++if ! fipsmode=$(getarg fips) || [ $fipsmode = "0" ]; then
++    rm -f /etc/modprobe.d/fips.conf >/dev/null 2>&1
++elif getarg boot= >/dev/null; then
++    . /sbin/fips.sh
++    set -e
++    do_fips || die "FIPS integrity test failed"
++    set +e
++fi
+diff --git a/modules.d/01fips/fips-noboot.sh b/modules.d/01fips/fips-noboot.sh
+new file mode 100755
+index 0000000..d6c2e2f
+--- /dev/null
++++ b/modules.d/01fips/fips-noboot.sh
+@@ -0,0 +1,12 @@
++#!/bin/sh
++# -*- mode: shell-script; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
++# ex: ts=8 sw=4 sts=4 et filetype=sh
++
++if ! fipsmode=$(getarg fips) || [ $fipsmode = "0" ]; then
++    rm -f /etc/modprobe.d/fips.conf >/dev/null 2>&1
++elif ! getarg boot= >/dev/null; then
++    . /sbin/fips.sh
++    set -e
++    do_fips || die "FIPS integrity test failed"
++    set +e
++fi
+diff --git a/modules.d/01fips/fips.sh b/modules.d/01fips/fips.sh
+index 2969398..1ae01cf 100755
+--- a/modules.d/01fips/fips.sh
++++ b/modules.d/01fips/fips.sh
+@@ -58,8 +58,10 @@ do_fipskernel()
+ 
+ do_fips()
+ {
+-    FIPSMODULES=$(cat /etc/fipsmodules)
++    do_fipskernel || return 1
+ 
++    FIPSMODULES=$(cat /etc/fipsmodules)
++    
+     info "Loading and integrity checking all crypto modules"
+     for module in $FIPSMODULES; do
+         if [ "$module" != "tcrypt" ]; then
+@@ -73,11 +75,3 @@ do_fips()
+ 
+     return 0
+ }
+-
+-if ! fipsmode=$(getarg fips) || [ $fipsmode = "0" ]; then
+-    rm -f /etc/modprobe.d/fips.conf >/dev/null 2>&1
+-else
+-    set -e
+-    do_fips || die "FIPS integrity test failed"
+-    set +e
+-fi
+diff --git a/modules.d/01fips/install b/modules.d/01fips/install
+index 22e6d0f..503db9a 100755
+--- a/modules.d/01fips/install
++++ b/modules.d/01fips/install
+@@ -1,6 +1,8 @@
+ #!/bin/bash
+ 
+-inst_hook pre-pivot 01 "$moddir/fips.sh"
++inst_hook pre-trigger 01 "$moddir/fips-boot.sh"
++inst_hook pre-pivot 01 "$moddir/fips-noboot.sh"
++inst "$moddir/fips.sh" /sbin/fips.sh
+ dracut_install sha512hmac rmmod insmod mount uname umount
+ 
+ libdir="lib"

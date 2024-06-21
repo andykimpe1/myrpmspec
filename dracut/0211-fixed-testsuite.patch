@@ -1,0 +1,441 @@
+From 9259945f93f529d8385399e3a38ef49c5ea9295d Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Wed, 20 Apr 2011 12:53:22 +0200
+Subject: [PATCH] fixed testsuite
+
+---
+ test/TEST-10-RAID/test.sh            |  2 +-
+ test/TEST-11-LVM/create-root.sh      |  8 +++---
+ test/TEST-11-LVM/test.sh             |  4 +--
+ test/TEST-12-RAID-DEG/create-root.sh | 51 ++++++++++++++++++------------------
+ test/TEST-12-RAID-DEG/test.sh        |  6 ++---
+ test/TEST-13-ENC-RAID-LVM/test.sh    |  2 +-
+ test/TEST-14-IMSM/create-root.sh     | 17 ++++++------
+ test/TEST-14-IMSM/test.sh            |  6 ++---
+ test/TEST-20-NFS/test.sh             | 13 +++++----
+ test/TEST-30-ISCSI/test.sh           | 13 +++++----
+ test/TEST-40-NBD/test.sh             |  6 +++--
+ test/TEST-50-MULTINIC/test.sh        | 14 ++++++----
+ 12 files changed, 78 insertions(+), 64 deletions(-)
+
+diff --git a/test/TEST-10-RAID/test.sh b/test/TEST-10-RAID/test.sh
+index 83a461a..93d7c61 100755
+--- a/test/TEST-10-RAID/test.sh
++++ b/test/TEST-10-RAID/test.sh
+@@ -63,7 +63,7 @@ test_setup() {
+ 	initdir=overlay
+ 	. $basedir/dracut-functions
+ 	dracut_install poweroff shutdown
+-	inst_simple ./hard-off.sh /emergency/01hard-off.sh
++	inst_simple ./hard-off.sh /emergency/000hard-off.sh
+ 	inst ./cryptroot-ask /sbin/cryptroot-ask
+ 	inst_simple ./99-idesymlinks.rules /etc/udev/rules.d/99-idesymlinks.rules
+     )
+diff --git a/test/TEST-11-LVM/create-root.sh b/test/TEST-11-LVM/create-root.sh
+index c569cd4..357c481 100755
+--- a/test/TEST-11-LVM/create-root.sh
++++ b/test/TEST-11-LVM/create-root.sh
+@@ -6,11 +6,11 @@ done
+ rm /etc/lvm/lvm.conf
+ udevadm control --reload-rules
+ # save a partition at the beginning for future flagging purposes
+-sfdisk -C 640 -H 2 -S 32 -L /dev/sda <<EOF
++sfdisk -C 1280 -H 2 -S 32 -L /dev/sda <<EOF
+ ,1
+-,213
+-,213
+-,213
++,400
++,400
++,400
+ EOF
+ for i in sda2 sda3 sda4; do
+ lvm pvcreate -ff  -y /dev/$i ;
+diff --git a/test/TEST-11-LVM/test.sh b/test/TEST-11-LVM/test.sh
+index 849aeb1..fe51501 100755
+--- a/test/TEST-11-LVM/test.sh
++++ b/test/TEST-11-LVM/test.sh
+@@ -16,7 +16,7 @@ test_run() {
+ 
+ test_setup() {
+     # Create the blank file to use as a root filesystem
+-    dd if=/dev/zero of=root.ext2 bs=1M count=20
++    dd if=/dev/zero of=root.ext2 bs=1M count=40
+ 
+     kernel=$KVERSION
+     # Create what will eventually be our root filesystem onto an overlay
+@@ -62,7 +62,7 @@ test_setup() {
+ 	initdir=overlay
+ 	. $basedir/dracut-functions
+ 	dracut_install poweroff shutdown
+-	inst_simple ./hard-off.sh /emergency/01hard-off.sh
++	inst_simple ./hard-off.sh /emergency/000hard-off.sh
+ 	inst_simple ./99-idesymlinks.rules /etc/udev/rules.d/99-idesymlinks.rules
+     )
+     sudo $basedir/dracut -l -i overlay / \
+diff --git a/test/TEST-12-RAID-DEG/create-root.sh b/test/TEST-12-RAID-DEG/create-root.sh
+index 23f1afc..1a27ab5 100755
+--- a/test/TEST-12-RAID-DEG/create-root.sh
++++ b/test/TEST-12-RAID-DEG/create-root.sh
+@@ -6,11 +6,11 @@ done
+ rm /etc/lvm/lvm.conf
+ udevadm control --reload-rules
+ # save a partition at the beginning for future flagging purposes
+-sfdisk -C 640 -H 2 -S 32 -L /dev/sda <<EOF
++sfdisk -C 1280 -H 2 -S 32 -L /dev/sda <<EOF
+ ,1
+-,213
+-,213
+-,213
++,400
++,400
++,400
+ EOF
+ mdadm --create /dev/md0 --run --auto=yes --level=5 --raid-devices=3 /dev/sda2 /dev/sda3 /dev/sda4
+ # wait for the array to finish initailizing, otherwise this sometimes fails
+@@ -19,28 +19,29 @@ mdadm -W /dev/md0
+ echo -n test >keyfile
+ cryptsetup -q luksFormat /dev/md0 /keyfile
+ echo "The passphrase is test"
+-cryptsetup luksOpen /dev/md0 dracut_crypt_test </keyfile && \
+-lvm pvcreate -ff  -y /dev/mapper/dracut_crypt_test && \
+-lvm vgcreate dracut /dev/mapper/dracut_crypt_test && \
+-lvm lvcreate -l 100%FREE -n root dracut && \
+-lvm vgchange -ay && \
+-mke2fs -L root /dev/dracut/root && \
+-mkdir -p /sysroot && \
++set -e
++cryptsetup luksOpen /dev/md0 dracut_crypt_test </keyfile 
++lvm pvcreate -ff  -y /dev/mapper/dracut_crypt_test 
++lvm vgcreate dracut /dev/mapper/dracut_crypt_test
++lvm lvcreate -l 100%FREE -n root dracut 
++lvm vgchange -ay
++mke2fs -L root /dev/dracut/root 
++mkdir -p /sysroot 
+ mount /dev/dracut/root /sysroot && \
+-cp -a -t /sysroot /source/* && \
+-umount /sysroot && \
+-lvm lvchange -a n /dev/dracut/root && \
+-cryptsetup luksClose /dev/mapper/dracut_crypt_test && \
+-{ mdadm -W /dev/md0 || : ;} && \
+-mdadm /dev/md0 --fail /dev/sda2 --remove /dev/sda2 && \
+-{ mdadm -W /dev/md0 || : ;} && \
+-{
++cp -a -t /sysroot /source/* 
++umount /sysroot 
++lvm lvchange -a n /dev/dracut/root 
++cryptsetup luksClose /dev/mapper/dracut_crypt_test 
++mdadm -W /dev/md0 || :
++mdadm /dev/md0 --fail /dev/sda2 --remove /dev/sda2 
++mdadm -W /dev/md0 || : 
+ /sbin/mdadm --detail --export /dev/md0 > /tmp/mduuid ;
+-. /tmp/mduuid;
+-} && \
++strstr() { [ "${1#*$2*}" != "$1" ]; }
++MD_UUID=$(while read line; do strstr "$line" "MD_UUID=" || continue; line=${line##*MD_UUID=}; echo ${line%% *}; done </tmp/mduuid)
++echo MD_UUID=$MD_UUID
+ {
+-echo "dracut-root-block-created" 
+-echo MD_UUID=$MD_UUID 
+-}> /dev/sda1
+-dd if=/dev/zero of=/dev/sda2
++	echo "dracut-root-block-created" 
++	echo MD_UUID=$MD_UUID 
++} > /dev/sda1
++dd if=/dev/zero of=/dev/sda2 || :
+ poweroff -f
+diff --git a/test/TEST-12-RAID-DEG/test.sh b/test/TEST-12-RAID-DEG/test.sh
+index e776aec..e47b613 100755
+--- a/test/TEST-12-RAID-DEG/test.sh
++++ b/test/TEST-12-RAID-DEG/test.sh
+@@ -36,7 +36,7 @@ test_run() {
+ 
+     client_run rd_LVM_VG=dracut || return 1
+ 
+-    client_run rd_LVM_VG=dummy1 rd_LVM_VG=dracut rd_LVM_VG=dummy2 rd_NO_LVMCONF || return 1
++    client_run rd_LVM_VG=dummy1 rd_LVM_VG=dracut rd_LVM_VG=dummy2 rd_NO_LVMCONF failme && return 1
+ 
+     client_run rd_MD_UUID=failme rd_NO_MDADMCONF failme && return 1
+ 
+@@ -51,7 +51,7 @@ test_run() {
+ 
+ test_setup() {
+     # Create the blank file to use as a root filesystem
+-    dd if=/dev/zero of=root.ext2 bs=1M count=20
++    dd if=/dev/zero of=root.ext2 bs=1M count=40
+  
+     kernel=$KVERSION
+     # Create what will eventually be our root filesystem onto an overlay
+@@ -98,7 +98,7 @@ test_setup() {
+ 	initdir=overlay
+ 	. $basedir/dracut-functions
+ 	dracut_install poweroff shutdown
+-	inst_simple ./hard-off.sh /emergency/01hard-off.sh
++	inst_simple ./hard-off.sh /emergency/000hard-off.sh
+ 	inst_simple ./99-idesymlinks.rules /etc/udev/rules.d/99-idesymlinks.rules
+ 	inst ./cryptroot-ask /sbin/cryptroot-ask
+         mkdir -p overlay/etc
+diff --git a/test/TEST-13-ENC-RAID-LVM/test.sh b/test/TEST-13-ENC-RAID-LVM/test.sh
+index adb94cb..ede714a 100755
+--- a/test/TEST-13-ENC-RAID-LVM/test.sh
++++ b/test/TEST-13-ENC-RAID-LVM/test.sh
+@@ -62,7 +62,7 @@ test_setup() {
+ 	initdir=overlay
+ 	. $basedir/dracut-functions
+ 	dracut_install poweroff shutdown
+-	inst_simple ./hard-off.sh /emergency/01hard-off.sh
++	inst_simple ./hard-off.sh /emergency/000hard-off.sh
+ 	inst_simple ./99-idesymlinks.rules /etc/udev/rules.d/99-idesymlinks.rules
+ 	inst ./cryptroot-ask /sbin/cryptroot-ask
+     )
+diff --git a/test/TEST-14-IMSM/create-root.sh b/test/TEST-14-IMSM/create-root.sh
+index 05006c9..5e85a3f 100755
+--- a/test/TEST-14-IMSM/create-root.sh
++++ b/test/TEST-14-IMSM/create-root.sh
+@@ -22,19 +22,20 @@ for s in $SETS; do
+ done
+ 
+ udevadm settle
++sfdisk -g /dev/mapper/isw*Test0 
+ 
+-# save a partition at the beginning for future flagging purposes
+-sfdisk -H 255 -S 63 -L /dev/mapper/isw*Test0 <<EOF
++ # save a partition at the beginning for future flagging purposes
++sfdisk -C 2560 -H 2 -S 32 -L /dev/mapper/isw*Test0 <<EOF
+ ,1
+-,1
+-,1
+-,
++,600
++,600
++,600
+ EOF
+ udevadm settle
+ dmraid -a n
+ udevadm settle
+ 
+-SETS=$(dmraid -c -s)
++SETS=$(dmraid -c -s -i)
+ # scan and activate all DM RAIDS
+ for s in $SETS; do
+    dmraid -ay -i -p --rm_partitions "$s" 
+@@ -44,9 +45,9 @@ done
+ udevadm settle
+ 
+ mdadm --create /dev/md0 --run --auto=yes --level=5 --raid-devices=3 \
+-	/dev/mapper/isw*p1 \
+ 	/dev/mapper/isw*p2 \
+-	/dev/mapper/isw*p3 
++	/dev/mapper/isw*p3 \
++	/dev/mapper/isw*p4 
+ 
+ # wait for the array to finish initailizing, otherwise this sometimes fails
+ # randomly.
+diff --git a/test/TEST-14-IMSM/test.sh b/test/TEST-14-IMSM/test.sh
+index 80d4b1b..3c8dc2f 100755
+--- a/test/TEST-14-IMSM/test.sh
++++ b/test/TEST-14-IMSM/test.sh
+@@ -37,8 +37,8 @@ test_run() {
+ test_setup() {
+     # Create the blank file to use as a root filesystem
+     dd if=/dev/zero of=root.ext2 bs=1M count=1
+-    dd if=/dev/zero of=disk1 bs=1M count=40
+-    dd if=/dev/zero of=disk2 bs=1M count=40
++    dd if=/dev/zero of=disk1 bs=1M count=80
++    dd if=/dev/zero of=disk2 bs=1M count=80
+ 
+     kernel=$KVERSION
+     # Create what will eventually be our root filesystem onto an overlay
+@@ -84,7 +84,7 @@ test_setup() {
+ 	initdir=overlay
+ 	. $basedir/dracut-functions
+ 	dracut_install poweroff shutdown
+-	inst_simple ./hard-off.sh /emergency/01hard-off.sh
++	inst_simple ./hard-off.sh /emergency/000hard-off.sh
+ 	inst_simple ./99-idesymlinks.rules /etc/udev/rules.d/99-idesymlinks.rules
+     )
+     sudo $basedir/dracut -l -i overlay / \
+diff --git a/test/TEST-20-NFS/test.sh b/test/TEST-20-NFS/test.sh
+index 9e056d3..340db8e 100755
+--- a/test/TEST-20-NFS/test.sh
++++ b/test/TEST-20-NFS/test.sh
+@@ -5,6 +5,8 @@ KVERSION=${KVERSION-$(uname -r)}
+ 
+ # Uncomment this to debug failures
+ #DEBUGFAIL="rdshell"
++#SERIAL="-serial udp:127.0.0.1:9999"
++SERIAL="null"
+ 
+ run_server() {
+     # Start server first
+@@ -12,8 +14,8 @@ run_server() {
+ 
+     $testdir/run-qemu -hda server.ext2 -m 256M -nographic \
+ 	-net nic,macaddr=52:54:00:12:34:56,model=e1000 \
+-	-net socket,mcast=230.0.0.1:1234 \
+-	-serial udp:127.0.0.1:9999 \
++	-net socket,listen=127.0.0.1:12345 \
++        -serial $SERIAL \
+ 	-kernel /boot/vmlinuz-$KVERSION \
+ 	-append "root=/dev/sda rw quiet console=ttyS0,115200n81 selinux=0" \
+ 	-initrd initramfs.server -pidfile server.pid -daemonize || return 1
+@@ -44,7 +46,7 @@ client_test() {
+ 
+     $testdir/run-qemu -hda client.img -m 256M -nographic \
+   	-net nic,macaddr=$mac,model=e1000 \
+-  	-net socket,mcast=230.0.0.1:1234 \
++        -net socket,connect=127.0.0.1:12345 \
+   	-kernel /boot/vmlinuz-$KVERSION \
+   	-append "$cmdline $DEBUGFAIL rdinitdebug rd_retry=10 rdinfo quiet rdnetdebug ro console=ttyS0,115200n81 selinux=0" \
+   	-initrd initramfs.testing
+@@ -278,13 +280,14 @@ test_setup() {
+ 	mkdir overlay
+ 	. $basedir/dracut-functions
+ 	dracut_install poweroff shutdown
+-	inst_simple ./hard-off.sh /emergency/01hard-off.sh
++	inst_simple ./hard-off.sh /emergency/000hard-off.sh
+ 	inst_simple ./99-idesymlinks.rules /etc/udev/rules.d/99-idesymlinks.rules
+     )
+ 
+     # Make server's dracut image
+     $basedir/dracut -l -i overlay / \
+-	-m "dash udev-rules base rootfs-block debug kernel-modules" \
++	-m "dash udev-rules base rootfs-block kernel-modules" \
++	-a "debug" \
+ 	-d "piix ide-gd_mod ata_piix ext2 sd_mod e1000" \
+ 	-f initramfs.server $KVERSION || return 1
+ 
+diff --git a/test/TEST-30-ISCSI/test.sh b/test/TEST-30-ISCSI/test.sh
+index ca87be8..ffa55d0 100755
+--- a/test/TEST-30-ISCSI/test.sh
++++ b/test/TEST-30-ISCSI/test.sh
+@@ -4,6 +4,8 @@ TEST_DESCRIPTION="root filesystem over iSCSI"
+ KVERSION=${KVERSION-$(uname -r)}
+ 
+ #DEBUGFAIL="rdshell"
++#SERIAL="-serial udp:127.0.0.1:9999"
++SERIAL="null"
+ 
+ run_server() {
+     # Start server first
+@@ -12,8 +14,8 @@ run_server() {
+     $testdir/run-qemu -hda server.ext2 -hdb root.ext2 -m 256M -nographic \
+ 	-hdc iscsidisk2.img -hdd iscsidisk3.img \
+ 	-net nic,macaddr=52:54:00:12:34:56,model=e1000 \
+-	-net socket,mcast=230.0.0.1:1235 \
+-	-serial udp:127.0.0.1:9999 \
++        -net socket,listen=127.0.0.1:12345 \
++	-serial $SERIAL \
+ 	-kernel /boot/vmlinuz-$KVERSION \
+ 	-append "root=/dev/sda rw quiet console=ttyS0,115200n81 selinux=0" \
+ 	-initrd initramfs.server -pidfile server.pid -daemonize || return 1
+@@ -36,7 +38,7 @@ run_client() {
+ 
+     $testdir/run-qemu -hda client.img -m 256M -nographic \
+   	-net nic,macaddr=52:54:00:12:34:00,model=e1000 \
+-  	-net socket,mcast=230.0.0.1:1235 \
++        -net socket,connect=127.0.0.1:12345 \
+   	-kernel /boot/vmlinuz-$KVERSION \
+ 	-append "root=LABEL=sysroot ip=192.168.50.101::192.168.50.1:255.255.255.0:iscsi-1:eth0:off netroot=iscsi:192.168.50.1::::iqn.2009-06.dracut:target1 netroot=iscsi:192.168.50.1::::iqn.2009-06.dracut:target2 rw quiet rd_retry=5 rdinitdebug rdinfo rdnetdebug console=ttyS0,115200n81 selinux=0 $DEBUGFAIL" \
+   	-initrd initramfs.testing
+@@ -129,7 +131,7 @@ test_setup() {
+ 	initdir=overlay
+ 	. $basedir/dracut-functions
+ 	dracut_install poweroff shutdown
+-	inst_simple ./hard-off.sh /emergency/01hard-off.sh
++	inst_simple ./hard-off.sh /emergency/000hard-off.sh
+ 	inst_simple ./99-idesymlinks.rules /etc/udev/rules.d/99-idesymlinks.rules
+     )
+     sudo $basedir/dracut -l -i overlay / \
+@@ -179,7 +181,8 @@ test_setup() {
+ 
+     # Make server's dracut image
+     $basedir/dracut -l -i overlay / \
+-	-m "dash udev-rules base rootfs-block debug kernel-modules" \
++	-m "dash udev-rules base rootfs-block kernel-modules" \
++	-a "debug" \
+ 	-d "piix ide-gd_mod ata_piix ext2 sd_mod e1000" \
+ 	-f initramfs.server $KVERSION || return 1
+ 
+diff --git a/test/TEST-40-NBD/test.sh b/test/TEST-40-NBD/test.sh
+index d84d657..55aacd5 100755
+--- a/test/TEST-40-NBD/test.sh
++++ b/test/TEST-40-NBD/test.sh
+@@ -5,6 +5,8 @@ KVERSION=${KVERSION-$(uname -r)}
+ 
+ # Uncomment this to debug failures
+ #DEBUGFAIL="rdshell"
++#SERIAL="-serial udp:127.0.0.1:9999"
++SERIAL="null"
+ 
+ run_server() {
+     # Start server first
+@@ -14,7 +16,7 @@ run_server() {
+ 	-m 256M -nographic \
+ 	-net nic,macaddr=52:54:00:12:34:56,model=e1000 \
+ 	-net socket,listen=127.0.0.1:12345 \
+-	-serial udp:127.0.0.1:9999 \
++	-serial $SERIAL \
+ 	-kernel /boot/vmlinuz-$KVERSION \
+ 	-append "root=/dev/sda rw quiet console=ttyS0,115200n81 selinux=0" \
+ 	-initrd initramfs.server -pidfile server.pid -daemonize || return 1
+@@ -292,7 +294,7 @@ test_setup() {
+ 	initdir=overlay
+ 	. $basedir/dracut-functions
+ 	dracut_install poweroff shutdown
+-	inst_simple ./hard-off.sh /emergency/01hard-off.sh
++	inst_simple ./hard-off.sh /emergency/000hard-off.sh
+ 	inst_simple ./99-idesymlinks.rules /etc/udev/rules.d/99-idesymlinks.rules
+ 	inst ./cryptroot-ask /sbin/cryptroot-ask
+     )
+diff --git a/test/TEST-50-MULTINIC/test.sh b/test/TEST-50-MULTINIC/test.sh
+index af3d709..ab96987 100755
+--- a/test/TEST-50-MULTINIC/test.sh
++++ b/test/TEST-50-MULTINIC/test.sh
+@@ -5,6 +5,8 @@ KVERSION=${KVERSION-$(uname -r)}
+ 
+ # Uncomment this to debug failures
+ #DEBUGFAIL="rdshell"
++#SERIAL="udp:127.0.0.1:9999"
++SERIAL="null"
+ 
+ run_server() {
+     # Start server first
+@@ -12,8 +14,8 @@ run_server() {
+ 
+     $testdir/run-qemu -hda server.ext2 -m 256M -nographic \
+ 	-net nic,macaddr=52:54:00:12:34:56,model=e1000 \
+-	-net socket,mcast=230.0.0.1:1234 \
+-	-serial udp:127.0.0.1:9999 \
++        -net socket,listen=127.0.0.1:12345 \
++	-serial $SERIAL \
+ 	-kernel /boot/vmlinuz-$KVERSION \
+ 	-append "selinux=0 root=/dev/sda rdinitdebug rdinfo rdnetdebug rw quiet console=ttyS0,115200n81" \
+ 	-initrd initramfs.server -pidfile server.pid -daemonize || return 1
+@@ -46,7 +48,8 @@ client_test() {
+   	-net nic,macaddr=52:54:00:12:34:$mac1,model=e1000 \
+   	-net nic,macaddr=52:54:00:12:34:$mac2,model=e1000 \
+   	-net nic,macaddr=52:54:00:12:34:$mac3,model=e1000 \
+-  	-net socket,mcast=230.0.0.1:1234 \
++        -net socket,connect=127.0.0.1:12345 \
++        -hdc /dev/null \
+   	-kernel /boot/vmlinuz-$KVERSION \
+   	-append "$cmdline $DEBUGFAIL rd_retry=5 rdinitdebug rdinfo rdnetdebug ro quiet console=ttyS0,115200n81 selinux=0 rdcopystate" \
+   	-initrd initramfs.testing
+@@ -199,13 +202,14 @@ test_setup() {
+  	mkdir overlay
+  	. $basedir/dracut-functions
+  	dracut_install poweroff shutdown
+- 	inst_simple ./hard-off.sh /emergency/01hard-off.sh
++ 	inst_simple ./hard-off.sh /emergency/000hard-off.sh
+ 	inst_simple ./99-idesymlinks.rules /etc/udev/rules.d/99-idesymlinks.rules
+     )
+ 
+     # Make server's dracut image
+     $basedir/dracut -l -i overlay / \
+-	-m "dash udev-rules base rootfs-block debug kernel-modules" \
++	-m "dash udev-rules base rootfs-block kernel-modules" \
++	-a "debug" \
+ 	-d "piix ide-gd_mod ata_piix ext2 sd_mod e1000" \
+ 	-f initramfs.server $KVERSION || return 1
+ 

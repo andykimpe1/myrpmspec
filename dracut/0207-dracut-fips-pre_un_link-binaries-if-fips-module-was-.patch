@@ -1,0 +1,69 @@
+From 18a6ce9d2579a34e8ce7ef1607994444d2b4f0a8 Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Tue, 19 Apr 2011 15:11:46 +0200
+Subject: [PATCH] dracut, fips: pre_un_link binaries, if fips module was
+ included
+
+---
+ dracut                   | 18 ++++++++++++++----
+ modules.d/01fips/install |  4 ++++
+ 2 files changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/dracut b/dracut
+index 5f0c162..083ac90 100755
+--- a/dracut
++++ b/dracut
+@@ -235,11 +235,11 @@ fi
+ # check all our modules to see if they should be sourced.
+ # This builds a list of modules that we will install next.
+ check_modules
+-  
++modules_loaded=" "
+ # source our modules.
+ for moddir in "$dracutbasedir/modules.d"/[0-9][0-9]*; do
+-    mod=${moddir##*/}; mod=${mod#[0-9][0-9]}
+-    if strstr "$mods_to_load" " $mod "; then
++    _d_mod=${moddir##*/}; _d_mod=${_d_mod#[0-9][0-9]}
++    if strstr "$mods_to_load" " $_d_mod "; then
+ 	if [[ $kernel_only = yes ]]; then
+ 	    [[ -x $moddir/installkernel ]] && . "$moddir/installkernel"
+ 	else
+@@ -248,7 +248,8 @@ for moddir in "$dracutbasedir/modules.d"/[0-9][0-9]*; do
+ 		. "$moddir/installkernel"
+ 	    fi
+ 	fi
+-	mods_to_load=${mods_to_load// $mod /}
++	modules_loaded+="$_d_mod "
++	mods_to_load=${mods_to_load// $_d_mod /}
+     fi
+ done
+ unset moddir
+@@ -310,6 +311,15 @@ if [[ $do_strip = yes ]] ; then
+     done
+ fi
+ 
++if strstr "$modules_loaded" " fips " && command -v prelink >/dev/null; then
++    for i in $initdir/bin/* \
++	$initdir/bin/* \
++	$initdir/usr/bin/* \
++	$initdir/usr/sbin/*; do
++	[ -x $i ] && prelink -u $i &>/dev/null
++    done
++fi
++
+ type pigz &>/dev/null && gzip=pigz || gzip=gzip
+ ( cd "$initdir"; find . |cpio -R 0:0 -H newc -o --quiet |$gzip -9 > "$outfile"; ) 
+ if [ $? -ne 0 ]; then
+diff --git a/modules.d/01fips/install b/modules.d/01fips/install
+index 503db9a..ee5c38b 100755
+--- a/modules.d/01fips/install
++++ b/modules.d/01fips/install
+@@ -28,4 +28,8 @@ done
+ dracut_install /usr/$libdir/hmaccalc/sha512hmac.hmac
+ dracut_install fipscheck
+ 
++if command -v prelink >/dev/null; then
++    dracut_install prelink
++fi
++
+ # vim:ts=8:sw=4:sts=4:et

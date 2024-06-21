@@ -1,0 +1,88 @@
+From 7596b72b394fe3def6192ea5776e18c7e85adc50 Mon Sep 17 00:00:00 2001
+From: Harald Hoyer <harald@redhat.com>
+Date: Thu, 20 Sep 2012 14:20:23 +0200
+Subject: [PATCH] dmsquash-live: enable live boot with "netroot:iscsi:..."
+
+---
+ modules.d/90dmsquash-live/dmsquash-live-genrules.sh | 16 ----------------
+ modules.d/90dmsquash-live/dmsquash-live-root        |  2 +-
+ modules.d/90dmsquash-live/install                   |  1 -
+ modules.d/90dmsquash-live/parse-dmsquash-live.sh    | 20 ++++++++++++++++++--
+ 4 files changed, 19 insertions(+), 20 deletions(-)
+ delete mode 100644 modules.d/90dmsquash-live/dmsquash-live-genrules.sh
+
+diff --git a/modules.d/90dmsquash-live/dmsquash-live-genrules.sh b/modules.d/90dmsquash-live/dmsquash-live-genrules.sh
+deleted file mode 100644
+index f3ea0a3..0000000
+--- a/modules.d/90dmsquash-live/dmsquash-live-genrules.sh
++++ /dev/null
+@@ -1,16 +0,0 @@
+-if [ "${root%%:*}" = "live" ]; then
+-    [ -d /dev/.udev/rules.d ] || mkdir -p /dev/.udev/rules.d
+-    {
+-    printf 'KERNEL=="%s", SYMLINK+="live"\n' \
+-    	${root#live:/dev/} 
+-    printf 'SYMLINK=="%s", SYMLINK+="live"\n' \
+-	${root#live:/dev/} 
+-    } >> /dev/.udev/rules.d/99-live-mount.rules
+-    {
+-    printf 'KERNEL=="%s", RUN+="/sbin/initqueue --settled --onetime --unique /sbin/dmsquash-live-root $env{DEVNAME}"\n' \
+-    	${root#live:/dev/} 
+-    printf 'SYMLINK=="%s", RUN+="/sbin/initqueue --settled --onetime --unique /sbin/dmsquash-live-root $env{DEVNAME}"\n' \
+-	${root#live:/dev/} 
+-    } >> /etc/udev/rules.d/99-live-squash.rules
+-    echo '[ -e /dev/root ]' > /initqueue-finished/dmsquash.sh
+-fi
+diff --git a/modules.d/90dmsquash-live/dmsquash-live-root b/modules.d/90dmsquash-live/dmsquash-live-root
+index 1b7fe19..38c4819 100755
+--- a/modules.d/90dmsquash-live/dmsquash-live-root
++++ b/modules.d/90dmsquash-live/dmsquash-live-root
+@@ -174,7 +174,7 @@ if [ -n "$ROOTFLAGS" ]; then
+     ROOTFLAGS="-o $ROOTFLAGS"
+ fi
+ 
+-ln -s /dev/mapper/live-rw /dev/root
++ln -fs /dev/mapper/live-rw /dev/root
+ printf '/bin/mount %s /dev/mapper/live-rw %s\n' "$ROOTFLAGS" "$NEWROOT" > /mount/01-$$-live.sh
+ 
+ exit 0
+diff --git a/modules.d/90dmsquash-live/install b/modules.d/90dmsquash-live/install
+index ad1d29c..e65ccdf 100755
+--- a/modules.d/90dmsquash-live/install
++++ b/modules.d/90dmsquash-live/install
+@@ -16,7 +16,6 @@ fi
+ inst blockdev
+ which checkisomd5 >/dev/null 2>&1 && inst checkisomd5
+ inst_hook cmdline 30 "$moddir/parse-dmsquash-live.sh"
+-inst_hook pre-udev 30 "$moddir/dmsquash-live-genrules.sh"
+ inst_hook pre-udev 30 "$moddir/dmsquash-liveiso-genrules.sh"
+ inst "$moddir/dmsquash-live-root" "/sbin/dmsquash-live-root"
+ # should probably just be generally included
+diff --git a/modules.d/90dmsquash-live/parse-dmsquash-live.sh b/modules.d/90dmsquash-live/parse-dmsquash-live.sh
+index 24b854e..a029152 100755
+--- a/modules.d/90dmsquash-live/parse-dmsquash-live.sh
++++ b/modules.d/90dmsquash-live/parse-dmsquash-live.sh
+@@ -39,5 +39,21 @@ case "$liveroot" in
+ esac
+ info "root was $root, liveroot is now $liveroot"
+ 
+-# make sure that init doesn't complain
+-[ -z "$root" ] && root="live"
++if [ "${root##live:/dev/}:" != "$root" ]; then
++    [ -d /dev/.udev/rules.d ] || mkdir -p /dev/.udev/rules.d
++    {
++        printf 'KERNEL=="%s", SYMLINK+="live"\n' \
++            ${root#live:/dev/}
++        printf 'SYMLINK=="%s", SYMLINK+="live"\n' \
++            ${root#live:/dev/}
++    } >> /dev/.udev/rules.d/99-live-mount.rules
++    {
++        printf 'KERNEL=="%s", RUN+="/sbin/initqueue --settled --onetime --unique /sbin/dmsquash-live-root $env{DEVNAME}"\n' \
++            ${root#live:/dev/}
++        printf 'SYMLINK=="%s", RUN+="/sbin/initqueue --settled --onetime --unique /sbin/dmsquash-live-root $env{DEVNAME}"\n' \
++            ${root#live:/dev/}
++    } >> /etc/udev/rules.d/98-dracut-20-live-squash.rules
++    echo '[ -e /dev/live ]' > /initqueue-finished/dmsquash.sh
++    root=/dev/mapper/live-rw
++    unset rootok
++fi
