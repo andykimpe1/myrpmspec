@@ -1,0 +1,120 @@
+From 9b68cd9ac123a56862d016848f7de4cb36633fc8 Mon Sep 17 00:00:00 2001
+From: Chris Coulson <chrisccoulson@googlemail.com>
+Date: Mon, 17 May 2010 21:53:41 +0100
+Subject: [PATCH 1/2] Fall back to XF86VM gamma fade if XRANDR gamma fade is not supported
+
+Author: Chris Coulson <chrisccoulson@ubuntu.com>
+Bug-Ubuntu: https://bugs.edge.launchpad.net/ubuntu/+source/gnome-screensaver/+bug/522806
+---
+ src/gs-fade.c |   17 +++++++++++++++++
+ 1 files changed, 17 insertions(+), 0 deletions(-)
+
+diff --git a/src/gs-fade.c b/src/gs-fade.c
+index b03f172..bc054a0 100644
+--- a/src/gs-fade.c
++++ b/src/gs-fade.c
+@@ -565,6 +565,10 @@ check_randr_extension (GSFade *fade, int screen_idx)
+         GdkDisplay *display = gdk_display_get_default ();
+         GdkScreen *screen = gdk_display_get_screen (display, screen_idx);
+         struct GSFadeScreenPrivate *screen_priv;
++        GnomeRRCrtc **crtcs;
++        GnomeRRCrtc *crtc;
++        gboolean res;
++        int gamma_size;
+ 
+         screen_priv = &fade->priv->screen_priv[screen_idx];
+ 
+@@ -577,6 +581,19 @@ check_randr_extension (GSFade *fade, int screen_idx)
+                 return;
+         }
+ 
++        crtcs = gnome_rr_screen_list_crtcs (screen_priv->rrscreen);
++
++        while (*crtcs)
++        {
++                crtc = *crtcs;
++                res = gnome_rr_crtc_get_gamma (crtc, &gamma_size, NULL, NULL, NULL);
++                if (res == FALSE || gamma_size == 0) {
++                        screen_priv->fade_type = FADE_TYPE_NONE;
++                        return;                
++                }
++                crtcs++;
++        }
++
+         screen_priv->fade_type = FADE_TYPE_XRANDR;
+         screen_priv->fade_setup = xrandr_fade_setup;
+         screen_priv->fade_finish = screen_fade_finish;
+-- 
+1.7.1
+
+
+From 43b6e5425b96a009224af9d8ae229dce4f524bc3 Mon Sep 17 00:00:00 2001
+From: Chris Coulson <chrisccoulson@googlemail.com>
+Date: Mon, 17 May 2010 21:53:41 +0100
+Subject: [PATCH 2/2] Don't crash when the XF86VM extension doesn't allow the gamma to be set
+
+On some systems where the XF86VM extension is present, the gamma value
+can be read successfully with XF86VidModeGetGamma but attempting to
+change the gamma value with XF86VidModeSetGamma will result in a
+BadValue error (eg, on KVM).
+
+Trap this error and abort the fade rather than crashing.
+
+Fixes https://bugzilla.gnome.org/show_bug.cgi?id=618932
+---
+ src/gs-fade.c |   16 +++++++++++++---
+ 1 files changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/src/gs-fade.c b/src/gs-fade.c
+index bc054a0..5105aa9 100644
+--- a/src/gs-fade.c
++++ b/src/gs-fade.c
+@@ -204,7 +204,13 @@ xf86_whack_gamma (int              screen,
+                         g2.blue = XF86_MIN_GAMMA;
+                 }
+ 
++                gdk_error_trap_push ();
+                 status = XF86VidModeSetGamma (GDK_DISPLAY (), screen, &g2);
++                gdk_flush ();
++                if (gdk_error_trap_pop ()) {
++                        gs_debug ("Failed to set gamma. Bailing out and aborting fade");
++                        return FALSE;        
++                }
+         } else {
+ 
+ # ifdef HAVE_XF86VMODE_GAMMA_RAMP
+@@ -221,7 +227,13 @@ xf86_whack_gamma (int              screen,
+                         b[i] = gamma_info->b[i] * ratio;
+                 }
+ 
++                gdk_error_trap_push ();
+                 status = XF86VidModeSetGammaRamp (GDK_DISPLAY (), screen, gamma_info->size, r, g, b);
++                gdk_flush ();
++                if (gdk_error_trap_pop ()) {
++                        gs_debug ("Failed to set gamma. Bailing out and aborting fade");
++                        return FALSE;                
++                }
+ 
+                 g_free (r);
+                 g_free (g);
+@@ -232,8 +244,6 @@ xf86_whack_gamma (int              screen,
+ # endif /* !HAVE_XF86VMODE_GAMMA_RAMP */
+         }
+ 
+-        gdk_flush ();
+-
+         return status;
+ }
+ 
+@@ -388,7 +398,7 @@ gamma_fade_set_alpha_gamma (GSFade *fade,
+         screen_priv = &fade->priv->screen_priv[screen_idx];
+         res = xf86_whack_gamma (screen_idx, screen_priv, alpha);
+ 
+-        return TRUE;
++        return res;
+ #else
+         return FALSE;
+ #endif /* HAVE_XF86VMODE_GAMMA */
+-- 
+1.7.1
+

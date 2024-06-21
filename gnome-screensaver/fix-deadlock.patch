@@ -1,0 +1,203 @@
+From f26e1b56ad41e99051a1562d463d265d8e7d2328 Mon Sep 17 00:00:00 2001
+From: Ray Strode <rstrode@redhat.com>
+Date: Tue, 4 Oct 2011 18:00:11 -0400
+Subject: [PATCH 1/4] window: ensure windows are realized before modifying them
+
+We check if a window is flagged visible before modifying it,
+but being flagged visible doesn't imply being realized.
+
+This commit fixes console warnings in some obscure cases.
+---
+ src/gs-window-x11.c |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/gs-window-x11.c b/src/gs-window-x11.c
+index d51895a..66acdeb 100644
+--- a/src/gs-window-x11.c
++++ b/src/gs-window-x11.c
+@@ -295,7 +295,7 @@ gs_window_clear_to_background_pixmap (GSWindow *window)
+ 
+         g_return_if_fail (GS_IS_WINDOW (window));
+ 
+-        if (! GTK_WIDGET_VISIBLE (GTK_WIDGET (window))) {
++        if (! GTK_WIDGET_REALIZED (GTK_WIDGET (window)) || ! GTK_WIDGET_VISIBLE (GTK_WIDGET (window))) {
+                 return;
+         }
+ 
+@@ -341,7 +341,7 @@ clear_widget (GtkWidget *widget)
+         GtkStateType state;
+         GtkStyle    *style;
+ 
+-        if (! GTK_WIDGET_VISIBLE (widget)) {
++        if (! GTK_WIDGET_REALIZED (widget) || ! GTK_WIDGET_VISIBLE (widget)) {
+                 return;
+         }
+ 
+-- 
+1.7.1
+
+
+From ed7fd33f98e93042a74f65ffaa5b26c10dba4022 Mon Sep 17 00:00:00 2001
+From: Ray Strode <rstrode@redhat.com>
+Date: Tue, 4 Oct 2011 18:03:47 -0400
+Subject: [PATCH 2/4] manager: fix deadlock
+
+If the monitor topology changes during a fade out, we can
+end up in a situation where a monitor gets realized while
+under a server grab.  This causes deadlock because the
+realization process invokes a helper that also needs a display
+connection.
+
+This commit ensures all windows are properly realized upfront,
+so we don't end up in that sticky situation.
+---
+ src/gs-manager.c |    2 ++
+ 1 files changed, 2 insertions(+), 0 deletions(-)
+
+diff --git a/src/gs-manager.c b/src/gs-manager.c
+index fbc7464..e367bbe 100644
+--- a/src/gs-manager.c
++++ b/src/gs-manager.c
+@@ -1643,6 +1643,8 @@ gs_manager_create_window_for_monitor (GSManager *manager,
+ 
+         if (manager->priv->active && !manager->priv->fading) {
+                 gtk_widget_show (window);
++        } else {
++                gtk_widget_realize (GTK_WIDGET (window));
+         }
+ }
+ 
+-- 
+1.7.1
+
+
+From 7984e87d6f6a3957542f9ca861a6d501f716524b Mon Sep 17 00:00:00 2001
+From: Ray Strode <rstrode@redhat.com>
+Date: Thu, 6 Oct 2011 11:00:22 -0400
+Subject: [PATCH 3/4] window: place window when it's mapped
+
+The code currently places the window when it's
+realized, not when it's mapped.
+
+Since we now realize the window when we create it,
+not when we show it, that's wrong.
+
+This commit places the window at map time.
+---
+ src/gs-window-x11.c |   17 +++++++++++++++--
+ 1 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/src/gs-window-x11.c b/src/gs-window-x11.c
+index 66acdeb..09a3273 100644
+--- a/src/gs-window-x11.c
++++ b/src/gs-window-x11.c
+@@ -670,8 +670,6 @@ gs_window_real_realize (GtkWidget *widget)
+ 
+         gs_window_override_user_time (GS_WINDOW (widget));
+ 
+-        gs_window_move_resize_window (GS_WINDOW (widget), TRUE, TRUE);
+-
+         g_signal_connect (gtk_window_get_screen (GTK_WINDOW (widget)),
+                           "size_changed",
+                           G_CALLBACK (screen_size_changed),
+@@ -926,6 +924,20 @@ gs_window_real_hide (GtkWidget *widget)
+         }
+ }
+ 
++static void
++gs_window_real_map (GtkWidget *widget)
++{
++        GSWindow *window;
++
++        window = GS_WINDOW (widget);
++
++        if (GTK_WIDGET_CLASS (gs_window_parent_class)->map) {
++                GTK_WIDGET_CLASS (gs_window_parent_class)->map (widget);
++        }
++
++        gs_window_move_resize_window (window, TRUE, TRUE);
++}
++
+ void
+ gs_window_destroy (GSWindow *window)
+ {
+@@ -2161,6 +2173,7 @@ gs_window_class_init (GSWindowClass *klass)
+ 
+         widget_class->show                = gs_window_real_show;
+         widget_class->hide                = gs_window_real_hide;
++        widget_class->map                 = gs_window_real_map;
+         widget_class->realize             = gs_window_real_realize;
+         widget_class->unrealize           = gs_window_real_unrealize;
+         widget_class->key_press_event     = gs_window_real_key_press_event;
+-- 
+1.7.1
+
+
+From 59633ce953028a9fe283f9f6da3b798b81142ead Mon Sep 17 00:00:00 2001
+From: Ray Strode <rstrode@redhat.com>
+Date: Thu, 27 Sep 2012 20:12:57 -0400
+Subject: [PATCH 4/4] manager: don't show unlock when window unobscured
+
+gnome-screensaver will assume if a window becomes obscured then
+unobscured that the user VT switched away and back, and will
+then try to show the unlock dialog.
+
+This is not a very reliable heuristic for judging VT switch, and
+we end up showing the unlock dialog needlessly.
+
+Furthermore, we already listen to consolekit for vt switches and
+act appropriately.  That functionaly does work reliably.
+
+This commit drops the unreliable code.
+---
+ src/gs-manager.c |   20 --------------------
+ 1 files changed, 0 insertions(+), 20 deletions(-)
+
+diff --git a/src/gs-manager.c b/src/gs-manager.c
+index e367bbe..37bc377 100644
+--- a/src/gs-manager.c
++++ b/src/gs-manager.c
+@@ -1451,23 +1451,6 @@ maybe_set_window_throttle (GSManager *manager,
+ }
+ 
+ static void
+-window_obscured_cb (GSWindow   *window,
+-                    GParamSpec *pspec,
+-                    GSManager  *manager)
+-{
+-        gboolean obscured;
+-
+-        obscured = gs_window_is_obscured (window);
+-        gs_debug ("Handling window obscured: %s", obscured ? "obscured" : "unobscured");
+-
+-        maybe_set_window_throttle (manager, window, obscured);
+-
+-        if (! obscured) {
+-                gs_manager_request_unlock (manager);
+-        }
+-}
+-
+-static void
+ handle_window_dialog_up (GSManager *manager,
+                          GSWindow  *window)
+ {
+@@ -1572,7 +1555,6 @@ disconnect_window_signals (GSManager *manager,
+         g_signal_handlers_disconnect_by_func (window, window_show_cb, manager);
+         g_signal_handlers_disconnect_by_func (window, window_map_cb, manager);
+         g_signal_handlers_disconnect_by_func (window, window_map_event_cb, manager);
+-        g_signal_handlers_disconnect_by_func (window, window_obscured_cb, manager);
+         g_signal_handlers_disconnect_by_func (window, window_dialog_up_changed_cb, manager);
+         g_signal_handlers_disconnect_by_func (window, window_unmap_cb, manager);
+         g_signal_handlers_disconnect_by_func (window, window_grab_broken_cb, manager);
+@@ -1602,8 +1584,6 @@ connect_window_signals (GSManager *manager,
+                                  G_CALLBACK (window_map_cb), manager, G_CONNECT_AFTER);
+         g_signal_connect_object (window, "map_event",
+                                  G_CALLBACK (window_map_event_cb), manager, G_CONNECT_AFTER);
+-        g_signal_connect_object (window, "notify::obscured",
+-                                 G_CALLBACK (window_obscured_cb), manager, G_CONNECT_AFTER);
+         g_signal_connect_object (window, "notify::dialog-up",
+                                  G_CALLBACK (window_dialog_up_changed_cb), manager, 0);
+         g_signal_connect_object (window, "unmap",
+-- 
+1.7.1
+
