@@ -1,0 +1,90 @@
+From 7262513bde29679dec7145a2793c16b85782ab9a Mon Sep 17 00:00:00 2001
+Message-Id: <7262513bde29679dec7145a2793c16b85782ab9a.1375947482.git.mprivozn@redhat.com>
+In-Reply-To: <7005de20306f16ac1f30e4ea17e6faf9f9322296.1375947482.git.mprivozn@redhat.com>
+References: <7005de20306f16ac1f30e4ea17e6faf9f9322296.1375947482.git.mprivozn@redhat.com>
+From: Martin Kletzander <mkletzan@redhat.com>
+Date: Wed, 30 May 2012 14:30:02 +0200
+Subject: [libvirt-snmp][PATCH] Stop event thread on server stop
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+https://bugzilla.redhat.com/show_bug.cgi?id=736258
+
+When C-c is sent to the process, the main thread (server) receives it
+and sets keep_running to 0, but the second thread is still
+running. Also, the second thread is not cleaned up after
+pthread_join() or pthread_destroy().
+This patch adds the cleanup function before all exit points of the
+program and fixes the cleansing of the second thread.
+(cherry picked from commit 22c2f5fd91a63d817199b42e695a87dab28ad0c1)
+---
+ src/libvirtMib_subagent.c |  4 +++-
+ src/libvirtSnmp.c         | 20 +++++++++++++++++++-
+ 2 files changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/src/libvirtMib_subagent.c b/src/libvirtMib_subagent.c
+index f5749be..279703b 100644
+--- a/src/libvirtMib_subagent.c
++++ b/src/libvirtMib_subagent.c
+@@ -80,6 +80,8 @@ main (int argc, char **argv) {
+       init_snmp("libvirtGuestTable");
+       fprintf(stderr, "Configuration directives understood:\n");
+       read_config_print_usage("  ");
++      snmp_shutdown("libvirtGuestTable");
++      shutdown_libvirtGuestTable();
+       exit(0);
+     case 'M':
+       agentx_subagent = 0;
+@@ -176,7 +178,7 @@ main (int argc, char **argv) {
+ 
+   /* at shutdown time */
+   snmp_shutdown("libvirtGuestTable");
++  shutdown_libvirtGuestTable();
+   SOCK_CLEANUP;
+   exit(0);
+ }
+-
+diff --git a/src/libvirtSnmp.c b/src/libvirtSnmp.c
+index 7e56737..a9fa185 100644
+--- a/src/libvirtSnmp.c
++++ b/src/libvirtSnmp.c
+@@ -296,7 +296,6 @@ libvirtUnregisterEvents(virConnectPtr conn)
+ {
+     void *status;
+ 
+-    pthread_join(poll_thread, &status);
+     virConnectDomainEventDeregisterAny(conn, callbackRet);
+     callbackRet = -1;
+     return 0;
+@@ -344,8 +343,27 @@ int libvirtSnmpInit(void)
+     return 0;
+ }
+ 
++static void
++libvirtDeinitTimer(int timer ATTRIBUTE_UNUSED, void *opaque ATTRIBUTE_UNUSED)
++{
++    /* nothing to be done here */
++}
++
+ void libvirtSnmpShutdown(void)
+ {
++    int timer;
++
++    /* in case server is being stopped, run is still 1, so let's
++     * shutdown the thread in a clean way */
++    run = 0;
++
++    /* HACK: Add a dummy timeout to break event loop */
++    timer = virEventAddTimeout(0, libvirtDeinitTimer, NULL, NULL);
++    pthread_join(poll_thread, NULL);
++
++    if (timer != -1)
++        virEventRemoveTimeout(timer);
++
+     if (libvirtUnregisterEvents(conn)) {
+         printf("Failed to unregister domain events\n");
+     }
+-- 
+1.8.1.5
+
