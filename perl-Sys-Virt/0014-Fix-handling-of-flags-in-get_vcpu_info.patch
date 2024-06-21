@@ -1,0 +1,103 @@
+From ef5261fd431a255d5afcbe418cefc2705ecdf389 Mon Sep 17 00:00:00 2001
+From: "Daniel P. Berrange" <berrange@redhat.com>
+Date: Tue, 6 Aug 2013 15:46:02 +0100
+Subject: [PATCH] Fix handling of flags in get_vcpu_info()
+
+For https://bugzilla.redhat.com/show_bug.cgi?id=905836
+
+We must always use virDomainGetVcpus if flags is zero and
+fall back to virDomainGetVcpuPinInfo if we get an error
+indicating the guest was shutoff.
+
+Signed-off-by: Daniel P. Berrange <berrange@redhat.com>
+(cherry picked from commit 08613905c70525810dfc107c54f3b9ddf7e4ae7c)
+---
+ Virt.xs                | 21 +++++++++++++++++----
+ examples/vcpuinfo.pl   |  4 ++--
+ lib/Sys/Virt/Domain.pm |  6 ++++--
+ 3 files changed, 23 insertions(+), 8 deletions(-)
+
+diff --git a/Virt.xs b/Virt.xs
+index 3915b4b..1ce613d 100644
+--- a/Virt.xs
++++ b/Virt.xs
+@@ -4126,12 +4126,21 @@ get_vcpu_info(dom, flags=0)
+ 
+       maplen = VIR_CPU_MAPLEN(VIR_NODEINFO_MAXCPUS(nodeinfo));
+       Newx(cpumaps, dominfo.nrVirtCpu * maplen, unsigned char);
+-      if (flags && (flags & VIR_DOMAIN_AFFECT_CONFIG)) {
+-          Newx(info, dominfo.nrVirtCpu, virVcpuInfo);
++      if (!flags) {
++	  Newx(info, dominfo.nrVirtCpu, virVcpuInfo);
+           if ((nvCpus = virDomainGetVcpus(dom, info, dominfo.nrVirtCpu, cpumaps, maplen)) < 0) {
++              virErrorPtr err = virGetLastError();
+               Safefree(info);
+-              Safefree(cpumaps);
+-              _croak_error();
++              info = NULL;
++              if (err && err->code == VIR_ERR_OPERATION_INVALID) {
++                  if ((nvCpus = virDomainGetVcpuPinInfo(dom, dominfo.nrVirtCpu, cpumaps, maplen, flags)) < 0) {
++                      Safefree(cpumaps);
++                      _croak_error();
++                  }
++              } else {
++                  Safefree(cpumaps);
++                  _croak_error();
++              }
+           }
+       } else {
+           info = NULL;
+@@ -4149,6 +4158,10 @@ get_vcpu_info(dom, flags=0)
+               (void)hv_store(rec, "state", 5, newSViv(info[i].state), 0);
+               (void)hv_store(rec, "cpuTime", 7, virt_newSVull(info[i].cpuTime), 0);
+               (void)hv_store(rec, "cpu", 3, newSViv(info[i].cpu), 0);
++          } else {
++              (void)hv_store(rec, "state", 5, newSViv(0), 0);
++              (void)hv_store(rec, "cpuTime", 7, virt_newSVull(0), 0);
++              (void)hv_store(rec, "cpu", 3, newSViv(0), 0);
+           }
+           (void)hv_store(rec, "affinity", 8, newSVpvn((char*)cpumaps + (i *maplen), maplen), 0);
+           PUSHs(newRV_noinc((SV *)rec));
+diff --git a/examples/vcpuinfo.pl b/examples/vcpuinfo.pl
+index 668a0aa..6b07433 100644
+--- a/examples/vcpuinfo.pl
++++ b/examples/vcpuinfo.pl
+@@ -9,12 +9,12 @@ my $con = Sys::Virt->new(address => $addr, readonly => 1);
+ 
+ print "VMM type: ", $con->get_type(), "\n";
+ 
+-foreach my $dom (sort { $a->get_id <=> $b->get_id } $con->list_domains) {
++foreach my $dom (sort { $a->get_id <=> $b->get_id } $con->list_all_domains) {
+     print "Domain: {\n";
+     print "  ID: ", $dom->get_id(), " '" , $dom->get_name(), "'\n";
+     print "  UUID: ", $dom->get_uuid_string(), "\n";
+     my $nodeinfo = $con->get_node_info;
+-    my @info = $dom->get_vcpu_info;
++    my @info = $dom->get_vcpu_info(Sys::Virt::Domain::AFFECT_CONFIG);
+ 
+     foreach my $info (@info) {
+ 	print "  VCPU: {\n";
+diff --git a/lib/Sys/Virt/Domain.pm b/lib/Sys/Virt/Domain.pm
+index 864335b..1076995 100644
+--- a/lib/Sys/Virt/Domain.pm
++++ b/lib/Sys/Virt/Domain.pm
+@@ -894,7 +894,7 @@ or multi-card configuration. C<$st> must be a C<Sys::Virt::Stream>
+ object from which the data can be read. C<$flags> is currently unused
+ and defaults to 0. The mimetype of the screenshot is returned
+ 
+-=item @vcpuinfo = $dom->get_vcpu_info()
++=item @vcpuinfo = $dom->get_vcpu_info($flags=0)
+ 
+ Obtain information about the state of all virtual CPUs in a running
+ guest domain. The returned list will have one element for each vCPU,
+@@ -905,7 +905,9 @@ time of the vCPU, C<state> the running state and C<affinity> giving
+ the allowed shedular placement. The value for C<affinity> is a
+ string representing a bitmask against physical CPUs, 8 cpus per
+ character. To extract the bits use the C<unpack> function with
+-the C<b*> template.
++the C<b*> template. NB The C<state>, C<cpuTime>, C<cpu> values are
++only available if using C<$flags> value of 0, and the domain is
++currently running; otherwise they will all be set to zero.
+ 
+ =item $dom->pin_vcpu($vcpu, $mask)
+ 
