@@ -1,0 +1,79 @@
+From 3b1fe5e7656182c181d606badc4c81937385fb31 Mon Sep 17 00:00:00 2001
+From: Wim Taymans <wtaymans@redhat.com>
+Date: Tue, 20 Jan 2015 15:14:00 +0100
+Subject: [PATCH 1/6] combine-sink: rework output add/remove
+
+Add the output from its sink-input attached callback and remove it
+again from the detach callback. This simplifies some output_enable
+and we can also avoid posting 2 messages for the sink.
+---
+ src/modules/module-combine.c | 26 ++++++++++----------------
+ 1 file changed, 10 insertions(+), 16 deletions(-)
+
+diff --git a/src/modules/module-combine.c b/src/modules/module-combine.c
+index cffb901..b944b30 100644
+--- a/src/modules/module-combine.c
++++ b/src/modules/module-combine.c
+@@ -508,8 +508,9 @@ static void sink_input_attach_cb(pa_sink_input *i) {
+     c = pa_sink_get_requested_latency_within_thread(i->sink);
+     pa_atomic_store(&o->requested_latency, (int) (c == (pa_usec_t) -1 ? 0 : c));
+ 
+-    pa_asyncmsgq_post(o->outq, PA_MSGOBJECT(o->userdata->sink), SINK_MESSAGE_UPDATE_MAX_REQUEST, NULL, 0, NULL, NULL);
+-    pa_asyncmsgq_post(o->outq, PA_MSGOBJECT(o->userdata->sink), SINK_MESSAGE_UPDATE_REQUESTED_LATENCY, NULL, 0, NULL, NULL);
++    /* We register the output. That means that the sink will start to pass data to
++     * this output. */
++    pa_asyncmsgq_send(o->userdata->sink->asyncmsgq, PA_MSGOBJECT(o->userdata->sink), SINK_MESSAGE_ADD_OUTPUT, o, 0, NULL);
+ }
+ 
+ /* Called from I/O thread context */
+@@ -519,6 +520,10 @@ static void sink_input_detach_cb(pa_sink_input *i) {
+     pa_sink_input_assert_ref(i);
+     pa_assert_se(o = i->userdata);
+ 
++    /* We unregister the output. That means that the sink doesn't
++     * pass any further data to this output */
++    pa_asyncmsgq_send(o->userdata->sink->asyncmsgq, PA_MSGOBJECT(o->userdata->sink), SINK_MESSAGE_REMOVE_OUTPUT, o, 0, NULL);
++
+     if (o->inq_rtpoll_item_read) {
+         pa_rtpoll_item_free(o->inq_rtpoll_item_read);
+         o->inq_rtpoll_item_read = NULL;
+@@ -945,18 +950,11 @@ static void output_enable(struct output *o) {
+     if (output_create_sink_input(o) >= 0) {
+ 
+         if (pa_sink_get_state(o->sink) != PA_SINK_INIT) {
+-
+-            /* First we register the output. That means that the sink
+-             * will start to pass data to this output. */
+-            pa_asyncmsgq_send(o->userdata->sink->asyncmsgq, PA_MSGOBJECT(o->userdata->sink), SINK_MESSAGE_ADD_OUTPUT, o, 0, NULL);
+-
+-            /* Then we enable the sink input. That means that the sink
++            /* Enable the sink input. That means that the sink
+              * is now asked for new data. */
+             pa_sink_input_put(o->sink_input);
+ 
+-        } else
+-            /* Hmm the sink is not yet started, do things right here */
+-            output_add_within_thread(o);
++        }
+     }
+ 
+     o->ignore_state_change = FALSE;
+@@ -969,14 +967,10 @@ static void output_disable(struct output *o) {
+     if (!o->sink_input)
+         return;
+ 
+-    /* First we disable the sink input. That means that the sink is
++    /* We disable the sink input. That means that the sink is
+      * not asked for new data anymore  */
+     pa_sink_input_unlink(o->sink_input);
+ 
+-    /* Then we unregister the output. That means that the sink doesn't
+-     * pass any further data to this output */
+-    pa_asyncmsgq_send(o->userdata->sink->asyncmsgq, PA_MSGOBJECT(o->userdata->sink), SINK_MESSAGE_REMOVE_OUTPUT, o, 0, NULL);
+-
+     /* Now dellocate the stream */
+     pa_sink_input_unref(o->sink_input);
+     o->sink_input = NULL;
+-- 
+1.9.3
+

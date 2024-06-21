@@ -1,0 +1,69 @@
+From 193c97bcd6cb76d95fd284994a3aa96ac4aa6e99 Mon Sep 17 00:00:00 2001
+From: "Alexander E. Patrakov" <patrakov@gmail.com>
+Date: Sun, 20 Apr 2014 21:58:19 +0600
+Subject: [PATCH 3/3] core-util: Remove redundant check of directory
+ permissions
+
+Initially (in commit ef422fa4ae626e9638ca70d1c56f27e701dd69c2),
+pa_make_secure_dir followed a simple principle: "make a directory, or,
+if it exists, check that it is suitable". Later this evolved into "make
+a directory, or, if it exists, ensure that it is suitable". But the
+check remained.
+
+The check is now neither sufficient nor necessary. On POSIX-compliant
+systems, the fstat results being checked are actually post-conditions of
+fchmod and fchown. And on systems implementing POSIX ACLs, fstat only
+reflects a part of the information relevant to the security of the
+directory permissions, so PulseAudio could accept an existing insecure
+directory anyway.
+
+Also, the check still fires on non-POSIX-compliant filesystems like CIFS.
+As a user cannot do anything to fix it, just accept insecure permissions
+in this case.
+---
+ src/pulsecore/core-util.c | 25 +++++--------------------
+ 1 file changed, 5 insertions(+), 20 deletions(-)
+
+diff --git a/src/pulsecore/core-util.c b/src/pulsecore/core-util.c
+index 5cd02c0..36bf239 100644
+--- a/src/pulsecore/core-util.c
++++ b/src/pulsecore/core-util.c
+@@ -254,30 +254,15 @@ int pa_make_secure_dir(const char* dir, mode_t m, uid_t uid, gid_t gid) {
+ #endif
+ 
+ #ifdef HAVE_FCHMOD
+-    (void) fchmod(fd, m);
++    if (fchmod(fd, m) < 0) {
++        pa_assert_se(pa_close(fd) >= 0);
++        goto fail;
++    };
+ #endif
+ 
+     pa_assert_se(pa_close(fd) >= 0);
+-
+-#endif
+-
+-#ifdef HAVE_LSTAT
+-    if (lstat(dir, &st) < 0)
+-#else
+-    if (stat(dir, &st) < 0)
+-#endif
+-        goto fail;
+-
+-#ifndef OS_IS_WIN32
+-    if (!S_ISDIR(st.st_mode) ||
+-        (st.st_uid != uid) ||
+-        (st.st_gid != gid) ||
+-        ((st.st_mode & 0777) != m)) {
+-        errno = EACCES;
+-        goto fail;
+-    }
+ #else
+-    pa_log_warn("Secure directory creation not supported on Win32.");
++    pa_log_warn("Secure directory creation not supported on this platform.");
+ #endif
+ 
+     return 0;
+-- 
+2.7.4
+
