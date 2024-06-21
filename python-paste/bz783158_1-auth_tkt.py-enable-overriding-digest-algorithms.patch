@@ -1,0 +1,196 @@
+From 2322eb324d50306655311a6ebc50b126a4abaa79 Mon Sep 17 00:00:00 2001
+From: Jan Pokorny <jpokorny@redhat.com>
+Date: Tue, 6 Mar 2012 21:26:16 +0100
+Subject: [PATCH 1/3] auth_tkt.py: enable overriding digest algorithms 1/2
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Related:
+rhbz#783158
+
+backport of https://bitbucket.org/ianb/paste/changeset/5499c61eb27f:
+# HG changeset patch
+# User Jan Pokorný <jpokorny@redhat.com>
+# Date 1330559801 -3600
+# Node ID 5499c61eb27fb3595fc79a114106697ec9185407
+# Parent  c5138df7a4797a7061ec5b3c7ccbbc112eb2f334
+auth/auth_tkt.py: enable overriding digest algorithms
+
+Currently, mod_auth_tkt supports also SHA256 and SHA 512 [1],
+not just plain MD5.  Quoting:
+
+----v----
+The default is MD5, which is faster, but has now been shown to be vulnerable
+to collision attacks. Such attacks are not directly applicable to
+mod_auth_tkt, which primarily relies on the security of the shared secret
+rather than the strength of the hashing scheme. More paranoid users will
+probably prefer to use one of the SHA digest types, however.
+
+The default is likely to change in a future version, so setting the digest
+type explicitly is encouraged.
+----^----
+
+Thus, enable it also in this implementation so one can optionally switch
+to a stronger secure hash.
+
+Backward compatibility should be untouched as ``md`` is being passed
+as a default kwarg.  The only change affecting external world is
+a new parameter required at ``calculate digest`` (specifying the
+digest to use), but as it has probably no use outside the module,
+this is a non-issue.  Alternatively: another optional kwarg.
+
+[1] http://linux.die.net/man/3/mod_auth_tkt
+
+Signed-off-by: Jan Pokorný <jpokorny@redhat.com>
+---
+ paste/auth/auth_tkt.py |   42 ++++++++++++++++++++++++++++--------------
+ 1 files changed, 28 insertions(+), 14 deletions(-)
+
+diff --git a/paste/auth/auth_tkt.py b/paste/auth/auth_tkt.py
+index e70e2a3..30c8438 100644
+--- a/paste/auth/auth_tkt.py
++++ b/paste/auth/auth_tkt.py
+@@ -45,6 +45,9 @@ except ImportError:
+ import Cookie
+ from paste import request
+ 
++DEFAULT_DIGEST = md5
++
++
+ class AuthTicket(object):
+ 
+     """
+@@ -52,8 +55,8 @@ class AuthTicket(object):
+     the shared secret, the userid, and the IP address.  Optionally you
+     can include tokens (a list of strings, representing role names),
+     'user_data', which is arbitrary data available for your own use in
+-    later scripts.  Lastly, you can override the cookie name and
+-    timestamp.
++    later scripts.  Lastly, you can override the timestamp, cookie name,
++    whether to secure the cookie and the digest algorithm.
+ 
+     Once you provide all the arguments, use .cookie_value() to
+     generate the appropriate authentication ticket.  .cookie()
+@@ -83,7 +86,7 @@ class AuthTicket(object):
+ 
+     def __init__(self, secret, userid, ip, tokens=(), user_data='',
+                  time=None, cookie_name='auth_tkt',
+-                 secure=False):
++                 secure=False, digest_algo=DEFAULT_DIGEST):
+         self.secret = secret
+         self.userid = userid
+         self.ip = ip
+@@ -95,11 +98,12 @@ class AuthTicket(object):
+             self.time = time
+         self.cookie_name = cookie_name
+         self.secure = secure
++        self.digest_algo = digest_algo
+ 
+     def digest(self):
+         return calculate_digest(
+             self.ip, self.time, self.secret, self.userid, self.tokens,
+-            self.user_data)
++            self.user_data, self.digest_algo)
+ 
+     def cookie_value(self):
+         v = '%s%08x%s!' % (self.digest(), int(self.time), self.userid)
+@@ -127,21 +131,22 @@ class BadTicket(Exception):
+         self.expected = expected
+         Exception.__init__(self, msg)
+ 
+-def parse_ticket(secret, ticket, ip):
++def parse_ticket(secret, ticket, ip, digest_algo=DEFAULT_DIGEST):
+     """
+     Parse the ticket, returning (timestamp, userid, tokens, user_data).
+ 
+     If the ticket cannot be parsed, ``BadTicket`` will be raised with
+     an explanation.
+     """
++    digest_hexa_size = digest_algo().digest_size * 2
+     ticket = ticket.strip('"')
+-    digest = ticket[:32]
++    digest = ticket[:digest_hexa_size]
+     try:
+-        timestamp = int(ticket[32:40], 16)
++        timestamp = int(ticket[digest_hexa_size:digest_hexa_size + 8], 16)
+     except ValueError, e:
+         raise BadTicket('Timestamp is not a hex integer: %s' % e)
+     try:
+-        userid, data = ticket[40:].split('!', 1)
++        userid, data = ticket[digest_hexa_size + 8:].split('!', 1)
+     except ValueError:
+         raise BadTicket('userid is not followed by !')
+     if '!' in data:
+@@ -152,7 +157,8 @@ def parse_ticket(secret, ticket, ip):
+         user_data = data
+     
+     expected = calculate_digest(ip, timestamp, secret,
+-                                userid, tokens, user_data)
++                                userid, tokens, user_data,
++                                digest_algo)
+ 
+     if expected != digest:
+         raise BadTicket('Digest signature is not correct',
+@@ -162,15 +168,16 @@ def parse_ticket(secret, ticket, ip):
+ 
+     return (timestamp, userid, tokens, user_data)
+     
+-def calculate_digest(ip, timestamp, secret, userid, tokens, user_data):
++def calculate_digest(ip, timestamp, secret, userid, tokens, user_data,
++                     digest_algo):
+     secret = maybe_encode(secret)
+     userid = maybe_encode(userid)
+     tokens = maybe_encode(tokens)
+     user_data = maybe_encode(user_data)
+-    digest0 = md5(
++    digest0 = digest_algo(
+         encode_ip_timestamp(ip, timestamp) + secret + userid + '\0'
+         + tokens + '\0' + user_data).hexdigest()
+-    digest = md5(digest0 + secret).hexdigest()
++    digest = digest_algo(digest0 + secret).hexdigest()
+     return digest
+ 
+ def encode_ip_timestamp(ip, timestamp):
+@@ -224,6 +231,12 @@ class AuthTKTMiddleware(object):
+         page will be shown as usual, but the user will also be logged out
+         when they visit this page.
+         
++    ``digest_algo``:
++        Digest object constructor compatible with named constructors from
++        ``hashlib``.
++        Defaults to ``md5``, as in mod_auth_tkt.  The others currently
++        compatible with mod_auth_tkt are ``sha256`` and ``sha512``.
++
+     If used with mod_auth_tkt, then these settings (except logout_path) should 
+     match the analogous Apache configuration settings.
+ 
+@@ -243,7 +256,7 @@ class AuthTKTMiddleware(object):
+     def __init__(self, app, secret, cookie_name='auth_tkt', secure=False,
+                  include_ip=True, logout_path=None, httponly=False,
+                  no_domain_cookie=True, current_domain_cookie=True,
+-                 wildcard_cookie=True):
++                 wildcard_cookie=True, digest_algo=DEFAULT_DIGEST):
+         self.app = app
+         self.secret = secret
+         self.cookie_name = cookie_name
+@@ -254,6 +267,7 @@ class AuthTKTMiddleware(object):
+         self.no_domain_cookie = no_domain_cookie
+         self.current_domain_cookie = current_domain_cookie
+         self.wildcard_cookie = wildcard_cookie
++        self.digest_algo = digest_algo
+ 
+     def __call__(self, environ, start_response):
+         cookies = request.get_cookies(environ)
+@@ -272,7 +286,7 @@ class AuthTKTMiddleware(object):
+             # Also, timeouts should cause cookie refresh
+             try:
+                 timestamp, userid, tokens, user_data = parse_ticket(
+-                    self.secret, cookie_value, remote_addr)
++                    self.secret, cookie_value, remote_addr, self.digest_algo)
+                 tokens = ','.join(tokens)
+                 environ['REMOTE_USER'] = userid
+                 if environ.get('REMOTE_USER_TOKENS'):
+-- 
+1.7.7.5
+

@@ -1,0 +1,173 @@
+From 6c7cf6d71380771b8932dce919cd62af1e528ba8 Mon Sep 17 00:00:00 2001
+From: Jan Pokorny <jpokorny@redhat.com>
+Date: Tue, 6 Mar 2012 21:26:17 +0100
+Subject: [PATCH 2/3] auth/auth_tkt.py: enable overriding digest algorithms 2/2
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Related:
+rhbz#783158
+
+backport of https://bitbucket.org/ianb/paste/changeset/7f90a96378ed:
+# HG changeset patch
+# User Jan Pokorný <jpokorny@redhat.com>
+# Date 1330978448 -3600
+# Node ID 7f90a96378ed42954014ea08ad60407c4082e383
+# Parent  5499c61eb27fb3595fc79a114106697ec9185407
+auth/auth_tkt.py: enable overriding digest algorithms
+
+Update (based Ian's comments):
+The algorithm can also be specified as a string referring to the
+algorithm known to hashlib (otherwise AttributeError will be raised).
+
+Example session I used to check it works as expected (longish):
+
+>>> import sys; sys.path.append('../..')
+>>> from hashlib import sha256, sha512
+>>> execfile('auth_tkt.py')
+>>> AuthTicket('secret', 'me', '0.0.0.0').cookie_value()
+'39fecb1395af5285232be390eba0eed34f5518c8me!'
+>>> AuthTicket('secret', 'me', '0.0.0.0', "md5").cookie_value()
+'c3b8eacbbbf76a9c993c7dcb99975d504f5518cfme!m,d,5!'
+>>> AuthTicket('secret', 'me', '0.0.0.0', digest_algo="md5") \
+... .cookie_value()
+'db3b04de3c44b5bd0e2b47019e903c064f5518dbme!'
+>>> AuthTicket('secret', 'me', '0.0.0.0', digest_algo="sha1") \
+... .cookie_value()
+'dddaadc2be960b6e89263ae7fb8c39591554103d4f5518edme!'
+>>> AuthTicket('secret', 'me', '0.0.0.0', digest_algo=sha256) \
+... .cookie_value()
+'bf5c9a32e49920f2ca517ec19a9d55e10a83849e5d532e8997891b8ccdbf0e634f551902me!'
+>>> AuthTicket('secret', 'me', '0.0.0.0', digest_algo="sha256") \
+... .cookie_value()
+'9cb12df90fd86b868c98353115df4da3b8f9fa83bebecdf0b7918fea5d06b0744f551908me!'
+>>> AuthTicket('secret', 'me', '0.0.0.0', digest_algo='foo') \
+... .cookie_value()
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "auth_tkt.py", line 107, in __init__
+    self.digest_algo = getattr(hashlib, digest_algo)
+AttributeError: 'module' object has no attribute 'foo'
+>>>
+>>> parse_ticket('secret', \
+...     AuthTicket('secret', 'me', '0.0.0.0').cookie_value(),'0.0.0.0')
+(1330977060, 'me', [''], '')
+>>> parse_ticket('secret', \
+...     AuthTicket('secret', 'me', '0.0.0.0', digest_algo='md5') \
+... .cookie_value(),'0.0.0.0', digest_algo='md5')
+(1330977096, 'me', [''], '')
+>>> parse_ticket('secret', \
+...     AuthTicket('secret', 'me', '0.0.0.0', digest_algo=sha256) \
+... .cookie_value(),'0.0.0.0', digest_algo=sha256)
+(1330977115, 'me', [''], '')
+>>> parse_ticket('secret', \
+...     AuthTicket('secret', 'me', '0.0.0.0', digest_algo=sha512) \
+... .cookie_value(),'0.0.0.0', digest_algo=sha512)
+(1330977125, 'me', [''], '')
+>>> parse_ticket('secret', \
+...     AuthTicket('secret', 'me', '0.0.0.0', digest_algo=sha512) \
+... .cookie_value(),'0.0.0.0')
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "auth_tkt.py", line 179, in parse_ticket
+    expected=(expected, digest))
+__main__.BadTicket: Digest signature is not correct
+
+[1] http://linux.die.net/man/3/mod_auth_tkt
+
+Signed-off-by: Jan Pokorný <jpokorny@redhat.com>
+---
+ paste/auth/auth_tkt.py |   30 ++++++++++++++++++++++--------
+ 1 files changed, 22 insertions(+), 8 deletions(-)
+
+diff --git a/paste/auth/auth_tkt.py b/paste/auth/auth_tkt.py
+index 30c8438..eae6339 100644
+--- a/paste/auth/auth_tkt.py
++++ b/paste/auth/auth_tkt.py
+@@ -39,13 +39,14 @@ non-Python code run under Apache.
+ 
+ import time as time_mod
+ try:
+-    from hashlib import md5
++    import hashlib
+ except ImportError:
+-    from md5 import md5
++    # mimic hashlib (will work for md5, fail for secure hashes)
++    import md5 as hashlib
+ import Cookie
+ from paste import request
+ 
+-DEFAULT_DIGEST = md5
++DEFAULT_DIGEST = hashlib.md5
+ 
+ 
+ class AuthTicket(object):
+@@ -56,7 +57,8 @@ class AuthTicket(object):
+     can include tokens (a list of strings, representing role names),
+     'user_data', which is arbitrary data available for your own use in
+     later scripts.  Lastly, you can override the timestamp, cookie name,
+-    whether to secure the cookie and the digest algorithm.
++    whether to secure the cookie and the digest algorithm (for details
++    look at ``AuthTKTMiddleware``).
+ 
+     Once you provide all the arguments, use .cookie_value() to
+     generate the appropriate authentication ticket.  .cookie()
+@@ -98,7 +100,11 @@ class AuthTicket(object):
+             self.time = time
+         self.cookie_name = cookie_name
+         self.secure = secure
+-        self.digest_algo = digest_algo
++        if isinstance(digest_algo, str):
++            # correct specification of digest from hashlib or fail
++            self.digest_algo = getattr(hashlib, digest_algo)
++        else:
++            self.digest_algo = digest_algo
+ 
+     def digest(self):
+         return calculate_digest(
+@@ -138,6 +144,9 @@ def parse_ticket(secret, ticket, ip, digest_algo=DEFAULT_DIGEST):
+     If the ticket cannot be parsed, ``BadTicket`` will be raised with
+     an explanation.
+     """
++    if isinstance(digest_algo, str):
++        # correct specification of digest from hashlib or fail
++        digest_algo = getattr(hashlib, digest_algo)
+     digest_hexa_size = digest_algo().digest_size * 2
+     ticket = ticket.strip('"')
+     digest = ticket[:digest_hexa_size]
+@@ -168,6 +177,7 @@ def parse_ticket(secret, ticket, ip, digest_algo=DEFAULT_DIGEST):
+ 
+     return (timestamp, userid, tokens, user_data)
+     
++# @@: Digest object constructor compatible with named ones in hashlib only
+ def calculate_digest(ip, timestamp, secret, userid, tokens, user_data,
+                      digest_algo):
+     secret = maybe_encode(secret)
+@@ -232,8 +242,8 @@ class AuthTKTMiddleware(object):
+         when they visit this page.
+         
+     ``digest_algo``:
+-        Digest object constructor compatible with named constructors from
+-        ``hashlib``.
++        Digest algorithm specified as a name of the algorithm provided by
++        ``hashlib`` or as a compatible digest object constructor.
+         Defaults to ``md5``, as in mod_auth_tkt.  The others currently
+         compatible with mod_auth_tkt are ``sha256`` and ``sha512``.
+ 
+@@ -267,7 +277,11 @@ class AuthTKTMiddleware(object):
+         self.no_domain_cookie = no_domain_cookie
+         self.current_domain_cookie = current_domain_cookie
+         self.wildcard_cookie = wildcard_cookie
+-        self.digest_algo = digest_algo
++        if isinstance(digest_algo, str):
++            # correct specification of digest from hashlib or fail
++            self.digest_algo = getattr(hashlib, digest_algo)
++        else:
++            self.digest_algo = digest_algo
+ 
+     def __call__(self, environ, start_response):
+         cookies = request.get_cookies(environ)
+-- 
+1.7.7.5
+
