@@ -1,0 +1,208 @@
+diff -up net-tools-1.60/hostname.c.allnames net-tools-1.60/hostname.c
+--- net-tools-1.60/hostname.c.allnames	2012-02-01 18:07:10.566046487 +0100
++++ net-tools-1.60/hostname.c	2012-02-01 18:09:44.302053753 +0100
+@@ -39,6 +39,8 @@
+ #include <sys/param.h>
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
++#include <ifaddrs.h>
++#include <net/if.h>
+ #include "config.h"
+ #include "version.h"
+ #include "../intl.h"
+@@ -130,6 +132,7 @@ static void showhname(char *hname, int c
+     register char *p, **alias;
+     struct in_addr **ip;
+ 
++  if (c != 'I' && c != 'A') { // 'I' and 'A' don't depend on name resolution
+     if (opt_v)
+ 	fprintf(stderr, _("Resolving `%s' ...\n"), hname);
+     if (!(hp = gethostbyname(hname))) {
+@@ -152,8 +155,62 @@ static void showhname(char *hname, int c
+     }
+     if (!(p = strchr(hp->h_name, '.')) && (c == 'd'))
+ 	return;
+-
++  }
+     switch (c) {
++    case 'I':
++    case 'A': {
++	char buf[INET6_ADDRSTRLEN];
++	int flags, ret, family, addrlen;
++	struct ifaddrs *ifa, *ifap;
++
++	/* What kind of information do we want from getnameinfo()? */
++	flags = (c == 'I') ? NI_NUMERICHOST : NI_NAMEREQD;
++
++	if (getifaddrs(&ifa) != 0)
++	    errx(1, "%s", strerror(errno));
++	for (ifap = ifa; ifap != NULL; ifap = ifap->ifa_next) {
++	    /* Skip interfaces that have no configured addresses */
++	    if (ifap->ifa_addr == NULL)
++		continue;
++	    /* Skip the loopback interface */
++	    if (ifap->ifa_flags & IFF_LOOPBACK)
++		continue;
++	    /* Skip interfaces that are not UP */
++	    if (!(ifap->ifa_flags & IFF_UP))
++		continue;
++
++	    /* Only handle IPv4 and IPv6 addresses */
++	    family = ifap->ifa_addr->sa_family;
++	    if (family != AF_INET && family != AF_INET6)
++		continue;
++
++	    addrlen = (family == AF_INET) ? sizeof(struct sockaddr_in) :
++	    sizeof(struct sockaddr_in6);
++
++	    /* Skip IPv6 link-local addresses */
++	    if (family == AF_INET6) {
++		struct sockaddr_in6 *sin6;
++
++		sin6 = (struct sockaddr_in6 *)ifap->ifa_addr;
++		if (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr) ||
++		    IN6_IS_ADDR_MC_LINKLOCAL(&sin6->sin6_addr))
++		    continue;
++	    }
++
++	    ret = getnameinfo(ifap->ifa_addr, addrlen,
++				buf, sizeof(buf), NULL, 0, flags);
++
++	    /* Just skip addresses that cannot be translated */
++	    if (ret != 0) {
++		if (c != 'A' && ret != EAI_NONAME)
++		    errx(1, "%s", gai_strerror(ret));
++	    } else
++		printf("%s ", buf);
++	}
++	printf("\n");
++	freeifaddrs(ifa);
++	break;
++	}
+     case 'a':
+ 	while (hp->h_aliases[0]) {
+ 	    printf("%s", *hp->h_aliases++);
+@@ -231,14 +288,16 @@ static void usage(void)
+     fprintf(stderr, _("       nodename [-v] {nodename|-F file}      set DECnet node name (from file)\n"));
+     fprintf(stderr, _("       hostname [-n] 			    DECnet domain name\n"));
+ #endif
+-    fprintf(stderr, _("       hostname [-v] [-d|-f|-s|-a|-i|-y]  display formatted name\n"));
++    fprintf(stderr, _("       hostname [-v] [-d|-f|-s|-a|-i|-y|-A|-I]  display formatted name\n"));
+     fprintf(stderr, _("       hostname [-v]                         display hostname\n\n"));
+     fprintf(stderr, _("       hostname -V|--version|-h|--help       print info and exit\n\n"));
+     fprintf(stderr, _("    dnsdomainname=hostname -d, {yp,nis,}domainname=hostname -y\n\n"));
+     fprintf(stderr, _("    -s, --short           short host name\n"));
+     fprintf(stderr, _("    -a, --alias           alias names\n"));
+     fprintf(stderr, _("    -i, --ip-address      addresses for the hostname\n"));
++    fprintf(stderr, _("    -I, --all-ip-addresses all addresses for the host\n"));
+     fprintf(stderr, _("    -f, --fqdn, --long    long host name (FQDN)\n"));
++    fprintf(stderr, _("    -A, --all-fqdns        all long host names (FQDNs)\n"));
+     fprintf(stderr, _("    -d, --domain          DNS domain name\n"));
+     fprintf(stderr, _("    -y, --yp, --nis       NIS/YP domainname\n"));
+ #if HAVE_AFDECnet
+@@ -272,12 +331,14 @@ int main(int argc, char **argv)
+ 	{"domain", no_argument, 0, 'd'},
+ 	{"file", required_argument, 0, 'F'},
+ 	{"fqdn", no_argument, 0, 'f'},
++	{"all-fqdns", no_argument, 0, 'A'},
+ 	{"help", no_argument, 0, 'h'},
+ 	{"long", no_argument, 0, 'f'},
+ 	{"short", no_argument, 0, 's'},
+ 	{"version", no_argument, 0, 'V'},
+ 	{"verbose", no_argument, 0, 'v'},
+ 	{"alias", no_argument, 0, 'a'},
++	{"all-ip-addresses", no_argument, 0, 'I'},
+ 	{"ip-address", no_argument, 0, 'i'},
+ 	{"nis", no_argument, 0, 'y'},
+ 	{"yp", no_argument, 0, 'y'},
+@@ -304,7 +365,7 @@ int main(int argc, char **argv)
+         what = 4;
+ #endif /* HAVE_AFDECnet */
+ 
+-    while ((c = getopt_long(argc, argv, "adfF:h?isVvyn", long_options, &option_index)) != EOF)
++    while ((c = getopt_long(argc, argv, "adfAIF:h?isVvyn", long_options, &option_index)) != EOF)
+ 	switch (c) {
+ 	case 'd':
+ 	    what = 2;
+@@ -312,6 +373,8 @@ int main(int argc, char **argv)
+ 	case 'a':
+ 	case 'f':
+ 	case 'i':
++	case 'A':
++	case 'I':
+ 	case 's':
+ 	    what = 1;
+ 	    type = c;
+diff -up net-tools-1.60/man/en_US/hostname.1.allnames net-tools-1.60/man/en_US/hostname.1
+--- net-tools-1.60/man/en_US/hostname.1.allnames	2012-02-01 18:07:10.266049396 +0100
++++ net-tools-1.60/man/en_US/hostname.1	2012-02-01 18:07:10.672046657 +0100
+@@ -20,8 +20,12 @@ ypdomainname \- show or set the system's
+ .RB [ \-\-domain ]
+ .RB [ \-f ]
+ .RB [ \-\-fqdn ]
++.RB [ \-A ]
++.RB [ \-\-all-fqdns ]
+ .RB [ \-i ]
+ .RB [ \-\-ip-address ]
++.RB [ \-I ]
++.RB [ \-\-all-ip-addresses ]
+ .RB [ \-\-long ]
+ .RB [ \-s ]
+ .RB [ \-\-short ]
+@@ -170,7 +174,16 @@ Therefore it depends on the configuratio
+ how you can change it. Usually (if the hosts file is parsed before DNS or 
+ NIS) you can change it in 
+ .IR /etc/hosts .
+-
++.LP
++If a machine has multiple network interfaces/addresses or is used in a
++mobile environment, then it may either have multiple FQDNs/domain names
++or none at all. Therefore avoid using
++.BR "hostname \-\-fqdn" ,
++.BR "hostname \-\-domain"
++and
++.BR "dnsdomainname" .
++.BR "hostname \-\-ip-address"
++is subject to the same limitations so it should be avoided as well.
+ 
+ .SH OPTIONS
+ .TP
+@@ -193,13 +206,36 @@ a `#') are ignored.
+ Display the FQDN (Fully Qualified Domain Name). A FQDN consists of a
+ short host name and the DNS domain name. Unless you are using bind or NIS
+ for host lookups you can change the FQDN and the DNS domain name (which is
+-part of the FQDN) in the \fI/etc/hosts\fR file.
++part of the FQDN) in the \fI/etc/hosts\fR file. See the warnings in section
++.B "THE FQDN"
++above, and avoid using this option; use 
++.BR "hostname \-\-all-fqdns"
++instead.
++.TP
++.I "\-A, \-\-all-fqdns"
++Displays all FQDNs of the machine. This option enumerates all configured
++network addresses on all configured network interfaces, and translates
++them to DNS domain names. Addresses that cannot be translated (i.e. because
++they do not have an appropriate reverse DNS entry) are skipped. Note that
++different addresses may resolve to the same name, therefore the output may
++contain duplicate entries. Do not make any assumptions about the order of the
++output.
+ .TP
+ .I "\-h, \-\-help"
+ Print a usage message and exit.
+ .TP
+ .I "\-i, \-\-ip-address"
+-Display the IP address(es) of the host.
++Display the IP address(es) of the host. Note that this works only
++if the host name can be resolved. Avoid using this option; use
++.BR "hostname \-\-all-ip-addresses"
++instead.
++.TP
++.I "\-I, \-\-all-ip-addresses"
++Display all network addresses of the host. This option enumerates all
++configured addresses on all network interfaces. The loopback interface and IPv6
++link-local addresses are omitted. Contrary to option \fI-i\fR, this option
++does not depend on name resolution. Do not make any assumptions about the
++order of the output.
+ .TP
+ .I "\-s, \-\-short"
+ Display the short host name. This is the host name cut at the first dot.
