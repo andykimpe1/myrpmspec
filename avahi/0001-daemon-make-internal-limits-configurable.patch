@@ -1,0 +1,713 @@
+From 7b4779f1f230182b02b2fee487c318127f7dc042 Mon Sep 17 00:00:00 2001
+From: Lennart Poettering <lennart@poettering.net>
+Date: Tue, 22 Jul 2014 14:07:02 +0200
+Subject: [PATCH] daemon: make internal limits configurable
+
+(cherry picked from commit 037ca37a213d9e40258f5ebc3b00113df9f842d1)
+
+Conflicts:
+	avahi-core/cache.c
+       	avahi-daemon/avahi-daemon.conf
+        avahi-daemon/dbus-async-address-resolver.c
+        avahi-daemon/dbus-async-host-name-resolver.c
+        avahi-daemon/dbus-async-service-resolver.c
+        avahi-daemon/dbus-domain-browser.c
+        avahi-daemon/dbus-entry-group.c
+        avahi-daemon/dbus-internal.h
+        avahi-daemon/dbus-protocol.c
+        avahi-daemon/dbus-service-browser.c
+        avahi-daemon/dbus-service-type-browser.c
+        man/avahi-daemon.conf.5.xml.in
+---
+ avahi-core/cache.c                           |    7 +--
+ avahi-core/core.h                            |    1 +
+ avahi-core/server.c                          |    3 +
+ avahi-daemon/avahi-daemon.conf               |    4 ++
+ avahi-daemon/dbus-async-address-resolver.c   |    2 +-
+ avahi-daemon/dbus-async-host-name-resolver.c |    2 +-
+ avahi-daemon/dbus-async-service-resolver.c   |    2 +-
+ avahi-daemon/dbus-domain-browser.c           |    3 +-
+ avahi-daemon/dbus-entry-group.c              |   10 ++--
+ avahi-daemon/dbus-internal.h                 |   18 ++++--
+ avahi-daemon/dbus-protocol.c                 |   42 +++++++++-------
+ avahi-daemon/dbus-protocol.h                 |    7 ++-
+ avahi-daemon/dbus-record-browser.c           |    2 +-
+ avahi-daemon/dbus-service-browser.c          |    2 +-
+ avahi-daemon/dbus-service-type-browser.c     |    4 +-
+ avahi-daemon/dbus-sync-address-resolver.c    |    2 +-
+ avahi-daemon/dbus-sync-host-name-resolver.c  |    2 +-
+ avahi-daemon/dbus-sync-service-resolver.c    |    2 +-
+ avahi-daemon/main.c                          |   71 +++++++++++++++++++++++++-
+ man/avahi-daemon.conf.5.xml.in               |   29 +++++++++++
+ 20 files changed, 165 insertions(+), 50 deletions(-)
+
+diff --git a/avahi-core/cache.c b/avahi-core/cache.c
+index 9d97b6c..849fa4a 100644
+--- a/avahi-core/cache.c
++++ b/avahi-core/cache.c
+@@ -34,8 +34,6 @@
+ #include "log.h"
+ #include "rr-util.h"
+ 
+-#define AVAHI_CACHE_ENTRIES_MAX 500
+-
+ static void remove_entry(AvahiCache *c, AvahiCacheEntry *e) {
+     AvahiCacheEntry *t;
+ 
+@@ -341,7 +339,7 @@ void avahi_cache_update(AvahiCache *c, AvahiRecord *r, int cache_flush, const Av
+             
+ /*             avahi_log_debug("cache: couldn't find matching cache entry for %s", txt);   */
+ 
+-            if (c->n_entries >= AVAHI_CACHE_ENTRIES_MAX)
++            if (c->n_entries >= c->server->config.n_cache_entries_max)
+                 return;
+ 
+             if (!(e = avahi_new(AvahiCacheEntry, 1))) {
+@@ -514,6 +512,3 @@ void avahi_cache_stop_poof(AvahiCache *c, AvahiRecord *record, const AvahiAddres
+             next_expiry(c, e, 80);
+         }
+ }
+-
+-
+-
+diff --git a/avahi-core/core.h b/avahi-core/core.h
+index 94d1970..aaa1560 100644
+--- a/avahi-core/core.h
++++ b/avahi-core/core.h
+@@ -67,6 +67,7 @@ typedef struct AvahiServerConfig {
+     int allow_point_to_point;         /**< Enable publishing on POINTOPOINT interfaces */
+     int publish_a_on_ipv6;            /**< Publish an IPv4 A RR on IPv6 sockets */
+     int publish_aaaa_on_ipv4;         /**< Publish an IPv4 A RR on IPv6 sockets */
++    unsigned n_cache_entries_max;     /**< Maximum number of cache entries per interface */
+ } AvahiServerConfig;
+ 
+ /** Allocate a new mDNS responder object. */
+diff --git a/avahi-core/server.c b/avahi-core/server.c
+index 7b93fcc..f862689 100644
+--- a/avahi-core/server.c
++++ b/avahi-core/server.c
+@@ -51,6 +51,8 @@
+ #include "domain-util.h"
+ #include "rr-util.h"
+ 
++#define AVAHI_DEFAULT_CACHE_ENTRIES_MAX 500
++
+ static void enum_aux_records(AvahiServer *s, AvahiInterface *i, const char *name, uint16_t type, void (*callback)(AvahiServer *s, AvahiRecord *r, int flush_cache, void* userdata), void* userdata) {
+     assert(s);
+     assert(i);
+@@ -1592,6 +1594,7 @@ AvahiServerConfig* avahi_server_config_init(AvahiServerConfig *c) {
+     c->allow_point_to_point = 0;
+     c->publish_aaaa_on_ipv4 = 1;
+     c->publish_a_on_ipv6 = 0;
++    c->n_cache_entries_max = AVAHI_DEFAULT_CACHE_ENTRIES_MAX;
+ 
+     return c;
+ }
+diff --git a/avahi-daemon/avahi-daemon.conf b/avahi-daemon/avahi-daemon.conf
+index ad69c73..836a950 100644
+--- a/avahi-daemon/avahi-daemon.conf
++++ b/avahi-daemon/avahi-daemon.conf
+@@ -33,6 +33,10 @@ use-ipv6=no
+ #enable-dbus=yes
+ #disallow-other-stacks=no
+ #allow-point-to-point=no
++#cache-entries-max=500
++#clients-max=256
++#objects-per-client-max=250
++#entries-per-entry-group-max=20
+ 
+ [wide-area]
+ enable-wide-area=yes
+diff --git a/avahi-daemon/dbus-async-address-resolver.c b/avahi-daemon/dbus-async-address-resolver.c
+index f05af8f..ed54f96 100644
+--- a/avahi-daemon/dbus-async-address-resolver.c
++++ b/avahi-daemon/dbus-async-address-resolver.c
+@@ -46,8 +46,8 @@ void avahi_dbus_async_address_resolver_free(AsyncAddressResolverInfo *i) {
+     
+     AVAHI_LLIST_REMOVE(AsyncAddressResolverInfo, async_address_resolvers, i->client->async_address_resolvers, i);
+ 
++    assert(i->client->n_objects >= 1);
+     i->client->n_objects--;
+-    assert(i->client->n_objects >= 0);
+ 
+     avahi_free(i);
+ }
+diff --git a/avahi-daemon/dbus-async-host-name-resolver.c b/avahi-daemon/dbus-async-host-name-resolver.c
+index a2c99a7..6b155f9 100644
+--- a/avahi-daemon/dbus-async-host-name-resolver.c
++++ b/avahi-daemon/dbus-async-host-name-resolver.c
+@@ -45,8 +45,8 @@ void avahi_dbus_async_host_name_resolver_free(AsyncHostNameResolverInfo *i) {
+     }
+     AVAHI_LLIST_REMOVE(AsyncHostNameResolverInfo, async_host_name_resolvers, i->client->async_host_name_resolvers, i);
+ 
++    assert(i->client->n_objects >= 1);
+     i->client->n_objects--;
+-    assert(i->client->n_objects >= 0);
+ 
+     avahi_free(i);
+ }
+diff --git a/avahi-daemon/dbus-async-service-resolver.c b/avahi-daemon/dbus-async-service-resolver.c
+index a9a1364..d5a40b8 100644
+--- a/avahi-daemon/dbus-async-service-resolver.c
++++ b/avahi-daemon/dbus-async-service-resolver.c
+@@ -46,8 +46,8 @@ void avahi_dbus_async_service_resolver_free(AsyncServiceResolverInfo *i) {
+     
+     AVAHI_LLIST_REMOVE(AsyncServiceResolverInfo, async_service_resolvers, i->client->async_service_resolvers, i);
+ 
++    assert(i->client->n_objects >= 1);
+     i->client->n_objects--;
+-    assert(i->client->n_objects >= 0);
+ 
+     avahi_free(i);
+ }
+diff --git a/avahi-daemon/dbus-domain-browser.c b/avahi-daemon/dbus-domain-browser.c
+index b529ede..b3674dc 100644
+--- a/avahi-daemon/dbus-domain-browser.c
++++ b/avahi-daemon/dbus-domain-browser.c
+@@ -46,8 +46,8 @@ void avahi_dbus_domain_browser_free(DomainBrowserInfo *i) {
+     
+     AVAHI_LLIST_REMOVE(DomainBrowserInfo, domain_browsers, i->client->domain_browsers, i);
+ 
++    assert(i->client->n_objects >= 1);
+     i->client->n_objects--;
+-    assert(i->client->n_objects >= 0);
+ 
+     avahi_free(i);
+ }
+@@ -127,4 +127,3 @@ void avahi_dbus_domain_browser_callback(AvahiSDomainBrowser *b, AvahiIfIndex int
+     dbus_connection_send(server->bus, m, NULL);
+     dbus_message_unref(m);
+ }
+-
+diff --git a/avahi-daemon/dbus-entry-group.c b/avahi-daemon/dbus-entry-group.c
+index 0e1a21c..5e8020b 100644
+--- a/avahi-daemon/dbus-entry-group.c
++++ b/avahi-daemon/dbus-entry-group.c
+@@ -47,8 +47,8 @@ void avahi_dbus_entry_group_free(EntryGroupInfo *i) {
+     }
+     AVAHI_LLIST_REMOVE(EntryGroupInfo, entry_groups, i->client->entry_groups, i);
+ 
++    assert(i->client->n_objects >= 1);
+     i->client->n_objects--;
+-    assert(i->client->n_objects >= 0);
+     
+     avahi_free(i);
+ }
+@@ -184,7 +184,7 @@ DBusHandlerResult avahi_dbus_msg_entry_group_impl(DBusConnection *c, DBusMessage
+             goto fail;
+         }
+ 
+-        if (!(flags & AVAHI_PUBLISH_UPDATE) && i->n_entries >= ENTRIES_PER_ENTRY_GROUP_MAX) {
++        if (!(flags & AVAHI_PUBLISH_UPDATE) && i->n_entries >= server->n_entries_per_entry_group_max) {
+             avahi_string_list_free(strlst);
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_ENTRIES, NULL);
+         }
+@@ -227,7 +227,7 @@ DBusHandlerResult avahi_dbus_msg_entry_group_impl(DBusConnection *c, DBusMessage
+             goto fail;
+         }
+ 
+-        if (!(flags & AVAHI_PUBLISH_UPDATE) && i->n_entries >= ENTRIES_PER_ENTRY_GROUP_MAX)
++        if (!(flags & AVAHI_PUBLISH_UPDATE) && i->n_entries >= server->n_entries_per_entry_group_max)
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_ENTRIES, NULL);
+ 
+         if (domain && !*domain)
+@@ -292,7 +292,7 @@ DBusHandlerResult avahi_dbus_msg_entry_group_impl(DBusConnection *c, DBusMessage
+             goto fail;
+         }
+ 
+-        if (!(flags & AVAHI_PUBLISH_UPDATE) && i->n_entries >= ENTRIES_PER_ENTRY_GROUP_MAX)
++        if (!(flags & AVAHI_PUBLISH_UPDATE) && i->n_entries >= server->n_entries_per_entry_group_max)
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_ENTRIES, NULL);
+         
+         if (!(avahi_address_parse(address, AVAHI_PROTO_UNSPEC, &a)))
+@@ -328,7 +328,7 @@ DBusHandlerResult avahi_dbus_msg_entry_group_impl(DBusConnection *c, DBusMessage
+             goto fail;
+         }
+ 
+-        if (!(flags & AVAHI_PUBLISH_UPDATE) && i->n_entries >= ENTRIES_PER_ENTRY_GROUP_MAX)
++        if (!(flags & AVAHI_PUBLISH_UPDATE) && i->n_entries >= server->n_entries_per_entry_group_max)
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_ENTRIES, NULL);
+ 
+         if (!avahi_is_valid_domain_name (name))
+diff --git a/avahi-daemon/dbus-internal.h b/avahi-daemon/dbus-internal.h
+index 11c1094..ffbefb9 100644
+--- a/avahi-daemon/dbus-internal.h
++++ b/avahi-daemon/dbus-internal.h
+@@ -45,9 +45,9 @@ typedef struct SyncServiceResolverInfo SyncServiceResolverInfo;
+ typedef struct AsyncServiceResolverInfo AsyncServiceResolverInfo;
+ typedef struct RecordBrowserInfo RecordBrowserInfo;
+ 
+-#define CLIENTS_MAX 256
+-#define OBJECTS_PER_CLIENT_MAX 250
+-#define ENTRIES_PER_ENTRY_GROUP_MAX 20
++#define DEFAULT_CLIENTS_MAX 256
++#define DEFAULT_OBJECTS_PER_CLIENT_MAX 250
++#define DEFAULT_ENTRIES_PER_ENTRY_GROUP_MAX 20
+ 
+ struct EntryGroupInfo {
+     unsigned id;
+@@ -55,7 +55,7 @@ struct EntryGroupInfo {
+     AvahiSEntryGroup *entry_group;
+     char *path;
+ 
+-    int n_entries;
++    unsigned n_entries;
+     
+     AVAHI_LLIST_FIELDS(EntryGroupInfo, entry_groups);
+ };
+@@ -151,7 +151,7 @@ struct Client {
+     unsigned id;
+     char *name;
+     unsigned current_id;
+-    int n_objects;
++    unsigned n_objects;
+     
+     AVAHI_LLIST_FIELDS(Client, clients);
+     AVAHI_LLIST_HEAD(EntryGroupInfo, entry_groups);
+@@ -171,11 +171,17 @@ struct Server {
+     const AvahiPoll *poll_api;
+     DBusConnection *bus;
+     AVAHI_LLIST_HEAD(Client, clients);
+-    int n_clients;
++    unsigned n_clients;
+     unsigned current_id;
+ 
+     AvahiTimeout *reconnect_timeout;
+     int reconnect;
++
++    unsigned n_clients_max;
++    unsigned n_objects_per_client_max;
++    unsigned n_entries_per_entry_group_max;
++
++    int disable_user_service_publishing;
+ };
+ 
+ extern Server *server;
+diff --git a/avahi-daemon/dbus-protocol.c b/avahi-daemon/dbus-protocol.c
+index d61935a..65c2ac6 100644
+--- a/avahi-daemon/dbus-protocol.c
++++ b/avahi-daemon/dbus-protocol.c
+@@ -65,8 +65,6 @@
+ 
+ Server *server = NULL;
+ 
+-static int disable_user_service_publishing = 0;
+-
+ static int dbus_connect(void);
+ static void dbus_disconnect(void);
+ 
+@@ -114,8 +112,8 @@ static void client_free(Client *c) {
+     AVAHI_LLIST_REMOVE(Client, clients, server->clients, c);
+     avahi_free(c);
+ 
++    assert(server->n_clients >= 1);
+     server->n_clients --;
+-    assert(server->n_clients >= 0);
+ }
+ 
+ static Client *client_get(const char *name, int create) {
+@@ -131,7 +129,7 @@ static Client *client_get(const char *name, int create) {
+     if (!create)
+         return NULL;
+ 
+-    if (server->n_clients >= CLIENTS_MAX)
++    if (server->n_clients >= server->n_clients_max)
+         return NULL;
+     
+     /* If not existent yet, create a new entry */
+@@ -431,7 +429,7 @@ static DBusHandlerResult msg_server_impl(DBusConnection *c, DBusMessage *m, AVAH
+             goto fail;
+         }
+ 
+-        if (disable_user_service_publishing)
++        if (server->disable_user_service_publishing)
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_NOT_PERMITTED, NULL);
+         
+         if (!(client = client_get(dbus_message_get_sender(m), TRUE))) {
+@@ -439,7 +437,7 @@ static DBusHandlerResult msg_server_impl(DBusConnection *c, DBusMessage *m, AVAH
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_CLIENTS, NULL);
+         }
+ 
+-        if (client->n_objects >= OBJECTS_PER_CLIENT_MAX) {
++        if (client->n_objects >= server->n_objects_per_client_max) {
+             avahi_log_warn("Too many objects for client '%s', client request failed.", client->name);
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_OBJECTS, NULL);
+         }
+@@ -485,7 +483,7 @@ static DBusHandlerResult msg_server_impl(DBusConnection *c, DBusMessage *m, AVAH
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_CLIENTS, NULL);
+         }
+ 
+-        if (client->n_objects >= OBJECTS_PER_CLIENT_MAX) {
++        if (client->n_objects >= server->n_objects_per_client_max) {
+             avahi_log_warn("Too many objects for client '%s', client request failed.", client->name);
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_OBJECTS, NULL);
+         }
+@@ -530,7 +528,7 @@ static DBusHandlerResult msg_server_impl(DBusConnection *c, DBusMessage *m, AVAH
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_CLIENTS, NULL);
+         }
+ 
+-        if (client->n_objects >= OBJECTS_PER_CLIENT_MAX) {
++        if (client->n_objects >= server->n_objects_per_client_max) {
+             avahi_log_warn("Too many objects for client '%s', client request failed.", client->name);
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_OBJECTS, NULL);
+         }
+@@ -580,7 +578,7 @@ static DBusHandlerResult msg_server_impl(DBusConnection *c, DBusMessage *m, AVAH
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_CLIENTS, NULL);
+         }
+ 
+-        if (client->n_objects >= OBJECTS_PER_CLIENT_MAX) {
++        if (client->n_objects >= server->n_objects_per_client_max) {
+             avahi_log_warn("Too many objects for client '%s', client request failed.", client->name);
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_OBJECTS, NULL);
+         }
+@@ -635,7 +633,7 @@ static DBusHandlerResult msg_server_impl(DBusConnection *c, DBusMessage *m, AVAH
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_CLIENTS, NULL);
+         }
+ 
+-        if (client->n_objects >= OBJECTS_PER_CLIENT_MAX) {
++        if (client->n_objects >= server->n_objects_per_client_max) {
+             avahi_log_warn("Too many objects for client '%s', client request failed.", client->name);
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_OBJECTS, NULL);
+         }
+@@ -691,7 +689,7 @@ static DBusHandlerResult msg_server_impl(DBusConnection *c, DBusMessage *m, AVAH
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_CLIENTS, NULL);
+         }
+ 
+-        if (client->n_objects >= OBJECTS_PER_CLIENT_MAX) {
++        if (client->n_objects >= server->n_objects_per_client_max) {
+             avahi_log_warn("Too many objects for client '%s', client request failed.", client->name);
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_OBJECTS, NULL);
+         }
+@@ -741,7 +739,7 @@ static DBusHandlerResult msg_server_impl(DBusConnection *c, DBusMessage *m, AVAH
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_CLIENTS, NULL);
+         }
+         
+-        if (client->n_objects >= OBJECTS_PER_CLIENT_MAX) {
++        if (client->n_objects >= server->n_objects_per_client_max) {
+             avahi_log_warn("Too many objects for client '%s', client request failed.", client->name);
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_OBJECTS, NULL);
+         }
+@@ -799,7 +797,7 @@ static DBusHandlerResult msg_server_impl(DBusConnection *c, DBusMessage *m, AVAH
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_CLIENTS, NULL);
+         }
+ 
+-        if (client->n_objects >= OBJECTS_PER_CLIENT_MAX) {
++        if (client->n_objects >= server->n_objects_per_client_max) {
+             avahi_log_warn(__FILE__": Too many objects for client '%s', client request failed.", client->name);
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_OBJECTS, NULL);
+         }
+@@ -860,7 +858,7 @@ static DBusHandlerResult msg_server_impl(DBusConnection *c, DBusMessage *m, AVAH
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_CLIENTS, NULL);
+         }
+ 
+-        if (client->n_objects >= OBJECTS_PER_CLIENT_MAX) {
++        if (client->n_objects >= server->n_objects_per_client_max) {
+             avahi_log_warn(__FILE__": Too many objects for client '%s', client request failed.", client->name);
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_OBJECTS, NULL);
+         }
+@@ -916,7 +914,7 @@ static DBusHandlerResult msg_server_impl(DBusConnection *c, DBusMessage *m, AVAH
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_CLIENTS, NULL);
+         }
+ 
+-        if (client->n_objects >= OBJECTS_PER_CLIENT_MAX) {
++        if (client->n_objects >= server->n_objects_per_client_max) {
+             avahi_log_warn(__FILE__": Too many objects for client '%s', client request failed.", client->name);
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_OBJECTS, NULL);
+         }
+@@ -975,7 +973,7 @@ static DBusHandlerResult msg_server_impl(DBusConnection *c, DBusMessage *m, AVAH
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_CLIENTS, NULL);
+         }
+ 
+-        if (client->n_objects >= OBJECTS_PER_CLIENT_MAX) {
++        if (client->n_objects >= server->n_objects_per_client_max) {
+             avahi_log_warn("Too many objects for client '%s', client request failed.", client->name);
+             return avahi_dbus_respond_error(c, m, AVAHI_ERR_TOO_MANY_OBJECTS, NULL);
+         }
+@@ -1159,9 +1157,13 @@ static void dbus_disconnect(void) {
+     }
+ }
+ 
+-int dbus_protocol_setup(const AvahiPoll *poll_api, int _disable_user_service_publishing, int force) {
++int dbus_protocol_setup(const AvahiPoll *poll_api,
++                        int _disable_user_service_publishing,
++                        int _n_clients_max,
++                        int _n_objects_per_client_max,
++                        int _n_entries_per_entry_group_max,
++                        int force) {
+ 
+-    disable_user_service_publishing = _disable_user_service_publishing;
+ 
+     server = avahi_new(Server, 1);
+     AVAHI_LLIST_HEAD_INIT(Clients, server->clients);
+@@ -1171,6 +1173,10 @@ int dbus_protocol_setup(const AvahiPoll *poll_api, int _disable_user_service_pub
+     server->poll_api = poll_api;
+     server->reconnect_timeout = NULL;
+     server->reconnect = force;
++    server->disable_user_service_publishing = _disable_user_service_publishing;
++    server->n_clients_max = _n_clients_max > 0 ? _n_clients_max : DEFAULT_CLIENTS_MAX;
++    server->n_objects_per_client_max = _n_objects_per_client_max > 0 ? _n_objects_per_client_max : DEFAULT_OBJECTS_PER_CLIENT_MAX;
++    server->n_entries_per_entry_group_max = _n_entries_per_entry_group_max > 0 ? _n_entries_per_entry_group_max : DEFAULT_ENTRIES_PER_ENTRY_GROUP_MAX;
+ 
+     if (dbus_connect() < 0) {
+         struct timeval tv;
+diff --git a/avahi-daemon/dbus-protocol.h b/avahi-daemon/dbus-protocol.h
+index d4404f2..e251cbd 100644
+--- a/avahi-daemon/dbus-protocol.h
++++ b/avahi-daemon/dbus-protocol.h
+@@ -22,7 +22,12 @@
+   USA.
+ ***/
+ 
+-int dbus_protocol_setup(const AvahiPoll *poll_api, int disable_user_service_publishing, int force);
++int dbus_protocol_setup(const AvahiPoll *poll_api,
++                        int _disable_user_service_publishing,
++                        int _n_clients_max,
++                        int _n_objects_per_client_max,
++                        int _n_entries_per_entry_group_max,
++                        int force);
+ void dbus_protocol_shutdown(void);
+ void dbus_protocol_server_state_changed(AvahiServerState state);
+ 
+diff --git a/avahi-daemon/dbus-record-browser.c b/avahi-daemon/dbus-record-browser.c
+index ea23fe4..ba33477 100644
+--- a/avahi-daemon/dbus-record-browser.c
++++ b/avahi-daemon/dbus-record-browser.c
+@@ -45,8 +45,8 @@ void avahi_dbus_record_browser_free(RecordBrowserInfo *i) {
+     }
+     AVAHI_LLIST_REMOVE(RecordBrowserInfo, record_browsers, i->client->record_browsers, i);
+ 
++    assert(i->client->n_objects >= 1);
+     i->client->n_objects--;
+-    assert(i->client->n_objects >= 0);
+ 
+     avahi_free(i);
+ }
+diff --git a/avahi-daemon/dbus-service-browser.c b/avahi-daemon/dbus-service-browser.c
+index 1515ddf..5d6deb4 100644
+--- a/avahi-daemon/dbus-service-browser.c
++++ b/avahi-daemon/dbus-service-browser.c
+@@ -46,8 +46,8 @@ void avahi_dbus_service_browser_free(ServiceBrowserInfo *i) {
+     
+     AVAHI_LLIST_REMOVE(ServiceBrowserInfo, service_browsers, i->client->service_browsers, i);
+ 
++    assert(i->client->n_objects >= 1);
+     i->client->n_objects--;
+-    assert(i->client->n_objects >= 0);
+ 
+     avahi_free(i);
+ }
+diff --git a/avahi-daemon/dbus-service-type-browser.c b/avahi-daemon/dbus-service-type-browser.c
+index 9207a74..5277fac 100644
+--- a/avahi-daemon/dbus-service-type-browser.c
++++ b/avahi-daemon/dbus-service-type-browser.c
+@@ -46,8 +46,8 @@ void avahi_dbus_service_type_browser_free(ServiceTypeBrowserInfo *i) {
+     
+     AVAHI_LLIST_REMOVE(ServiceTypeBrowserInfo, service_type_browsers, i->client->service_type_browsers, i);
+ 
++    assert(i->client->n_objects >= 1);
+     i->client->n_objects--;
+-    assert(i->client->n_objects >= 0);
+ 
+     avahi_free(i);
+ }
+@@ -129,5 +129,3 @@ void avahi_dbus_service_type_browser_callback(AvahiSServiceTypeBrowser *b, Avahi
+     dbus_connection_send(server->bus, m, NULL);
+     dbus_message_unref(m);
+ }
+-
+-
+diff --git a/avahi-daemon/dbus-sync-address-resolver.c b/avahi-daemon/dbus-sync-address-resolver.c
+index 0a5fa59..2f16bcf 100644
+--- a/avahi-daemon/dbus-sync-address-resolver.c
++++ b/avahi-daemon/dbus-sync-address-resolver.c
+@@ -42,8 +42,8 @@ void avahi_dbus_sync_address_resolver_free(SyncAddressResolverInfo *i) {
+     dbus_message_unref(i->message);
+     AVAHI_LLIST_REMOVE(SyncAddressResolverInfo, sync_address_resolvers, i->client->sync_address_resolvers, i);
+ 
++    assert(i->client->n_objects >= 1);
+     i->client->n_objects--;
+-    assert(i->client->n_objects >= 0);
+ 
+     avahi_free(i);
+ }
+diff --git a/avahi-daemon/dbus-sync-host-name-resolver.c b/avahi-daemon/dbus-sync-host-name-resolver.c
+index 9750dd4..01d6798 100644
+--- a/avahi-daemon/dbus-sync-host-name-resolver.c
++++ b/avahi-daemon/dbus-sync-host-name-resolver.c
+@@ -42,8 +42,8 @@ void avahi_dbus_sync_host_name_resolver_free(SyncHostNameResolverInfo *i) {
+     dbus_message_unref(i->message);
+     AVAHI_LLIST_REMOVE(SyncHostNameResolverInfo, sync_host_name_resolvers, i->client->sync_host_name_resolvers, i);
+ 
++    assert(i->client->n_objects >= 1);
+     i->client->n_objects--;
+-    assert(i->client->n_objects >= 0);
+ 
+     avahi_free(i);
+ }
+diff --git a/avahi-daemon/dbus-sync-service-resolver.c b/avahi-daemon/dbus-sync-service-resolver.c
+index 21ae481..b6f1cb7 100644
+--- a/avahi-daemon/dbus-sync-service-resolver.c
++++ b/avahi-daemon/dbus-sync-service-resolver.c
+@@ -42,8 +42,8 @@ void avahi_dbus_sync_service_resolver_free(SyncServiceResolverInfo *i) {
+     dbus_message_unref(i->message);
+     AVAHI_LLIST_REMOVE(SyncServiceResolverInfo, sync_service_resolvers, i->client->sync_service_resolvers, i);
+ 
++    assert(i->client->n_objects >= 1);
+     i->client->n_objects--;
+-    assert(i->client->n_objects >= 0);
+ 
+     avahi_free(i);
+ }
+diff --git a/avahi-daemon/main.c b/avahi-daemon/main.c
+index c3cbb0e..a050e7a 100644
+--- a/avahi-daemon/main.c
++++ b/avahi-daemon/main.c
+@@ -107,6 +107,9 @@ typedef struct {
+ #ifdef HAVE_DBUS
+     int enable_dbus;
+     int fail_on_missing_dbus;
++    unsigned n_clients_max;
++    unsigned n_objects_per_client_max;
++    unsigned n_entries_per_entry_group_max;
+ #endif
+     int drop_root;
+     int set_rlimits;
+@@ -528,6 +531,26 @@ static int is_yes(const char *s) {
+     return *s == 'y' || *s == 'Y' || *s == '1' || *s == 't' || *s == 'T';
+ }
+ 
++static int parse_unsigned(const char *s, unsigned *u) {
++    char *e = NULL;
++    unsigned long ul;
++    unsigned k;
++
++    errno = 0;
++    ul = strtoul(s, &e, 0);
++
++    if (!e || *e || errno != 0)
++        return -1;
++
++    k = (unsigned) ul;
++
++    if ((unsigned long) k != ul)
++        return -1;
++
++    *u = k;
++    return 0;
++}
++
+ static int load_config_file(DaemonConfig *c) {
+     int r = -1;
+     AvahiIniFile *f;
+@@ -619,6 +642,44 @@ static int load_config_file(DaemonConfig *c) {
+                         c->server_config.deny_interfaces = avahi_string_list_add(c->server_config.deny_interfaces, *t);
+ 
+                     avahi_strfreev(e);
++                } else if (strcasecmp(p->key, "cache-entries-max") == 0) {
++                    unsigned k;
++
++                    if (parse_unsigned(p->value, &k) < 0) {
++                        avahi_log_error("Invalid cache-entries-max setting %s", p->value);
++                        goto finish;
++                    }
++
++                    c->server_config.n_cache_entries_max = k;
++#ifdef HAVE_DBUS
++                } else if (strcasecmp(p->key, "clients-max") == 0) {
++                    unsigned k;
++
++                    if (parse_unsigned(p->value, &k) < 0) {
++                        avahi_log_error("Invalid clients-max setting %s", p->value);
++                        goto finish;
++                    }
++
++                    c->n_clients_max = k;
++                } else if (strcasecmp(p->key, "objects-per-client-max") == 0) {
++                    unsigned k;
++
++                    if (parse_unsigned(p->value, &k) < 0) {
++                        avahi_log_error("Invalid objects-per-client-max setting %s", p->value);
++                        goto finish;
++                    }
++
++                    c->n_objects_per_client_max = k;
++                } else if (strcasecmp(p->key, "entries-per-entry-group-max") == 0) {
++                    unsigned k;
++
++                    if (parse_unsigned(p->value, &k) < 0) {
++                        avahi_log_error("Invalid entries-per-entry-group-max setting %s", p->value);
++                        goto finish;
++                    }
++
++                    c->n_entries_per_entry_group_max = k;
++#endif
+                 } else {
+                     avahi_log_error("Invalid configuration key \"%s\" in group \"%s\"\n", p->key, g->name);
+                     goto finish;
+@@ -1010,7 +1071,12 @@ static int run_server(DaemonConfig *c) {
+ 
+ #ifdef HAVE_DBUS
+     if (c->enable_dbus) {
+-        if (dbus_protocol_setup(poll_api, config.disable_user_service_publishing, !c->fail_on_missing_dbus
++        if (dbus_protocol_setup(poll_api,
++                                config.disable_user_service_publishing,
++                                config.n_clients_max,
++                                config.n_objects_per_client_max,
++                                config.n_entries_per_entry_group_max,
++                                !c->fail_on_missing_dbus
+ #ifdef ENABLE_CHROOT
+                                 && !config.use_chroot
+ #endif
+@@ -1348,6 +1414,9 @@ int main(int argc, char *argv[]) {
+ #ifdef HAVE_DBUS
+     config.enable_dbus = 1;
+     config.fail_on_missing_dbus = 1;
++    config.n_clients_max = 0;
++    config.n_objects_per_client_max = 0;
++    config.n_entries_per_entry_group_max = 0;
+ #endif
+ 
+     config.drop_root = 1;
+diff --git a/man/avahi-daemon.conf.5.xml.in b/man/avahi-daemon.conf.5.xml.in
+index 08992fa..708c522 100644
+--- a/man/avahi-daemon.conf.5.xml.in
++++ b/man/avahi-daemon.conf.5.xml.in
+@@ -144,6 +144,35 @@
+         care and YMMV!</p>
+       </option>
+ 
++      <option>
++        <p><opt>cache-entries-max=</opt> Takes an unsigned integer
++        specifying how many resource records are cached per
++        interface. Bigger values allow mDNS work correctly in large LANs
++        but also increase memory consumption.</p>
++      </option>
++
++      <option>
++        <p><opt>clients-max=</opt> Takes an unsigned integer. The
++        maximum number of concurrent D-Bus clients allowed. If the
++        maximum number is reached further clients will be refused until
++        at least one existing client disconnects.</p>
++      </option>
++
++      <option>
++        <p><opt>objects-per-client-max=</opt> Takes an unsigned
++        integer. The maximum number of objects (entry groups, browsers,
++        resolvers) that may be registered per client at a time. If the
++        maximum number is reached further object creation will be
++        refused until at least one object is freed.</p>
++      </option>
++
++      <option>
++        <p><opt>entries-per-entry-group-max=</opt> Takes an unsigned
++        integer. The maximum number of entries (resource records) per
++        entry group at a time. If the maximum number is reached further
++        resource records may not be added to an entry group.</p>
++      </option>
++
+ 	</section>
+ 
+ 	<section name="Section [wide-area]">
+-- 
+1.7.1
+
