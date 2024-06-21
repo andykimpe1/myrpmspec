@@ -1,0 +1,109 @@
+#!/bin/bash
+# Start/stop timemaster
+# chkconfig:   - 61 39
+# description: Synchronize system clock to NTP and PTP time sources.
+
+### BEGIN INIT INFO
+# Provides: timemaster
+# Required-Start: $network $local_fs $remote_fs
+# Required-Stop: 
+# Should-Start: $syslog
+# Should-Stop: $syslog
+# Short-Description: Synchronize clock via NTP and PTP
+# Description: Synchronize system clock to NTP and PTP time sources.
+### END INIT INFO
+
+# Source function library.
+. /etc/rc.d/init.d/functions
+
+# Source networking configuration.
+. /etc/sysconfig/network
+
+prog=timemaster
+config=/etc/timemaster.conf
+lockfile=/var/lock/subsys/$prog
+pidfile=/var/run/$prog.pid
+conflicts="ntpd ptp4l phc2sys"
+
+start() {
+    [ "$NETWORKING" = "no" ] && exit 1
+    [ -f $config ] || exit 6
+
+    for s in $conflicts; do
+        status -p /var/run/$s.pid $s >/dev/null 2>&1 || continue
+        echo "Conflicting service $s is already running. Cannot start $prog."
+        exit 1
+    done
+
+    echo -n $"Starting $prog: "
+    daemon --check $prog --pidfile $pidfile "(nohup /bin/sh -c \
+        \"echo \\\$\\\$ > $pidfile; exec /usr/sbin/$prog -f $config\" &> /dev/null &)"
+    retval=$?
+    echo
+    [ $retval -eq 0 ] && touch $lockfile
+    return $retval
+}
+
+stop() {
+    echo -n $"Stopping $prog: "
+    killproc -p $pidfile $prog
+    retval=$?
+    echo
+    [ $retval -eq 0 ] && rm -f $lockfile
+    return $retval
+}
+
+restart() {
+    stop
+    start
+}
+
+reload() {
+    restart
+}
+
+force_reload() {
+    restart
+}
+
+rh_status() {
+    status -p $pidfile $prog
+}
+
+rh_status_q() {
+    rh_status >/dev/null 2>&1
+}
+
+
+case "$1" in
+    start)
+        rh_status_q && exit 0
+        $1
+        ;;
+    stop)
+        rh_status_q || exit 0
+        $1
+        ;;
+    restart)
+        $1
+        ;;
+    reload)
+        rh_status_q || exit 7
+        $1
+        ;;
+    force-reload)
+        force_reload
+        ;;
+    status)
+        rh_status
+        ;;
+    condrestart|try-restart)
+        rh_status_q || exit 0
+        restart
+        ;;
+    *)
+        echo $"Usage: $0 {start|stop|status|restart|condrestart|try-restart|reload|force-reload}"
+        exit 2
+esac
+exit $?
+
