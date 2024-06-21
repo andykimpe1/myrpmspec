@@ -1,0 +1,101 @@
+From 758e40dcb72fac3b329ae99c866b57309e9968d2 Mon Sep 17 00:00:00 2001
+From: Tomas Bzatek <tbzatek@redhat.com>
+Date: Fri, 19 Apr 2013 16:19:16 +0200
+Subject: [PATCH] metadata: Create new journal if it doesn't exist
+
+With concurrent access of multiple daemons there may be a moment when
+tree file exists but not the journal file. The daemon can't write
+anything without journal and is doomed until next rotation. Missing
+journal file can also happen on system crash etc.
+
+This patch tries to create new journal file only when it doesn't exist,
+other errors still lead to inability to store anything.
+
+This will also allow us to have journal file somewhere else, e.g. on
+a non-persistent storage.
+
+https://bugzilla.gnome.org/show_bug.cgi?id=637095
+---
+ metadata/metabuilder.c |    6 +++---
+ metadata/metabuilder.h |    2 ++
+ metadata/metatree.c    |   16 +++++++++++++---
+ 3 files changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/metadata/metabuilder.c b/metadata/metabuilder.c
+index 58bb57b..c7e69fa 100644
+--- a/metadata/metabuilder.c
++++ b/metadata/metabuilder.c
+@@ -843,8 +843,8 @@ get_journal_filename (const char *filename, guint32 random_tag)
+   return g_strconcat (filename, "-", tag, ".log", NULL);
+ }
+ 
+-static gboolean
+-create_new_journal (const char *filename, guint32 random_tag)
++gboolean
++meta_builder_create_new_journal (const char *filename, guint32 random_tag)
+ {
+   char *journal_name;
+   guint32 size_offset;
+@@ -1016,7 +1016,7 @@ meta_builder_write (MetaBuilder *builder,
+   if (!write_all_data_and_close (fd, out->str, out->len))
+     goto out;
+ 
+-  if (!create_new_journal (filename, random_tag))
++  if (!meta_builder_create_new_journal (filename, random_tag))
+     goto out;
+ 
+   /* Open old file so we can set it rotated */
+diff --git a/metadata/metabuilder.h b/metadata/metabuilder.h
+index 364c0d8..ad3876f 100644
+--- a/metadata/metabuilder.h
++++ b/metadata/metabuilder.h
+@@ -68,6 +68,8 @@ void         meta_builder_copy      (MetaBuilder *builder,
+ 				     guint64      mtime);
+ gboolean     meta_builder_write     (MetaBuilder *builder,
+ 				     const char  *filename);
++gboolean     meta_builder_create_new_journal (const char *filename,
++				     guint32      random_tag);
+ MetaFile *   metafile_new           (const char  *name,
+ 				     MetaFile    *parent);
+ void         metafile_free          (MetaFile    *file);
+diff --git a/metadata/metatree.c b/metadata/metatree.c
+index 20b7862..8e2ab46 100644
+--- a/metadata/metatree.c
++++ b/metadata/metatree.c
+@@ -1146,20 +1146,30 @@ meta_journal_open (MetaTree *tree, const char *filename, gboolean for_write, gui
+   char *data;
+   char *journal_filename;
+   int open_flags, mmap_prot;
++  gboolean retried;
+ 
+   g_assert (sizeof (MetaJournalHeader) == 20);
+-
+-  journal_filename = get_journal_filename (filename, tag);
++  retried = FALSE;
+ 
+   if (for_write)
+     open_flags = O_RDWR;
+   else
+     open_flags = O_RDONLY;
+ 
++ retry:
++  journal_filename = get_journal_filename (filename, tag);
+   fd = safe_open (tree, journal_filename, open_flags);
+   g_free (journal_filename);
+   if (fd == -1)
+-    return NULL;
++    {
++      if (errno == ENOENT && tree->for_write && !retried)
++        {
++          retried = TRUE;
++          if (meta_builder_create_new_journal (filename, tag))
++            goto retry;
++        }
++      return NULL;
++    }
+ 
+   if (fstat (fd, &statbuf) != 0 ||
+       statbuf.st_size < sizeof (MetaJournalHeader))
+-- 
+1.7.8.6
+

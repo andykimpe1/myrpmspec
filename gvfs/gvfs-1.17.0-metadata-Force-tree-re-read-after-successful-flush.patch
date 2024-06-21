@@ -1,0 +1,89 @@
+From d6c39ee53bd35342a9d2efdd79d5310652653bc6 Mon Sep 17 00:00:00 2001
+From: Tomas Bzatek <tbzatek@redhat.com>
+Date: Thu, 18 Apr 2013 14:13:36 +0200
+Subject: [PATCH] metadata: Force tree re-read after successful flush
+
+Once we flush the journal and write new tree file we need to re-read
+it to refresh internal data structures (and mmap data from the right
+file). We originally left this work on meta_tree_refresh_locked() and
+meta_tree_needs_rereading() respectively where we checked the rotated
+bit.
+
+In detail, metabuilder wrote a new temp tree file, then explicitly opened
+the current (old) one, wrote the rotated bit and atomically replaced the
+temp file. Then the metadata daemon having mmapped the old file detected
+the rotated bit and scheduled journal and tree file reopen+reread.
+
+However in concurrent environment like NFS homedir where multiple metadata
+daemons are handling the same database we may run in a race and not getting
+the rotated bit detected properly.
+
+This led to an infinite loop between meta_journal_add_entry() -
+meta_tree_flush_locked() - meta_tree_refresh_locked() - meta_journal_add_entry()
+since we had full journal, didn't detect the rotation and since the files
+were already unlinked, there was no force to break that loop. This patch
+forces tree file re-read after successful flush to prevent this issue.
+
+https://bugzilla.gnome.org/show_bug.cgi?id=637095
+---
+ metadata/metatree.c |   14 ++++++++------
+ 1 files changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/metadata/metatree.c b/metadata/metatree.c
+index d3d811a..20b7862 100644
+--- a/metadata/metatree.c
++++ b/metadata/metatree.c
+@@ -169,7 +169,8 @@ struct _MetaTree {
+   MetaJournal *journal;
+ };
+ 
+-static void         meta_tree_refresh_locked   (MetaTree    *tree);
++static void         meta_tree_refresh_locked   (MetaTree    *tree,
++						gboolean     force_reread);
+ static MetaJournal *meta_journal_open          (MetaTree    *tree,
+ 						const char  *filename,
+ 						gboolean     for_write,
+@@ -510,7 +511,7 @@ meta_tree_init (MetaTree *tree)
+      journal. However we can detect this case by looking at the tree and see
+      if its been rotated, we do this to ensure we have an uptodate tree+journal
+      combo. */
+-  meta_tree_refresh_locked (tree);
++  meta_tree_refresh_locked (tree, FALSE);
+ 
+   return TRUE;
+ 
+@@ -658,10 +659,10 @@ meta_tree_has_new_journal_entries (MetaTree *tree)
+ 
+ /* Must be called with a write lock held */
+ static void
+-meta_tree_refresh_locked (MetaTree *tree)
++meta_tree_refresh_locked (MetaTree *tree, gboolean force_reread)
+ {
+   /* Needs to recheck since we dropped read lock */
+-  if (meta_tree_needs_rereading (tree))
++  if (force_reread || meta_tree_needs_rereading (tree))
+     {
+       if (tree->header)
+ 	meta_tree_clear (tree);
+@@ -685,7 +686,7 @@ meta_tree_refresh (MetaTree *tree)
+   if (needs_refresh)
+     {
+       g_static_rw_lock_writer_lock (&metatree_lock);
+-      meta_tree_refresh_locked (tree);
++      meta_tree_refresh_locked (tree, FALSE);
+       g_static_rw_lock_writer_unlock (&metatree_lock);
+     }
+ }
+@@ -2375,7 +2376,8 @@ meta_tree_flush_locked (MetaTree *tree)
+   res = meta_builder_write (builder,
+ 			    meta_tree_get_filename (tree));
+   if (res)
+-    meta_tree_refresh_locked (tree);
++    /* Force re-read since we wrote a new file */
++    meta_tree_refresh_locked (tree, TRUE);
+ 
+   meta_builder_free (builder);
+ 
+-- 
+1.7.8.6
+

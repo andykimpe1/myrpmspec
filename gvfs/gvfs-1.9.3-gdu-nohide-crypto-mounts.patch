@@ -1,0 +1,67 @@
+From 456cda6c1fa6c7471768f97a639420d17b93e0bf Mon Sep 17 00:00:00 2001
+From: Tomas Bzatek <tbzatek@redhat.com>
+Date: Tue, 9 Aug 2011 17:39:44 +0200
+Subject: [PATCH] gdu: Don't ignore fstab mounts belonging to crypto volumes
+
+Since we always show crypto volumes, we should never ignore
+corresponding mounts even if they are supposed to be ignored.
+
+If we consider the opposite case, i.e. ignoring volumes that have
+corresponding mounts that should be hidden, we may end up with strange
+behaviour like volume disappearing after mount/unlock. It's not
+easily possible to determine that the particular unlocked volume
+is supposed to be mounted in 'hidden' path.
+---
+ monitor/gdu/ggduvolumemonitor.c |   28 +++++++++++++++++++++++++++-
+ 1 files changed, 27 insertions(+), 1 deletions(-)
+
+diff --git a/monitor/gdu/ggduvolumemonitor.c b/monitor/gdu/ggduvolumemonitor.c
+index 1066f4f..82916c0 100644
+--- a/monitor/gdu/ggduvolumemonitor.c
++++ b/monitor/gdu/ggduvolumemonitor.c
+@@ -1487,6 +1487,30 @@ update_fstab_volumes (GGduVolumeMonitor *monitor,
+   g_list_free (fstab_mount_points);
+ }
+ 
++static gboolean
++unix_mount_is_cleartext (GGduVolumeMonitor *monitor,
++                         GUnixMountEntry *mount_entry)
++{
++  const char *device_file;
++  const char *mount_path;
++  GGduVolume *volume;
++  GduPresentable *presentable;
++
++  device_file = g_unix_mount_get_device_path (mount_entry);
++  mount_path = g_unix_mount_get_mount_path (mount_entry);
++  volume = find_volume_for_device_file (monitor, device_file);
++  if (volume == NULL)
++    volume = find_volume_for_mount_path (monitor, mount_path);
++
++  if (volume != NULL)
++    {
++      presentable = g_gdu_volume_get_presentable_with_cleartext (volume);
++      return presentable != NULL;
++    }
++
++  return FALSE;
++}
++
+ static void
+ update_mounts (GGduVolumeMonitor *monitor,
+                GList **added_mounts,
+@@ -1510,8 +1534,10 @@ update_mounts (GGduVolumeMonitor *monitor,
+       GUnixMountEntry *mount_entry = l->data;
+       ll = l->next;
+ 
++      /* since we always show crypto volumes, we should also never ignore their mounts */
+       /* keep in sync with should_mount_be_ignored() */
+-      if (!g_unix_mount_guess_should_display (mount_entry))
++      if (!g_unix_mount_guess_should_display (mount_entry) &&
++          !unix_mount_is_cleartext (monitor, mount_entry))
+         {
+           g_unix_mount_free (mount_entry);
+           new_mounts = g_list_delete_link (new_mounts, l);
+-- 
+1.7.6
+

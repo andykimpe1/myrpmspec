@@ -1,0 +1,73 @@
+commit d4049d3ac0741c3700a029a24c869dfafd840dc2
+Author: Christian Kellner <gicmo gnome org>
+Date:   Thu May 12 10:53:04 2011 +0200
+
+    daemonfile: Re-root the path in set_display_name ()
+    
+    The path we get as a result of a set_display_name operation has to be
+    re-rooted with the mount_prefix of the specific mount.
+    This fixes the "Location not mounted" error that we currently get for
+    e.g. WebDAV mounts with a mount_prefix after renaming of files.
+
+ client/gdaemonfile.c |   17 +++++++++++++----
+ 1 files changed, 13 insertions(+), 4 deletions(-)
+---
+diff --git a/client/gdaemonfile.c b/client/gdaemonfile.c
+index 26b88da..15c368c 100644
+--- a/client/gdaemonfile.c
++++ b/client/gdaemonfile.c
+@@ -2028,21 +2028,26 @@ g_daemon_file_set_display_name (GFile *file,
+ 				GError **error)
+ {
+   GDaemonFile *daemon_file;
++  GMountInfo  *mount_info;
+   DBusMessage *reply;
+   DBusMessageIter iter;
+   char *new_path;
+ 
+   daemon_file = G_DAEMON_FILE (file);
+-  
++
++  mount_info = NULL;
+   reply = do_sync_path_call (file, 
+ 			     G_VFS_DBUS_MOUNT_OP_SET_DISPLAY_NAME,
+-			     NULL, NULL,
++			     &mount_info, NULL,
+ 			     cancellable, error,
+ 			     DBUS_TYPE_STRING, &display_name,
+ 			     0);
+   if (reply == NULL)
+-    return NULL;
+-
++    {
++      if (mount_info)
++        g_mount_info_unref (mount_info);
++      return NULL;
++    }
+ 
+   if (!dbus_message_iter_init (reply, &iter) ||
+       !_g_dbus_message_iter_get_args (&iter, NULL,
+@@ -2054,10 +2059,12 @@ g_daemon_file_set_display_name (GFile *file,
+       goto out;
+     }
+ 
++  g_mount_info_apply_prefix (mount_info, &new_path);
+   file = new_file_for_new_path (daemon_file, new_path);
+   g_free (new_path);
+ 
+  out:
++  g_mount_info_unref (mount_info);
+   dbus_message_unref (reply);
+   return file;
+ }
+@@ -3099,7 +3106,9 @@ set_display_name_async_cb (DBusMessage *reply,
+       goto out;
+     }
+ 
++  g_mount_info_apply_prefix (mount_info, &new_path);
+   file = new_file_for_new_path (daemon_file, new_path);
++
+   g_free (new_path);
+ 
+   g_simple_async_result_set_op_res_gpointer (result, file, g_object_unref);
+

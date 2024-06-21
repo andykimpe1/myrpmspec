@@ -1,0 +1,424 @@
+--- gvfs-1.4.3/metadata/meta-get-tree.c.metadata-don-t-crash-if-meta_tree_init-fails	2009-06-24 10:27:13.000000000 +0200
++++ gvfs-1.4.3/metadata/meta-get-tree.c	2015-11-10 13:47:24.241378992 +0100
+@@ -46,7 +46,11 @@
+       tree_path = NULL;
+       tree = meta_lookup_cache_lookup_path (cache, argv[i], statbuf.st_dev,
+ 					    FALSE, &tree_path);
+-      g_print ("tree: %s (exists: %d), tree path: %s\n", meta_tree_get_filename (tree), meta_tree_exists (tree), tree_path);
++      if (tree)
++	g_print ("tree: %s (exists: %d), tree path: %s\n", meta_tree_get_filename (tree), meta_tree_exists (tree), tree_path);
++      else
++	g_print ("tree lookup failed\n");
++
+       if (pause)
+ 	{
+ 	  char buffer[1000];
+--- gvfs-1.4.3/metadata/metatree.h.metadata-don-t-crash-if-meta_tree_init-fails	2015-11-10 13:47:13.896399995 +0100
++++ gvfs-1.4.3/metadata/metatree.h	2015-11-10 13:47:27.071373247 +0100
+@@ -63,7 +63,7 @@
+ 				      gboolean    for_write);
+ MetaTree *  meta_tree_ref            (MetaTree   *tree);
+ void        meta_tree_unref          (MetaTree   *tree);
+-void        meta_tree_refresh        (MetaTree   *tree);
++gboolean    meta_tree_refresh        (MetaTree   *tree);
+ const char *meta_tree_get_filename   (MetaTree   *tree);
+ gboolean    meta_tree_exists         (MetaTree   *tree);
+ gboolean    meta_tree_is_on_nfs      (MetaTree   *tree);
+--- gvfs-1.4.3/metadata/metatree.c.metadata-don-t-crash-if-meta_tree_init-fails	2015-11-10 13:47:13.961399863 +0100
++++ gvfs-1.4.3/metadata/metatree.c	2015-11-10 13:47:28.632370078 +0100
+@@ -134,7 +134,7 @@
+   MetaJournal *journal;
+ };
+ 
+-static void         meta_tree_refresh_locked   (MetaTree    *tree,
++static gboolean     meta_tree_refresh_locked   (MetaTree    *tree,
+ 						gboolean     force_reread);
+ static MetaJournal *meta_journal_open          (MetaTree    *tree,
+ 						const char  *filename,
+@@ -349,6 +349,7 @@
+   guint32 *attributes;
+   gboolean retried;
+   int i;
++  int errsv;
+ 
+   retried = FALSE;
+  retry:
+@@ -356,6 +357,8 @@
+   fd = safe_open (tree, tree->filename, O_RDONLY);
+   if (fd == -1)
+     {
++      errsv = errno;
++
+       if (tree->for_write && !retried)
+ 	{
+ 	  MetaBuilder *builder;
+@@ -374,13 +377,30 @@
+ 	    }
+ 	  meta_builder_free (builder);
+ 	}
++      else if (tree->for_write || errsv != ENOENT)
++        {
++          g_warning ("can't init metadata tree %s: open: %s", tree->filename, g_strerror (errsv));
++        }
+       tree->fd = -1;
++
++      /* If we're opening for reading and the file does not exist, it is not
++       * an error. The file will be created later. */
++      return !tree->for_write && errsv == ENOENT;
++    }
++
++  if (fstat (fd, &statbuf) != 0)
++    {
++      errsv = errno;
++      g_warning ("can't init metadata tree %s: fstat: %s", tree->filename, g_strerror (errsv));
++
++      close (fd);
+       return FALSE;
+     }
+ 
+-  if (fstat (fd, &statbuf) != 0 ||
+-      statbuf.st_size < sizeof (MetaFileHeader))
++  if (statbuf.st_size < sizeof (MetaFileHeader))
+     {
++      g_warning ("can't init metadata tree %s: wrong size", tree->filename);
++
+       close (fd);
+       return FALSE;
+     }
+@@ -388,6 +408,9 @@
+   data = mmap (NULL, statbuf.st_size, PROT_READ, MAP_SHARED, fd, 0);
+   if (data == MAP_FAILED)
+     {
++      errsv = errno;
++      g_warning ("can't init metadata tree %s: mmap: %s", tree->filename, g_strerror (errsv));
++
+       close (fd);
+       return FALSE;
+     }
+@@ -399,18 +422,30 @@
+   tree->header = (MetaFileHeader *)data;
+ 
+   if (memcmp (tree->header->magic, MAGIC, MAGIC_LEN) != 0)
+-    goto err;
++    {
++      g_warning ("can't init metadata tree %s: wrong magic", tree->filename);
++      goto err;
++    }
+ 
+   if (tree->header->major != MAJOR_VERSION)
+-    goto err;
++    {
++      g_warning ("can't init metadata tree %s: wrong version", tree->filename);
++      goto err;
++    }
+ 
+   tree->root = verify_block_pointer (tree, tree->header->root, sizeof (MetaFileDirEnt));
+   if (tree->root == NULL)
+-    goto err;
++    {
++      g_warning ("can't init metadata tree %s: wrong pointer", tree->filename);
++      goto err;
++    }
+ 
+   attributes = verify_array_block (tree, tree->header->attributes, sizeof (guint32));
+   if (attributes == NULL)
+-    goto err;
++    {
++      g_warning ("can't init metadata tree %s: wrong block", tree->filename);
++      goto err;
++    }
+ 
+   tree->num_attributes = GUINT32_FROM_BE (*attributes);
+   attributes++;
+@@ -419,7 +454,10 @@
+     {
+       tree->attributes[i] = verify_string (tree, attributes[i]);
+       if (tree->attributes[i] == NULL)
+-	goto err;
++        {
++          g_warning ("can't init metadata tree %s: wrong attribute", tree->filename);
++          goto err;
++        }
+     }
+ 
+   tree->tag = GUINT32_FROM_BE (tree->header->random_tag);
+@@ -432,9 +470,7 @@
+      journal. However we can detect this case by looking at the tree and see
+      if its been rotated, we do this to ensure we have an uptodate tree+journal
+      combo. */
+-  meta_tree_refresh_locked (tree, FALSE);
+-
+-  return TRUE;
++  return meta_tree_refresh_locked (tree, FALSE);
+ 
+  err:
+   meta_tree_clear (tree);
+@@ -446,6 +482,7 @@
+ 		gboolean for_write)
+ {
+   MetaTree *tree;
++  gboolean res;
+ 
+   g_assert (sizeof (MetaFileHeader) == 32);
+   g_assert (sizeof (MetaFileDirEnt) == 16);
+@@ -457,7 +494,13 @@
+   tree->for_write = for_write;
+   tree->fd = -1;
+ 
+-  meta_tree_init (tree);
++  res = meta_tree_init (tree);
++  if (!res)
++    {
++      /* do not return uninitialized tree to avoid corruptions */
++      meta_tree_unref (tree);
++      tree = NULL;
++    }
+ 
+   return tree;
+ }
+@@ -504,8 +547,11 @@
+       meta_tree_ref (tree);
+       G_UNLOCK (cached_trees);
+ 
+-      meta_tree_refresh (tree);
+-      return tree;
++      if (meta_tree_refresh (tree))
++        return tree;
++
++      meta_tree_unref (tree);
++      tree = NULL;
+     }
+ 
+   filename = g_build_filename (g_get_user_data_dir (), "gvfs-metadata", name, NULL);
+@@ -587,7 +633,7 @@
+ 
+ 
+ /* Must be called with a write lock held */
+-static void
++static gboolean
+ meta_tree_refresh_locked (MetaTree *tree, gboolean force_reread)
+ {
+   /* Needs to recheck since we dropped read lock */
+@@ -595,16 +641,19 @@
+     {
+       if (tree->header)
+ 	meta_tree_clear (tree);
+-      meta_tree_init (tree);
++      return meta_tree_init (tree);
+     }
+   else if (meta_tree_has_new_journal_entries (tree))
+     meta_journal_validate_more (tree->journal);
++
++  return TRUE;
+ }
+ 
+-void
++gboolean
+ meta_tree_refresh (MetaTree *tree)
+ {
+   gboolean needs_refresh;
++  gboolean res = TRUE;
+ 
+   g_static_rw_lock_reader_lock (&metatree_lock);
+   needs_refresh =
+@@ -615,9 +664,11 @@
+   if (needs_refresh)
+     {
+       g_static_rw_lock_writer_lock (&metatree_lock);
+-      meta_tree_refresh_locked (tree, FALSE);
++      res = meta_tree_refresh_locked (tree, FALSE);
+       g_static_rw_lock_writer_unlock (&metatree_lock);
+     }
++
++  return res;
+ }
+ 
+ struct FindName {
+@@ -2303,7 +2354,7 @@
+ 			    meta_tree_get_filename (tree));
+   if (res)
+     /* Force re-read since we wrote a new file */
+-    meta_tree_refresh_locked (tree, TRUE);
++    res = meta_tree_refresh_locked (tree, TRUE);
+ 
+   meta_builder_free (builder);
+ 
+--- gvfs-1.4.3/client/gdaemonvfs.c.metadata-don-t-crash-if-meta_tree_init-fails	2015-11-10 13:47:13.834400121 +0100
++++ gvfs-1.4.3/client/gdaemonvfs.c	2015-11-10 13:47:34.722357713 +0100
+@@ -1338,66 +1339,77 @@
+ 						statbuf.st_dev,
+ 						FALSE,
+ 						&tree_path);
+-	  message =
+-	    dbus_message_new_method_call (G_VFS_DBUS_METADATA_NAME,
+-					  G_VFS_DBUS_METADATA_PATH,
+-					  G_VFS_DBUS_METADATA_INTERFACE,
+-					  G_VFS_DBUS_METADATA_OP_SET);
+-	  g_assert (message != NULL);
+-	  metatreefile = meta_tree_get_filename (tree);
+-	  _g_dbus_message_append_args (message,
+-				       G_DBUS_TYPE_CSTRING, &metatreefile,
+-				       G_DBUS_TYPE_CSTRING, &tree_path,
+-				       0);
+-	  meta_lookup_cache_free (cache);
+-
+-	  num_set = 0;
+-	  for (i = 0; attributes[i] != NULL; i++)
+-	    {
+-	      if (g_file_info_get_attribute_data (info, attributes[i], &type, &value, NULL))
+-		{
+-		  appended = _g_daemon_vfs_append_metadata_for_set (message,
+-								    tree,
+-								    tree_path,
+-								    attributes[i],
+-								    type,
+-								    value);
+-		  if (appended != -1)
+-		    {
+-		      num_set += appended;
+-		      g_file_info_set_attribute_status (info, attributes[i],
+-							G_FILE_ATTRIBUTE_STATUS_SET);
+-		    }
+-		  else
+-		    {
+-		      res = FALSE;
+-		      g_set_error (error, G_IO_ERROR,
+-				   G_IO_ERROR_INVALID_ARGUMENT,
+-				   _("Error setting file metadata: %s"),
+-				   _("values must be string or list of strings"));
+-		      error = NULL; /* Don't set further errors */
+-		      g_file_info_set_attribute_status (info, attributes[i],
+-							G_FILE_ATTRIBUTE_STATUS_ERROR_SETTING);
+-		    }
+-		}
+-	    }
+-
+-	  meta_tree_unref (tree);
+-	  g_free (tree_path);
+-
+-	  if (num_set > 0 &&
+-	      !_g_daemon_vfs_send_message_sync (message,
+-						cancellable, error))
+-	    {
+-	      res = FALSE;
+-	      error = NULL; /* Don't set further errors */
+-	      for (i = 0; attributes[i] != NULL; i++)
+-		g_file_info_set_attribute_status (info, attributes[i],
+-						  G_FILE_ATTRIBUTE_STATUS_ERROR_SETTING);
+-	    }
+-
+-	  dbus_message_unref (message);
+-	}
++          if (!tree)
++            {
++              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
++                           _("Error setting file metadata: %s"),
++                           _("can't open metadata tree"));
++              res = FALSE;
++              error = NULL; /* Don't set further errors */
++            }
++          else
++            {
++              message =
++                dbus_message_new_method_call (G_VFS_DBUS_METADATA_NAME,
++				              G_VFS_DBUS_METADATA_PATH,
++				              G_VFS_DBUS_METADATA_INTERFACE,
++				              G_VFS_DBUS_METADATA_OP_SET);
++              g_assert (message != NULL);
++              metatreefile = meta_tree_get_filename (tree);
++              _g_dbus_message_append_args (message,
++			                   G_DBUS_TYPE_CSTRING, &metatreefile,
++			                   G_DBUS_TYPE_CSTRING, &tree_path,
++			                   0);
++              meta_lookup_cache_free (cache);
++
++              num_set = 0;
++              for (i = 0; attributes[i] != NULL; i++)
++                {
++                  if (g_file_info_get_attribute_data (info, attributes[i], &type, &value, NULL))
++	            {
++	              appended = _g_daemon_vfs_append_metadata_for_set (message,
++							                tree,
++							                tree_path,
++							                attributes[i],
++							                type,
++							                value);
++	              if (appended != -1)
++	                {
++	                  num_set += appended;
++	                  g_file_info_set_attribute_status (info, attributes[i],
++						            G_FILE_ATTRIBUTE_STATUS_SET);
++	                }
++	              else
++	                {
++	                  res = FALSE;
++	                  g_set_error (error, G_IO_ERROR,
++			               G_IO_ERROR_INVALID_ARGUMENT,
++			               _("Error setting file metadata: %s"),
++			               _("values must be string or list of strings"));
++	                  error = NULL; /* Don't set further errors */
++	                  g_file_info_set_attribute_status (info, attributes[i],
++						            G_FILE_ATTRIBUTE_STATUS_ERROR_SETTING);
++	                }
++	            }
++                }
++
++              meta_tree_unref (tree);
++              g_free (tree_path);
++
++              if (num_set > 0 &&
++                  !_g_daemon_vfs_send_message_sync (message,
++					            cancellable, error))
++                {
++                  res = FALSE;
++                  error = NULL; /* Don't set further errors */
++                  for (i = 0; attributes[i] != NULL; i++)
++	            g_file_info_set_attribute_status (info, attributes[i],
++					              G_FILE_ATTRIBUTE_STATUS_ERROR_SETTING);
++                }
++
++              dbus_message_unref (message);
++            }
++        }
+ 
+       g_strfreev (attributes);
+     }
+--- gvfs-1.4.3/client/gdaemonfile.c.metadata-don-t-crash-if-meta_tree_init-fails	2015-11-10 13:47:13.926399935 +0100
++++ gvfs-1.4.3/client/gdaemonfile.c	2015-11-10 13:47:41.568343814 +0100
+@@ -825,12 +825,16 @@
+   tree = meta_tree_lookup_by_name (treename, FALSE);
+   g_free (treename);
+ 
+-  g_file_info_set_attribute_mask (info, matcher);
+-  meta_tree_enumerate_keys (tree, daemon_file->path,
+-			    enumerate_keys_callback, info);
+-  g_file_info_unset_attribute_mask (info);
++  if (tree)
++    {
++      g_file_info_set_attribute_mask (info, matcher);
++      meta_tree_enumerate_keys (tree, daemon_file->path,
++                                enumerate_keys_callback, info);
++      g_file_info_unset_attribute_mask (info);
++
++      meta_tree_unref (tree);
++    }
+ 
+-  meta_tree_unref (tree);
+   g_file_attribute_matcher_unref (matcher);
+ }
+ 
+@@ -2227,6 +2231,14 @@
+   tree = meta_tree_lookup_by_name (treename, FALSE);
+   g_free (treename);
+ 
++  if (!tree)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
++                   _("Error setting file metadata: %s"),
++                   _("can't open metadata tree"));
++      return FALSE;
++    }
++
+   message =
+     dbus_message_new_method_call (G_VFS_DBUS_METADATA_NAME,
+ 				  G_VFS_DBUS_METADATA_PATH,

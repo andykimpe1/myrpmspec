@@ -1,0 +1,80 @@
+From 789cafa60b09dd14ec7d02bfe71e2a55dbaec9dc Mon Sep 17 00:00:00 2001
+From: Tomas Bzatek <tbzatek@redhat.com>
+Date: Fri, 23 Mar 2012 13:47:40 +0100
+Subject: [PATCH] gdu: Workaround formatted BD-RE media detection
+
+Formatted BD-RE medium contains a dumb track which is fully visible
+and can be read, even if it contains bogus data.
+
+This patch treats unknown filesystem on BD-RE medium as a blank disc
+and allows burn:// to be placed instead.
+
+https://bugzilla.gnome.org/show_bug.cgi?id=672566
+---
+ monitor/gdu/ggduvolumemonitor.c |   36 ++++++++++++++++++++++++++++++++++--
+ 1 files changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/monitor/gdu/ggduvolumemonitor.c b/monitor/gdu/ggduvolumemonitor.c
+index 82916c0..34f1a38 100644
+--- a/monitor/gdu/ggduvolumemonitor.c
++++ b/monitor/gdu/ggduvolumemonitor.c
+@@ -1592,6 +1592,38 @@ update_mounts (GGduVolumeMonitor *monitor,
+   monitor->last_mounts = new_mounts;
+ }
+ 
++/* This function fakes blank media detection of BD-RE media. */
++/* See https://bugzilla.gnome.org/show_bug.cgi?id=672566 */
++static gboolean
++is_blank_bdre (GGduVolumeMonitor *monitor,
++               GduDevice *device)
++{
++  GduPool *pool;
++  GduPresentable *p;
++  GList *fstab_mount_points;
++  gboolean ignored = FALSE;
++
++  if (g_ascii_strcasecmp ("optical_bd_re", gdu_device_drive_get_media (device)) != 0)
++    return FALSE;
++
++  fstab_mount_points = g_unix_mount_points_get (NULL);
++
++  pool = gdu_device_get_pool (device);
++  p = gdu_pool_get_volume_by_device (pool, device);
++  g_object_unref (pool);
++
++  if (p == NULL)
++    return FALSE;
++
++  if (!GDU_IS_VOLUME (p) || should_volume_be_ignored (monitor->pool, GDU_VOLUME (p), fstab_mount_points))
++    ignored = TRUE;
++
++  g_list_foreach (fstab_mount_points, (GFunc) g_unix_mount_point_free, NULL);
++  g_list_free (fstab_mount_points);
++
++  return ignored;
++}
++
+ static void
+ update_discs (GGduVolumeMonitor *monitor,
+               GList **added_volumes,
+@@ -1632,7 +1664,7 @@ update_discs (GGduVolumeMonitor *monitor,
+       d = gdu_presentable_get_device (p);
+       if (GDU_IS_VOLUME (p) && d != NULL && gdu_device_is_optical_disc (d))
+         {
+-          if (gdu_device_optical_disc_get_num_audio_tracks (d) > 0 || gdu_device_optical_disc_get_is_blank (d))
++          if (gdu_device_optical_disc_get_num_audio_tracks (d) > 0 || gdu_device_optical_disc_get_is_blank (d) || is_blank_bdre (monitor, d))
+             ignore = FALSE;
+         }
+ 
+@@ -1697,7 +1729,7 @@ update_discs (GGduVolumeMonitor *monitor,
+ 
+       if (d != NULL)
+         {
+-          is_blank = gdu_device_optical_disc_get_is_blank (d);
++          is_blank = gdu_device_optical_disc_get_is_blank (d) || is_blank_bdre (monitor, d);
+           volume = find_disc_volume_for_device_file (monitor, gdu_device_get_device_file (d));
+         }
+ 
+-- 
+1.7.3.4
+

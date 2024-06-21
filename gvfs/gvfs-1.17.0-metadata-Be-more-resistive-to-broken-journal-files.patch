@@ -1,0 +1,58 @@
+From 8772f1ccdf1fac536823f152021e4778d3a80895 Mon Sep 17 00:00:00 2001
+From: Tomas Bzatek <tbzatek@redhat.com>
+Date: Fri, 12 Apr 2013 17:16:29 +0200
+Subject: [PATCH] metadata: Be more resistive to broken journal files
+
+In shared NFS homedir case with multiple clients writing to the same
+mmaped journal file data can get easily corrupted. The daemon iterates
+over a journal file on flush taking in account variable entry size and
+advances according to the data read.
+
+However in certain case invalid data are read making us to jump out of
+bounds. In case of zero entry size we would stand at the same place
+leading to infinite loop.
+
+This patch checks if the indicated entry size is at least the size of
+the structure we're getting the size from (it's a first element) and breaks
+the iteration cycle if it's not. This may lead to partial data loss on flush
+as we don't process the rest of the journal file. Old data from existing
+tree file will be preserved of course, only few recent changes would get lost.
+
+https://bugzilla.gnome.org/show_bug.cgi?id=637095
+---
+ metadata/metatree.c |   12 ++++++++++++
+ 1 files changed, 12 insertions(+), 0 deletions(-)
+
+diff --git a/metadata/metatree.c b/metadata/metatree.c
+index 3bcf9a6..d3d811a 100644
+--- a/metadata/metatree.c
++++ b/metadata/metatree.c
+@@ -1303,6 +1303,11 @@ meta_journal_iterate (MetaJournal *journal,
+     {
+       sizep = (guint32 *)entry;
+       entry = (MetaJournalEntry *)((char *)entry - GUINT32_FROM_BE (*(sizep-1)));
++      if (GUINT32_FROM_BE (*(sizep)) < sizeof (MetaJournalEntry) && entry > journal->first_entry)
++        {
++          g_warning ("meta_journal_iterate: found short sized entry, possible journal corruption\n");
++          break;
++        }
+ 
+       mtime = GUINT64_FROM_BE (entry->mtime);
+       journal_path = &entry->path[0];
+@@ -2342,6 +2347,13 @@ apply_journal_to_builder (MetaTree *tree,
+ 
+       sizep = (guint32 *)entry;
+       entry = (MetaJournalEntry *)((char *)entry + GUINT32_FROM_BE (*(sizep)));
++      if (GUINT32_FROM_BE (*(sizep)) < sizeof (MetaJournalEntry) && entry < journal->last_entry)
++        {
++          /* This shouldn't happen, we found an entry that is shorter than its data */
++          /* See https://bugzilla.gnome.org/show_bug.cgi?id=637095 for discussion */
++          g_warning ("apply_journal_to_builder: found short sized entry, possible journal corruption\n");
++          break;
++        }
+     }
+ }
+ 
+-- 
+1.7.8.6
+

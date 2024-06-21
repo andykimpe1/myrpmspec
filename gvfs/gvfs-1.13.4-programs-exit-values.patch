@@ -1,0 +1,364 @@
+diff -up gvfs-1.4.3/programs/gvfs-cat.c.bak gvfs-1.4.3/programs/gvfs-cat.c
+--- gvfs-1.4.3/programs/gvfs-cat.c.bak	2009-11-19 11:59:22.000000000 +0100
++++ gvfs-1.4.3/programs/gvfs-cat.c	2012-07-20 11:50:03.000000000 +0200
+@@ -38,7 +38,7 @@ static GOptionEntry entries[] = {
+   {NULL}
+ };
+ 
+-static void
++static gboolean
+ cat (GFile * file)
+ {
+   GInputStream *in;
+@@ -47,6 +47,7 @@ cat (GFile * file)
+   gssize res;
+   gboolean close_res;
+   GError *error;
++  gboolean success;
+ 
+   error = NULL;
+   in = (GInputStream *) g_file_read (file, NULL, &error);
+@@ -57,9 +58,10 @@ cat (GFile * file)
+       g_printerr (_("%s: %s: error opening file: %s\n"),
+ 		  g_get_prgname (), g_file_get_uri (file), error->message);
+       g_error_free (error);
+-      return;
++      return FALSE;
+     }
+ 
++  success = TRUE;
+   while (1)
+     {
+       res =
+@@ -79,6 +81,7 @@ cat (GFile * file)
+ 		  /* second one is the URI of the file.                 */
+ 		  g_printerr (_("%s: %s, error writing to stdout"),
+ 			      g_get_prgname (), g_file_get_uri (file));
++		  success = FALSE;
+ 		  goto out;
+ 		}
+ 	      res -= written;
+@@ -94,6 +97,7 @@ cat (GFile * file)
+ 		      error->message);
+ 	  g_error_free (error);
+ 	  error = NULL;
++	  success = FALSE;
+ 	  break;
+ 	}
+       else if (res == 0)
+@@ -110,7 +114,10 @@ cat (GFile * file)
+       g_printerr (_("%s: %s:error closing: %s\n"),
+ 		  g_get_prgname (), g_file_get_uri (file), error->message);
+       g_error_free (error);
++      success = FALSE;
+     }
++
++  return success;
+ }
+ 
+ int
+@@ -121,6 +128,7 @@ main (int argc, char *argv[])
+   GFile *file;
+   gchar *summary;
+   int i;
++  gboolean res;
+ 
+   setlocale (LC_ALL, "");
+ 
+@@ -179,15 +187,16 @@ main (int argc, char *argv[])
+       return 1;
+     }
+ 
++  res = TRUE;
+   i = 0;
+ 
+   do
+     {
+       file = g_file_new_for_commandline_arg (locations[i]);
+-      cat (file);
++      res = cat (file) && res;
+       g_object_unref (file);
+     }
+   while (locations[++i] != NULL);
+ 
+-  return 0;
++  return res ? 0 : 2;
+ }
+diff -up gvfs-1.4.3/programs/gvfs-info.c.bak gvfs-1.4.3/programs/gvfs-info.c
+--- gvfs-1.4.3/programs/gvfs-info.c.bak	2009-08-24 17:04:19.000000000 +0200
++++ gvfs-1.4.3/programs/gvfs-info.c	2012-07-20 11:51:17.000000000 +0200
+@@ -185,7 +185,7 @@ show_info (GFileInfo *info)
+   show_attributes (info);
+ }
+ 
+-static void
++static gboolean
+ query_info (GFile *file)
+ {
+   GFileQueryInfoFlags flags;
+@@ -193,7 +193,7 @@ query_info (GFile *file)
+   GError *error;
+ 
+   if (file == NULL)
+-    return;
++    return FALSE;
+ 
+   if (attributes == NULL)
+     attributes = "*";
+@@ -212,7 +212,7 @@ query_info (GFile *file)
+     {
+       g_printerr ("Error getting info: %s\n", error->message);
+       g_error_free (error);
+-      return;
++      return FALSE;
+     }
+ 
+   if (filesystem)
+@@ -221,6 +221,8 @@ query_info (GFile *file)
+     show_info (info);
+ 
+   g_object_unref (info);
++
++  return TRUE;
+ }
+ 
+ static char *
+@@ -288,7 +290,7 @@ attribute_flags_to_string (GFileAttribut
+   return g_string_free (s, FALSE);
+ }
+ 
+-static void
++static gboolean
+ get_writable_info (GFile *file)
+ {
+   GFileAttributeInfoList *list;
+@@ -297,7 +299,7 @@ get_writable_info (GFile *file)
+   char *flags;
+ 
+   if (file == NULL)
+-    return;
++    return FALSE;
+ 
+   error = NULL;
+ 
+@@ -306,7 +308,7 @@ get_writable_info (GFile *file)
+     {
+       g_printerr (_("Error getting writable attributes: %s\n"), error->message);
+       g_error_free (error);
+-      return;
++      return FALSE;
+     }
+ 
+   g_print (_("Settable attributes:\n"));
+@@ -327,7 +329,7 @@ get_writable_info (GFile *file)
+     {
+       g_printerr ("Error getting writable namespaces: %s\n", error->message);
+       g_error_free (error);
+-      return;
++      return FALSE;
+     }
+ 
+   if (list->n_infos > 0)
+@@ -344,6 +346,8 @@ get_writable_info (GFile *file)
+     }
+ 
+   g_file_attribute_info_list_unref (list);
++
++  return TRUE;
+ }
+ 
+ 
+@@ -353,6 +357,7 @@ main (int argc, char *argv[])
+   GError *error;
+   GOptionContext *context;
+   GFile *file;
++  gboolean res;
+ 
+   setlocale (LC_ALL, "");
+ 
+@@ -375,6 +380,7 @@ main (int argc, char *argv[])
+       return 1;
+     }
+ 
++  res = TRUE;
+   if (argc > 1)
+     {
+       int i;
+@@ -382,12 +388,12 @@ main (int argc, char *argv[])
+       for (i = 1; i < argc; i++) {
+ 	file = g_file_new_for_commandline_arg (argv[i]);
+ 	if (writable)
+-	  get_writable_info (file);
++	  res = get_writable_info (file) && res;
+ 	else
+-	  query_info (file);
++	  res = query_info (file) && res;
+ 	g_object_unref (file);
+       }
+     }
+ 
+-  return 0;
++  return res ? 0 : 2;
+ }
+diff -up gvfs-1.4.3/programs/gvfs-ls.c.bak gvfs-1.4.3/programs/gvfs-ls.c
+--- gvfs-1.4.3/programs/gvfs-ls.c.bak	2009-08-24 17:04:19.000000000 +0200
++++ gvfs-1.4.3/programs/gvfs-ls.c	2012-07-20 11:51:31.000000000 +0200
+@@ -128,15 +128,16 @@ show_info (GFileInfo *info)
+   g_print ("\n");
+ }
+ 
+-static void
++static gboolean
+ list (GFile *file)
+ {
+   GFileEnumerator *enumerator;
+   GFileInfo *info;
+   GError *error;
++  gboolean res;
+ 
+   if (file == NULL)
+-    return;
++    return FALSE;
+ 
+   error = NULL;
+   enumerator = g_file_enumerate_children (file,
+@@ -149,9 +150,10 @@ list (GFile *file)
+       g_printerr ("Error: %s\n", error->message);
+       g_error_free (error);
+       error = NULL;
+-      return;
++      return FALSE;
+     }
+ 
++  res = TRUE;
+   while ((info = g_file_enumerator_next_file (enumerator, NULL, &error)) != NULL)
+     {
+       show_info (info);
+@@ -164,6 +166,7 @@ list (GFile *file)
+       g_printerr (_("Error: %s\n"), error->message);
+       g_error_free (error);
+       error = NULL;
++      res = FALSE;
+     }
+ 
+   if (!g_file_enumerator_close (enumerator, NULL, &error))
+@@ -171,7 +174,10 @@ list (GFile *file)
+       g_printerr (_("Error: %s\n"), error->message);
+       g_error_free (error);
+       error = NULL;
++      res = FALSE;
+     }
++
++  return res;
+ }
+ 
+ static void
+@@ -374,6 +380,7 @@ main (int argc, char *argv[])
+   GError *error;
+   GOptionContext *context;
+   GFile *file;
++  gboolean res;
+ 
+   setlocale (LC_ALL, "");
+ 
+@@ -416,13 +423,14 @@ main (int argc, char *argv[])
+       return 0;
+     }
+ 
++  res = TRUE;
+   if (argc > 1)
+     {
+       int i;
+ 
+       for (i = 1; i < argc; i++) {
+ 	file = g_file_new_for_commandline_arg (argv[i]);
+-	list (file);
++	res = list (file) && res;
+ 	g_object_unref (file);
+       }
+     }
+@@ -433,11 +441,11 @@ main (int argc, char *argv[])
+       cwd = g_get_current_dir ();
+       file = g_file_new_for_path (cwd);
+       g_free (cwd);
+-      list (file);
++      res = list (file);
+       g_object_unref (file);
+     }
+ 
+   g_free (attributes);
+ 
+-  return 0;
++  return res ? 0 : 2;
+ }
+diff -up gvfs-1.4.3/programs/gvfs-mount.c.bak gvfs-1.4.3/programs/gvfs-mount.c
+--- gvfs-1.4.3/programs/gvfs-mount.c.bak	2009-12-14 09:31:02.000000000 +0100
++++ gvfs-1.4.3/programs/gvfs-mount.c	2012-07-20 11:52:08.000000000 +0200
+@@ -48,6 +48,8 @@ static gboolean extra_detail = FALSE;
+ static gboolean mount_monitor = FALSE;
+ static const char *unmount_scheme = NULL;
+ static const char *mount_device_file = NULL;
++static gboolean success = TRUE;
++
+ 
+ static const GOptionEntry entries[] =
+ {
+@@ -160,7 +162,10 @@ mount_mountable_done_cb (GObject *object
+   target = g_file_mount_mountable_finish (G_FILE (object), res, &error);
+ 
+   if (target == NULL)
+-    g_printerr (_("Error mounting location: %s\n"), error->message);
++    {
++      g_printerr (_("Error mounting location: %s\n"), error->message);
++      success = FALSE;
++    }
+   else
+     g_object_unref (target);
+ 
+@@ -181,7 +186,10 @@ mount_done_cb (GObject *object,
+   succeeded = g_file_mount_enclosing_volume_finish (G_FILE (object), res, &error);
+ 
+   if (!succeeded)
+-    g_printerr (_("Error mounting location: %s\n"), error->message);
++    {
++      g_printerr (_("Error mounting location: %s\n"), error->message);
++      success = FALSE;
++    }
+ 
+   outstanding_mounts--;
+ 
+@@ -238,7 +246,10 @@ unmount_done_cb (GObject *object,
+   g_object_unref (G_MOUNT (object));
+ 
+   if (!succeeded)
+-    g_printerr (_("Error unmounting mount: %s\n"), error->message);
++    {
++      g_printerr (_("Error unmounting mount: %s\n"), error->message);
++      success = FALSE;
++    }
+ 
+   outstanding_mounts--;
+ 
+@@ -260,6 +271,7 @@ unmount (GFile *file)
+   if (mount == NULL)
+     {
+       g_printerr (_("Error finding enclosing mount: %s\n"), error->message);
++      success = FALSE;
+       return;
+     }
+ 
+@@ -673,6 +685,7 @@ mount_with_device_file_cb (GObject *obje
+       g_printerr (_("Error mounting %s: %s\n"),
+                   g_volume_get_identifier (volume, G_VOLUME_IDENTIFIER_KIND_UNIX_DEVICE),
+                   error->message);
++      success = FALSE;
+     }
+   else
+     {
+@@ -964,5 +977,5 @@ main (int argc, char *argv[])
+   if (outstanding_mounts > 0)
+     g_main_loop_run (main_loop);
+ 
+-  return 0;
++  return success ? 0 : 2;
+ }
