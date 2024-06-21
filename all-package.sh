@@ -254,9 +254,9 @@
 #./get-package.sh dvipdfm-0.13.2d-41.1.el6.src.rpm
 #./get-package.sh dvipdfmx-0-0.31.20090708cvs.el6.src.rpm
 #./get-package.sh dvipng-1.11-3.2.el6.src.rpm
-./get-package.sh e2fsprogs-1.41.12-24.el6.src.rpm
-./get-package.sh ebtables-2.0.9-6.el6.src.rpm
-./get-package.sh ecj-4.5.2-3.el6.src.rpm
+#./get-package.sh e2fsprogs-1.41.12-24.el6.src.rpm
+#./get-package.sh ebtables-2.0.9-6.el6.src.rpm
+#./get-package.sh ecj-4.5.2-3.el6.src.rpm
 ./get-package.sh eclipse-3.6.1-6.13.el6.src.rpm
 ./get-package.sh eclipse-birt-2.6.0-1.1.el6.src.rpm
 ./get-package.sh eclipse-callgraph-0.6.1-1.el6.src.rpm
@@ -269,7 +269,7 @@
 ./get-package.sh eclipse-mylyn-3.4.2-9.el6.src.rpm
 ./get-package.sh eclipse-nls-3.6.0.v20120721114722-2.el6.src.rpm
 ./get-package.sh eclipse-oprofile-0.6.1-1.el6.src.rpm
-./get-package.sh eclipse-rpm
+./get-package.sh eclipse-rpm-editor-0.5.0-2.el6.src.rpm
 ./get-package.sh eclipse-rse-3.2-1.el6.src.rpm
 ./get-package.sh eclipse-subclipse-1.6.5-6.el6.src.rpm
 ./get-package.sh eclipse-valgrind-0.6.1-1.el6.src.rpm
