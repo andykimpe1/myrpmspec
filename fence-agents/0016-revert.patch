@@ -1,0 +1,1239 @@
+From 3aac0750a8402e6e3ecc77a5d9c435370e9de318 Mon Sep 17 00:00:00 2001
+From: Marek 'marx' Grac <mgrac@redhat.com>
+Date: Wed, 18 Feb 2015 13:16:24 +0100
+Subject: [PATCH 16/16] fence_scsi: Return the original fence_scsi version as
+ was in RHEL6.6
+
+---
+ fence/agents/scsi/Makefile.am         |  24 +-
+ fence/agents/scsi/fence_scsi.8        | 119 +++++
+ fence/agents/scsi/fence_scsi.pl       | 868 ++++++++++++++++++++++++++++++++++
+ fence/agents/scsi/fence_scsi_check.pl | 174 +++++++
+ 4 files changed, 1172 insertions(+), 13 deletions(-)
+ create mode 100644 fence/agents/scsi/fence_scsi.8
+ create mode 100644 fence/agents/scsi/fence_scsi.pl
+ create mode 100644 fence/agents/scsi/fence_scsi_check.pl
+
+diff --git a/fence/agents/scsi/Makefile.am b/fence/agents/scsi/Makefile.am
+index 295d649..32f6549 100644
+--- a/fence/agents/scsi/Makefile.am
++++ b/fence/agents/scsi/Makefile.am
+@@ -2,25 +2,23 @@ MAINTAINERCLEANFILES	= Makefile.in
+ 
+ TARGET			= fence_scsi
+ 
+-SRC			= $(TARGET).py
++SRC			= $(TARGET).pl
+ 
+-EXTRA_DIST		= $(SRC) 
++EXTRA_DIST		= $(SRC) \
++			  $(TARGET)_check.pl $(TARGET)_check_hardreboot.pl
+ 
+ scsidatadir		= $(CLUSTERDATA)
+-scsidata_SCRIPTS	= fence_scsi_check
+ 
+-sbin_SCRIPTS		= $(TARGET)
+-
+-man_MANS		= $(TARGET).8
++scsidata_SCRIPTS	= $(TARGET)_check.pl $(TARGET)_check_hardreboot.pl
+ 
+-FENCE_TEST_ARGS         = -k 1
++sbin_SCRIPTS		= $(TARGET)
+ 
+-fence_scsi_check: $(TARGET)
+-	cp $^ $@
++dist_man_MANS		= $(TARGET).8
+ 
+ include $(top_srcdir)/make/fencebuild.mk
+-include $(top_srcdir)/make/fenceman.mk
+-include $(top_srcdir)/make/agentpycheck.mk
+ 
+-clean-local: clean-man
+-	rm -f $(TARGET) $(SYMTARGET) fence_scsi_check
++clean-local:
++	rm -f $(TARGET)
++
++fence_scsi_check_hardreboot.pl: fence_scsi_check.pl
++	cp fence_scsi_check.pl fence_scsi_check_hardreboot.pl
+diff --git a/fence/agents/scsi/fence_scsi.8 b/fence/agents/scsi/fence_scsi.8
+new file mode 100644
+index 0000000..180de4f
+--- /dev/null
++++ b/fence/agents/scsi/fence_scsi.8
+@@ -0,0 +1,119 @@
++.TH fence_scsi 8
++
++.SH NAME
++fence_scsi - I/O fencing agent for SCSI persistent reservations
++
++.SH SYNOPSIS
++.B
++fence_scsi
++[\fIOPTION\fR]...
++
++.SH DESCRIPTION
++fence_scsi is an I/O fencing agent that uses SCSI-3 persistent
++reservations to control access to shared storage devices. These
++devices must support SCSI-3 persistent reservations (SPC-3 or greater)
++as well as the "preempt-and-abort" subcommand.
++
++The fence_scsi agent works by having each node in the cluster register
++a unique key with the SCSI devive(s). Once registered, a single node
++will become the reservation holder by creating a "write exclusive,
++registrants only" reservation on the device(s). The result is that
++only registered nodes may write to the device(s). When a node failure
++occurs, the fence_scsi agent will remove the key belonging to the
++failed node from the device(s). The failed node will no longer be able
++to write to the device(s). A manual reboot is required. In the cluster
++environment unfence action should be configured also.
++
++Keys are either be specified manually (see -k option) or generated
++automatically (see -n option). Automatic key generation requires that
++cman be running. Keys will then be generated using the cluster ID and
++node ID such that each node has a unique key that can be determined by
++any other node in the cluster.
++
++Devices can either be specified manually (see -d option) or discovered
++automatically. Multiple devices can be specified manually by using a
++comma-separated list. If no devices are specified, the fence_scsi
++agent will attempt to discover devices by looking for cluster volumes
++and extracting the underlying devices. Devices may be device-mapper
++multipath devices or raw devices. If using a device-mapper multipath
++device, the fence_scsi agent will find the underlying devices (paths)
++and created registrations for each path.
++
++.SH OPTIONS
++.TP
++\fB-o\fP \fIaction\fR
++Fencing action. This value can be "on", "off", "status", or
++"metadata". The "on", "off", and "status" actions require either a key
++(see -k option) or node name (see -n option). For "on", the agent will
++attempt to register with the device(s) and create a reservation if
++none exists. The "off" action will attempt to remove a node's key from
++the device(s). The "status" action will report whether or not a node's
++key is currently register with one or more of the devices. The
++"metadata" action will display the XML metadata. The default action if
++"off".
++.TP
++\fB-d\fP \fIdevices\fR
++List of devices to use for current operation. Devices can be
++comma-separated list of raw device (eg. /dev/sdc) or device-mapper
++multipath devices (eg. /dev/dm-3). Each device must support SCSI-3
++persistent reservations.
++.TP
++\fB-f\fP \fIlogfile\fR
++Log output to file.
++.TP
++\fB-n\fP \fInodename\fR
++Name of the node to be fenced. The node name is used to generate the
++key value used for the current operation. This option will be ignored
++when used with the -k option.
++.TP
++\fB-k\fP \fIkey\fR
++Key to use for the current operation. This key should be unique to a
++node. For the "on" action, the key specifies the key use to register
++the local node. For the "off" action, this key specifies the key to be
++removed from the device(s).
++.TP
++\fB-H\fP \fIdelay\fR
++Wait X seconds before fencing is started (Default Value: 0)
++
++.TP
++\fB-a\fP
++Use the APTPL flag for registrations. This option is only used for the
++"on" action.
++.TP
++\fB-h\fP
++Print out a help message describing available options, then exit.
++.TP
++\fB-v\fP
++Verbose output.
++.TP
++\fB-V\fP
++Print out a version message, then exit.
++
++.SH STDIN PARAMETERS
++.TP
++\fIagent = "param"\fR
++This option is used by fence_node(8) and is ignored by fence_scsi.
++.TP
++\fInodename = "param"\fR
++Same as -n option.
++.TP
++\fIaction = "param" \fR
++Same as -o option.
++.TP
++\fIdevices = "param"\fR
++Same as -d option.
++.TP
++\fIlogfile = "param"\fR
++Same as -f option
++.TP
++\fIkey = "param"\fR
++Same as -k option.
++.TP
++\fIdelay = "param"\fR
++Same as -H option.
++.TP
++\fIaptpl = "1"
++Enable the APTPL flag. Default is 0 (disable).
++
++.SH SEE ALSO
++fence(8), fence_node(8), sg_persist(8), vgs(8), cman_tool(8), cman(5)
+diff --git a/fence/agents/scsi/fence_scsi.pl b/fence/agents/scsi/fence_scsi.pl
+new file mode 100644
+index 0000000..4e5cc96
+--- /dev/null
++++ b/fence/agents/scsi/fence_scsi.pl
+@@ -0,0 +1,868 @@
++#!/usr/bin/perl
++
++use Cwd 'realpath';
++use File::Basename;
++use File::Path;
++use Getopt::Std;
++use POSIX;
++
++#BEGIN_VERSION_GENERATION
++$RELEASE_VERSION="";
++$REDHAT_COPYRIGHT="";
++$BUILD_DATE="";
++#END_VERSION_GENERATION
++
++my $ME = fileparse ($0, ".pl");
++
++################################################################################
++
++sub log_debug ($)
++{
++    my $time = strftime "%b %e %T", localtime;
++    my ($msg) = @_;
++
++    print STDOUT "$time $ME: [debug] $msg\n" unless defined ($opt_q);
++
++    return;
++}
++
++sub log_error ($)
++{
++    my $time = strftime "%b %e %T", localtime;
++    my ($msg) = @_;
++
++    print STDERR "$time $ME: [error] $msg\n" unless defined ($opt_q);
++
++    exit (1);
++}
++
++sub do_action_on ($@)
++{
++    my $self = (caller(0))[3];
++    my ($node_key, @devices) = @_;
++
++    key_write ($node_key);
++
++    foreach $dev (@devices) {
++	log_error ("device $dev does not exist") if (! -e $dev);
++	log_error ("device $dev is not a block device") if (! -b $dev);
++
++	if (do_register_ignore ($node_key, $dev) != 0) {
++	    log_error ("failed to create registration (key=$node_key, device=$dev)");
++	}
++
++	if (!get_reservation_key ($dev)) {
++	    if (do_reserve ($node_key, $dev) != 0) {
++		if (!get_reservation_key ($dev)) {
++		    log_error ("failed to create reservation (key=$node_key, device=$dev)");
++		}
++	    }
++	}
++    }
++
++    return;
++}
++
++sub do_action_off ($@)
++{
++    my $self = (caller(0))[3];
++    my ($node_key, @devices) = @_;
++
++    my $host_key = key_read ();
++
++    if ($host_key eq $node_key) {
++	log_error ($self);
++    }
++
++    foreach $dev (@devices) {
++	log_error ("device $dev does not exist") if (! -e $dev);
++	log_error ("device $dev is not a block device") if (! -b $dev);
++
++	my @keys = grep { /^$node_key$/i } get_registration_keys ($dev);
++
++	if (scalar (@keys) != 0) {
++	    do_preempt_abort ($host_key, $node_key, $dev);
++	}
++    }
++
++    return;
++}
++
++sub do_action_status ($@)
++{
++    my $self = (caller(0))[3];
++    my ($node_key, @devices) = @_;
++
++    my $dev_count = 0;
++    my $key_count = 0;
++
++    foreach $dev (@devices) {
++	log_error ("device $dev does not exist") if (! -e $dev);
++	log_error ("device $dev is not a block device") if (! -b $dev);
++
++	do_reset ($dev);
++
++	my @keys = grep { /^$node_key$/i } get_registration_keys ($dev);
++
++	if (scalar (@keys) != 0) {
++	    $dev_count++;
++	}
++    }
++
++    if ($dev_count != 0) {
++	exit (0);
++    } else {
++	exit (2);
++    }
++}
++
++sub do_verify_on ($@)
++{
++    my $self = (caller(0))[3];
++    my ($node_key, @devices) = @_;
++    my $count = 0;
++
++    for $dev (@devices) {
++        my @keys = grep { /^$node_key$/i } get_registration_keys ($dev);
++
++        ## check that our key is registered
++        if (scalar (@keys) == 0) {
++            log_debug ("failed to register key $node_key on device $dev");
++            $count++;
++            next;
++        }
++
++	## write dev to device file once registration is verified
++	dev_write ($dev);
++
++        ## check that a reservation exists
++        if (!get_reservation_key ($dev)) {
++            log_debug ("no reservation exists on device $dev");
++            $count++;
++        }
++    }
++
++    if ($count != 0) {
++        log_error ("$self: failed to verify $count devices");
++    }
++}
++
++sub do_verify_off ($@)
++{
++    my $self = (caller(0))[3];
++    my ($node_key, @devices) = @_;
++    my $count = 0;
++
++    for $dev (@devices) {
++        my @keys = grep { /^$node_key$/i } get_registration_keys ($dev);
++
++        ## check that our key is not registered
++        if (scalar (@keys) != 0) {
++            log_debug ("failed to remove key $node_key from device $dev");
++            $count++;
++            next;
++        }
++
++        ## check that a reservation exists
++        if (!get_reservation_key ($dev)) {
++            log_debug ("no reservation exists on device $dev");
++            $count++;
++        }
++    }
++
++    if ($count != 0) {
++        log_error ("$self: failed to verify $count devices");
++    }
++}
++
++sub do_register ($$$)
++{
++    my $self = (caller(0))[3];
++    my ($host_key, $node_key, $dev) = @_;
++
++    $dev = realpath ($dev);
++
++    if (substr ($dev, 5) =~ /^dm/) {
++	my @slaves = get_mpath_slaves ($dev);
++	foreach (@slaves) {
++	    do_register ($node_key, $_);
++	}
++	return;
++    }
++
++    log_debug ("$self (host_key=$host_key, node_key=$node_key, dev=$dev)");
++
++    my $cmd;
++    my $out;
++    my $err;
++
++    do_reset ($dev);
++
++    $cmd = "sg_persist -n -o -G -K $host_key -S $node_key -d $dev";
++    $cmd .= " -Z" if (defined $opt_a);
++    $out = qx { $cmd 2> /dev/null };
++    $err = ($?>>8);
++
++    # if ($err != 0) {
++    # 	log_error ("$self (err=$err)");
++    # }
++
++    log_debug ("$self (err=$err)");
++
++    return ($err);
++}
++
++sub do_register_ignore ($$)
++{
++    my $self = (caller(0))[3];
++    my ($node_key, $dev) = @_;
++
++    $dev = realpath ($dev);
++
++    if (substr ($dev, 5) =~ /^dm/) {
++	my @slaves = get_mpath_slaves ($dev);
++	foreach (@slaves) {
++	    do_register_ignore ($node_key, $_);
++	}
++	return;
++    }
++
++    log_debug ("$self (node_key=$node_key, dev=$dev)");
++
++    my $cmd;
++    my $out;
++    my $err;
++
++    do_reset ($dev);
++
++    $cmd = "sg_persist -n -o -I -S $node_key -d $dev";
++    $cmd .= " -Z" if (defined $opt_a);
++    $out = qx { $cmd 2> /dev/null };
++    $err = ($?>>8);
++
++    # if ($err != 0) {
++    # 	log_error ("$self (err=$err)");
++    # }
++
++    log_debug ("$self (err=$err)");
++
++    return ($err);
++}
++
++sub do_reserve ($$)
++{
++    my $self = (caller(0))[3];
++    my ($host_key, $dev) = @_;
++
++    log_debug ("$self (host_key=$host_key, dev=$dev)");
++
++    my $cmd = "sg_persist -n -o -R -T 5 -K $host_key -d $dev";
++    my $out = qx { $cmd 2> /dev/null };
++    my $err = ($?>>8);
++
++    # if ($err != 0) {
++    # 	log_error ("$self (err=$err)");
++    # }
++
++    log_debug ("$self (err=$err)");
++
++    return ($err);
++}
++
++sub do_release ($$)
++{
++    my $self = (caller(0))[3];
++    my ($host_key, $dev) = @_;
++
++    log_debug ("$self (host_key=$host_key, dev=$dev)");
++
++    my $cmd = "sg_persist -n -o -L -T 5 -K $host_key -d $dev";
++    my $out = qx { $cmd 2> /dev/null };
++    my $err = ($?>>8);
++
++    # if ($err != 0) {
++    # 	log_error ("$self (err=$err)");
++    # }
++
++    log_debug ("$self (err=$err)");
++
++    return ($err);
++}
++
++sub do_preempt ($$$)
++{
++    my $self = (caller(0))[3];
++    my ($host_key, $node_key, $dev) = @_;
++
++    log_debug ("$self (host_key=$host_key, node_key=$node_key, dev=$dev)");
++
++    my $cmd = "sg_persist -n -o -P -T 5 -K $host_key -S $node_key -d $dev";
++    my $out = qx { $cmd 2> /dev/null };
++    my $err = ($?>>8);
++
++    # if ($err != 0) {
++    # 	log_error ("$self (err=$err)");
++    # }
++
++    log_debug ("$self (err=$err)");
++
++    return ($err);
++}
++
++sub do_preempt_abort ($$$)
++{
++    my $self = (caller(0))[3];
++    my ($host_key, $node_key, $dev) = @_;
++
++    log_debug ("$self (host_key=$host_key, node_key=$node_key, dev=$dev)");
++
++    my $cmd = "sg_persist -n -o -A -T 5 -K $host_key -S $node_key -d $dev";
++    my $out = qx { $cmd 2> /dev/null };
++    my $err = ($?>>8);
++
++    # if ($err != 0) {
++    # 	log_error ("$self (err=$err)");
++    # }
++
++    log_debug ("$self (err=$err)");
++
++    return ($err);
++}
++
++sub do_reset (S)
++{
++    my $self = (caller(0))[3];
++    my ($dev) = @_;
++
++    my $cmd = "sg_turs $dev";
++    my @out = qx { $cmd 2> /dev/null };
++    my $err = ($?>>8);
++
++    ## note that it is not necessarily an error is $err is non-zero,
++    ## so just log the device and status and continue.
++
++    log_debug ("$self (dev=$dev, status=$err)");
++
++    return ($err);
++}
++
++sub dev_unlink ()
++{
++    my $self = (caller(0))[3];
++    my $file = "/var/run/cluster/fence_scsi.dev";
++
++    if (-e $file) {
++	unlink ($file) or die "$!\n";
++    }
++
++    return;
++}
++
++sub dev_write ($)
++{
++    my $self = (caller(0))[3];
++    my $file = "/var/run/cluster/fence_scsi.dev";
++    my $dev = shift;
++
++    if (! -d "/var/run/cluster") {
++	mkpath ("/var/run/cluster");
++    }
++
++    open (\*FILE, "+>>$file") or die "$!\n";
++
++    ## since the file is opened for read, write and append,
++    ## we need to seek to the beginning of the file before grep.
++
++    seek (FILE, 0, 0);
++
++    if (! grep { /^$dev$/ } <FILE>) {
++	print FILE "$dev\n";
++    }
++
++    close (FILE);
++
++    return;
++}
++
++sub key_read ()
++{
++    my $self = (caller(0))[3];
++    my $file = "/var/run/cluster/fence_scsi.key";
++    my $key;
++
++    open (\*FILE, "<$file") or die "$!\n";
++    chomp ($key = <FILE>);
++    close (FILE);
++
++    return ($key);
++}
++
++sub key_write ($)
++{
++    my $self = (caller(0))[3];
++    my $file = "/var/run/cluster/fence_scsi.key";
++    my $key = shift;
++
++    if (! -d "/var/run/cluster") {
++	mkpath ("/var/run/cluster");
++    }
++
++    open (\*FILE, ">$file") or die "$!\n";
++    print FILE "$key\n";
++    close (FILE);
++
++    return;
++}
++
++sub get_key ($)
++{
++    my $self = (caller(0))[3];
++
++    my $key = sprintf ("%.4x%.4x", get_cluster_id (), get_node_id ($_[0]));
++
++    return ($key);
++}
++
++sub get_node_id ($)
++{
++    my $self = (caller(0))[3];
++    my $node_id;
++
++    my $cmd = "cman_tool nodes -n $_[0] -F id";
++    my $out = qx { $cmd 2> /dev/null };
++    my $err = ($?>>8);
++
++    if ($err != 0) {
++	log_error ("$self (err=$err)");
++    }
++
++    # die "[error]: $self\n" if ($?>>8);
++
++    chomp ($out);
++
++    $node_id = $out;
++
++    return ($node_id);
++}
++
++sub get_cluster_id ()
++{
++    my $self = (caller(0))[3];
++    my $cluster_id;
++
++    my $cmd = "cman_tool status";
++    my @out = qx { $cmd 2> /dev/null };
++    my $err = ($?>>8);
++
++    if ($err != 0) {
++	log_error ("$self (err=$err)");
++    }
++
++    # die "[error]: $self\n" if ($?>>8);
++
++    foreach (@out) {
++	chomp;
++	my ($param, $value) = split (/\s*:\s*/, $_);
++	if ($param =~ /^cluster\s+id/i) {
++	    $cluster_id = $value;
++	}
++    }
++
++    return ($cluster_id);
++}
++
++sub get_devices_clvm ()
++{
++    my $self = (caller(0))[3];
++    my @devices;
++
++    my $cmd = "vgs --noheadings " .
++	"    --separator : " .
++	"    --sort pv_uuid " .
++	"    --options vg_attr,pv_name " .
++	"    --config 'global { locking_type = 0 } " .
++	"              devices { preferred_names = [ \"^/dev/dm\" ] }'";
++
++    my @out = qx { $cmd 2> /dev/null };
++    my $err = ($?>>8);
++
++    if ($err != 0) {
++	log_error ("$self (err=$err)");
++    }
++
++    # die "[error]: $self\n" if ($?>>8);
++
++    foreach (@out) {
++	chomp;
++	my ($vg_attr, $pv_name) = split (/:/, $_);
++	if ($vg_attr =~ /c$/) {
++	    push (@devices, $pv_name);
++	}
++    }
++
++    return (@devices);
++}
++
++sub get_devices_scsi ()
++{
++    my $self = (caller(0))[3];
++    my @devices;
++
++    opendir (\*DIR, "/sys/block/") or die "$!\n";
++    @devices = grep { /^sd/ } readdir (DIR);
++    closedir (DIR);
++
++    return (@devices);
++}
++
++sub get_mpath_name ($)
++{
++    my $self = (caller(0))[3];
++    my ($dev) = @_;
++    my $name;
++
++    if ($dev =~ /^\/dev\//) {
++	$dev = substr ($dev, 5);
++    }
++
++    open (\*FILE, "/sys/block/$dev/dm/name") or die "$!\n";
++    chomp ($name = <FILE>);
++    close (FILE);
++
++    return ($name);
++}
++
++sub get_mpath_uuid ($)
++{
++    my $self = (caller(0))[3];
++    my ($dev) = @_;
++    my $uuid;
++
++    if ($dev =~ /^\/dev\//) {
++	$dev = substr ($dev, 5);
++    }
++
++    open (\*FILE, "/sys/block/$dev/dm/uuid") or die "$!\n";
++    chomp ($uuid = <FILE>);
++    close (FILE);
++
++    return ($name);
++}
++
++sub get_mpath_slaves ($)
++{
++    my $self = (caller(0))[3];
++    my ($dev) = @_;
++    my @slaves;
++
++    if ($dev =~ /^\/dev\//) {
++	$dev = substr ($dev, 5);
++    }
++
++    opendir (\*DIR, "/sys/block/$dev/slaves/") or die "$!\n";
++
++    @slaves = grep { !/^\./ } readdir (DIR);
++    if ($slaves[0] =~ /^dm/) {
++	@slaves = get_mpath_slaves ($slaves[0]);
++    } else {
++	@slaves = map { "/dev/$_" } @slaves;
++    }
++
++    closedir (DIR);
++
++    return (@slaves);
++}
++
++sub get_registration_keys ($)
++{
++    my $self = (caller(0))[3];
++    my ($dev) = @_;
++    my @keys;
++
++    my $cmd = "sg_persist -n -i -k -d $dev";
++    my @out = qx { $cmd 2> /dev/null };
++    my $err = ($?>>8);
++
++    if ($err != 0) {
++	log_error ("$self (err=$err)");
++    }
++
++    # die "[error]: $self\n" if ($?>>8);
++
++    foreach (@out) {
++	chomp;
++	if ($_ =~ s/^\s+0x//i) {
++	    push (@keys, $_);
++	}
++    }
++
++    return (@keys);
++}
++
++sub get_reservation_key ($)
++{
++    my $self = (caller(0))[3];
++    my ($dev) = @_;
++    my $key;
++
++    my $cmd = "sg_persist -n -i -r -d $dev";
++    my @out = qx { $cmd 2> /dev/null };
++    my $err = ($?>>8);
++
++    if ($err != 0) {
++	log_error ("$self (err=$err)");
++    }
++
++    # die "[error]: $self\n" if ($?>>8);
++
++    foreach (@out) {
++	chomp;
++	if ($_ =~ s/^\s+key=0x//i) {
++	    $key = $_;
++	    last;
++	}
++    }
++
++    return ($key)
++}
++
++sub get_options_stdin ()
++{
++    my $num = 0;
++
++    while (<STDIN>) {
++	chomp;
++	s/^\s*//;
++	s/\s*$//;
++
++	next if (/^#/);
++
++	$num++;
++
++	next unless ($_);
++
++	my ($opt, $arg) = split (/\s*=\s*/, $_);
++
++	if ($opt eq "") {
++	    exit (1);
++	}
++	elsif ($opt eq "aptpl") {
++	    $opt_a = $arg;
++	}
++	elsif ($opt eq "devices") {
++	    $opt_d = $arg;
++	}
++	elsif ($opt eq "logfile") {
++	    $opt_f = $arg;
++	}
++	elsif ($opt eq "key") {
++	    $opt_k = $arg;
++	}
++	elsif ($opt eq "nodename") {
++	    $opt_n = $arg;
++	}
++	elsif ($opt eq "action") {
++	    $opt_o = $arg;
++	}
++	elsif ($opt eq "delay") {
++	    $opt_H = $arg;
++	}
++    }
++}
++
++sub print_usage ()
++{
++    print "Usage:\n";
++    print "\n";
++    print "$ME [options]\n";
++    print "\n";
++    print "Options:\n";
++    print "  -a               Use APTPL flag\n";
++    print "  -d <devices>     Devices to be used for action\n";
++    print "  -f <logfile>     File to write debug/error output\n";
++    print "  -H <timeout>     Wait X seconds before fencing is started\n";
++    print "  -h               Usage\n";
++    print "  -k <key>         Key to be used for current action\n";
++    print "  -n <nodename>    Name of node to operate on\n";
++    print "  -o <action>      Action: off (default), on, or status\n";
++    print "  -q               Quiet mode\n";
++    print "  -V               Version\n";
++
++    exit (0);
++}
++
++sub print_version ()
++{
++    print "$ME $RELEASE_VERSION $BUILD_DATE\n";
++    print "$REDHAT_COPYRIGHT\n" if ( $REDHAT_COPYRIGHT );
++
++    exit (0);
++}
++
++sub print_metadata ()
++{
++    print "<?xml version=\"1.0\" ?>\n";
++    print "<resource-agent name=\"fence_scsi\"" .
++          " shortdesc=\"fence agent for SCSI-3 persistent reservations\">\n";
++    print "<longdesc>fence_scsi</longdesc>\n";
++    print "<parameters>\n";
++    print "\t<parameter name=\"aptpl\" unique=\"0\" required=\"0\">\n";
++    print "\t\t<getopt mixed=\"-a\"/>\n";
++    print "\t\t<content type=\"boolean\"/>\n";
++    print "\t\t<shortdesc lang=\"en\">" .
++          "Use APTPL flag for registrations" .
++          "</shortdesc>\n";
++    print "\t</parameter>\n";
++    print "\t<parameter name=\"devices\" unique=\"0\" required=\"0\">\n";
++    print "\t\t<getopt mixed=\"-d\"/>\n";
++    print "\t\t<content type=\"string\"/>\n";
++    print "\t\t<shortdesc lang=\"en\">" .
++          "List of devices to be used for fencing action" .
++          "</shortdesc>\n";
++    print "\t</parameter>\n";
++    print "\t<parameter name=\"logfile\" unique=\"0\" required=\"0\">\n";
++    print "\t\t<getopt mixed=\"-f\"/>\n";
++    print "\t\t<content type=\"string\"/>\n";
++    print "\t\t<shortdesc lang=\"en\">" .
++          "File to write error/debug messages" .
++          "</shortdesc>\n";
++    print "\t</parameter>\n";
++    print "\t<parameter name=\"delay\" unique=\"0\" required=\"0\">\n";
++    print "\t\t<getopt mixed=\"-H\"/>\n";
++    print "\t\t<content type=\"string\"/>\n";
++    print "\t\t<shortdesc lang=\"en\">" .
++          "Wait X seconds before fencing is started" .
++          "</shortdesc>\n";
++    print "\t</parameter>\n";
++    print "\t<parameter name=\"key\" unique=\"0\" required=\"0\">\n";
++    print "\t\t<getopt mixed=\"-k\"/>\n";
++    print "\t\t<content type=\"string\"/>\n";
++    print "\t\t<shortdesc lang=\"en\">" .
++          "Key value to be used for fencing action" .
++          "</shortdesc>\n";
++    print "\t</parameter>\n";
++    print "\t<parameter name=\"action\" unique=\"0\" required=\"0\">\n";
++    print "\t\t<getopt mixed=\"-o\"/>\n";
++    print "\t\t<content type=\"string\" default=\"off\"/>\n";
++    print "\t\t<shortdesc lang=\"en\">" .
++          "Fencing action" .
++          "</shortdesc>\n";
++    print "\t</parameter>\n";
++    print "\t<parameter name=\"nodename\" unique=\"0\" required=\"0\">\n";
++    print "\t\t<getopt mixed=\"-n\"/>\n";
++    print "\t\t<content type=\"string\"/>\n";
++    print "\t\t<shortdesc lang=\"en\">" .
++          "Name of node" .
++          "</shortdesc>\n";
++    print "\t</parameter>\n";
++    print "</parameters>\n";
++    print "<actions>\n";
++    print "\t<action name=\"on\" on_target=\"1\"/>\n";
++    print "\t<action name=\"off\"/>\n";
++    print "\t<action name=\"status\"/>\n";
++    print "\t<action name=\"metadata\"/>\n";
++    print "</actions>\n";
++    print "</resource-agent>\n";
++
++    exit (0);
++}
++
++################################################################################
++
++if (@ARGV > 0) {
++    getopts ("ad:f:H:hk:n:o:qV") or print_usage;
++    print_usage if (defined $opt_h);
++    print_version if (defined $opt_V);
++} else {
++    get_options_stdin ();
++}
++
++## handle the metadata action here to avoid other parameter checks
++##
++if ($opt_o =~ /^metadata$/i) {
++    print_metadata;
++}
++
++## if the logfile (-f) parameter was specified, open the logfile
++## and redirect STDOUT and STDERR to the logfile.
++##
++if (defined $opt_f) {
++    open (LOG, ">>$opt_f") or die "$!\n";
++    open (STDOUT, ">&LOG");
++    open (STDERR, ">&LOG");
++}
++
++## verify that either key or nodename have been specified
++##
++if ((!defined $opt_n) && (!defined $opt_k)) {
++    print_usage ();
++}
++
++## determine key value
++##
++if (defined $opt_k) {
++    $key = $opt_k;
++} else {
++    $key = get_key ($opt_n);
++}
++
++## verify that key is not zero
++##
++if (hex($key) == 0) {
++    log_error ("key cannot be zero");
++}
++
++## remove any leading zeros from key
++##
++if ($key =~ /^0/) {
++    $key =~ s/^0+//;
++}
++
++## get devices
++##
++if (defined $opt_d) {
++    @devices = split (/\s*,\s*/, $opt_d);
++} else {
++    @devices = get_devices_clvm ();
++}
++
++## verify that device list is not empty
++##
++if (scalar (@devices) == 0) {
++    log_error ("no devices found");
++}
++
++## default action is "off"
++##
++if (!defined $opt_o) {
++    $opt_o = "off";
++}
++
++## Wait for defined period (-H / delay= )
++##
++if ((defined $opt_H) && ($opt_H =~ /^[0-9]+/)) {
++    sleep($opt_H);
++}
++
++## determine the action to perform
++##
++if ($opt_o =~ /^on$/i) {
++    do_action_on ($key, @devices);
++    do_verify_on ($key, @devices);
++}
++elsif ($opt_o =~ /^off$/i) {
++    do_action_off ($key, @devices);
++    do_verify_off ($key, @devices);
++}
++elsif ($opt_o =~ /^status/i) {
++    do_action_status ($key, @devices);
++} else {
++    log_error ("unknown action '$opt_o'");
++    exit (1);
++}
++
++## close the logfile
++##
++if (defined $opt_f) {
++    close (LOG);
++}
+diff --git a/fence/agents/scsi/fence_scsi_check.pl b/fence/agents/scsi/fence_scsi_check.pl
+new file mode 100644
+index 0000000..a08c416
+--- /dev/null
++++ b/fence/agents/scsi/fence_scsi_check.pl
+@@ -0,0 +1,174 @@
++#!/usr/bin/perl
++
++use POSIX;
++require 'syscall.ph';
++
++################################################################################
++
++my $dev_file = "/var/run/cluster/fence_scsi.dev";
++my $key_file = "/var/run/cluster/fence_scsi.key";
++
++################################################################################
++
++sub log_debug ($)
++{
++    my $time = strftime ("%b %e %T", localtime);
++    my $msg = shift;
++
++    print STDOUT "$time [$0] debug: $msg\n" if ($verbose);
++
++    return;
++}
++
++sub log_error ($)
++{
++    my $time = strftime ("%b %e %T", localtime);
++    my $msg = shift;
++
++    print STDERR "$time [$0] error: $msg\n";
++
++    return;
++}
++
++sub do_reset ($)
++{
++    my $dev = shift;
++
++    my $cmd = "sg_turs $dev";
++    my @out = qx { $cmd 2> /dev/null };
++
++    return;
++}
++
++sub get_registration_keys ($)
++{
++    my $dev = shift;
++    my @keys = ();
++
++    do_reset ($dev);
++
++    my $cmd = "sg_persist -n -i -k -d $dev";
++    my @out = qx { $cmd 2> /dev/null };
++
++    if ($?>>8 != 0) {
++	log_error ("$cmd");
++	exit (0);
++    }
++
++    foreach (@out) {
++	chomp;
++	if (s/^\s+0x//i) {
++	    push (@keys, $_);
++	}
++    }
++
++    return (@keys);
++}
++
++sub get_reservation_keys ($)
++{
++    my $dev = shift;
++    my @keys = ();
++
++    do_reset ($dev);
++
++    my $cmd = "sg_persist -n -i -r -d $dev";
++    my @out = qx { $cmd 2> /dev/null };
++
++    if ($?>>8 != 0) {
++	log_error ("$cmd");
++	exit (0);
++    }
++
++    foreach (@out) {
++	chomp;
++	if (s/^\s+key=0x//i) {
++	    push (@keys, $_);
++	}
++    }
++
++    return (@keys);
++}
++
++sub get_verbose ()
++{
++    open (\*FILE, "</etc/sysconfig/watchdog") or return;
++    chomp (my @opt = <FILE>);
++    close (FILE);
++
++    foreach (@opt) {
++	next if (/^#/);
++	next unless ($_);
++
++	if (/^verbose=yes$/i) {
++	    return (1);
++	}
++    }
++
++    return (0);
++}
++
++sub key_read ()
++{
++    open (\*FILE, "<$key_file") or exit (0);
++    chomp (my $key = <FILE>);
++    close (FILE);
++
++    return ($key);
++}
++
++sub dev_read ()
++{
++    open (\*FILE, "<$dev_file") or exit (0);
++    chomp (my @dev = <FILE>);
++    close (FILE);
++
++    return (@dev);
++}
++
++################################################################################
++
++if ($ARGV[0] =~ /^repair$/i) {
++    if ($0 =~ /hardreboot/) {
++        syscall(&SYS_reboot, 0xfee1dead, 672274793, 0x01234567);
++    }
++    exit ($ARGV[1]);
++}
++
++if (-e "/etc/sysconfig/watchdog") {
++    $verbose = get_verbose ();
++}
++
++if (! -e $dev_file) {
++    log_debug ("$dev_file does not exit");
++    exit (0);
++} elsif (-z $dev_file) {
++    log_debug ("$dev_file is empty");
++    exit (0);
++}
++
++if (! -e $key_file) {
++    log_debug ("$key_file does not exist");
++    exit (0);
++} elsif (-z $key_file) {
++    log_debug ("$key_file is empty");
++    exit (0);
++}
++
++my $key = key_read ();
++my @dev = dev_read ();
++
++foreach (@dev) {
++    my @keys = grep { /^$key$/i } get_registration_keys ($_);
++
++    if (scalar (@keys) != 0) {
++	log_debug ("key $key registered with device $_");
++	exit (0);
++    } else {
++	log_debug ("key $key not registered with device $_");
++    }
++}
++
++log_debug ("key $key not registered with any devices");
++
++exit (2);
+-- 
+1.9.3
+

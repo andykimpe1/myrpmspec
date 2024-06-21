@@ -1,0 +1,88 @@
+From 81df6a8ac90d3f05d7405b4d36ffe28fe35d1bf1 Mon Sep 17 00:00:00 2001
+From: Marek 'marx' Grac <mgrac@redhat.com>
+Date: Mon, 16 Feb 2015 17:01:25 +0100
+Subject: [PATCH 02/16] [backward] Make --ssl works as --ssl-insecure
+
+In upstream/RHEL7 we handle --ssl as --ssl-secure but as this check was introduced
+after RHEL6.0 we will break a lot of setups. So validation of certificates is only
+optional using --ssl-secure.
+---
+ fence/agents/cisco_ucs/fence_cisco_ucs.py     | 4 ++--
+ fence/agents/lib/fencing.py.py                | 5 +++--
+ fence/agents/rhevm/fence_rhevm.py             | 4 ++--
+ fence/agents/vmware_soap/fence_vmware_soap.py | 6 +++---
+ 4 files changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/fence/agents/cisco_ucs/fence_cisco_ucs.py b/fence/agents/cisco_ucs/fence_cisco_ucs.py
+index 6288207..79d63f2 100644
+--- a/fence/agents/cisco_ucs/fence_cisco_ucs.py
++++ b/fence/agents/cisco_ucs/fence_cisco_ucs.py
+@@ -92,11 +92,11 @@ def send_command(opt, command, timeout):
+ 	conn.setopt(pycurl.POSTFIELDS, command)
+ 	conn.setopt(pycurl.WRITEFUNCTION, web_buffer.write)
+ 	conn.setopt(pycurl.TIMEOUT, timeout)
+-	if opt.has_key("--ssl") or opt.has_key("--ssl-secure"):
++	if opt.has_key("--ssl-secure"):
+ 		conn.setopt(pycurl.SSL_VERIFYPEER, 1)
+ 		conn.setopt(pycurl.SSL_VERIFYHOST, 2)
+ 
+-	if opt.has_key("--ssl-insecure"):
++	if opt.has_key("--ssl") or opt.has_key("--ssl-insecure"):
+ 		conn.setopt(pycurl.SSL_VERIFYPEER, 0)
+ 		conn.setopt(pycurl.SSL_VERIFYHOST, 0)
+ 	conn.perform()
+diff --git a/fence/agents/lib/fencing.py.py b/fence/agents/lib/fencing.py.py
+index 8fd7842..994a562 100644
+--- a/fence/agents/lib/fencing.py.py
++++ b/fence/agents/lib/fencing.py.py
+@@ -927,8 +927,9 @@ def _open_ssl_connection(options):
+ 	if options.has_key("--notls"):
+ 		gnutls_opts = "--priority \"NORMAL:-VERS-TLS1.2:-VERS-TLS1.1:-VERS-TLS1.0:+VERS-SSL3.0\""
+ 
+-	# --ssl is same as the --ssl-secure; it means we want to verify certificate in these cases
+-	if options.has_key("--ssl-insecure"):
++	# --ssl is same as the --ssl-insecure; it means we DO NOT want to verify certificate in these cases
++	# this is unique to RHEL6 environment
++	if options.has_key("--ssl-insecure") or options.has_key("--ssl"):
+ 		ssl_opts = "--insecure"
+ 
+ 	command = '%s %s %s --crlf -p %s %s' % \
+diff --git a/fence/agents/rhevm/fence_rhevm.py b/fence/agents/rhevm/fence_rhevm.py
+index 427bed5..d98b946 100644
+--- a/fence/agents/rhevm/fence_rhevm.py
++++ b/fence/agents/rhevm/fence_rhevm.py
+@@ -98,11 +98,11 @@ def send_command(opt, command, method="GET"):
+ 			conn.setopt(pycurl.COOKIEFILE, "")
+ 
+ 	conn.setopt(pycurl.TIMEOUT, int(opt["--shell-timeout"]))
+-	if opt.has_key("--ssl") or opt.has_key("--ssl-secure"):
++	if opt.has_key("--ssl-secure"):
+ 		conn.setopt(pycurl.SSL_VERIFYPEER, 1)
+ 		conn.setopt(pycurl.SSL_VERIFYHOST, 2)
+ 
+-	if opt.has_key("--ssl-insecure"):
++	if opt.has_key("--ssl") or opt.has_key("--ssl-insecure"):
+ 		conn.setopt(pycurl.SSL_VERIFYPEER, 0)
+ 		conn.setopt(pycurl.SSL_VERIFYHOST, 0)
+ 
+diff --git a/fence/agents/vmware_soap/fence_vmware_soap.py b/fence/agents/vmware_soap/fence_vmware_soap.py
+index e47f11e..d1f6c00 100644
+--- a/fence/agents/vmware_soap/fence_vmware_soap.py
++++ b/fence/agents/vmware_soap/fence_vmware_soap.py
+@@ -41,10 +41,10 @@ def soap_login(options):
+ 	run_delay(options)
+ 
+ 	if options.has_key("--ssl") or options.has_key("--ssl-secure") or options.has_key("--ssl-insecure"):
+-		if options.has_key("--ssl-insecure"):
+-			verify = False
+-		else:
++		if options.has_key("--ssl-secure"):
+ 			verify = True
++		else:
++			verify = False
+ 		url = "https://"
+ 	else:
+ 		verify = False
+-- 
+1.9.3
+

@@ -1,0 +1,554 @@
+From cf20e93f68feafd6faf31a611f4b647acfe355cc Mon Sep 17 00:00:00 2001
+From: Marek 'marx' Grac <mgrac@redhat.com>
+Date: Wed, 4 Mar 2015 17:15:14 +0100
+Subject: [PATCH 4/5] fencing: Add operation 'list-status'
+
+This new action will report output similar to 'list' with 3rd column that
+represents status of node = ON/OFF/UNKNOWN. Majority of relevant fence agent
+is supported.
+
+Exceptions are:
+	'list' is not working at all
+		fence_ovh, fence_scsi, fence_mpath
+	'list-status' reports 'UNKNOWN' status all the time
+		fence_lpar
+		fence_ifmib
+		fence_bladecenter
+		fence_hds_cb
+		fence_cisco_ucs
+		fence_eaton_snmp
+		fence_netio
+		fence_rhevm
+---
+ fence/agents/lib/fencing.py.py               | 50 +++++++++++++++++-----------
+ fence/agents/ovh/fence_ovh.py                |  3 ++
+ tests/data/metadata/fence_apc.xml            |  1 +
+ tests/data/metadata/fence_apc_snmp.xml       |  1 +
+ tests/data/metadata/fence_bladecenter.xml    |  1 +
+ tests/data/metadata/fence_brocade.xml        |  1 +
+ tests/data/metadata/fence_cisco_mds.xml      |  1 +
+ tests/data/metadata/fence_cisco_ucs.xml      |  1 +
+ tests/data/metadata/fence_docker.xml         |  1 +
+ tests/data/metadata/fence_drac5.xml          |  1 +
+ tests/data/metadata/fence_dummy.xml          |  1 +
+ tests/data/metadata/fence_eaton_snmp.xml     |  1 +
+ tests/data/metadata/fence_emerson.xml        |  1 +
+ tests/data/metadata/fence_eps.xml            |  1 +
+ tests/data/metadata/fence_hds_cb.xml         |  1 +
+ tests/data/metadata/fence_hpblade.xml        |  1 +
+ tests/data/metadata/fence_ibmblade.xml       |  1 +
+ tests/data/metadata/fence_ifmib.xml          |  1 +
+ tests/data/metadata/fence_ilo_moonshot.xml   |  1 +
+ tests/data/metadata/fence_intelmodular.xml   |  1 +
+ tests/data/metadata/fence_ipdu.xml           |  1 +
+ tests/data/metadata/fence_ldom.xml           |  1 +
+ tests/data/metadata/fence_lpar.xml           |  1 +
+ tests/data/metadata/fence_netio.xml          |  1 +
+ tests/data/metadata/fence_ovh.xml            |  1 +
+ tests/data/metadata/fence_pve.xml            |  1 +
+ tests/data/metadata/fence_raritan.xml        |  1 +
+ tests/data/metadata/fence_rhevm.xml          |  1 +
+ tests/data/metadata/fence_sanbox2.xml        |  1 +
+ tests/data/metadata/fence_tripplite_snmp.xml |  1 +
+ tests/data/metadata/fence_virsh.xml          |  1 +
+ tests/data/metadata/fence_vmware_soap.xml    |  1 +
+ tests/data/metadata/fence_wti.xml            |  1 +
+ tests/data/metadata/fence_xenapi.xml         |  1 +
+ tests/data/metadata/fence_zvmip.xml          |  1 +
+ 35 files changed, 67 insertions(+), 19 deletions(-)
+
+diff --git a/fence/agents/lib/fencing.py.py b/fence/agents/lib/fencing.py.py
+index c1c47e2..bc8556e 100644
+--- a/fence/agents/lib/fencing.py.py
++++ b/fence/agents/lib/fencing.py.py
+@@ -612,6 +612,7 @@ def metadata(avail_opt, docs):
+ 	if avail_opt.count("no_status") == 0:
+ 		print "\t<action name=\"status\" />"
+ 	print "\t<action name=\"list\" />"
++	print "\t<action name=\"list-status\" />"
+ 	print "\t<action name=\"monitor\" />"
+ 	print "\t<action name=\"metadata\" />"
+ 	if avail_opt.count("diag") == 1:
+@@ -667,7 +668,7 @@ def check_input(device_opt, opt):
+ 	## add logging to stderr
+ 	logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
+ 
+-	acceptable_actions = ["on", "off", "status", "list", "monitor", "diag"]
++	acceptable_actions = ["on", "off", "status", "list", "list-status", "monitor", "diag"]
+ 	if 1 == device_opt.count("fabric_fencing"):
+ 		## Compatibility layer
+ 		#####
+@@ -798,23 +799,34 @@ def fence_action(connection, options, set_power_fn, get_power_fn, get_outlet_lis
+ 
+ 		## Process options that manipulate fencing device
+ 		#####
+-		if options["--action"] == "list" and 0 == options["device_opt"].count("port"):
+-			print "N/A"
+-			return
+-		elif options["--action"] == "list" and get_outlet_list == None:
+-			## @todo: exception?
+-			## This is just temporal solution, we will remove default value
+-			## None as soon as all existing agent will support this operation
+-			print "NOTICE: List option is not working on this device yet"
+-			return
+-		elif (options["--action"] == "list") or \
+-				((options["--action"] == "monitor") and 1 == options["device_opt"].count("port")):
+-			outlets = get_outlet_list(connection, options)
+-			## keys can be numbers (port numbers) or strings (names of VM, UUID)
+-			for outlet_id in outlets.keys():
+-				(alias, status) = outlets[outlet_id]
+-				if options["--action"] != "monitor":
+-					print outlet_id + options["--separator"] + alias
++		if (options["--action"] in ["list", "list-status"]) or \
++			((options["--action"] == "monitor") and 1 == options["device_opt"].count("port")):
++
++			if 0 == options["device_opt"].count("port"):
++				print "N/A"
++			elif get_outlet_list == None:
++				## @todo: exception?
++				## This is just temporal solution, we will remove default value
++				## None as soon as all existing agent will support this operation
++				print "NOTICE: List option is not working on this device yet"
++			else:
++				original_action = options["--action"]
++				options["--action"] = "list"
++				outlets = get_outlet_list(connection, options)
++				options["--action"] = original_action
++
++				## keys can be numbers (port numbers) or strings (names of VM, UUID)
++				for outlet_id in outlets.keys():
++					(alias, status) = outlets[outlet_id]
++					status = status.upper()
++					if not status in ["ON", "OFF"]:
++						status = "UNKNOWN"
++
++					if options["--action"] == "list":
++						print outlet_id + options["--separator"] + alias
++					elif options["--action"] == "list-status":
++						print outlet_id + options["--separator"] + alias + options["--separator"] + status
++
+ 			return
+ 
+ 		status = get_multi_power_fn(connection, options, get_power_fn)
+@@ -1238,7 +1250,7 @@ def _validate_input(options):
+ 	if options.has_key("--identity-file") and not os.path.isfile(options["--identity-file"]):
+ 		fail_usage("Failed: Identity file " + options["--identity-file"] + " does not exist")
+ 
+-	if (0 == ["list", "monitor"].count(options["--action"])) and \
++	if (0 == ["list", "list-status", "monitor"].count(options["--action"])) and \
+ 		not options.has_key("--plug") and device_opt.count("port") and device_opt.count("no_port") == 0:
+ 		fail_usage("Failed: You have to enter plug number or machine identification")
+ 
+diff --git a/fence/agents/ovh/fence_ovh.py b/fence/agents/ovh/fence_ovh.py
+index 3dfee49..30cf1ba 100644
+--- a/fence/agents/ovh/fence_ovh.py
++++ b/fence/agents/ovh/fence_ovh.py
+@@ -95,6 +95,9 @@ Poweroff is simulated with a reboot into rescue-pro mode."
+ 	if options["--action"] == "list":
+ 		fail_usage("Action 'list' is not supported in this fence agent")
+ 
++	if options["--action"] == "list-status":
++		fail_usage("Action 'list-status' is not supported in this fence agent")
++
+ 	if options["--action"] != "monitor" and not options["--plug"].endswith(".ovh.net"):
+ 		options["--plug"] += ".ovh.net"
+ 
+diff --git a/tests/data/metadata/fence_apc.xml b/tests/data/metadata/fence_apc.xml
+index 87da031..e90c730 100644
+--- a/tests/data/metadata/fence_apc.xml
++++ b/tests/data/metadata/fence_apc.xml
+@@ -145,6 +145,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_apc_snmp.xml b/tests/data/metadata/fence_apc_snmp.xml
+index d09f851..42ca124 100644
+--- a/tests/data/metadata/fence_apc_snmp.xml
++++ b/tests/data/metadata/fence_apc_snmp.xml
+@@ -159,6 +159,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_bladecenter.xml b/tests/data/metadata/fence_bladecenter.xml
+index 8d075ed..510ea97 100644
+--- a/tests/data/metadata/fence_bladecenter.xml
++++ b/tests/data/metadata/fence_bladecenter.xml
+@@ -145,6 +145,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_brocade.xml b/tests/data/metadata/fence_brocade.xml
+index 21f2190..5e7725d 100644
+--- a/tests/data/metadata/fence_brocade.xml
++++ b/tests/data/metadata/fence_brocade.xml
+@@ -139,6 +139,7 @@
+ 	<action name="off" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_cisco_mds.xml b/tests/data/metadata/fence_cisco_mds.xml
+index 4adbf22..d2de432 100644
+--- a/tests/data/metadata/fence_cisco_mds.xml
++++ b/tests/data/metadata/fence_cisco_mds.xml
+@@ -158,6 +158,7 @@
+ 	<action name="off" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_cisco_ucs.xml b/tests/data/metadata/fence_cisco_ucs.xml
+index 52ff1b1..3e4e0bd 100644
+--- a/tests/data/metadata/fence_cisco_ucs.xml
++++ b/tests/data/metadata/fence_cisco_ucs.xml
+@@ -140,6 +140,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_docker.xml b/tests/data/metadata/fence_docker.xml
+index 870ce92..7ed3b65 100644
+--- a/tests/data/metadata/fence_docker.xml
++++ b/tests/data/metadata/fence_docker.xml
+@@ -138,6 +138,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_drac5.xml b/tests/data/metadata/fence_drac5.xml
+index 42352e1..ec80014 100644
+--- a/tests/data/metadata/fence_drac5.xml
++++ b/tests/data/metadata/fence_drac5.xml
+@@ -149,6 +149,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_dummy.xml b/tests/data/metadata/fence_dummy.xml
+index 03821ac..19ff57f 100644
+--- a/tests/data/metadata/fence_dummy.xml
++++ b/tests/data/metadata/fence_dummy.xml
+@@ -85,6 +85,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_eaton_snmp.xml b/tests/data/metadata/fence_eaton_snmp.xml
+index bfe05aa..7f2c3bb 100644
+--- a/tests/data/metadata/fence_eaton_snmp.xml
++++ b/tests/data/metadata/fence_eaton_snmp.xml
+@@ -159,6 +159,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_emerson.xml b/tests/data/metadata/fence_emerson.xml
+index 1aa5474..41c4261 100644
+--- a/tests/data/metadata/fence_emerson.xml
++++ b/tests/data/metadata/fence_emerson.xml
+@@ -159,6 +159,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_eps.xml b/tests/data/metadata/fence_eps.xml
+index 5f047cf..0de749e 100644
+--- a/tests/data/metadata/fence_eps.xml
++++ b/tests/data/metadata/fence_eps.xml
+@@ -117,6 +117,7 @@ Agent basically works by connecting to hidden page and pass appropriate argument
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_hds_cb.xml b/tests/data/metadata/fence_hds_cb.xml
+index 42a837c..b3d3c5c 100644
+--- a/tests/data/metadata/fence_hds_cb.xml
++++ b/tests/data/metadata/fence_hds_cb.xml
+@@ -145,6 +145,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_hpblade.xml b/tests/data/metadata/fence_hpblade.xml
+index 2858a8d..0a375aa 100644
+--- a/tests/data/metadata/fence_hpblade.xml
++++ b/tests/data/metadata/fence_hpblade.xml
+@@ -145,6 +145,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_ibmblade.xml b/tests/data/metadata/fence_ibmblade.xml
+index 42952da..c762b58 100644
+--- a/tests/data/metadata/fence_ibmblade.xml
++++ b/tests/data/metadata/fence_ibmblade.xml
+@@ -159,6 +159,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_ifmib.xml b/tests/data/metadata/fence_ifmib.xml
+index 523c510..e6cc38d 100644
+--- a/tests/data/metadata/fence_ifmib.xml
++++ b/tests/data/metadata/fence_ifmib.xml
+@@ -160,6 +160,7 @@ It was written with managed ethernet switches in mind, in order to fence iSCSI S
+ 	<action name="off" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_ilo_moonshot.xml b/tests/data/metadata/fence_ilo_moonshot.xml
+index a712115..9966d8e 100644
+--- a/tests/data/metadata/fence_ilo_moonshot.xml
++++ b/tests/data/metadata/fence_ilo_moonshot.xml
+@@ -135,6 +135,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_intelmodular.xml b/tests/data/metadata/fence_intelmodular.xml
+index 36b7284..640776b 100644
+--- a/tests/data/metadata/fence_intelmodular.xml
++++ b/tests/data/metadata/fence_intelmodular.xml
+@@ -161,6 +161,7 @@ Note: Since firmware update version 2.7, SNMP v2 write support is removed, and r
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_ipdu.xml b/tests/data/metadata/fence_ipdu.xml
+index 476e861..513a45d 100644
+--- a/tests/data/metadata/fence_ipdu.xml
++++ b/tests/data/metadata/fence_ipdu.xml
+@@ -159,6 +159,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_ldom.xml b/tests/data/metadata/fence_ldom.xml
+index a629eb7..2fac5f1 100644
+--- a/tests/data/metadata/fence_ldom.xml
++++ b/tests/data/metadata/fence_ldom.xml
+@@ -137,6 +137,7 @@ Very useful parameter is -c (or cmd_prompt in stdin mode). This must be set to s
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_lpar.xml b/tests/data/metadata/fence_lpar.xml
+index b8f9e55..cea1d46 100644
+--- a/tests/data/metadata/fence_lpar.xml
++++ b/tests/data/metadata/fence_lpar.xml
+@@ -148,6 +148,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_netio.xml b/tests/data/metadata/fence_netio.xml
+index e3b6fee..36733a7 100644
+--- a/tests/data/metadata/fence_netio.xml
++++ b/tests/data/metadata/fence_netio.xml
+@@ -115,6 +115,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_ovh.xml b/tests/data/metadata/fence_ovh.xml
+index 14a2b20..d97b7e8 100644
+--- a/tests/data/metadata/fence_ovh.xml
++++ b/tests/data/metadata/fence_ovh.xml
+@@ -94,6 +94,7 @@
+ 	<action name="off" />
+ 	<action name="reboot" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_pve.xml b/tests/data/metadata/fence_pve.xml
+index 6d5d7e2..bcfa310 100644
+--- a/tests/data/metadata/fence_pve.xml
++++ b/tests/data/metadata/fence_pve.xml
+@@ -115,6 +115,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_raritan.xml b/tests/data/metadata/fence_raritan.xml
+index 51900e5..42db666 100644
+--- a/tests/data/metadata/fence_raritan.xml
++++ b/tests/data/metadata/fence_raritan.xml
+@@ -115,6 +115,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_rhevm.xml b/tests/data/metadata/fence_rhevm.xml
+index affdbc7..e603155 100644
+--- a/tests/data/metadata/fence_rhevm.xml
++++ b/tests/data/metadata/fence_rhevm.xml
+@@ -140,6 +140,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_sanbox2.xml b/tests/data/metadata/fence_sanbox2.xml
+index aeb2e87..9eecf2b 100644
+--- a/tests/data/metadata/fence_sanbox2.xml
++++ b/tests/data/metadata/fence_sanbox2.xml
+@@ -119,6 +119,7 @@
+ 	<action name="off" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_tripplite_snmp.xml b/tests/data/metadata/fence_tripplite_snmp.xml
+index eb568d9..20806c0 100644
+--- a/tests/data/metadata/fence_tripplite_snmp.xml
++++ b/tests/data/metadata/fence_tripplite_snmp.xml
+@@ -159,6 +159,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_virsh.xml b/tests/data/metadata/fence_virsh.xml
+index 5a5fad0..a349b98 100644
+--- a/tests/data/metadata/fence_virsh.xml
++++ b/tests/data/metadata/fence_virsh.xml
+@@ -147,6 +147,7 @@ By default, virsh needs root account to do properly work. So you must allow ssh
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_vmware_soap.xml b/tests/data/metadata/fence_vmware_soap.xml
+index dbcdc15..dc4ea9d 100644
+--- a/tests/data/metadata/fence_vmware_soap.xml
++++ b/tests/data/metadata/fence_vmware_soap.xml
+@@ -137,6 +137,7 @@ Name of virtual machine (-n / port) has to be used in inventory path format (e.g
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_wti.xml b/tests/data/metadata/fence_wti.xml
+index 0136a5f..feaa925 100644
+--- a/tests/data/metadata/fence_wti.xml
++++ b/tests/data/metadata/fence_wti.xml
+@@ -140,6 +140,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_xenapi.xml b/tests/data/metadata/fence_xenapi.xml
+index 3454f10..07b8b33 100644
+--- a/tests/data/metadata/fence_xenapi.xml
++++ b/tests/data/metadata/fence_xenapi.xml
+@@ -95,6 +95,7 @@
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+diff --git a/tests/data/metadata/fence_zvmip.xml b/tests/data/metadata/fence_zvmip.xml
+index 75d90c4..3fc9e31 100644
+--- a/tests/data/metadata/fence_zvmip.xml
++++ b/tests/data/metadata/fence_zvmip.xml
+@@ -132,6 +132,7 @@ Where XXXXXXX is the name of the virtual machine used in the authuser field of t
+ 	<action name="reboot" />
+ 	<action name="status" />
+ 	<action name="list" />
++	<action name="list-status" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
+ </actions>
+-- 
+2.4.3
+

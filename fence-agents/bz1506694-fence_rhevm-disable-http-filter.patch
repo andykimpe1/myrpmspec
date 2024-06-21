@@ -1,0 +1,142 @@
+diff -uNr a/fence/agents/rhevm/fence_rhevm.py b/fence/agents/rhevm/fence_rhevm.py
+--- a/fence/agents/rhevm/fence_rhevm.py	2017-11-02 15:56:26.970719969 +0100
++++ b/fence/agents/rhevm/fence_rhevm.py	2017-11-02 16:43:30.130407500 +0100
+@@ -66,7 +66,8 @@
+ 		lines = res.split("<vm ")
+ 		for i in range(1, len(lines)):
+ 			name = RE_GET_NAME.search(lines[i]).group(1)
+-			outlets[name] = ("", None)
++			status = RE_STATUS.search(lines[i]).group(1)
++			outlets[name] = ("", status)
+ 	except AttributeError:
+ 		return {}
+ 	except IndexError:
+@@ -76,18 +77,32 @@
+ 
+ def send_command(opt, command, method="GET"):
+ 	## setup correct URL
+-	if opt.has_key("--ssl") or opt.has_key("--ssl-secure") or opt.has_key("--ssl-insecure"):
++	if opt.has_key("--ssl"):
+ 		url = "https:"
+ 	else:
+ 		url = "http:"
++	if opt.has_key("--api-path"):
++		api_path = opt["--api-path"]
++	else:
++		api_path = "/ovirt-engine/api"
++	if opt.has_key("--disable-http-filter"):
++		http_filter = 'false'
++	else:
++		http_filter = 'true'
+ 
+-	url += "//" + opt["--ip"] + ":" + str(opt["--ipport"]) + "/api/" + command
++	url += "//" + opt["--ip"] + ":" + str(opt["--ipport"]) + api_path + "/" + command
+ 
+ 	## send command through pycurl
+ 	conn = pycurl.Curl()
+ 	web_buffer = StringIO.StringIO()
+ 	conn.setopt(pycurl.URL, url)
+-	conn.setopt(pycurl.HTTPHEADER, ["Content-type: application/xml", "Accept: application/xml", "Prefer: persistent-auth"])
++	conn.setopt(pycurl.HTTPHEADER, [
++		"Version: 3",
++		"Content-type: application/xml",
++		"Accept: application/xml",
++		"Prefer: persistent-auth",
++		"Filter: {0}".format(http_filter),
++	])
+ 
+ 	if opt.has_key("cookie"):
+ 		conn.setopt(pycurl.COOKIE, opt["cookie"])
+@@ -98,11 +113,14 @@
+ 			conn.setopt(pycurl.COOKIEFILE, "")
+ 
+ 	conn.setopt(pycurl.TIMEOUT, int(opt["--shell-timeout"]))
+-	if opt.has_key("--ssl-secure"):
++	if opt.has_key("--ssl") or opt.has_key("--ssl-secure") or opt.has_key("--ssl-insecure"):
++		# use TLSv1.2 and fallback to SSL
++		conn.setopt(pycurl.SSLVERSION, pycurl.SSLVERSION_TLSv1_2)
++	if opt.has_key("--ssl") or opt.has_key("--ssl-secure"):
+ 		conn.setopt(pycurl.SSL_VERIFYPEER, 1)
+ 		conn.setopt(pycurl.SSL_VERIFYHOST, 2)
+ 
+-	if opt.has_key("--ssl") or opt.has_key("--ssl-insecure"):
++	if opt.has_key("--ssl-insecure"):
+ 		conn.setopt(pycurl.SSL_VERIFYPEER, 0)
+ 		conn.setopt(pycurl.SSL_VERIFYHOST, 0)
+ 
+@@ -129,15 +147,42 @@
+ 
+ def define_new_opts():
+ 	all_opt["use_cookies"] = {
+-		"getopt" : "",
++		"getopt" : "s",
+ 		"longopt" : "use-cookies",
+ 		"help" : "--use-cookies                  Reuse cookies for authentication",
+ 		"required" : "0",
+ 		"shortdesc" : "Reuse cookies for authentication",
+ 		"order" : 1}
++	all_opt["api_path"] = {
++		"getopt" : ":",
++		"longopt" : "api-path",
++		"help" : "--api-path=[path]              The path of the API URL",
++		"default" : "/ovirt-engine/api",
++		"required" : "0",
++		"shortdesc" : "The path of the API URL",
++		"order" : 2}
++	all_opt["disable_http_filter"] = {
++		"getopt" : "",
++		"longopt" : "disable-http-filter",
++		"help" : "--disable-http-filter          Set HTTP Filter header to false",
++		"required" : "0",
++		"shortdesc" : "Set HTTP Filter header to false",
++		"order" : 3}
++
+ 
+ def main():
+-	device_opt = ["ipaddr", "login", "passwd", "ssl", "notls", "web", "port", "use_cookies" ]
++	device_opt = [
++		"ipaddr",
++		"api_path",
++		"login",
++		"passwd",
++		"ssl",
++		"notls",
++		"web",
++		"port",
++		"use_cookies",
++		"disable_http_filter",
++	]
+ 
+ 	atexit.register(atexit_handler)
+ 	define_new_opts()
+diff -uNr a/tests/data/metadata/fence_rhevm.xml b/tests/data/metadata/fence_rhevm.xml
+--- a/tests/data/metadata/fence_rhevm.xml	2014-12-04 22:58:44.000000000 +0100
++++ b/tests/data/metadata/fence_rhevm.xml	2017-11-02 15:55:35.812198368 +0100
+@@ -35,8 +35,8 @@
+ 	</parameter>
+ 	<parameter name="notls" unique="0" required="0">
+ 		<getopt mixed="-t, --notls" />
+-		<content type="boolean"  />
+-		<shortdesc lang="en">Disable TLS negotiation</shortdesc>
++		<content type="boolean" default="1"  />
++		<shortdesc lang="en">Disable TLS negotiation, force SSL 3.0</shortdesc>
+ 	</parameter>
+ 	<parameter name="passwd" unique="0" required="0">
+ 		<getopt mixed="-p, --password=[password]" />
+@@ -73,6 +73,16 @@
+ 		<content type="boolean"  />
+ 		<shortdesc lang="en">Reuse cookies for authentication</shortdesc>
+ 	</parameter>
++	<parameter name="api_path" unique="0" required="0">
++		<getopt mixed="--api-path=[path]" />
++		<content type="string" default="/ovirt-engine/api"  />
++		<shortdesc lang="en">The path of the API URL</shortdesc>
++	</parameter>
++	<parameter name="disable_http_filter" unique="0" required="0">
++		<getopt mixed="--disable-http-filter" />
++		<content type="boolean"  />
++		<shortdesc lang="en">Set HTTP Filter header to false</shortdesc>
++	</parameter>
+ 	<parameter name="verbose" unique="0" required="0">
+ 		<getopt mixed="-v, --verbose" />
+ 		<content type="boolean"  />

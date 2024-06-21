@@ -1,0 +1,188 @@
+From dd20ef1c3ba83d25b354b41775181c98fc001cfe Mon Sep 17 00:00:00 2001
+From: Marek 'marx' Grac <mgrac@redhat.com>
+Date: Mon, 14 Dec 2015 10:26:03 +0100
+Subject: [PATCH 3/5] fence_ipmilan: Add action diag
+
+Previous version of fence_ipmilan (C-based) contains also action 'diag'. This commit adds this action to new fence agent.
+
+Resolves: rhbz#1266600
+---
+ fence/agents/ipmilan/fence_ipmilan.py | 15 +++++++++++++--
+ fence/agents/lib/fence2man.xsl        |  1 +
+ fence/agents/lib/fencing.py.py        | 15 +++++++++++++--
+ tests/data/metadata/fence_idrac.xml   |  1 +
+ tests/data/metadata/fence_ilo3.xml    |  1 +
+ tests/data/metadata/fence_ilo4.xml    |  1 +
+ tests/data/metadata/fence_imm.xml     |  1 +
+ tests/data/metadata/fence_ipmilan.xml |  1 +
+ 8 files changed, 32 insertions(+), 4 deletions(-)
+
+diff --git a/fence/agents/ipmilan/fence_ipmilan.py b/fence/agents/ipmilan/fence_ipmilan.py
+index b418813..2901492 100644
+--- a/fence/agents/ipmilan/fence_ipmilan.py
++++ b/fence/agents/ipmilan/fence_ipmilan.py
+@@ -27,6 +27,10 @@ def reboot_cycle(_, options):
+ 	output = run_command(options, create_command(options, "cycle"))
+ 	return bool(re.search('chassis power control: cycle', str(output).lower()))
+ 
++def reboot_diag(_, options):
++	output = run_command(options, create_command(options, "diag"))
++	return bool(re.search('chassis power control: diag', str(output).lower()))
++
+ def create_command(options, action):
+ 	cmd = options["--ipmitool-path"]
+ 
+@@ -137,7 +141,7 @@ def define_new_opts():
+ def main():
+ 	atexit.register(atexit_handler)
+ 
+-	device_opt = ["ipaddr", "ipport", "login", "no_login", "no_password", "passwd",
++	device_opt = ["ipaddr", "ipport", "login", "no_login", "no_password", "passwd", "diag",
+ 		"lanplus", "auth", "cipher", "privlvl", "sudo", "ipmitool_path", "method",
+ 		"obsolete_ip", "timeout"]
+ 	define_new_opts()
+@@ -180,7 +184,14 @@ This agent calls support software ipmitool (http://ipmitool.sf.net/)."
+ 	if not is_executable(options["--ipmitool-path"]):
+ 		fail_usage("Ipmitool not found or not accessible")
+ 
+-	result = fence_action(None, options, set_power_status, get_power_status, None, reboot_cycle)
++	reboot_fn = reboot_cycle
++	if options["--action"] == "diag":
++		# Diag is a special action that can't be verified so we will reuse reboot functionality
++		# to minimize impact on generic library
++		options["--action"] = "reboot"
++		reboot_fn = reboot_diag
++
++	result = fence_action(None, options, set_power_status, get_power_status, None, reboot_fn)
+ 	sys.exit(result)
+ 
+ if __name__ == "__main__":
+diff --git a/fence/agents/lib/fence2man.xsl b/fence/agents/lib/fence2man.xsl
+index 13e24da..e6b11a3 100644
+--- a/fence/agents/lib/fence2man.xsl
++++ b/fence/agents/lib/fence2man.xsl
+@@ -20,6 +20,7 @@
+ <xsl:when test="@name = 'enable'">Enable fabric access.</xsl:when>
+ <xsl:when test="@name = 'disable'">Disable fabric access.</xsl:when>
+ <xsl:when test="@name = 'reboot'">Reboot machine.</xsl:when>
++<xsl:when test="@name = 'diag'">Pulse a diagnostic interrupt to the processor(s).</xsl:when>
+ <xsl:when test="@name = 'monitor'">Check the health of fence device</xsl:when>
+ <xsl:when test="@name = 'metadata'">Display the XML metadata describing this resource.</xsl:when>
+ <xsl:when test="@name = 'list'">List available plugs with aliases/virtual machines if there is support for more then one device. Returns N/A otherwise.</xsl:when>
+diff --git a/fence/agents/lib/fencing.py.py b/fence/agents/lib/fencing.py.py
+index 093c1c5..c1c47e2 100644
+--- a/fence/agents/lib/fencing.py.py
++++ b/fence/agents/lib/fencing.py.py
+@@ -139,6 +139,10 @@ all_opt = {
+ 		"getopt" : "",
+ 		"help" : "",
+ 		"order" : ""},
++	"diag" : {
++		"getopt" : "",
++		"help" : "",
++		"order" : ""},
+ 	"passwd" : {
+ 		"getopt" : "p:",
+ 		"longopt" : "password",
+@@ -610,6 +614,8 @@ def metadata(avail_opt, docs):
+ 	print "\t<action name=\"list\" />"
+ 	print "\t<action name=\"monitor\" />"
+ 	print "\t<action name=\"metadata\" />"
++	if avail_opt.count("diag") == 1:
++		print "\t<action name=\"diag\" />"
+ 	print "</actions>"
+ 	print "</resource-agent>"
+ 
+@@ -661,7 +667,7 @@ def check_input(device_opt, opt):
+ 	## add logging to stderr
+ 	logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
+ 
+-	acceptable_actions = ["on", "off", "status", "list", "monitor"]
++	acceptable_actions = ["on", "off", "status", "list", "monitor", "diag"]
+ 	if 1 == device_opt.count("fabric_fencing"):
+ 		## Compatibility layer
+ 		#####
+@@ -669,6 +675,9 @@ def check_input(device_opt, opt):
+ 	else:
+ 		acceptable_actions.extend(["reboot"])
+ 
++	if 0 == device_opt.count("diag"):
++		acceptable_actions.remove("diag")
++
+ 	if 1 == device_opt.count("no_status"):
+ 		acceptable_actions.remove("status")
+ 
+@@ -1136,12 +1145,14 @@ def _update_metadata(options):
+ 	else:
+ 		all_opt["login"]["required"] = "0"
+ 
+-	available_actions = ["status", "reboot", "off", "on"]
++	available_actions = ["status", "reboot", "off", "on", "diag"]
+ 	if device_opt.count("fabric_fencing"):
+ 		available_actions.remove("reboot")
+ 		all_opt["action"]["default"] = "off"
+ 	if device_opt.count("no_status"):
+ 		available_actions.remove("status")
++	if device_opt.count("diag") == 0:
++		available_actions.remove("diag")
+ 	actions_with_default = \
+ 			[x if not x == all_opt["action"]["default"] else x + " (default)" for x in available_actions]
+ 	all_opt["action"]["help"] = \
+diff --git a/tests/data/metadata/fence_idrac.xml b/tests/data/metadata/fence_idrac.xml
+index 3c21900..5da9aeb 100644
+--- a/tests/data/metadata/fence_idrac.xml
++++ b/tests/data/metadata/fence_idrac.xml
+@@ -163,5 +163,6 @@
+ 	<action name="list" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
++	<action name="diag" />
+ </actions>
+ </resource-agent>
+diff --git a/tests/data/metadata/fence_ilo3.xml b/tests/data/metadata/fence_ilo3.xml
+index 783e342..6f6034a 100644
+--- a/tests/data/metadata/fence_ilo3.xml
++++ b/tests/data/metadata/fence_ilo3.xml
+@@ -163,5 +163,6 @@
+ 	<action name="list" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
++	<action name="diag" />
+ </actions>
+ </resource-agent>
+diff --git a/tests/data/metadata/fence_ilo4.xml b/tests/data/metadata/fence_ilo4.xml
+index 1779a2e..cb2a9bb 100644
+--- a/tests/data/metadata/fence_ilo4.xml
++++ b/tests/data/metadata/fence_ilo4.xml
+@@ -163,5 +163,6 @@
+ 	<action name="list" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
++	<action name="diag" />
+ </actions>
+ </resource-agent>
+diff --git a/tests/data/metadata/fence_imm.xml b/tests/data/metadata/fence_imm.xml
+index 54da925..68c35c3 100644
+--- a/tests/data/metadata/fence_imm.xml
++++ b/tests/data/metadata/fence_imm.xml
+@@ -163,5 +163,6 @@
+ 	<action name="list" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
++	<action name="diag" />
+ </actions>
+ </resource-agent>
+diff --git a/tests/data/metadata/fence_ipmilan.xml b/tests/data/metadata/fence_ipmilan.xml
+index a29415f..df83362 100644
+--- a/tests/data/metadata/fence_ipmilan.xml
++++ b/tests/data/metadata/fence_ipmilan.xml
+@@ -163,5 +163,6 @@
+ 	<action name="list" />
+ 	<action name="monitor" />
+ 	<action name="metadata" />
++	<action name="diag" />
+ </actions>
+ </resource-agent>
+-- 
+2.4.3
+
