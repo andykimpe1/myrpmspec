@@ -1,0 +1,77 @@
+From 9f7331023760a3c1c49c97fbdf10dccda8dd4542 Mon Sep 17 00:00:00 2001
+From: Lennart Poettering <lennart@poettering.net>
+Date: Sat, 20 Feb 2010 00:18:31 +0100
+Subject: [PATCH 1/3] pulse: fix a minor race with sound cancellation
+
+If we call pa_stream_drain() and immediately afterwards destroy the
+stream it might happen that the pa_stream_drain() callback is called
+after the destruction finished pointing to an invalid out structure.
+
+To fix this we need to terminate the _drain() callback to make sure the
+reference to the not existing structure is dropped.
+---
+ src/pulse.c | 22 ++++++++++++++++++----
+ 1 file changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/src/pulse.c b/src/pulse.c
+index da7a2b2..b71d6b5 100644
+--- a/src/pulse.c
++++ b/src/pulse.c
+@@ -57,6 +57,7 @@ struct outstanding {
+     uint32_t id;
+     uint32_t sink_input;
+     pa_stream *stream;
++    pa_operation *drain_operation;
+     ca_finish_callback_t callback;
+     void *userdata;
+     ca_sound_file *file;
+@@ -85,6 +86,12 @@ static void outstanding_disconnect(struct outstanding *o) {
+     ca_assert(o);
+ 
+     if (o->stream) {
++        if (o->drain_operation) {
++            pa_operation_cancel(o->drain_operation);
++            pa_operation_unref(o->drain_operation);
++            o->drain_operation = NULL;
++        }
++
+         pa_stream_set_write_callback(o->stream, NULL, NULL);
+         pa_stream_set_state_callback(o->stream, NULL, NULL);
+         pa_stream_disconnect(o->stream);
+@@ -645,6 +652,11 @@ static void stream_drain_cb(pa_stream *s, int success, void *userdata) {
+         out->finished = TRUE;
+     }
+ 
++    if (out->drain_operation) {
++        pa_operation_unref(out->drain_operation);
++        out->drain_operation = NULL;
++    }
++
+     pa_threaded_mainloop_signal(p->mainloop, FALSE);
+ }
+ 
+@@ -704,15 +716,17 @@ static void stream_write_cb(pa_stream *s, size_t bytes, void *userdata) {
+             pa_threaded_mainloop_signal(p->mainloop, FALSE);
+ 
+         } else {
+-            pa_operation *o;
+             ca_assert(out->type == OUTSTANDING_STREAM);
+ 
+-            if (!(o = pa_stream_drain(s, stream_drain_cb, out))) {
++            if (out->drain_operation) {
++                pa_operation_cancel(out->drain_operation);
++                pa_operation_unref(out->drain_operation);
++            }
++
++            if (!(out->drain_operation = pa_stream_drain(s, stream_drain_cb, out))) {
+                 ret = translate_error(pa_context_errno(p->context));
+                 goto finish;
+             }
+-
+-            pa_operation_unref(o);
+         }
+ 
+         pa_stream_set_write_callback(s, NULL, NULL);
+-- 
+1.9.3
+

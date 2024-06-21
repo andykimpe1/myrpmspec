@@ -1,0 +1,84 @@
+From 7ef7ed602181c6ad205dcc8bf84965ca770f118a Mon Sep 17 00:00:00 2001
+From: Lennart Poettering <lennart@poettering.net>
+Date: Tue, 24 Jun 2014 16:08:54 +0200
+Subject: [PATCH 2/3] pulse: fix finish notification for cached sample playback
+
+---
+ src/pulse.c | 19 ++++++++-----------
+ 1 file changed, 8 insertions(+), 11 deletions(-)
+
+diff --git a/src/pulse.c b/src/pulse.c
+index b71d6b5..22eab14 100644
+--- a/src/pulse.c
++++ b/src/pulse.c
+@@ -330,7 +330,7 @@ static void context_subscribe_cb(pa_context *pc, pa_subscription_event_type_t t,
+     for (out = p->outstanding; out; out = n) {
+         n = out->next;
+ 
+-        if (!out->clean_up ||out->type != OUTSTANDING_SAMPLE || out->sink_input != idx)
++        if (!out->clean_up || out->type != OUTSTANDING_SAMPLE || out->sink_input != idx)
+             continue;
+ 
+         outstanding_disconnect(out);
+@@ -941,6 +941,11 @@ int driver_play(ca_context *c, uint32_t id, ca_proplist *proplist, ca_finish_cal
+ 
+             pa_operation_unref(o);
+ 
++            if (!canceled && p->context && out->error == CA_SUCCESS) {
++                ret = CA_SUCCESS;
++                goto finish_locked;
++            }
++
+             pa_threaded_mainloop_unlock(p->mainloop);
+ 
+             /* The operation might have been canceled due to connection termination */
+@@ -949,7 +954,7 @@ int driver_play(ca_context *c, uint32_t id, ca_proplist *proplist, ca_finish_cal
+                 goto finish_unlocked;
+             }
+ 
+-            /* Did we manage to play the sample or did some other error occur? */
++            /* Did some other error occur? */
+             if (out->error != CA_ERROR_NOTFOUND) {
+                 ret = out->error;
+                 goto finish_unlocked;
+@@ -1168,7 +1173,6 @@ int driver_cache(ca_context *c, ca_proplist *proplist) {
+     struct private *p;
+     pa_proplist *l = NULL;
+     const char *n, *ct;
+-    char *name = NULL;
+     pa_sample_spec ss;
+     pa_channel_map cm;
+     ca_bool_t cm_good;
+@@ -1202,11 +1206,6 @@ int driver_cache(ca_context *c, ca_proplist *proplist) {
+         goto finish_unlocked;
+     }
+ 
+-    if (!(name = ca_strdup(n))) {
+-        ret = CA_ERROR_OOM;
+-        goto finish_unlocked;
+-    }
+-
+     if ((ct = pa_proplist_gets(l, CA_PROP_CANBERRA_CACHE_CONTROL)))
+         if ((ret = ca_parse_cache_control(&cache_control, ct)) < 0) {
+             ret = CA_ERROR_INVALID;
+@@ -1251,7 +1250,7 @@ int driver_cache(ca_context *c, ca_proplist *proplist) {
+         goto finish_locked;
+     }
+ 
+-    if (!(out->stream = pa_stream_new_with_proplist(p->context, name, &ss, cm_good ? &cm : NULL, l))) {
++    if (!(out->stream = pa_stream_new_with_proplist(p->context, NULL, &ss, cm_good ? &cm : NULL, l))) {
+         ret = translate_error(pa_context_errno(p->context));
+         goto finish_locked;
+     }
+@@ -1303,8 +1302,6 @@ finish_unlocked:
+     if (l)
+         pa_proplist_free(l);
+ 
+-    ca_free(name);
+-
+     return ret;
+ }
+ 
+-- 
+1.9.3
+
