@@ -1,0 +1,141 @@
+Index: gdb-7.2/gdb/infrun.c
+===================================================================
+--- gdb-7.2.orig/gdb/infrun.c	2011-08-10 20:25:49.000000000 +0200
++++ gdb-7.2/gdb/infrun.c	2011-08-10 20:35:26.000000000 +0200
+@@ -2962,6 +2962,56 @@ handle_syscall_event (struct execution_c
+   return 1;
+ }
+ 
++/* Argument for at_solib_event_breakpoint_helper.  */
++
++struct solib_event_breakpoint_helper_arg
++{
++  CORE_ADDR prev_pc;
++  int shlib_bp_count;
++  int other_bp_count;
++};
++
++/* Helper for at_solib_event_breakpoint.  */
++
++static int
++at_solib_event_breakpoint_helper (struct breakpoint *b, void *argp)
++{
++  struct solib_event_breakpoint_helper_arg *arg
++    = (struct solib_event_breakpoint_helper_arg *) argp; 
++  struct bp_location *loc;
++
++  for (loc = b->loc; loc; loc = loc->next)
++    {
++      if (loc->pspace == current_program_space
++	  && (loc->address == stop_pc || loc->address == arg->prev_pc))
++	{
++	  if (b->type == bp_shlib_event)
++	    arg->shlib_bp_count++;
++	  else
++	    {
++	      arg->other_bp_count++;
++	      return 1; /* quick exit */
++	    }
++	}
++    }
++
++  return 0; /* carry on looking */
++}
++
++/* Nonzero if the location stopoed at is the shlib event breakpoint.  */
++
++static int
++at_solib_event_breakpoint (struct execution_control_state *ecs)
++{
++  struct solib_event_breakpoint_helper_arg arg;
++  arg.prev_pc = ecs->event_thread->prev_pc;
++  arg.shlib_bp_count = arg.other_bp_count = 0;
++
++  iterate_over_breakpoints (at_solib_event_breakpoint_helper, &arg);
++
++  return arg.shlib_bp_count && !arg.other_bp_count;
++}
++
+ /* Given an execution control state that has been freshly filled in
+    by an event from the inferior, figure out what it means and take
+    appropriate action.  */
+@@ -3811,11 +3861,23 @@ targets should add new threads to the th
+   ecs->random_signal = 0;
+   stopped_by_random_signal = 0;
+ 
+-  /* Hide inlined functions starting here, unless we just performed stepi or
+-     nexti.  After stepi and nexti, always show the innermost frame (not any
+-     inline function call sites).  */
+-  if (ecs->event_thread->step_range_end != 1)
+-    skip_inline_frames (ecs->ptid);
++  /* If we have stopped at the solib event breakpoint and
++     stop_on_solib_events is not set then we can avoid calling
++     anything that calls find_pc_section.  This saves a lot
++     of time when the inferior loads a lot of shared libraries,
++     because otherwise the section map gets regenerated every
++     time we stop.  */
++  if (stop_on_solib_events
++      || ecs->event_thread->stop_signal != TARGET_SIGNAL_TRAP
++      || stop_after_trap
++      || !at_solib_event_breakpoint (ecs))
++    {
++      /* Hide inlined functions starting here, unless we just
++	 performed stepi or nexti.  After stepi and nexti, always show
++	 the innermost frame (not any inline function call sites).  */
++      if (ecs->event_thread->step_range_end != 1)
++	skip_inline_frames (ecs->ptid);
++    }
+ 
+   if (ecs->event_thread->stop_signal == TARGET_SIGNAL_TRAP
+       && ecs->event_thread->trap_expected
+Index: gdb-7.2/gdb/breakpoint.c
+===================================================================
+--- gdb-7.2.orig/gdb/breakpoint.c	2011-08-10 20:25:50.000000000 +0200
++++ gdb-7.2/gdb/breakpoint.c	2011-08-10 20:36:08.000000000 +0200
+@@ -11817,6 +11817,23 @@ save_command (char *arg, int from_tty)
+   help_list (save_cmdlist, "save ", -1, gdb_stdout);
+ }
+ 
++/* RHEL-6 backport from: 7d5a91474a0cdb796031ddc25aa0d107be6eb39d */
++
++struct breakpoint *
++iterate_over_breakpoints (int (*callback) (struct breakpoint *, void *),
++                         void *data)
++{
++  struct breakpoint *b, *temp;
++
++  ALL_BREAKPOINTS_SAFE (b, temp)
++    {
++      if ((*callback) (b, data))
++       return b;
++    }
++
++  return NULL;
++}
++
+ static void
+ gnu_ifunc_resolver_stop (struct breakpoint *b)
+ {
+Index: gdb-7.2/gdb/breakpoint.h
+===================================================================
+--- gdb-7.2.orig/gdb/breakpoint.h	2011-08-10 20:25:50.000000000 +0200
++++ gdb-7.2/gdb/breakpoint.h	2011-08-10 20:36:49.000000000 +0200
+@@ -1114,6 +1114,18 @@ extern void check_tracepoint_command (ch
+ extern void start_rbreak_breakpoints (void);
+ extern void end_rbreak_breakpoints (void);
+ 
++/* RHEL-6 backport from: 7d5a91474a0cdb796031ddc25aa0d107be6eb39d */
++/* Breakpoint iterator function.
++
++   Calls a callback function once for each breakpoint, so long as the
++   callback function returns false.  If the callback function returns
++   true, the iteration will end and the current breakpoint will be
++   returned.  This can be useful for implementing a search for a
++   breakpoint with arbitrary attributes, or for applying an operation
++   to every breakpoint.  */
++extern struct breakpoint *iterate_over_breakpoints (int (*) (struct breakpoint *,
++							     void *), void *);
++
+ extern void breakpoints_relocate (struct objfile *objfile,
+ 				  struct section_offsets *delta);
+ 

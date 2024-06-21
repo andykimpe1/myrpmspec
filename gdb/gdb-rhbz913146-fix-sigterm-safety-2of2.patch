@@ -1,0 +1,219 @@
+From: Pedro Alves <palves at redhat dot com>
+To: gdb-patches at sourceware dot org
+Subject: [PATCH] PR gdb/15713 - errors from i386_linux_resume lead to lock-up
+Date: Wed, 21 May 2014 13:47:48 +0100
+Message-Id: <1400676468-2216-1-git-send-email-palves@redhat.com>
+
+linux_nat_resume is not considering that linux_ops->to_resume may throw:
+
+  /* Mark LWP as not stopped to prevent it from being continued by
+     linux_nat_resume_callback.  */
+  lp->stopped = 0;
+
+  if (resume_many)
+    iterate_over_lwps (ptid, linux_nat_resume_callback, NULL);
+
+If something within linux_nat_resume_callback, GDB leaves the lwp_info
+as if the inferior was resumed, while it actually wasn't.
+
+A couple examples, there are possibly others:
+
+ - i386_linux_resume calls target_read which calls QUIT.
+ - if the actual ptrace resumption fails in inf_ptrace_resume,
+   perror_with_name is called.
+
+If the user tries to kill the inferior at this point (or quit, which
+offers to kill), GDB locks up trying to stop the lwp -- if it is
+already stopped no new waitpid event gets generated for it.
+
+Fix this by setting the stopped flag earlier, as soon as we collect a
+stop event with waitpid, and clearing it always only after resuming
+the lwp successfully.
+
+Tested on x86_64 Fedora 20.  Confirmed the lock-up disappears using a
+local hack that forces an error in inf_ptrace_resume.
+
+Also fixes a little "set debug lin-lwp" annoyance.  Currently we always see:
+
+ Continuing.
+ LLR: Preparing to resume process 6802, 0, inferior_ptid Thread 0x7ffff7fc7740 (LWP 6802)
+                                                                                ^^^^^^^^
+ RC: Resuming sibling Thread 0x7ffff77c5700 (LWP 6807), 0, resume
+ RC: Resuming sibling Thread 0x7ffff7fc6700 (LWP 6806), 0, resume
+ RC: Not resuming sibling Thread 0x7ffff7fc7740 (LWP 6802) (not stopped)
+                                                 ^^^^^^^^^^^^^^^^^^^^^^^
+ LLR: PTRACE_CONT process 6802, 0 (resume event thread)
+
+This patch gets rid of the "Not resuming sibling" line.
+
+2014-05-21  Pedro Alves  <palves@redhat.com>
+
+	PR gdb/15713
+	* linux-nat.c (linux_nat_resume_callback): Rename the second
+	parameter to 'except'.  Skip LP if it points to EXCEPT.
+	(linux_nat_resume): Don't mark the event lwp as not stopped
+	before resuming sibling lwps.  Instead ask
+	linux_nat_resume_callback to skip the event lwp.  Mark it as not
+	stopped after actually resuming it.
+	(linux_handle_syscall_trap): Mark the lwp as not stopped after
+	resuming it.
+	(wait_lwp): Mark the lwp as stopped here.
+	(stop_wait_callback): Mark the lwp as not stopped right after
+	resuming it.  Don't mark lwps as stopped here.
+	(linux_nat_filter_event): Mark the lwp as stopped earlier.
+	(linux_nat_wait_1): Don't mark dead lwps as stopped here.
+---
+ gdb/linux-nat.c | 41 ++++++++++++++++++-----------------------
+ 1 file changed, 18 insertions(+), 23 deletions(-)
+
+Index: gdb-7.2/gdb/linux-nat.c
+===================================================================
+--- gdb-7.2.orig/gdb/linux-nat.c
++++ gdb-7.2/gdb/linux-nat.c
+@@ -1840,7 +1840,12 @@ linux_nat_detach (struct target_ops *ops
+ static int
+ resume_callback (struct lwp_info *lp, void *data)
+ {
+-  struct inferior *inf = find_inferior_pid (GET_PID (lp->ptid));
++  struct inferior *inf;
++
++  if (lp == data)
++    return 0;
++
++  inf = find_inferior_pid (GET_PID (lp->ptid));
+ 
+   if (lp->stopped && inf->vfork_child != NULL)
+     {
+@@ -1987,10 +1992,6 @@ linux_nat_resume (struct target_ops *ops
+       return;
+     }
+ 
+-  /* Mark LWP as not stopped to prevent it from being continued by
+-     resume_callback.  */
+-  lp->stopped = 0;
+-
+   /* At this point, we are going to resume the inferior and if we
+      have attached to a stopped process, we no longer should leave
+      it as stopped if the user detaches.  PTID variable has PID set to LWP
+@@ -2000,13 +2001,14 @@ linux_nat_resume (struct target_ops *ops
+     pid_was_stopped = 0;
+ 
+   if (resume_many)
+-    iterate_over_lwps (ptid, resume_callback, NULL);
++    iterate_over_lwps (ptid, resume_callback, lp);
+ 
+   /* Convert to something the lower layer understands.  */
+   ptid = pid_to_ptid (GET_LWP (lp->ptid));
+ 
+   linux_ops->to_resume (linux_ops, ptid, step, signo);
+   lp->stopped_by_watchpoint = 0;
++  lp->stopped = 0;
+ 
+   if (debug_linux_nat)
+     fprintf_unfiltered (gdb_stdlog,
+@@ -2093,6 +2095,7 @@ linux_handle_syscall_trap (struct lwp_in
+ 
+       lp->syscall_state = TARGET_WAITKIND_IGNORE;
+       ptrace (PTRACE_CONT, GET_LWP (lp->ptid), 0, 0);
++      lp->stopped = 0;
+       return 1;
+     }
+ 
+@@ -2172,6 +2175,7 @@ linux_handle_syscall_trap (struct lwp_in
+   registers_changed ();
+   linux_ops->to_resume (linux_ops, pid_to_ptid (GET_LWP (lp->ptid)),
+ 			lp->step, TARGET_SIGNAL_0);
++  lp->stopped = 0;
+   return 1;
+ }
+ 
+@@ -2322,7 +2326,7 @@ linux_handle_extended_wait (struct lwp_i
+ 				GET_LWP (lp->ptid));
+ 	  linux_ops->to_resume (linux_ops, pid_to_ptid (GET_LWP (lp->ptid)),
+ 				0, TARGET_SIGNAL_0);
+-
++	  lp->stopped = 0;
+ 	  return 1;
+ 	}
+ 
+@@ -2468,6 +2472,7 @@ wait_lwp (struct lwp_info *lp)
+     }
+ 
+   gdb_assert (WIFSTOPPED (status));
++  lp->stopped = 1;
+ 
+   /* Handle GNU/Linux's syscall SIGTRAPs.  */
+   if (WIFSTOPPED (status) && WSTOPSIG (status) == SYSCALL_SIGTRAP)
+@@ -2711,6 +2716,7 @@ stop_wait_callback (struct lwp_info *lp,
+ 
+ 	  errno = 0;
+ 	  ptrace (PTRACE_CONT, GET_LWP (lp->ptid), 0, 0);
++	  lp->stopped = 0;
+ 	  if (debug_linux_nat)
+ 	    fprintf_unfiltered (gdb_stdlog,
+ 				"PTRACE_CONT %s, 0, 0 (%s) (discarding SIGINT)\n",
+@@ -2736,9 +2742,7 @@ stop_wait_callback (struct lwp_info *lp,
+ 
+ 	  /* Save the sigtrap event. */
+ 	  lp->status = status;
+-	  gdb_assert (! lp->stopped);
+ 	  gdb_assert (lp->signalled);
+-	  lp->stopped = 1;
+ 	}
+       else
+ 	{
+@@ -2771,8 +2775,6 @@ stop_wait_callback (struct lwp_info *lp,
+ 	      stop_wait_callback (lp, NULL);
+ 	      gdb_assert (lp->stopped);
+ 	    }
+-	  else
+-	    lp->stopped = 1;
+ 
+ 	  /* Reset SIGNALLED only after the stop_wait_callback call above as
+ 	     it does gdb_assert on SIGNALLED.  */
+@@ -3071,6 +3073,10 @@ linux_nat_filter_event (int lwpid, int s
+       add_thread (lp->ptid);
+     }
+ 
++  /* This LWP is stopped now.  (And if dead, this prevents it from
++     ever being continued.)  */
++  lp->stopped = 1;
++
+   /* Handle GNU/Linux's syscall SIGTRAPs.  */
+   if (WIFSTOPPED (status) && WSTOPSIG (status) == SYSCALL_SIGTRAP)
+     {
+@@ -3113,7 +3119,6 @@ linux_nat_filter_event (int lwpid, int s
+ 	 used.  */
+       if (GET_PID (lp->ptid) == GET_LWP (lp->ptid))
+ 	{
+-	  lp->stopped = 1;
+ 	  iterate_over_lwps (pid_to_ptid (GET_PID (lp->ptid)),
+ 			     stop_and_resume_callback, NULL);
+ 	}
+@@ -3423,13 +3428,9 @@ retry:
+ 				     "for another process; cancelled it\n",
+ 				     ptid_get_lwp (lp->ptid));
+ 			}
+-		      lp->stopped = 1;
+ 		    }
+ 		  else
+-		    {
+-		      lp->stopped = 1;
+-		      lp->signalled = 0;
+-		    }
++		    lp->signalled = 0;
+ 		}
+ 	      else if (WIFEXITED (status) || WIFSIGNALED (status))
+ 		{
+@@ -3445,11 +3446,6 @@ retry:
+ 		     pending for the next time we're able to report
+ 		     it.  */
+ 
+-		  /* Prevent trying to stop this thread again.  We'll
+-		     never try to resume it because it has a pending
+-		     status.  */
+-		  lp->stopped = 1;
+-
+ 		  /* Dead LWP's aren't expected to reported a pending
+ 		     sigstop.  */
+ 		  lp->signalled = 0;

@@ -1,0 +1,159 @@
+Re: RFC: fix DW_AT_data_member_location buglet
+http://sourceware.org/ml/gdb-patches/2011-05/msg00291.html
+http://sourceware.org/ml/gdb-cvs/2011-05/msg00072.html
+
+### src/gdb/ChangeLog	2011/05/11 04:56:04	1.12992
+### src/gdb/ChangeLog	2011/05/11 17:25:41	1.12993
+## -1,3 +1,9 @@
++2011-05-11  Tom Tromey  <tromey@redhat.com>
++
++	* dwarf2read.c (handle_data_member_location): New function.
++	(dwarf2_add_field): Use it.
++	(read_common_block): Likewise.
++
+ 2011-05-11  Jan Kratochvil  <jan.kratochvil@redhat.com>
+ 
+ 	Make addrs->SECTINDEX always defined.
+Index: gdb-7.2/gdb/dwarf2read.c
+===================================================================
+--- gdb-7.2.orig/gdb/dwarf2read.c	2011-07-27 00:06:43.000000000 +0200
++++ gdb-7.2/gdb/dwarf2read.c	2011-07-27 00:10:11.000000000 +0200
+@@ -5771,6 +5771,41 @@ dwarf2_record_block_ranges (struct die_i
+     }
+ }
+ 
++/* Look for DW_AT_data_member_location.  Set *OFFSET to the byte
++   offset.  If the attribute was not found return 0, otherwise return
++   1.  If it was found but could not properly be handled, set *OFFSET
++   to 0.  */
++
++static int
++handle_data_member_location (struct die_info *die, struct dwarf2_cu *cu,
++			     LONGEST *offset)
++{
++  struct attribute *attr;
++
++  attr = dwarf2_attr (die, DW_AT_data_member_location, cu);
++  if (attr != NULL)
++    {
++      *offset = 0;
++
++      /* Note that we do not check for a section offset first here.
++	 This is because DW_AT_data_member_location is new in DWARF 4,
++	 so if we see it, we can assume that a constant form is really
++	 a constant and not a section offset.  */
++      if (attr_form_is_constant (attr))
++	*offset = dwarf2_get_attr_constant_value (attr, 0);
++      else if (attr_form_is_section_offset (attr))
++	dwarf2_complex_location_expr_complaint ();
++      else if (attr_form_is_block (attr))
++	*offset = decode_locdesc (DW_BLOCK (attr), cu);
++      else
++	dwarf2_complex_location_expr_complaint ();
++
++      return 1;
++    }
++
++  return 0;
++}
++
+ /* Add an aggregate field to the field list.  */
+ 
+ static void
+@@ -5823,6 +5858,8 @@ dwarf2_add_field (struct field_info *fip
+ 
+   if (die->tag == DW_TAG_member && ! die_is_declaration (die, cu))
+     {
++      LONGEST offset;
++
+       /* Data member other than a C++ static data member.  */
+ 
+       /* Get type of field.  */
+@@ -5842,22 +5879,8 @@ dwarf2_add_field (struct field_info *fip
+ 	}
+ 
+       /* Get bit offset of field.  */
+-      attr = dwarf2_attr (die, DW_AT_data_member_location, cu);
+-      if (attr)
+-	{
+-          int byte_offset = 0;
+-
+-          if (attr_form_is_section_offset (attr))
+-	    dwarf2_complex_location_expr_complaint ();
+-          else if (attr_form_is_constant (attr))
+-            byte_offset = dwarf2_get_attr_constant_value (attr, 0);
+-          else if (attr_form_is_block (attr))
+-            byte_offset = decode_locdesc (DW_BLOCK (attr), cu);
+-	  else
+-	    dwarf2_complex_location_expr_complaint ();
+-
+-          SET_FIELD_BITPOS (*fp, byte_offset * bits_per_byte);
+-	}
++      if (handle_data_member_location (die, cu, &offset))
++	SET_FIELD_BITPOS (*fp, offset * bits_per_byte);
+       attr = dwarf2_attr (die, DW_AT_bit_offset, cu);
+       if (attr)
+ 	{
+@@ -5961,23 +5984,11 @@ dwarf2_add_field (struct field_info *fip
+     }
+   else if (die->tag == DW_TAG_inheritance)
+     {
+-      /* C++ base class field.  */
+-      attr = dwarf2_attr (die, DW_AT_data_member_location, cu);
+-      if (attr)
+-	{
+-          int byte_offset = 0;
+-
+-          if (attr_form_is_section_offset (attr))
+-	    dwarf2_complex_location_expr_complaint ();
+-          else if (attr_form_is_constant (attr))
+-            byte_offset = dwarf2_get_attr_constant_value (attr, 0);
+-          else if (attr_form_is_block (attr))
+-            byte_offset = decode_locdesc (DW_BLOCK (attr), cu);
+-	  else
+-	    dwarf2_complex_location_expr_complaint ();
++      LONGEST offset;
+ 
+-          SET_FIELD_BITPOS (*fp, byte_offset * bits_per_byte);
+-	}
++      /* C++ base class field.  */
++      if (handle_data_member_location (die, cu, &offset))
++	SET_FIELD_BITPOS (*fp, offset * bits_per_byte);
+       FIELD_BITSIZE (*fp) = 0;
+       FIELD_TYPE (*fp) = die_type (die, cu);
+       FIELD_NAME (*fp) = type_name_no_tag (fp->type);
+@@ -7116,29 +7127,20 @@ read_common_block (struct die_info *die,
+       child_die = die->child;
+       while (child_die && child_die->tag)
+ 	{
++	  LONGEST offset;
++
+ 	  /* Create the symbol in the DW_TAG_common_block block in the current
+ 	     symbol scope.  */
+ 	  sym = new_symbol (child_die, NULL, cu);
+ 
+ 	  /* Undocumented in DWARF3, when it can be present?  */
+-	  attr = dwarf2_attr (child_die, DW_AT_data_member_location, cu);
+-	  if (sym != NULL && attr != NULL)
++	  if (sym != NULL &&
++	      handle_data_member_location (child_die, cu, &offset))
+ 	    {
+-	      CORE_ADDR byte_offset = 0;
+-
+-	      if (attr_form_is_section_offset (attr))
+-		dwarf2_complex_location_expr_complaint ();
+-	      else if (attr_form_is_constant (attr))
+-		byte_offset = dwarf2_get_attr_constant_value (attr, 0);
+-	      else if (attr_form_is_block (attr))
+-		byte_offset = decode_locdesc (DW_BLOCK (attr), cu);
+-	      else
+-		dwarf2_complex_location_expr_complaint ();
+-
+ 	      if (!base_p)
+ 		dwarf2_invalid_attrib_class_complaint
+ 		  ("DW_AT_data_member_location", "common block member");
+-	      SYMBOL_VALUE_ADDRESS (sym) = base + byte_offset + baseaddr;
++	      SYMBOL_VALUE_ADDRESS (sym) = base + offset + baseaddr;
+ 	      add_symbol_to_list (sym, &global_symbols);
+ 	    }
+ 

@@ -1,0 +1,270 @@
+http://sourceware.org/ml/gdb-cvs/2011-05/msg00159.html
+
+### src/gdb/ChangeLog	2011/05/19 18:41:22	1.13025
+### src/gdb/ChangeLog	2011/05/20 08:55:43	1.13026
+## -1,3 +1,15 @@
++2011-05-20  Jan Kratochvil  <jan.kratochvil@redhat.com>
++
++	Fix -readnow for -gdwarf-4 unused type units.
++	* dwarf2read.c (struct signatured_type): Remove the field offset.
++	(create_signatured_type_table_from_index): Remove its initialization.
++	(create_debug_types_hash_table): Likewise.  Initialize per_cu.offset
++	instead.  Add a complaint call.
++	(process_psymtab_comp_unit): Change assignment to gdb_assert.
++	(process_type_comp_unit, lookup_die_type, dump_die_shallow)
++	(lookup_signatured_type_at_offset, read_signatured_type)
++	(write_one_signatured_type): Update the field for per_cu.
++
+ 2011-05-19  Tom Tromey  <tromey@redhat.com>
+ 
+ 	* python/py-inferior.c (python_inferior_exit): Use
+Index: gdb-7.2/gdb/dwarf2read.c
+===================================================================
+--- gdb-7.2.orig/gdb/dwarf2read.c	2011-07-26 22:55:52.000000000 +0200
++++ gdb-7.2/gdb/dwarf2read.c	2011-07-26 22:56:06.000000000 +0200
+@@ -470,9 +470,6 @@ struct signatured_type
+ {
+   ULONGEST signature;
+ 
+-  /* Offset in .debug_types of the TU (type_unit) for this type.  */
+-  unsigned int offset;
+-
+   /* Offset in .debug_types of the type defined by this TU.  */
+   unsigned int type_offset;
+ 
+@@ -1778,7 +1775,6 @@ create_signatured_type_table_from_index 
+       type_sig = OBSTACK_ZALLOC (&objfile->objfile_obstack,
+ 				 struct signatured_type);
+       type_sig->signature = signature;
+-      type_sig->offset = offset;
+       type_sig->type_offset = type_offset;
+       type_sig->per_cu.from_debug_types = 1;
+       type_sig->per_cu.offset = offset;
+@@ -2884,13 +2880,24 @@ create_debug_types_hash_table (struct ob
+       type_sig = obstack_alloc (&objfile->objfile_obstack, sizeof (*type_sig));
+       memset (type_sig, 0, sizeof (*type_sig));
+       type_sig->signature = signature;
+-      type_sig->offset = offset;
+       type_sig->type_offset = type_offset;
+       type_sig->per_cu.objfile = objfile;
+       type_sig->per_cu.from_debug_types = 1;
++      type_sig->per_cu.offset = offset;
+ 
+       slot = htab_find_slot (types_htab, type_sig, INSERT);
+       gdb_assert (slot != NULL);
++      if (*slot != NULL)
++	{
++	  const struct signatured_type *dup_sig = *slot;
++
++	  complaint (&symfile_complaints,
++		     _("debug type entry at offset 0x%x is duplicate to the "
++		       "entry at offset 0x%x, signature 0x%s"),
++		     offset, dup_sig->per_cu.offset,
++		     phex (signature, sizeof (signature)));
++	  gdb_assert (signature == dup_sig->signature);
++	}
+       *slot = type_sig;
+ 
+       if (dwarf2_die_debug)
+@@ -3057,8 +3064,8 @@ process_psymtab_comp_unit (struct objfil
+ 
+   if (this_cu->from_debug_types)
+     {
+-      /* offset,length haven't been set yet for type units.  */
+-      this_cu->offset = cu.header.offset;
++      /* LENGTH has not been set yet for type units.  */
++      gdb_assert (this_cu->offset == cu.header.offset);
+       this_cu->length = cu.header.length + cu.header.initial_length_size;
+     }
+   else if (comp_unit_die->tag == DW_TAG_partial_unit)
+@@ -3184,7 +3191,7 @@ process_type_comp_unit (void **slot, voi
+   gdb_assert (dwarf2_per_objfile->types.readin);
+   process_psymtab_comp_unit (objfile, this_cu,
+ 			     dwarf2_per_objfile->types.buffer,
+-			     dwarf2_per_objfile->types.buffer + entry->offset,
++			     dwarf2_per_objfile->types.buffer + this_cu->offset,
+ 			     dwarf2_per_objfile->types.size);
+ 
+   return 1;
+@@ -11021,7 +11028,7 @@ lookup_die_type (struct die_info *die, s
+ 	       die->offset, cu->objfile->name);
+ 
+       gdb_assert (sig_type->per_cu.from_debug_types);
+-      offset = sig_type->offset + sig_type->type_offset;
++      offset = sig_type->per_cu.offset + sig_type->type_offset;
+       this_type = get_die_type_at_offset (offset, &sig_type->per_cu);
+     }
+   else
+@@ -12473,7 +12480,7 @@ dump_die_shallow (struct ui_file *f, int
+ 	case DW_FORM_sig8:
+ 	  if (DW_SIGNATURED_TYPE (&die->attrs[i]) != NULL)
+ 	    fprintf_unfiltered (f, "signatured type, offset: 0x%x",
+-				DW_SIGNATURED_TYPE (&die->attrs[i])->offset);
++			  DW_SIGNATURED_TYPE (&die->attrs[i])->per_cu.offset);
+ 	  else
+ 	    fprintf_unfiltered (f, "signatured type, offset: unknown");
+ 	  break;
+@@ -12836,7 +12843,7 @@ lookup_signatured_type_at_offset (struct
+   /* This is only used to lookup previously recorded types.
+      If we didn't find it, it's our bug.  */
+   gdb_assert (type_sig != NULL);
+-  gdb_assert (offset == type_sig->offset);
++  gdb_assert (offset == type_sig->per_cu.offset);
+ 
+   return type_sig;
+ }
+@@ -12876,7 +12883,7 @@ read_signatured_type (struct objfile *ob
+   struct attribute *attr;
+ 
+   dwarf2_read_section (objfile, &dwarf2_per_objfile->types);
+-  types_ptr = dwarf2_per_objfile->types.buffer + type_sig->offset;
++  types_ptr = dwarf2_per_objfile->types.buffer + type_sig->per_cu.offset;
+ 
+   gdb_assert (type_sig->per_cu.cu == NULL);
+ 
+@@ -15006,7 +15013,7 @@ write_one_signatured_type (void **slot, 
+ 		  psymtab->n_static_syms, info->cu_index,
+ 		  1);
+ 
+-  store_unsigned_integer (val, 8, BFD_ENDIAN_LITTLE, entry->offset);
++  store_unsigned_integer (val, 8, BFD_ENDIAN_LITTLE, entry->per_cu.offset);
+   obstack_grow (info->types_list, val, 8);
+   store_unsigned_integer (val, 8, BFD_ENDIAN_LITTLE, entry->type_offset);
+   obstack_grow (info->types_list, val, 8);
+Index: gdb-7.2/gdb/testsuite/gdb.dwarf2/dw4-sig-type-unused.S
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.dwarf2/dw4-sig-type-unused.S	2011-07-26 22:56:06.000000000 +0200
+@@ -0,0 +1,87 @@
++/* Copyright 2011 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++	.section	.debug_info
++debug_start:
++	.long	debug_end - 1f	/* Length of Compilation Unit Info */
++1:
++	.2byte	0x4	/* DWARF version number */
++	.long	.Ldebug_abbrev0	/* Offset Into Abbrev. Section */
++	.byte	0x4	/* Pointer Size (in bytes) */
++	.uleb128 0x3	/* (DIE (0xb) DW_TAG_compile_unit) */
++	.ascii "GNU C 4.4.3\0"	/* DW_AT_producer */
++	.byte	0x0c	/* DW_AT_language = DW_LANG_C99 */
++	.ascii "1.c\0"	/* DW_AT_name */
++debug_end:
++
++	.section	.debug_types
++types_start:
++	.macro	unit sig1 sig2 name
++	.long	2f - 1f	/* Length of Compilation Unit Info */
++1:
++	.2byte	0x4	/* DWARF version number */
++	.long	.Ldebug_abbrev0	/* Offset Into Abbrev. Section */
++	.byte	0x4	/* Pointer Size (in bytes) */
++	/* signature */
++	.4byte	\sig1
++	.4byte	\sig2
++	.long	3f-types_start	/* offset into type DIE */
++	.uleb128 0x1	/* DW_TAG_type_unit) */
++	.byte	0x0c	/* DW_AT_language = DW_LANG_C99 */
++3:
++	.uleb128 0x2	/* DW_TAG_structure_type */
++	.ascii	"\name"	/* DW_AT_name ... */
++	.byte	0	/* ... DW_AT_name */
++	.4byte	0	/* DW_AT_byte_size */
++	.byte	0x0	/* end of children of CU */
++2:
++	.endm
++
++	unit	0x01234567, 0x01234567, foo
++	/* One duplicate.  */
++	unit	0x01234567, 0x01234567, foo
++	/* One different, but still unused.  */
++	unit	0x89abcdef, 0x89abcdef, bar
++
++	.section	.debug_abbrev
++.Ldebug_abbrev0:
++	.uleb128 0x1	/* (abbrev code) */
++	.uleb128 0x11	/* (TAG: DW_TAG_type_unit) */
++	.byte	0x1	/* DW_children_yes */
++	.uleb128 0x13	/* (DW_AT_language) */
++	.uleb128 0xb	/* (DW_FORM_data1) */
++	.byte	0x0
++	.byte	0x0
++	.uleb128 0x2	/* (abbrev code) */
++	.uleb128 0x13	/* (TAG: DW_TAG_structure_type) */
++	.byte	0x0	/* DW_children_no */
++	.uleb128 0x3	/* (DW_AT_name) */
++	.uleb128 0x8	/* (DW_FORM_string) */
++	.uleb128 0x0b	/* (DW_AT_byte_size) */
++	.uleb128 0x6	/* (DW_FORM_data4) */
++	.byte	0x0
++	.byte	0x0
++	.uleb128 0x3	/* (abbrev code) */
++	.uleb128 0x11	/* (TAG: DW_TAG_compile_unit) */
++	.byte	0x0	/* DW_children_no */
++	.uleb128 0x25	/* (DW_AT_producer) */
++	.uleb128 0x8	/* (DW_FORM_string) */
++	.uleb128 0x13	/* (DW_AT_language) */
++	.uleb128 0xb	/* (DW_FORM_data1) */
++	.uleb128 0x3	/* (DW_AT_name) */
++	.uleb128 0x8	/* (DW_FORM_string) */
++	.byte	0x0
++	.byte	0x0
++	.byte	0x0
+Index: gdb-7.2/gdb/testsuite/gdb.dwarf2/dw4-sig-type-unused.exp
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.dwarf2/dw4-sig-type-unused.exp	2011-07-26 22:56:06.000000000 +0200
+@@ -0,0 +1,40 @@
++# Copyright 2011 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# This test can only be run on targets which support DWARF-2 and use gas.
++if {![istarget *-*-linux*]
++    && ![istarget *-*-gnu*]
++    && ![istarget *-*-elf*]
++    && ![istarget *-*-openbsd*]
++    && ![istarget arm-*-eabi*]
++    && ![istarget powerpc-*-eabi*]} {
++  return 0
++}
++
++set testfile "dw4-sig-type-unused"
++set srcfile ${testfile}.S
++set executable ${testfile}.x
++set binfile ${objdir}/${subdir}/${executable}
++
++if { [gdb_compile "${srcdir}/${subdir}/${srcfile}" "${binfile}" object {}] != "" } {
++    return -1
++}
++
++set saved_gdbflags $GDBFLAGS
++set GDBFLAGS "$GDBFLAGS --readnow"
++clean_restart $executable
++set GDBFLAGS $saved_gdbflags
++
++gdb_test "p 1" " = 1" "alive"

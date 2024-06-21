@@ -1,0 +1,179 @@
+[commit] Re: [patch 2/3] case insensitive: re_comp->regcomp
+http://sourceware.org/ml/gdb-patches/2011-04/msg00530.html
+http://sourceware.org/ml/gdb-cvs/2011-04/msg00178.html
+
+### src/gdb/ChangeLog	2011/04/27 19:52:19	1.12960
+### src/gdb/ChangeLog	2011/04/27 19:55:09	1.12961
+## -1,5 +1,14 @@
+ 2011-04-27  Jan Kratochvil  <jan.kratochvil@redhat.com>
+ 
++	Replace re_comp/re_exec by regcomp/regexec.
++	* symtab.c (struct search_symbols_data): New fields preg, preg_p.
++	(search_symbols_name_matches): Use them, use regexec.
++	(search_symbols): New variable retval_chain, adjust the use of
++	old_chain against it.  Replace re_comp by regcomp.  Use the new struct
++	search_symbols_data fields, use regexec instead of re_exec.
++
++2011-04-27  Jan Kratochvil  <jan.kratochvil@redhat.com>
++
+ 	Format the code for the next patch.
+ 	* dwarf2read.c (struct mapped_index): Include delimiting newlines.
+ 	* utils.c (strcmp_iw_ordered): Reformat the code for the next patch.
+Index: gdb-7.2/gdb/symtab.c
+===================================================================
+--- gdb-7.2.orig/gdb/symtab.c	2011-07-28 00:14:44.000000000 +0200
++++ gdb-7.2/gdb/symtab.c	2011-07-28 00:21:48.000000000 +0200
+@@ -2889,7 +2889,10 @@ struct search_symbols_data
+ {
+   int nfiles;
+   char **files;
+-  char *regexp;
++
++  /* It is true if PREG contains valid data, false otherwise.  */
++  unsigned preg_p : 1;
++  regex_t preg;
+ };
+ 
+ /* A callback for expand_symtabs_matching.  */
+@@ -2907,7 +2910,7 @@ search_symbols_name_matches (const char 
+ {
+   struct search_symbols_data *data = user_data;
+ 
+-  return data->regexp == NULL || re_exec (symname);
++  return !data->preg_p || regexec (&data->preg, symname, 0, NULL, 0) == 0;
+ }
+ 
+ /* Search the symbol table for matches to the regular expression REGEXP,
+@@ -2953,9 +2956,13 @@ search_symbols (char *regexp, domain_enu
+   struct symbol_search *sr;
+   struct symbol_search *psr;
+   struct symbol_search *tail;
+-  struct cleanup *old_chain = NULL;
+   struct search_symbols_data datum;
+ 
++  /* OLD_CHAIN .. RETVAL_CHAIN is always freed, RETVAL_CHAIN .. current
++     CLEANUP_CHAIN is freed only in the case of an error.  */
++  struct cleanup *old_chain = make_cleanup (null_cleanup, NULL);
++  struct cleanup *retval_chain;
++
+   if (kind < VARIABLES_DOMAIN)
+     error (_("must search on specific domain"));
+ 
+@@ -2966,6 +2973,7 @@ search_symbols (char *regexp, domain_enu
+ 
+   sr = *matches = NULL;
+   tail = NULL;
++  datum.preg_p = 0;
+ 
+   if (regexp != NULL)
+     {
+@@ -2975,6 +2983,7 @@ search_symbols (char *regexp, domain_enu
+          and <TYPENAME> or <OPERATOR>. */
+       char *opend;
+       char *opname = operator_chars (regexp, &opend);
++      int errcode;
+ 
+       if (*opname)
+ 	{
+@@ -3002,8 +3011,16 @@ search_symbols (char *regexp, domain_enu
+ 	    }
+ 	}
+ 
+-      if (0 != (val = re_comp (regexp)))
+-	error (_("Invalid regexp (%s): %s"), val, regexp);
++      errcode = regcomp (&datum.preg, regexp, REG_NOSUB);
++      if (errcode != 0)
++	{
++	  char *err = get_regcomp_error (errcode, &datum.preg);
++
++	  make_cleanup (xfree, err);
++	  error (_("Invalid regexp (%s): %s"), err, regexp);
++	}
++      datum.preg_p = 1;
++      make_regfree_cleanup (&datum.preg);
+     }
+ 
+   /* Search through the partial symtabs *first* for all symbols
+@@ -3012,7 +3029,6 @@ search_symbols (char *regexp, domain_enu
+ 
+   datum.nfiles = nfiles;
+   datum.files = files;
+-  datum.regexp = regexp;
+   ALL_OBJFILES (objfile)
+   {
+     if (objfile->sf)
+@@ -3023,6 +3039,8 @@ search_symbols (char *regexp, domain_enu
+ 						&datum);
+   }
+ 
++  retval_chain = old_chain;
++
+   /* Here, we search through the minimal symbol tables for functions
+      and variables that match, and force their symbols to be read.
+      This is in particular necessary for demangled variable names,
+@@ -3047,8 +3065,9 @@ search_symbols (char *regexp, domain_enu
+ 	    MSYMBOL_TYPE (msymbol) == ourtype3 ||
+ 	    MSYMBOL_TYPE (msymbol) == ourtype4)
+ 	  {
+-	    if (regexp == NULL
+-		|| re_exec (SYMBOL_NATURAL_NAME (msymbol)) != 0)
++	    if (!datum.preg_p
++		|| regexec (&datum.preg, SYMBOL_NATURAL_NAME (msymbol), 0,
++			    NULL, 0) == 0)
+ 	      {
+ 		if (0 == find_pc_symtab (SYMBOL_VALUE_ADDRESS (msymbol)))
+ 		  {
+@@ -3086,8 +3105,9 @@ search_symbols (char *regexp, domain_enu
+ 	      QUIT;
+ 
+ 	      if (file_matches (real_symtab->filename, files, nfiles)
+-		  && ((regexp == NULL
+-		       || re_exec (SYMBOL_NATURAL_NAME (sym)) != 0)
++		  && ((!datum.preg_p
++		       || regexec (&datum.preg, SYMBOL_NATURAL_NAME (sym), 0,
++				   NULL, 0) == 0)
+ 		      && ((kind == VARIABLES_DOMAIN
+ 			   && SYMBOL_CLASS (sym) != LOC_TYPEDEF
+ 			   && SYMBOL_CLASS (sym) != LOC_UNRESOLVED
+@@ -3125,7 +3145,7 @@ search_symbols (char *regexp, domain_enu
+ 		  tail = sort_search_symbols (&dummy, nfound);
+ 		  sr = dummy.next;
+ 
+-		  old_chain = make_cleanup_free_search_symbols (sr);
++		  make_cleanup_free_search_symbols (sr);
+ 		}
+ 	      else
+ 		tail = sort_search_symbols (prevtail, nfound);
+@@ -3147,8 +3167,9 @@ search_symbols (char *regexp, domain_enu
+ 	    MSYMBOL_TYPE (msymbol) == ourtype3 ||
+ 	    MSYMBOL_TYPE (msymbol) == ourtype4)
+ 	  {
+-	    if (regexp == NULL
+-		|| re_exec (SYMBOL_NATURAL_NAME (msymbol)) != 0)
++	    if (!datum.preg_p
++		|| regexec (&datum.preg, SYMBOL_NATURAL_NAME (msymbol), 0,
++			    NULL, 0) == 0)
+ 	      {
+ 		/* Functions:  Look up by address. */
+ 		if (kind != FUNCTIONS_DOMAIN ||
+@@ -3169,7 +3190,7 @@ search_symbols (char *regexp, domain_enu
+ 			if (tail == NULL)
+ 			  {
+ 			    sr = psr;
+-			    old_chain = make_cleanup_free_search_symbols (sr);
++			    make_cleanup_free_search_symbols (sr);
+ 			  }
+ 			else
+ 			  tail->next = psr;
+@@ -3181,9 +3202,9 @@ search_symbols (char *regexp, domain_enu
+       }
+     }
+ 
++  discard_cleanups (retval_chain);
++  do_cleanups (old_chain);
+   *matches = sr;
+-  if (sr != NULL)
+-    discard_cleanups (old_chain);
+ }
+ 
+ /* Helper function for symtab_symbol_info, this function uses

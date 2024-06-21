@@ -1,0 +1,69 @@
+commit 9e0aa64f5510861b2517c5841b59adde8e423540
+Author: Jan Kratochvil <jan.kratochvil@redhat.com>
+Date:   Mon May 19 20:20:27 2014 +0200
+
+    Fix gdbserver qGetTLSAddr for x86_64 -m32
+    
+    gdbserver makes libthread_db to access uninitialized memory.  Surprisingly it
+    does not harm normally, even -fsanitize=address works with current gdbserver.
+    I have found just valgrind detects it as a very first warning for gdbserver:
+    
+    Syscall param ptrace(addr) contains uninitialised byte(s)
+       at 0x3721EECEBE: ptrace (ptrace.c:45)
+       by 0x436EE5: ps_get_thread_area (linux-x86-low.c:252)
+       by 0x5559D02: __td_ta_lookup_th_unique (td_ta_map_lwp2thr.c:157)
+       by 0x5559EC3: td_ta_map_lwp2thr (td_ta_map_lwp2thr.c:207)
+       by 0x43F87D: find_one_thread (thread-db.c:281)
+       by 0x440038: thread_db_get_tls_address (thread-db.c:505)
+       by 0x40F6D0: handle_query (server.c:2004)
+       by 0x4124CF: process_serial_event (server.c:3445)
+       by 0x4136B6: handle_serial_event (server.c:3889)
+       by 0x419571: handle_file_event (event-loop.c:434)
+       by 0x418D38: process_event (event-loop.c:189)
+       by 0x419AB7: start_event_loop (event-loop.c:552)
+    
+    Reproducible with:
+    cd gdb/testsuite
+    g++ -o gdb.threads/tls gdb.threads/tls{,2}.c -m32 -pthread
+    ../gdbserver/gdbserver :1234 gdb.threads/tls
+    ../gdb -batch gdb.threads/tls -ex 'target remote :1234' -ex 'b spin' -ex c -ex 'p a_thread_local'
+    
+    It is more easily reproducible even without valgrind using s/0x00/0xff/ in the
+    attached patch.  It will then turn the output of reproducer above:
+    $1 = 0
+    ->
+    Cannot find thread-local storage for Thread 29044, executable file .../gdb/testsuite/gdb.threads/tls:
+    Remote target failed to process qGetTLSAddr request
+    
+    gdb/gdbserver/
+    2014-05-19  Jan Kratochvil  <jan.kratochvil@redhat.com>
+    
+    	Fix gdbserver qGetTLSAddr for x86_64 -m32.
+    	* linux-x86-low.c (X86_64_USER_REGS): New.
+    	(x86_fill_gregset): Call memset for BUF first in x86_64 -m32 case.
+    
+    Message-ID: <20140410114901.GA16411@host2.jankratochvil.net>
+
+Index: gdb-7.2/gdb/gdbserver/linux-x86-low.c
+===================================================================
+--- gdb-7.2.orig/gdb/gdbserver/linux-x86-low.c
++++ gdb-7.2/gdb/gdbserver/linux-x86-low.c
+@@ -138,6 +138,7 @@ static const int x86_64_regmap[] =
+ };
+ 
+ #define X86_64_NUM_REGS (sizeof (x86_64_regmap) / sizeof (x86_64_regmap[0]))
++#define X86_64_USER_REGS (GS + 1)
+ 
+ #else /* ! __x86_64__ */
+ 
+@@ -267,6 +268,10 @@ x86_fill_gregset (struct regcache *regca
+ 	  collect_register (regcache, i, ((char *) buf) + x86_64_regmap[i]);
+       return;
+     }
++
++  /* 32-bit inferior registers need to be zero-extended.
++     Callers would read uninitialized memory otherwise.  */
++  memset (buf, 0x00, X86_64_USER_REGS * 8);
+ #endif
+ 
+   for (i = 0; i < I386_NUM_REGS; i++)

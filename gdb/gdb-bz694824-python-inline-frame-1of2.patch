@@ -1,0 +1,73 @@
+http://sourceware.org/ml/gdb-patches/2011-01/msg00133.html
+Subject: FYI: bug fix in gdb.Frame.block
+
+I am checking this in.
+
+The gdb.Frame.block method returned the wrong results for a frame that
+had frames inlined into it.
+
+I don't have a simple test case, but the problem was easily reproduced
+using the system python on Fedora.
+
+This patch fixes the problem by changing Frame.block to use
+get_frame_block.
+
+Built and regtested on x86-64 (compile farm).
+
+Tom
+
+2011-01-06  Tom Tromey  <tromey@redhat.com>
+
+	* python/py-frame.c (frapy_block): Use get_frame_block.
+
+Index: python/py-frame.c
+===================================================================
+RCS file: /cvs/src/src/gdb/python/py-frame.c,v
+retrieving revision 1.11
+diff -u -r1.11 py-frame.c
+--- ./gdb/python/py-frame.c	6 Jan 2011 00:57:04 -0000	1.11
++++ ./gdb/python/py-frame.c	6 Jan 2011 17:14:55 -0000
+@@ -211,20 +211,22 @@
+ frapy_block (PyObject *self, PyObject *args)
+ {
+   struct frame_info *frame;
+-  struct block *block = NULL;
++  struct block *block = NULL, *fn_block;
+   volatile struct gdb_exception except;
+-  struct symtab_and_line sal;
+ 
+   TRY_CATCH (except, RETURN_MASK_ALL)
+     {
+       FRAPY_REQUIRE_VALID ((frame_object *) self, frame);
+-
+-      find_frame_sal (frame, &sal);
+-      block = block_for_pc (get_frame_address_in_block (frame));
++      block = get_frame_block (frame, NULL);
+     }
+   GDB_PY_HANDLE_EXCEPTION (except);
+ 
+-  if (!sal.symtab || !sal.symtab->objfile)
++  for (fn_block = block;
++       fn_block != NULL && BLOCK_FUNCTION (fn_block) == NULL;
++       fn_block = BLOCK_SUPERBLOCK (fn_block))
++    ;
++
++  if (block == NULL || fn_block == NULL || BLOCK_FUNCTION (fn_block) == NULL)
+     {
+       PyErr_SetString (PyExc_RuntimeError,
+ 		       _("Cannot locate object file for block."));
+@@ -232,7 +234,12 @@
+     }
+ 
+   if (block)
+-    return block_to_block_object (block, sal.symtab->objfile);
++    {
++      struct symtab *symt;
++
++      symt = SYMBOL_SYMTAB (BLOCK_FUNCTION (fn_block));
++      return block_to_block_object (block, symt->objfile);
++    }
+ 
+   Py_RETURN_NONE;
+ }
+

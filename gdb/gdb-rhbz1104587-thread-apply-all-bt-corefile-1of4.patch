@@ -1,0 +1,234 @@
+Original message by Jan Kratochvil:
+
+  <https://sourceware.org/ml/gdb-patches/2011-07/msg00343.html>
+  Message-ID: <20110713142758.GA5862@host1.jankratochvil.net>
+
+  On Thu, 02 Sep 2010 20:39:58 +0200, Doug Evans wrote:
+  > Assuming (and I don't know dwarf2_fetch_die_location_block well) just
+  > needs the dies and not a symtab,
+
+  Yes, it needs CU but not symtab.  I guess I probably messed up these two
+  before.
+
+
+  > how about moving this bit of code to
+  > its own function, and calling it from both dw2_do_instantiate_symtab
+  > and dwarf2_fetch_die_location_block.
+  > 
+  >     if (per_cu->from_debug_types)
+  >       read_signatured_type_at_offset (objfile, per_cu->offset);
+  >     else
+  >       load_full_comp_unit (per_cu, objfile);
+
+  Done.
+
+
+  > max-cache-age == 0 is defined to disable the cache.  It's a useful
+  > test vehicle, and I don't see any reason to disallow it either.
+
+  The testsuite now PASSes with max-cache-age == 0.  I haven't made it a global
+  default.
+
+
+  That `if' there is in fact a workaround, `load_cu' could be called
+  unconditionally:
+  +  if (per_cu->cu == NULL)
+  +    load_cu (per_cu);
+
+  But such conditional for load_full_comp_unit is already present there as in
+  follow_die_offset and it faces a change in:
+		    Re: [RFA] template names with arguments out of DW_AT_name
+		    http://sourceware.org/ml/gdb-patches/2010-08/msg00161.html
+  which implemented RealView compatibility without a testcase and RealView
+  download is only for MS-Windows (I haven't tried if it is Wine compatible).
+
+  Anyway I find that conditional need there as a different Bug.
+
+  No regressions on {x86_64,x86_64-m32,i686}-fedora15-linux-gnu.  Also with no
+  global "maintenance set dwarf2 max-cache-age 0".
+
+
+commit 918dd9105923fdbf070e5782aed7cd6275caa321
+Author: Jan Kratochvil <jan.kratochvil@redhat.com>
+Date:   Tue Jul 19 20:28:52 2011 +0000
+
+    gdb/
+    	Fix crash if referenced CU is aged out.
+    	* dwarf2loc.c (per_cu_dwarf_call): New variable back_to, use to for
+    	xfree of block.data.
+    	(indirect_pieced_value): New variable back_to, use to for xfree of
+    	baton.data.
+    	(dwarf2_compile_expr_to_ax): New variable back_to, use to for xfree of
+    	block.data.
+    	* dwarf2read.c (dwarf2_find_base_address): New prototype.
+    	(load_cu): New function from ...
+    	(dw2_do_instantiate_symtab): ... the code here ...
+    	(process_full_comp_unit): ... and here.
+    	(dwarf2_fetch_die_location_block): Call load_cu first.  Call xmemdup on
+    	retval.data.
+    
+    gdb/testsuite/
+    	Fix crash if referenced CU is aged out.
+    	* gdb.dwarf2/dw2-op-call.exp (maintenance set dwarf2 max-cache-age 0):
+    	New.
+    	* gdb.dwarf2/implptr.exp: Likewise.
+
+
+Index: gdb-7.2/gdb/dwarf2loc.c
+===================================================================
+--- gdb-7.2.orig/gdb/dwarf2loc.c
++++ gdb-7.2/gdb/dwarf2loc.c
+@@ -263,13 +263,18 @@ per_cu_dwarf_call (struct dwarf_expr_con
+ 		   struct dwarf2_per_cu_data *per_cu)
+ {
+   struct dwarf2_locexpr_baton block;
++  struct cleanup *back_to;
+ 
+   block = dwarf2_fetch_die_location_block (die_offset, per_cu);
+ 
++  back_to = make_cleanup (xfree, (void *) block.data);
++
+   /* DW_OP_call_ref is currently not supported.  */
+   gdb_assert (block.per_cu == per_cu);
+ 
+   dwarf_expr_eval (ctx, block.data, block.size);
++
++  do_cleanups (back_to);
+ }
+ 
+ /* Helper interface of per_cu_dwarf_call for dwarf2_evaluate_loc_desc.  */
+@@ -2001,12 +2006,14 @@ compile_dwarf_to_ax (struct agent_expr *
+ 	case DW_OP_call4:
+ 	  {
+ 	    struct dwarf2_locexpr_baton block;
++	    struct cleanup *back_to;
+ 	    int size = (op == DW_OP_call2 ? 2 : 4);
+ 
+ 	    uoffset = extract_unsigned_integer (op_ptr, size, byte_order);
+ 	    op_ptr += size;
+ 
+ 	    block = dwarf2_fetch_die_location_block (uoffset, per_cu);
++	    back_to = make_cleanup (xfree, (void *) block.data);
+ 
+ 	    /* DW_OP_call_ref is currently not supported.  */
+ 	    gdb_assert (block.per_cu == per_cu);
+@@ -2014,6 +2021,8 @@ compile_dwarf_to_ax (struct agent_expr *
+ 	    compile_dwarf_to_ax (expr, loc, arch, addr_size,
+ 				 block.data, block.data + block.size,
+ 				 per_cu);
++
++	    do_cleanups (back_to);
+ 	  }
+ 	  break;
+ 
+Index: gdb-7.2/gdb/dwarf2read.c
+===================================================================
+--- gdb-7.2.orig/gdb/dwarf2read.c
++++ gdb-7.2/gdb/dwarf2read.c
+@@ -879,6 +879,9 @@ static void dwarf2_build_include_psymtab
+                                            struct die_info *,
+                                            struct partial_symtab *);
+ 
++static void dwarf2_find_base_address (struct die_info *die,
++				      struct dwarf2_cu *cu);
++
+ static void dwarf2_build_psymtabs_hard (struct objfile *);
+ 
+ static void scan_partial_symbols (struct partial_die_info *,
+@@ -1653,6 +1656,25 @@ dwarf2_get_section_info (struct objfile
+ 
+ 
+ 
++/* Read in PER_CU->CU.  This function is unrelated to symtabs, symtab would
++   have to be created afterwards.  You should call age_cached_comp_units after
++   processing PER_CU->CU.  dw2_setup must have been already called.  */
++
++static void
++load_cu (struct dwarf2_per_cu_data *per_cu)
++{
++  if (per_cu->debug_type_section != NULL)
++    read_signatured_type_at_offset (per_cu->objfile,
++				    per_cu->debug_type_section,
++				    per_cu->offset);
++  else
++    load_full_comp_unit (per_cu, per_cu->objfile);
++
++  gdb_assert (per_cu->cu != NULL);
++
++  dwarf2_find_base_address (per_cu->cu->dies, per_cu->cu);
++}
++
+ /* Read in the symbols for PER_CU.  OBJFILE is the objfile from which
+    this CU came.  */
+ static void
+@@ -1665,12 +1687,7 @@ dw2_do_instantiate_symtab (struct objfil
+ 
+   queue_comp_unit (per_cu, objfile);
+ 
+-  if (per_cu->debug_type_section)
+-    read_signatured_type_at_offset (objfile,
+-				    per_cu->debug_type_section,
+-				    per_cu->offset);
+-  else
+-    load_full_comp_unit (per_cu, objfile);
++  load_cu (per_cu);
+ 
+   process_queue (objfile);
+ 
+@@ -4478,8 +4495,6 @@ process_full_comp_unit (struct dwarf2_pe
+   delayed_list_cleanup = make_cleanup (method_list_cleanup,
+ 				       &cu->method_list);
+ 
+-  dwarf2_find_base_address (cu->dies, cu);
+-
+   /* Do line number decoding in read_file_scope () */
+   process_die (cu->dies, cu);
+ 
+@@ -12851,7 +12866,8 @@ follow_die_ref (struct die_info *src_die
+ }
+ 
+ /* Return DWARF block and its CU referenced by OFFSET at PER_CU.  Returned
+-   value is intended for DW_OP_call*.  */
++   value is intended for DW_OP_call*.  You must call xfree on returned
++   dwarf2_locexpr_baton->data.  */
+ 
+ struct dwarf2_locexpr_baton
+ dwarf2_fetch_die_location_block (unsigned int offset,
+@@ -12862,6 +12878,10 @@ dwarf2_fetch_die_location_block (unsigne
+   struct attribute *attr;
+   struct dwarf2_locexpr_baton retval;
+ 
++  if (per_cu->cu == NULL)
++    load_cu (per_cu);
++  cu = per_cu->cu;
++
+   die = follow_die_offset (offset, &cu);
+   if (!die)
+     error (_("Dwarf Error: Cannot find DIE at 0x%x referenced in module %s"),
+@@ -12886,6 +12906,12 @@ dwarf2_fetch_die_location_block (unsigne
+       retval.size = DW_BLOCK (attr)->size;
+     }
+   retval.per_cu = cu->per_cu;
++
++  if (retval.data)
++    retval.data = xmemdup (retval.data, retval.size, retval.size);
++
++  age_cached_comp_units ();
++
+   return retval;
+ }
+ 
+Index: gdb-7.2/gdb/testsuite/gdb.dwarf2/dw2-op-call.exp
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/gdb.dwarf2/dw2-op-call.exp
++++ gdb-7.2/gdb/testsuite/gdb.dwarf2/dw2-op-call.exp
+@@ -36,6 +36,9 @@ if  { [gdb_compile "${srcdir}/${subdir}/
+ 
+ clean_restart $executable
+ 
++# Additional test to verify the referenced CU is not aged out.
++gdb_test_no_output "maintenance set dwarf2 max-cache-age 0"
++
+ gdb_test "p array1" " = 1"
+ gdb_test "p array2" " = 2" "array2 using DW_OP_call2"
+ gdb_test "p array3" " = 3" "array3 using DW_OP_call4"

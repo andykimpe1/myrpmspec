@@ -1,0 +1,951 @@
+Original message from Sergio Durigan Junior:
+
+  <https://sourceware.org/ml/gdb-patches/2013-07/msg00651.html>
+  Message-Id: <1374869594-16965-1-git-send-email-sergiodj@redhat.com>
+
+====
+
+commit eb14d4068893a301911485d732b4ae961c34e532
+Author: Sergio Durigan Junior <sergiodj@redhat.com>
+Date:   Fri Aug 9 16:54:43 2013 +0000
+
+    This patch implements the new gdbarch method gdbarch_gdb_signal_to_target.
+    It will be used when one wants to convert between the internal GDB signal
+    representation (enum gdb_signal) and the target's representation.
+    
+    The idea of this patch came from a chat between Pedro and I on IRC, plus
+    the discussion of my patches to add the new $_exitsignal convenience
+    variable:
+    
+    	<http://sourceware.org/ml/gdb-patches/2013-06/msg00452.html>
+    	<http://sourceware.org/ml/gdb-patches/2013-06/msg00352.html>
+    
+    What I did was to investigate, on the Linux kernel, which targets shared
+    the signal numbers definition with the generic definition, present at
+    <include/uapi/asm-generic/signal.h>.  For the record, I used linux-3.10-rc7
+    as the main source of information, always looking at
+    <arch/<ARCH_NAME>/include/uapi/asm/signal.h>.  For SIGRTMAX (which defaults
+    to _NSIG in most cases), I had to look at different signal-related
+    files, but most of them (except MIPS) were defined to 64 anyway.
+    
+    Then, with all the differences in hand, I implemented the bits on each
+    target.
+    
+    2013-08-09  Sergio Durigan Junior  <sergiodj@redhat.com>
+    
+    	* linux-tdep.c: Define enum with generic signal numbers.
+    	(linux_gdb_signal_from_target): New function.
+    	(linux_gdb_signal_to_target): Likewise.
+    	(linux_init_abi): Set gdbarch_gdb_signal_{to,from}_target
+    	methods to the functions above.
+    	* linux-tdep.h (linux_gdb_signal_from_target): New prototype.
+    	(linux_gdb_signal_to_target): Likewise.
+    	* alpha-linux-tdep.c: Define new enum with signals different
+    	from generic Linux kernel.
+    	(alpha_linux_gdb_signal_from_target): New function.
+    	(alpha_linux_gdb_signal_to_target): Likewise.
+    	(alpha_linux_init_abi): Set gdbarch_gdb_signal_{to,from}_target
+    	with the functions mentioned above.
+    	* avr-tdep.c: Define enum with differences between Linux kernel
+    	and AVR signals.
+    	(avr_linux_gdb_signal_from_target): New function.
+    	(avr_linux_gdb_signal_to_target): Likewise.
+    	(avr_gdbarch_init): Set gdbarch_gdb_signal_{to,from}_target to
+    	the functions mentioned above.
+    	* sparc-linux-tdep.c: Define enum with differences between SPARC
+    	and generic Linux kernel signal numbers.
+    	(sparc32_linux_gdb_signal_from_target): New function.
+    	(sparc32_linux_gdb_signal_to_target): Likewise.
+    	(sparc32_linux_init_abi): Set gdbarch_gdb_signal_{to,from}_target
+    	to the functions defined above.
+    	* xtensa-linux-tdep.c: Define enum with differences between
+    	Xtensa and Linux kernel generic signals.
+    	(xtensa_linux_gdb_signal_from_target): New function.
+    	(xtensa_linux_gdb_signal_to_target): Likewise.
+    	(xtensa_linux_init_abi): Set gdbarch_gdb_signal_to_target
+    	to the functions defined above.
+    	* mips-linux-tdep.c: Define enum with differences between
+    	signals in MIPS and Linux kernel generic ones.
+    	(mips_gdb_signal_to_target): New function.
+    	(mips_gdb_signal_from_target): Redefine to use new enum, handle
+    	only different signals from the Linux kernel generic.
+    	(mips_linux_init_abi): Set gdbarch_gdb_signal_{to,from}_target
+    	the functions defined above.
+    	* mips-linux-tdep.h (enum mips_signals): Remove.
+
+Index: gdb-7.2/gdb/alpha-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/alpha-linux-tdep.c
++++ gdb-7.2/gdb/alpha-linux-tdep.c
+@@ -29,6 +29,35 @@
+ #include "linux-tdep.h"
+ #include "alpha-tdep.h"
+ 
++/* This enum represents the signals' numbers on the Alpha
++   architecture.  It just contains the signal definitions which are
++   different from the generic implementation.
++
++   It is derived from the file <arch/alpha/include/uapi/asm/signal.h>,
++   from the Linux kernel tree.  */
++
++enum
++  {
++    /* SIGABRT is the same as in the generic implementation, but is
++       defined here because SIGIOT depends on it.  */
++    ALPHA_LINUX_SIGABRT = 6,
++    ALPHA_LINUX_SIGEMT = 7,
++    ALPHA_LINUX_SIGBUS = 10,
++    ALPHA_LINUX_SIGSYS = 12,
++    ALPHA_LINUX_SIGURG = 16,
++    ALPHA_LINUX_SIGSTOP = 17,
++    ALPHA_LINUX_SIGTSTP = 18,
++    ALPHA_LINUX_SIGCONT = 19,
++    ALPHA_LINUX_SIGCHLD = 20,
++    ALPHA_LINUX_SIGIO = 23,
++    ALPHA_LINUX_SIGINFO = 29,
++    ALPHA_LINUX_SIGUSR1 = 30,
++    ALPHA_LINUX_SIGUSR2 = 31,
++    ALPHA_LINUX_SIGPOLL = ALPHA_LINUX_SIGIO,
++    ALPHA_LINUX_SIGPWR = ALPHA_LINUX_SIGINFO,
++    ALPHA_LINUX_SIGIOT = ALPHA_LINUX_SIGABRT,
++  };
++
+ /* Under GNU/Linux, signal handler invocations can be identified by
+    the designated code sequence that is used to return from a signal
+    handler.  In particular, the return address of a signal handler
+@@ -207,6 +236,61 @@ alpha_linux_regset_from_core_section (st
+   return NULL;
+ }
+ 
++/* Implementation of `gdbarch_gdb_signal_to_target', as defined in
++   gdbarch.h.  */
++
++static int
++alpha_linux_gdb_signal_to_target (struct gdbarch *gdbarch,
++				  enum target_signal signal)
++{
++  switch (signal)
++    {
++    case TARGET_SIGNAL_EMT:
++      return ALPHA_LINUX_SIGEMT;
++
++    case TARGET_SIGNAL_BUS:
++      return ALPHA_LINUX_SIGBUS;
++
++    case TARGET_SIGNAL_SYS:
++      return ALPHA_LINUX_SIGSYS;
++
++    case TARGET_SIGNAL_URG:
++      return ALPHA_LINUX_SIGURG;
++
++    case TARGET_SIGNAL_STOP:
++      return ALPHA_LINUX_SIGSTOP;
++
++    case TARGET_SIGNAL_TSTP:
++      return ALPHA_LINUX_SIGTSTP;
++
++    case TARGET_SIGNAL_CONT:
++      return ALPHA_LINUX_SIGCONT;
++
++    case TARGET_SIGNAL_CHLD:
++      return ALPHA_LINUX_SIGCHLD;
++
++    case TARGET_SIGNAL_IO:
++      return ALPHA_LINUX_SIGIO;
++
++    case TARGET_SIGNAL_INFO:
++      return ALPHA_LINUX_SIGINFO;
++
++    case TARGET_SIGNAL_USR1:
++      return ALPHA_LINUX_SIGUSR1;
++
++    case TARGET_SIGNAL_USR2:
++      return ALPHA_LINUX_SIGUSR2;
++
++    case TARGET_SIGNAL_POLL:
++      return ALPHA_LINUX_SIGPOLL;
++
++    case TARGET_SIGNAL_PWR:
++      return ALPHA_LINUX_SIGPWR;
++    }
++
++  return linux_gdb_signal_to_target (gdbarch, signal);
++}
++
+ static void
+ alpha_linux_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
+ {
+@@ -238,6 +322,9 @@ alpha_linux_init_abi (struct gdbarch_inf
+ 
+   set_gdbarch_regset_from_core_section
+     (gdbarch, alpha_linux_regset_from_core_section);
++
++  set_gdbarch_gdb_signal_to_target (gdbarch,
++				    alpha_linux_gdb_signal_to_target);
+ }
+ 
+ /* Provide a prototype to silence -Wmissing-prototypes.  */
+Index: gdb-7.2/gdb/avr-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/avr-tdep.c
++++ gdb-7.2/gdb/avr-tdep.c
+@@ -37,6 +37,7 @@
+ #include "regcache.h"
+ #include "gdb_string.h"
+ #include "dis-asm.h"
++#include "linux-tdep.h"
+ 
+ /* AVR Background:
+ 
+@@ -194,6 +195,19 @@ struct gdbarch_tdep
+   struct type *pc_type;
+ };
+ 
++/* This enum represents the signals' numbers on the AVR
++   architecture.  It just contains the signal definitions which are
++   different from the generic implementation.
++
++   It is derived from the file <arch/avr32/include/uapi/asm/signal.h>,
++   from the Linux kernel tree.  */
++
++enum
++  {
++    AVR_LINUX_SIGRTMIN = 32,
++    AVR_LINUX_SIGRTMAX = 63,
++  };
++
+ /* Lookup the name of a register given it's number. */
+ 
+ static const char *
+@@ -1342,6 +1356,38 @@ avr_dwarf_reg_to_regnum (struct gdbarch
+   return -1;
+ }
+ 
++/* Implementation of `gdbarch_gdb_signal_to_target', as defined in
++   gdbarch.h.  */
++
++static int
++avr_linux_gdb_signal_to_target (struct gdbarch *gdbarch,
++				enum target_signal signal)
++{
++  switch (signal)
++    {
++    /* TARGET_SIGNAL_REALTIME_32 is not continuous in <gdb/signals.def>,
++       therefore we have to handle it here.  */
++    case TARGET_SIGNAL_REALTIME_32:
++      return AVR_LINUX_SIGRTMIN;
++
++    /* TARGET_SIGNAL_REALTIME_64 is not valid on AVR.  */
++    case TARGET_SIGNAL_REALTIME_64:
++      return -1;
++    }
++
++  /* TARGET_SIGNAL_REALTIME_33 to _63 are continuous.
++     AVR does not have _64.  */
++  if (signal >= TARGET_SIGNAL_REALTIME_33
++      && signal <= TARGET_SIGNAL_REALTIME_63)
++    {
++      int offset = signal - TARGET_SIGNAL_REALTIME_33;
++
++      return AVR_LINUX_SIGRTMIN + 1 + offset;
++    }
++
++  return linux_gdb_signal_to_target (gdbarch, signal);
++}
++
+ /* Initialize the gdbarch structure for the AVR's. */
+ 
+ static struct gdbarch *
+@@ -1445,6 +1491,9 @@ avr_gdbarch_init (struct gdbarch_info in
+   set_gdbarch_unwind_pc (gdbarch, avr_unwind_pc);
+   set_gdbarch_unwind_sp (gdbarch, avr_unwind_sp);
+ 
++  set_gdbarch_gdb_signal_to_target (gdbarch,
++				    avr_linux_gdb_signal_to_target);
++
+   return gdbarch;
+ }
+ 
+Index: gdb-7.2/gdb/gdbarch.c
+===================================================================
+--- gdb-7.2.orig/gdb/gdbarch.c
++++ gdb-7.2/gdb/gdbarch.c
+@@ -255,6 +255,7 @@ struct gdbarch
+   gdbarch_process_record_signal_ftype *process_record_signal;
+   gdbarch_target_signal_from_host_ftype *target_signal_from_host;
+   gdbarch_target_signal_to_host_ftype *target_signal_to_host;
++  gdbarch_gdb_signal_to_target_ftype *gdb_signal_to_target;
+   gdbarch_get_siginfo_type_ftype *get_siginfo_type;
+   gdbarch_record_special_symbol_ftype *record_special_symbol;
+   gdbarch_get_syscall_number_ftype *get_syscall_number;
+@@ -404,6 +405,7 @@ struct gdbarch startup_gdbarch =
+   0,  /* process_record_signal */
+   default_target_signal_from_host,  /* target_signal_from_host */
+   default_target_signal_to_host,  /* target_signal_to_host */
++  0,  /* gdb_signal_to_target */
+   0,  /* get_siginfo_type */
+   0,  /* record_special_symbol */
+   0,  /* get_syscall_number */
+@@ -684,6 +686,7 @@ verify_gdbarch (struct gdbarch *gdbarch)
+   /* Skip verify of process_record_signal, has predicate */
+   /* Skip verify of target_signal_from_host, invalid_p == 0 */
+   /* Skip verify of target_signal_to_host, invalid_p == 0 */
++  /* Skip verify of gdb_signal_to_target, has predicate */
+   /* Skip verify of get_siginfo_type, has predicate */
+   /* Skip verify of record_special_symbol, has predicate */
+   /* Skip verify of get_syscall_number, has predicate */
+@@ -919,6 +922,12 @@ gdbarch_dump (struct gdbarch *gdbarch, s
+                       "gdbarch_dump: gcore_bfd_target = %s\n",
+                       gdbarch->gcore_bfd_target);
+   fprintf_unfiltered (file,
++                      "gdbarch_dump: gdbarch_gdb_signal_to_target_p() = %d\n",
++                      gdbarch_gdb_signal_to_target_p (gdbarch));
++  fprintf_unfiltered (file,
++                      "gdbarch_dump: gdb_signal_to_target = <%s>\n",
++                      host_address_to_string (gdbarch->gdb_signal_to_target));
++  fprintf_unfiltered (file,
+                       "gdbarch_dump: gdbarch_get_longjmp_target_p() = %d\n",
+                       gdbarch_get_longjmp_target_p (gdbarch));
+   fprintf_unfiltered (file,
+@@ -3533,6 +3542,30 @@ set_gdbarch_target_signal_to_host (struc
+ }
+ 
+ int
++gdbarch_gdb_signal_to_target_p (struct gdbarch *gdbarch)
++{
++  gdb_assert (gdbarch != NULL);
++  return gdbarch->gdb_signal_to_target != NULL;
++}
++
++int
++gdbarch_gdb_signal_to_target (struct gdbarch *gdbarch, enum target_signal signal)
++{
++  gdb_assert (gdbarch != NULL);
++  gdb_assert (gdbarch->gdb_signal_to_target != NULL);
++  if (gdbarch_debug >= 2)
++    fprintf_unfiltered (gdb_stdlog, "gdbarch_gdb_signal_to_target called\n");
++  return gdbarch->gdb_signal_to_target (gdbarch, signal);
++}
++
++void
++set_gdbarch_gdb_signal_to_target (struct gdbarch *gdbarch,
++                                  gdbarch_gdb_signal_to_target_ftype gdb_signal_to_target)
++{
++  gdbarch->gdb_signal_to_target = gdb_signal_to_target;
++}
++
++int
+ gdbarch_get_siginfo_type_p (struct gdbarch *gdbarch)
+ {
+   gdb_assert (gdbarch != NULL);
+Index: gdb-7.2/gdb/gdbarch.h
+===================================================================
+--- gdb-7.2.orig/gdb/gdbarch.h
++++ gdb-7.2/gdb/gdbarch.h
+@@ -882,6 +882,20 @@ typedef int (gdbarch_target_signal_to_ho
+ extern int gdbarch_target_signal_to_host (struct gdbarch *gdbarch, enum target_signal ts);
+ extern void set_gdbarch_target_signal_to_host (struct gdbarch *gdbarch, gdbarch_target_signal_to_host_ftype *target_signal_to_host);
+ 
++/* Signal translation: translate the GDB's internal signal number into
++   the inferior's signal (target's) representation.  The implementation
++   of this method must be host independent.  IOW, don't rely on symbols
++   of the NAT_FILE header (the nm-*.h files), the host <signal.h>
++   header, or similar headers.
++   Return the target signal number if found, or -1 if the GDB internal
++   signal number is invalid. */
++
++extern int gdbarch_gdb_signal_to_target_p (struct gdbarch *gdbarch);
++
++typedef int (gdbarch_gdb_signal_to_target_ftype) (struct gdbarch *gdbarch, enum target_signal signal);
++extern int gdbarch_gdb_signal_to_target (struct gdbarch *gdbarch, enum target_signal signal);
++extern void set_gdbarch_gdb_signal_to_target (struct gdbarch *gdbarch, gdbarch_gdb_signal_to_target_ftype *gdb_signal_to_target);
++
+ /* Extra signal info inspection.
+   
+    Return a type suitable to inspect extra signal information. */
+Index: gdb-7.2/gdb/gdbarch.sh
+===================================================================
+--- gdb-7.2.orig/gdb/gdbarch.sh
++++ gdb-7.2/gdb/gdbarch.sh
+@@ -743,6 +743,15 @@ m:enum target_signal:target_signal_from_
+ # signal number.
+ m:int:target_signal_to_host:enum target_signal ts:ts::default_target_signal_to_host::0
+ 
++# Signal translation: translate the GDB's internal signal number into
++# the inferior's signal (target's) representation.  The implementation
++# of this method must be host independent.  IOW, don't rely on symbols
++# of the NAT_FILE header (the nm-*.h files), the host <signal.h>
++# header, or similar headers.
++# Return the target signal number if found, or -1 if the GDB internal
++# signal number is invalid.
++M:int:gdb_signal_to_target:enum target_signal signal:signal
++
+ # Extra signal info inspection.
+ #
+ # Return a type suitable to inspect extra signal information.
+Index: gdb-7.2/gdb/linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/linux-tdep.c
++++ gdb-7.2/gdb/linux-tdep.c
+@@ -25,6 +25,72 @@
+ #include "elf/common.h"
+ #include "value.h"
+ #include "infcall.h"
++#include "gdbarch.h"
++
++/* This enum represents the signals' numbers on a generic architecture
++   running the Linux kernel.  The definition of "generic" comes from
++   the file <include/uapi/asm-generic/signal.h>, from the Linux kernel
++   tree, which is the "de facto" implementation of signal numbers to
++   be used by new architecture ports.
++
++   For those architectures which have differences between the generic
++   standard (e.g., Alpha), we define the different signals (and *only*
++   those) in the specific target-dependent file (e.g.,
++   alpha-linux-tdep.c, for Alpha).  Please refer to the architecture's
++   tdep file for more information.
++
++   ARM deserves a special mention here.  On the file
++   <arch/arm/include/uapi/asm/signal.h>, it defines only one different
++   (and ARM-only) signal, which is SIGSWI, with the same number as
++   SIGRTMIN.  This signal is used only for a very specific target,
++   called ArthurOS (from RISCOS).  Therefore, we do not handle it on
++   the ARM-tdep file, and we can safely use the generic signal handler
++   here for ARM targets.
++
++   As stated above, this enum is derived from
++   <include/uapi/asm-generic/signal.h>, from the Linux kernel
++   tree.  */
++
++enum
++  {
++    LINUX_SIGHUP = 1,
++    LINUX_SIGINT = 2,
++    LINUX_SIGQUIT = 3,
++    LINUX_SIGILL = 4,
++    LINUX_SIGTRAP = 5,
++    LINUX_SIGABRT = 6,
++    LINUX_SIGIOT = 6,
++    LINUX_SIGBUS = 7,
++    LINUX_SIGFPE = 8,
++    LINUX_SIGKILL = 9,
++    LINUX_SIGUSR1 = 10,
++    LINUX_SIGSEGV = 11,
++    LINUX_SIGUSR2 = 12,
++    LINUX_SIGPIPE = 13,
++    LINUX_SIGALRM = 14,
++    LINUX_SIGTERM = 15,
++    LINUX_SIGSTKFLT = 16,
++    LINUX_SIGCHLD = 17,
++    LINUX_SIGCONT = 18,
++    LINUX_SIGSTOP = 19,
++    LINUX_SIGTSTP = 20,
++    LINUX_SIGTTIN = 21,
++    LINUX_SIGTTOU = 22,
++    LINUX_SIGURG = 23,
++    LINUX_SIGXCPU = 24,
++    LINUX_SIGXFSZ = 25,
++    LINUX_SIGVTALRM = 26,
++    LINUX_SIGPROF = 27,
++    LINUX_SIGWINCH = 28,
++    LINUX_SIGIO = 29,
++    LINUX_SIGPOLL = LINUX_SIGIO,
++    LINUX_SIGPWR = 30,
++    LINUX_SIGSYS = 31,
++    LINUX_SIGUNUSED = 31,
++
++    LINUX_SIGRTMIN = 32,
++    LINUX_SIGRTMAX = 64,
++  };
+ 
+ static struct gdbarch_data *linux_gdbarch_data_handle;
+ 
+@@ -181,6 +247,134 @@ linux_has_shared_address_space (void)
+   return target_is_uclinux;
+ }
+ 
++/* Implementation of `gdbarch_gdb_signal_to_target', as defined in
++   gdbarch.h.  This function is not static because it is exported to
++   other -tdep files.  */
++
++int
++linux_gdb_signal_to_target (struct gdbarch *gdbarch,
++			    enum target_signal signal)
++{
++  switch (signal)
++    {
++    case TARGET_SIGNAL_0:
++      return 0;
++
++    case TARGET_SIGNAL_HUP:
++      return LINUX_SIGHUP;
++
++    case TARGET_SIGNAL_INT:
++      return LINUX_SIGINT;
++
++    case TARGET_SIGNAL_QUIT:
++      return LINUX_SIGQUIT;
++
++    case TARGET_SIGNAL_ILL:
++      return LINUX_SIGILL;
++
++    case TARGET_SIGNAL_TRAP:
++      return LINUX_SIGTRAP;
++
++    case TARGET_SIGNAL_ABRT:
++      return LINUX_SIGABRT;
++
++    case TARGET_SIGNAL_FPE:
++      return LINUX_SIGFPE;
++
++    case TARGET_SIGNAL_KILL:
++      return LINUX_SIGKILL;
++
++    case TARGET_SIGNAL_BUS:
++      return LINUX_SIGBUS;
++
++    case TARGET_SIGNAL_SEGV:
++      return LINUX_SIGSEGV;
++
++    case TARGET_SIGNAL_SYS:
++      return LINUX_SIGSYS;
++
++    case TARGET_SIGNAL_PIPE:
++      return LINUX_SIGPIPE;
++
++    case TARGET_SIGNAL_ALRM:
++      return LINUX_SIGALRM;
++
++    case TARGET_SIGNAL_TERM:
++      return LINUX_SIGTERM;
++
++    case TARGET_SIGNAL_URG:
++      return LINUX_SIGURG;
++
++    case TARGET_SIGNAL_STOP:
++      return LINUX_SIGSTOP;
++
++    case TARGET_SIGNAL_TSTP:
++      return LINUX_SIGTSTP;
++
++    case TARGET_SIGNAL_CONT:
++      return LINUX_SIGCONT;
++
++    case TARGET_SIGNAL_CHLD:
++      return LINUX_SIGCHLD;
++
++    case TARGET_SIGNAL_TTIN:
++      return LINUX_SIGTTIN;
++
++    case TARGET_SIGNAL_TTOU:
++      return LINUX_SIGTTOU;
++
++    case TARGET_SIGNAL_IO:
++      return LINUX_SIGIO;
++
++    case TARGET_SIGNAL_XCPU:
++      return LINUX_SIGXCPU;
++
++    case TARGET_SIGNAL_XFSZ:
++      return LINUX_SIGXFSZ;
++
++    case TARGET_SIGNAL_VTALRM:
++      return LINUX_SIGVTALRM;
++
++    case TARGET_SIGNAL_PROF:
++      return LINUX_SIGPROF;
++
++    case TARGET_SIGNAL_WINCH:
++      return LINUX_SIGWINCH;
++
++    case TARGET_SIGNAL_USR1:
++      return LINUX_SIGUSR1;
++
++    case TARGET_SIGNAL_USR2:
++      return LINUX_SIGUSR2;
++
++    case TARGET_SIGNAL_PWR:
++      return LINUX_SIGPWR;
++
++    case TARGET_SIGNAL_POLL:
++      return LINUX_SIGPOLL;
++
++    /* TARGET_SIGNAL_REALTIME_32 is not continuous in <gdb/signals.def>,
++       therefore we have to handle it here.  */
++    case TARGET_SIGNAL_REALTIME_32:
++      return LINUX_SIGRTMIN;
++
++    /* Same comment applies to _64.  */
++    case TARGET_SIGNAL_REALTIME_64:
++      return LINUX_SIGRTMAX;
++    }
++
++  /* TARGET_SIGNAL_REALTIME_33 to _64 are continuous.  */
++  if (signal >= TARGET_SIGNAL_REALTIME_33
++      && signal <= TARGET_SIGNAL_REALTIME_63)
++    {
++      int offset = signal - TARGET_SIGNAL_REALTIME_33;
++
++      return LINUX_SIGRTMIN + 1 + offset;
++    }
++
++  return -1;
++}
++
+ void
+ _initialize_linux_tdep (void)
+ {
+@@ -194,4 +388,6 @@ _initialize_linux_tdep (void)
+ void
+ linux_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
+ {
++  set_gdbarch_gdb_signal_to_target (gdbarch,
++				    linux_gdb_signal_to_target);
+ }
+Index: gdb-7.2/gdb/linux-tdep.h
+===================================================================
+--- gdb-7.2.orig/gdb/linux-tdep.h
++++ gdb-7.2/gdb/linux-tdep.h
+@@ -24,4 +24,10 @@ struct type *linux_get_siginfo_type (str
+ 
+ extern void linux_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch);
+ 
++extern enum target_signal linux_gdb_signal_from_target (struct gdbarch *gdbarch,
++						     int signal);
++
++extern int linux_gdb_signal_to_target (struct gdbarch *gdbarch,
++				       enum target_signal signal);
++
+ #endif /* linux-tdep.h */
+Index: gdb-7.2/gdb/mips-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/mips-linux-tdep.c
++++ gdb-7.2/gdb/mips-linux-tdep.c
+@@ -42,6 +42,42 @@
+ 
+ static struct target_so_ops mips_svr4_so_ops;
+ 
++/* This enum represents the signals' numbers on the MIPS
++   architecture.  It just contains the signal definitions which are
++   different from the generic implementation.
++
++   It is derived from the file <arch/mips/include/uapi/asm/signal.h>,
++   from the Linux kernel tree.  */
++
++enum
++  {
++    MIPS_LINUX_SIGEMT = 7,
++    MIPS_LINUX_SIGBUS = 10,
++    MIPS_LINUX_SIGSYS = 12,
++    MIPS_LINUX_SIGUSR1 = 16,
++    MIPS_LINUX_SIGUSR2 = 17,
++    MIPS_LINUX_SIGCHLD = 18,
++    MIPS_LINUX_SIGCLD = MIPS_LINUX_SIGCHLD,
++    MIPS_LINUX_SIGPWR = 19,
++    MIPS_LINUX_SIGWINCH = 20,
++    MIPS_LINUX_SIGURG = 21,
++    MIPS_LINUX_SIGIO = 22,
++    MIPS_LINUX_SIGPOLL = MIPS_LINUX_SIGIO,
++    MIPS_LINUX_SIGSTOP = 23,
++    MIPS_LINUX_SIGTSTP = 24,
++    MIPS_LINUX_SIGCONT = 25,
++    MIPS_LINUX_SIGTTIN = 26,
++    MIPS_LINUX_SIGTTOU = 27,
++    MIPS_LINUX_SIGVTALRM = 28,
++    MIPS_LINUX_SIGPROF = 29,
++    MIPS_LINUX_SIGXCPU = 30,
++    MIPS_LINUX_SIGXFSZ = 31,
++
++    MIPS_LINUX_SIGRTMIN = 32,
++    MIPS_LINUX_SIGRT64 = 64,
++    MIPS_LINUX_SIGRTMAX = 127,
++  };
++
+ /* Figure out where the longjmp will land.
+    We expect the first arg to be a pointer to the jmp_buf structure
+    from which we extract the pc (MIPS_LINUX_JB_PC) that we will land
+@@ -1131,6 +1167,99 @@ mips_linux_syscall_next_pc (struct frame
+   return pc + 4;
+ }
+ 
++/* Implementation of `gdbarch_gdb_signal_to_target', as defined in
++   gdbarch.h.  */
++
++static int
++mips_gdb_signal_to_target (struct gdbarch *gdbarch,
++			   enum target_signal signal)
++{
++  switch (signal)
++    {
++    case TARGET_SIGNAL_EMT:
++      return MIPS_LINUX_SIGEMT;
++
++    case TARGET_SIGNAL_BUS:
++      return MIPS_LINUX_SIGBUS;
++
++    case TARGET_SIGNAL_SYS:
++      return MIPS_LINUX_SIGSYS;
++
++    case TARGET_SIGNAL_USR1:
++      return MIPS_LINUX_SIGUSR1;
++
++    case TARGET_SIGNAL_USR2:
++      return MIPS_LINUX_SIGUSR2;
++
++    case TARGET_SIGNAL_CHLD:
++      return MIPS_LINUX_SIGCHLD;
++
++    case TARGET_SIGNAL_PWR:
++      return MIPS_LINUX_SIGPWR;
++
++    case TARGET_SIGNAL_WINCH:
++      return MIPS_LINUX_SIGWINCH;
++
++    case TARGET_SIGNAL_URG:
++      return MIPS_LINUX_SIGURG;
++
++    case TARGET_SIGNAL_IO:
++      return MIPS_LINUX_SIGIO;
++
++    case TARGET_SIGNAL_POLL:
++      return MIPS_LINUX_SIGPOLL;
++
++    case TARGET_SIGNAL_STOP:
++      return MIPS_LINUX_SIGSTOP;
++
++    case TARGET_SIGNAL_TSTP:
++      return MIPS_LINUX_SIGTSTP;
++
++    case TARGET_SIGNAL_CONT:
++      return MIPS_LINUX_SIGCONT;
++
++    case TARGET_SIGNAL_TTIN:
++      return MIPS_LINUX_SIGTTIN;
++
++    case TARGET_SIGNAL_TTOU:
++      return MIPS_LINUX_SIGTTOU;
++
++    case TARGET_SIGNAL_VTALRM:
++      return MIPS_LINUX_SIGVTALRM;
++
++    case TARGET_SIGNAL_PROF:
++      return MIPS_LINUX_SIGPROF;
++
++    case TARGET_SIGNAL_XCPU:
++      return MIPS_LINUX_SIGXCPU;
++
++    case TARGET_SIGNAL_XFSZ:
++      return MIPS_LINUX_SIGXFSZ;
++
++    /* TARGET_SIGNAL_REALTIME_32 is not continuous in <gdb/signals.def>,
++       therefore we have to handle it here.  */
++    case TARGET_SIGNAL_REALTIME_32:
++      return MIPS_LINUX_SIGRTMIN;
++    }
++
++  if (signal >= TARGET_SIGNAL_REALTIME_33
++      && signal <= TARGET_SIGNAL_REALTIME_63)
++    {
++      int offset = signal - TARGET_SIGNAL_REALTIME_33;
++
++      return MIPS_LINUX_SIGRTMIN + 1 + offset;
++    }
++  else if (signal >= TARGET_SIGNAL_REALTIME_64
++	   && signal <= TARGET_SIGNAL_REALTIME_127)
++    {
++      int offset = signal - TARGET_SIGNAL_REALTIME_64;
++
++      return MIPS_LINUX_SIGRT64 + offset;
++    }
++
++  return linux_gdb_signal_to_target (gdbarch, signal);
++}
++
+ /* Initialize one of the GNU/Linux OS ABIs.  */
+ 
+ static void
+@@ -1206,6 +1335,9 @@ mips_linux_init_abi (struct gdbarch_info
+   set_gdbarch_core_read_description (gdbarch,
+ 				     mips_linux_core_read_description);
+ 
++  set_gdbarch_gdb_signal_to_target (gdbarch,
++				    mips_gdb_signal_to_target);
++
+   tdep->syscall_next_pc = mips_linux_syscall_next_pc;
+ 
+   if (tdesc_data)
+Index: gdb-7.2/gdb/sparc-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/sparc-linux-tdep.c
++++ gdb-7.2/gdb/sparc-linux-tdep.c
+@@ -91,6 +91,31 @@ static const struct tramp_frame sparc32_
+   sparc32_linux_sigframe_init
+ };
+ 
++/* This enum represents the signals' numbers on the SPARC
++   architecture.  It just contains the signal definitions which are
++   different from the generic implementation.
++
++   It is derived from the file <arch/sparc/include/uapi/asm/signal.h>,
++   from the Linux kernel tree.  */
++
++enum
++  {
++    SPARC_LINUX_SIGEMT = 7,
++    SPARC_LINUX_SIGBUS = 10,
++    SPARC_LINUX_SIGSYS = 12,
++    SPARC_LINUX_SIGURG = 16,
++    SPARC_LINUX_SIGSTOP = 17,
++    SPARC_LINUX_SIGTSTP = 18,
++    SPARC_LINUX_SIGCONT = 19,
++    SPARC_LINUX_SIGCHLD = 20,
++    SPARC_LINUX_SIGIO = 23,
++    SPARC_LINUX_SIGPOLL = SPARC_LINUX_SIGIO,
++    SPARC_LINUX_SIGLOST = 29,
++    SPARC_LINUX_SIGPWR = SPARC_LINUX_SIGLOST,
++    SPARC_LINUX_SIGUSR1 = 30,
++    SPARC_LINUX_SIGUSR2 = 31,
++  };
++
+ static void
+ sparc32_linux_sigframe_init (const struct tramp_frame *self,
+ 			     struct frame_info *this_frame,
+@@ -267,6 +292,61 @@ sparc32_linux_get_syscall_number (struct
+   return ret;
+ }
+ 
++/* Implementation of `gdbarch_gdb_signal_to_target', as defined in
++   gdbarch.h.  */
++
++static int
++sparc32_linux_gdb_signal_to_target (struct gdbarch *gdbarch,
++				    enum target_signal signal)
++{
++  switch (signal)
++    {
++    case TARGET_SIGNAL_EMT:
++      return SPARC_LINUX_SIGEMT;
++
++    case TARGET_SIGNAL_BUS:
++      return SPARC_LINUX_SIGBUS;
++
++    case TARGET_SIGNAL_SYS:
++      return SPARC_LINUX_SIGSYS;
++
++    case TARGET_SIGNAL_URG:
++      return SPARC_LINUX_SIGURG;
++
++    case TARGET_SIGNAL_STOP:
++      return SPARC_LINUX_SIGSTOP;
++
++    case TARGET_SIGNAL_TSTP:
++      return SPARC_LINUX_SIGTSTP;
++
++    case TARGET_SIGNAL_CONT:
++      return SPARC_LINUX_SIGCONT;
++
++    case TARGET_SIGNAL_CHLD:
++      return SPARC_LINUX_SIGCHLD;
++
++    case TARGET_SIGNAL_IO:
++      return SPARC_LINUX_SIGIO;
++
++    case TARGET_SIGNAL_POLL:
++      return SPARC_LINUX_SIGPOLL;
++
++    case TARGET_SIGNAL_LOST:
++      return SPARC_LINUX_SIGLOST;
++
++    case TARGET_SIGNAL_PWR:
++      return SPARC_LINUX_SIGPWR;
++
++    case TARGET_SIGNAL_USR1:
++      return SPARC_LINUX_SIGUSR1;
++
++    case TARGET_SIGNAL_USR2:
++      return SPARC_LINUX_SIGUSR2;
++    }
++
++  return linux_gdb_signal_to_target (gdbarch, signal);
++}
++
+ 
+ 
+ static void
+@@ -312,6 +392,9 @@ sparc32_linux_init_abi (struct gdbarch_i
+   set_xml_syscall_file_name (XML_SYSCALL_FILENAME_SPARC32);
+   set_gdbarch_get_syscall_number (gdbarch,
+                                   sparc32_linux_get_syscall_number);
++
++  set_gdbarch_gdb_signal_to_target (gdbarch,
++				    sparc32_linux_gdb_signal_to_target);
+ }
+ 
+ /* Provide a prototype to silence -Wmissing-prototypes.  */
+Index: gdb-7.2/gdb/xtensa-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/xtensa-linux-tdep.c
++++ gdb-7.2/gdb/xtensa-linux-tdep.c
+@@ -23,6 +23,52 @@
+ #include "solib-svr4.h"
+ #include "symtab.h"
+ 
++/* This enum represents the signals' numbers on the Xtensa
++   architecture.  It just contains the signal definitions which are
++   different from the generic implementation.
++
++   It is derived from the file <arch/xtensa/include/uapi/asm/signal.h>,
++   from the Linux kernel tree.  */
++
++enum
++  {
++    XTENSA_LINUX_SIGRTMIN = 32,
++    XTENSA_LINUX_SIGRTMAX = 63,
++  };
++
++/* Implementation of `gdbarch_gdb_signal_to_target', as defined in
++   gdbarch.h.  */
++
++static int
++xtensa_linux_gdb_signal_to_target (struct gdbarch *gdbarch,
++				   enum target_signal signal)
++{
++  switch (signal)
++    {
++    /* TARGET_SIGNAL_REALTIME_32 is not continuous in <gdb/signals.def>,
++       therefore we have to handle it here.  */
++    case TARGET_SIGNAL_REALTIME_32:
++      return XTENSA_LINUX_SIGRTMIN;
++
++    /* TARGET_SIGNAL_REALTIME_64 is not valid on Xtensa.  */
++    case TARGET_SIGNAL_REALTIME_64:
++      return -1;
++    }
++
++  /* TARGET_SIGNAL_REALTIME_33 to _63 are continuous.
++
++     Xtensa does not have _64.  */
++  if (signal >= TARGET_SIGNAL_REALTIME_33
++      && signal <= TARGET_SIGNAL_REALTIME_63)
++    {
++      int offset = signal - TARGET_SIGNAL_REALTIME_33;
++
++      return XTENSA_LINUX_SIGRTMIN + 1 + offset;
++    }
++
++  return linux_gdb_signal_to_target (gdbarch, signal);
++}
++
+ /* OS specific initialization of gdbarch.  */
+ 
+ static void
+@@ -32,6 +78,9 @@ xtensa_linux_init_abi (struct gdbarch_in
+ 
+   set_solib_svr4_fetch_link_map_offsets
+     (gdbarch, svr4_ilp32_fetch_link_map_offsets);
++
++  set_gdbarch_gdb_signal_to_target (gdbarch,
++				    xtensa_linux_gdb_signal_to_target);
+ }
+ 
+ /* Provide a prototype to silence -Wmissing-prototypes.  */

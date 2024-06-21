@@ -1,0 +1,418 @@
+http://sourceware.org/ml/gdb-patches/2010-09/msg00519.html
+Subject: [patch] Fix inferior execl of new PIE x86_64
+
+Hi,
+
+gcc -o 1 1.c -Wall -g -fPIE -pie; gdb -nx ./1 -ex 'b main' -ex r -ex c 
+
+Starting program: .../gdb/1 
+Breakpoint 1, main (argc=1, argv=0x7fffffffdff8) at 1.c:7
+7	  setbuf (stdout, NULL);
+Continuing.
+re-exec
+process 28056 is executing new program: .../gdb/1
+Error in re-setting breakpoint 1: Cannot access memory at address 0x80c
+exit
+Program exited normally.
+(gdb) _
+
+while it should be:
+
+re-exec
+process 28095 is executing new program: .../gdb/1
+Breakpoint 1, main (argc=2, argv=0x7fffffffe008) at 1.c:7
+7	  setbuf (stdout, NULL);
+(gdb) _
+
+The error comes from:
+
+throw_error <- memory_error <- read_memory <- read_memory_unsigned_integer <-
+amd64_analyze_prologue <- amd64_skip_prologue <- gdbarch_skip_prologue <-
+skip_prologue_sal <- find_function_start_sal <- symbol_found <- decode_variable
+<- decode_line_1 <- breakpoint_re_set_one <- catch_errors <- breakpoint_re_set
+<- clear_symtab_users <- new_symfile_objfile <-
+symbol_file_add_with_addrs_or_offsets <- symbol_file_add_from_bfd <-
+symbol_file_add <- symbol_file_add_main_1 <- symbol_file_add_main <-
+follow_exec
+
+
+I understand this hack is not nice, the correct way would be to unify more
+follow_exec with post_create_inferior.  But I could break it for non-GNU/Linux
+targets a lot.
+
+No regressions on {x86_64,x86_64-m32,i686}-fedora14snapshot-linux-gnu.
+
+
+Thanks,
+Jan
+
+
+for the demo above:
+------------------------------------------------------------------------------
+#include <unistd.h>
+#include <assert.h>
+#include <stdio.h>
+int
+main (int argc, char **argv)
+{
+  setbuf (stdout, NULL);
+  if (argc == 1)
+    {
+      puts ("re-exec");
+      execl ("/proc/self/exe", argv[0], "foo", NULL);
+      assert (0);
+    }
+  puts ("exit");
+  return 0;
+}
+------------------------------------------------------------------------------
+
+
+gdb/
+2010-09-30  Jan Kratochvil  <jan.kratochvil@redhat.com>
+
+	* infrun.c (follow_exec): Replace symbol_file_add_main by
+	symbol_file_add with SYMFILE_DEFER_BP_RESET, set_initial_language and
+	breakpoint_re_set.
+	* m32r-rom.c (m32r_load, m32r_upload_command): Use parameter 0 for
+	clear_symtab_users.
+	* objfiles.c (free_all_objfiles): Likewise.
+	* remote-m32r-sdi.c (m32r_load): Likewise.
+	* solib-som.c (som_solib_create_inferior_hook): Likewise.
+	* symfile.c (new_symfile_objfile): New comment for add_flags.  Call
+	clear_symtab_users with ADD_FLAGS.
+	(reread_symbols): Use parameter 0 for clear_symtab_users.
+	(clear_symtab_users): New parameter add_flags.  Do not call
+	breakpoint_re_set if SYMFILE_DEFER_BP_RESET.
+	(clear_symtab_users_cleanup): Use parameter 0 for clear_symtab_users.
+	* symtab.h (clear_symtab_users): New parameter add_flags.
+
+gdb/testsuite/
+2010-09-30  Jan Kratochvil  <jan.kratochvil@redhat.com>
+
+	* gdb.base/pie-execl.exp: New file.
+	* gdb.base/pie-execl.c: New file.
+
+Index: gdb-7.2/gdb/infrun.c
+===================================================================
+--- gdb-7.2.orig/gdb/infrun.c	2010-10-12 18:27:58.000000000 +0200
++++ gdb-7.2/gdb/infrun.c	2010-10-12 18:29:24.000000000 +0200
+@@ -840,8 +840,15 @@ follow_exec (ptid_t pid, char *execd_pat
+   /* That a.out is now the one to use. */
+   exec_file_attach (execd_pathname, 0);
+ 
+-  /* Load the main file's symbols.  */
+-  symbol_file_add_main (execd_pathname, 0);
++  /* SYMFILE_DEFER_BP_RESET is used as the proper displacement for PIE
++     (Position Independent Executable) main symbol file will get applied by
++     solib_create_inferior_hook below.  breakpoint_re_set would fail to insert
++     the breakpoints with the zero displacement.  */
++
++  symbol_file_add (execd_pathname, SYMFILE_MAINLINE | SYMFILE_DEFER_BP_RESET,
++		   NULL, 0);
++
++  set_initial_language ();
+ 
+ #ifdef SOLIB_CREATE_INFERIOR_HOOK
+   SOLIB_CREATE_INFERIOR_HOOK (PIDGET (inferior_ptid));
+@@ -851,6 +858,8 @@ follow_exec (ptid_t pid, char *execd_pat
+ 
+   jit_inferior_created_hook ();
+ 
++  breakpoint_re_set ();
++
+   /* Reinsert all breakpoints.  (Those which were symbolic have
+      been reset to the proper address in the new a.out, thanks
+      to symbol_file_command...) */
+Index: gdb-7.2/gdb/m32r-rom.c
+===================================================================
+--- gdb-7.2.orig/gdb/m32r-rom.c	2010-01-01 08:31:37.000000000 +0100
++++ gdb-7.2/gdb/m32r-rom.c	2010-10-12 18:29:24.000000000 +0200
+@@ -188,7 +188,7 @@ m32r_load (char *filename, int from_tty)
+      the stack may not be valid, and things would get horribly
+      confused... */
+ 
+-  clear_symtab_users ();
++  clear_symtab_users (0);
+ }
+ 
+ static void
+@@ -551,7 +551,7 @@ m32r_upload_command (char *args, int fro
+      the stack may not be valid, and things would get horribly
+      confused... */
+ 
+-  clear_symtab_users ();
++  clear_symtab_users (0);
+ }
+ 
+ /* Provide a prototype to silence -Wmissing-prototypes.  */
+Index: gdb-7.2/gdb/objfiles.c
+===================================================================
+--- gdb-7.2.orig/gdb/objfiles.c	2010-10-12 18:27:56.000000000 +0200
++++ gdb-7.2/gdb/objfiles.c	2010-10-12 18:29:39.000000000 +0200
+@@ -699,7 +699,7 @@ free_all_objfiles (void)
+   {
+     free_objfile (objfile);
+   }
+-  clear_symtab_users ();
++  clear_symtab_users (0);
+ }
+ 
+ /* Relocate OBJFILE to NEW_OFFSETS.  There should be OBJFILE->NUM_SECTIONS
+Index: gdb-7.2/gdb/remote-m32r-sdi.c
+===================================================================
+--- gdb-7.2.orig/gdb/remote-m32r-sdi.c	2010-07-07 18:15:16.000000000 +0200
++++ gdb-7.2/gdb/remote-m32r-sdi.c	2010-10-12 18:29:24.000000000 +0200
+@@ -1377,7 +1377,7 @@ m32r_load (char *args, int from_tty)
+      might be to call normal_stop, except that the stack may not be valid,
+      and things would get horribly confused... */
+ 
+-  clear_symtab_users ();
++  clear_symtab_users (0);
+ 
+   if (!nostart)
+     {
+Index: gdb-7.2/gdb/solib-som.c
+===================================================================
+--- gdb-7.2.orig/gdb/solib-som.c	2010-05-17 01:49:58.000000000 +0200
++++ gdb-7.2/gdb/solib-som.c	2010-10-12 18:29:24.000000000 +0200
+@@ -354,7 +354,7 @@ keep_going:
+   /* Make the breakpoint at "_start" a shared library event breakpoint.  */
+   create_solib_event_breakpoint (target_gdbarch, anaddr);
+ 
+-  clear_symtab_users ();
++  clear_symtab_users (0);
+ }
+ 
+ static void
+Index: gdb-7.2/gdb/symfile.c
+===================================================================
+--- gdb-7.2.orig/gdb/symfile.c	2010-10-12 18:27:57.000000000 +0200
++++ gdb-7.2/gdb/symfile.c	2010-10-12 18:29:24.000000000 +0200
+@@ -1036,7 +1036,7 @@ syms_from_objfile (struct objfile *objfi
+ 
+ /* Perform required actions after either reading in the initial
+    symbols for a new objfile, or mapping in the symbols from a reusable
+-   objfile. */
++   objfile.  ADD_FLAGS is a bitmask of enum symfile_add_flags.  */
+ 
+ void
+ new_symfile_objfile (struct objfile *objfile, int add_flags)
+@@ -1049,7 +1049,7 @@ new_symfile_objfile (struct objfile *obj
+       /* OK, make it the "real" symbol file.  */
+       symfile_objfile = objfile;
+ 
+-      clear_symtab_users ();
++      clear_symtab_users (add_flags);
+     }
+   else if ((add_flags & SYMFILE_DEFER_BP_RESET) == 0)
+     {
+@@ -2527,7 +2527,7 @@ reread_symbols (void)
+       /* Notify objfiles that we've modified objfile sections.  */
+       objfiles_changed ();
+ 
+-      clear_symtab_users ();
++      clear_symtab_users (0);
+       /* At least one objfile has changed, so we can consider that
+          the executable we're debugging has changed too.  */
+       observer_notify_executable_changed ();
+@@ -2745,10 +2745,10 @@ allocate_symtab (char *filename, struct 
+ 
+ 
+ /* Reset all data structures in gdb which may contain references to symbol
+-   table data.  */
++   table data.  ADD_FLAGS is a bitmask of enum symfile_add_flags.  */
+ 
+ void
+-clear_symtab_users (void)
++clear_symtab_users (int add_flags)
+ {
+   /* Someday, we should do better than this, by only blowing away
+      the things that really need to be blown.  */
+@@ -2758,7 +2758,8 @@ clear_symtab_users (void)
+   clear_current_source_symtab_and_line ();
+ 
+   clear_displays ();
+-  breakpoint_re_set ();
++  if ((add_flags & SYMFILE_DEFER_BP_RESET) == 0)
++    breakpoint_re_set ();
+   set_default_breakpoint (0, NULL, 0, 0, 0);
+   clear_pc_function_cache ();
+   observer_notify_new_objfile (NULL);
+@@ -2777,7 +2778,7 @@ clear_symtab_users (void)
+ static void
+ clear_symtab_users_cleanup (void *ignore)
+ {
+-  clear_symtab_users ();
++  clear_symtab_users (0);
+ }
+ 
+ /* OVERLAYS:
+Index: gdb-7.2/gdb/symtab.h
+===================================================================
+--- gdb-7.2.orig/gdb/symtab.h	2010-10-12 18:27:56.000000000 +0200
++++ gdb-7.2/gdb/symtab.h	2010-10-12 18:29:24.000000000 +0200
+@@ -1170,7 +1170,7 @@ extern void skip_prologue_sal (struct sy
+ 
+ /* symfile.c */
+ 
+-extern void clear_symtab_users (void);
++extern void clear_symtab_users (int add_flags);
+ 
+ extern enum language deduce_language_from_filename (const char *);
+ 
+Index: gdb-7.2/gdb/testsuite/gdb.base/pie-execl.c
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.base/pie-execl.c	2010-10-12 18:29:24.000000000 +0200
+@@ -0,0 +1,51 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2010 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#include <stdio.h>
++#include <unistd.h>
++#include <assert.h>
++
++static void pie_execl_marker (void);
++
++int
++main (int argc, char **argv)
++{
++  setbuf (stdout, NULL);
++
++#if BIN == 1
++  if (argc == 2)
++    {
++      printf ("pie-execl: re-exec: %s\n", argv[1]);
++      execl (argv[1], argv[1], NULL);
++      assert (0);
++    }
++#endif
++
++  pie_execl_marker ();
++
++  return 0;
++}
++
++/* pie_execl_marker must be on a different address than in `pie-execl2.c'.  */
++
++volatile int v;
++
++static void
++pie_execl_marker (void)
++{
++  v = 1;
++}
+Index: gdb-7.2/gdb/testsuite/gdb.base/pie-execl.exp
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.base/pie-execl.exp	2010-10-12 18:29:24.000000000 +0200
+@@ -0,0 +1,94 @@
++# Copyright 2010 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# The problem was due to amd64_skip_prologue attempting to access inferior
++# memory before the PIE (Position Independent Executable) gets relocated.
++
++if { ![istarget *-linux*]} {
++    continue
++}
++
++set testfile "pie-execl"
++set srcfile ${testfile}.c
++set executable1 ${testfile}1
++set executable2 ${testfile}2
++set binfile1 ${objdir}/${subdir}/${executable1}
++set binfile2 ${objdir}/${subdir}/${executable2}
++
++# Use conditional compilation according to `BIN' as GDB remembers the source
++# file name of the breakpoint.
++
++set opts [list debug {additional_flags=-fPIE -pie}]
++if {[build_executable ${testfile}.exp $executable1 $srcfile [concat $opts {additional_flags=-DBIN=1}]] == ""
++    || [build_executable ${testfile}.exp $executable2 $srcfile [concat $opts {additional_flags=-DBIN=2}]] == ""} {
++    return -1
++}
++
++clean_restart ${executable1}
++
++gdb_test_no_output "set args ${binfile2}"
++
++if ![runto_main] {
++    return -1
++}
++
++# Do not stop on `main' after re-exec.
++delete_breakpoints
++
++gdb_breakpoint "pie_execl_marker"
++gdb_test "info breakpoints" ".*" ""
++
++set addr1 ""
++set test "pie_execl_marker address first"
++gdb_test_multiple "p/x &pie_execl_marker" $test {
++    -re " = (0x\[0-9a-f\]+)\r\n$gdb_prompt $" {
++	set addr1 $expect_out(1,string)
++	pass $test
++    }
++}
++verbose -log "addr1 is $addr1"
++
++set test "continue"
++gdb_test_multiple $test $test {
++    -re "Error in re-setting breakpoint" {
++	fail $test
++    }
++    -re "Cannot access memory" {
++	fail $test
++    }
++    -re "pie-execl: re-exec.*executing new program.*\r\nBreakpoint \[0-9\]+,\[^\r\n\]* pie_execl_marker .*\r\n$gdb_prompt $" {
++	pass $test
++    }
++}
++
++gdb_test "info breakpoints" ".*" ""
++
++set addr2 ""
++set test "pie_execl_marker address second"
++gdb_test_multiple "p/x &pie_execl_marker" $test {
++    -re " = (0x\[0-9a-f\]+)\r\n$gdb_prompt $" {
++	set addr2 $expect_out(1,string)
++	pass $test
++    }
++}
++verbose -log "addr2 is $addr2"
++
++# Ensure we cannot get a false PASS and the inferior has really changed.
++set test "pie_execl_marker address has changed"
++if [string equal $addr1 $addr2] {
++    fail $test
++} else {
++    pass $test
++}

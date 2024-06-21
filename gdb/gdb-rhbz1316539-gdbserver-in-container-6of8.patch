@@ -1,0 +1,127 @@
+commit 015de6884f6fdebaffd4b7d4c7f14fb4d5fc0bb1
+Author: Daniel Colascione <dancol@dancol.org>
+Date:   Tue Nov 11 14:18:23 2014 +0000
+
+    Warn users about mismatched PID namespaces
+    
+    Linux supports multiple "PID namespaces".  Processes in different PID
+    namespaces have different views of the system process list.  Sometimes,
+    a single process can appear in more than one PID namespace, but with a
+    different PID in each.  When GDB and its target are in different PID
+    namespaces, various features can break due to the mismatch between
+    what the target believes its PID to be and what GDB believes its PID
+    to be.  The most visible broken functionality is thread enumeration
+    silently failing.
+    
+    This patch explicitly warns users against trying to debug across PID
+    namespaces.
+    
+    The patch introduced no new failures in my test suite run on an x86_64
+    installation of Ubuntu 14.10.  It doesn't include a test: writing an
+    automated test that exercises this code would be very involved because
+    CLONE_NEWNS requires CAP_SYS_ADMIN; the easier way to reproduce the
+    problem is to start a new lxc container.
+    
+    gdb/
+    2014-11-11  Daniel Colascione  <dancol@dancol.org>
+    
+    	Warn about cross-PID-namespace debugging.
+    	* nat/linux-procfs.h (linux_proc_pid_get_ns): New prototype.
+    	* nat/linux-procfs.c (linux_proc_pid_get_ns): New function.
+    	* linux-thread-db.c (check_pid_namespace_match): New function.
+    	(thread_db_inferior_created): Call it.
+
+### a/gdb/ChangeLog
+### b/gdb/ChangeLog
+## -1,3 +1,11 @@
++2014-11-11  Daniel Colascione  <dancol@dancol.org>
++
++	Warn about cross-PID-namespace debugging.
++	* nat/linux-procfs.h (linux_proc_pid_get_ns): New prototype.
++	* nat/linux-procfs.c (linux_proc_pid_get_ns): New function.
++	* linux-thread-db.c (check_pid_namespace_match): New function.
++	(thread_db_inferior_created): Call it.
++
+ 2014-11-10  Doug Evans  <xdje42@gmail.com>
+ 
+ 	* symmisc.c (print_objfile_statistics): Remove trailing whitespace.
+Index: gdb-7.2/gdb/linux-thread-db.c
+===================================================================
+--- gdb-7.2.orig/gdb/linux-thread-db.c	2016-08-05 18:20:26.000000000 +0200
++++ gdb-7.2/gdb/linux-thread-db.c	2016-08-05 18:25:45.583382993 +0200
+@@ -1077,6 +1077,63 @@
+     return;
+ }
+ 
++// RHEL: gdb/nat/linux-procfs.h
++
++/* Return an opaque string identifying PID's NS namespace or NULL if
++ * the information is unavailable.  The returned string must be
++ * released with xfree.  */
++
++extern char *linux_proc_pid_get_ns (pid_t pid, const char *ns);
++
++// RHEL: gdb/nat/linux-procfs.c
++
++/* See linux-procfs.h declaration.  */
++
++char *
++linux_proc_pid_get_ns (pid_t pid, const char *ns)
++{
++  char buf[100];
++  char nsval[64];
++  int ret;
++  xsnprintf (buf, sizeof (buf), "/proc/%d/ns/%s", (int) pid, ns);
++  ret = readlink (buf, nsval, sizeof (nsval));
++  if (0 < ret && ret < sizeof (nsval))
++    {
++      nsval[ret] = '\0';
++      return xstrdup (nsval);
++    }
++
++  return NULL;
++}
++
++static void
++check_pid_namespace_match (void)
++{
++  /* Check is only relevant for local targets targets.  */
++  if (target_can_run (&current_target))
++    {
++      /* If the child is in a different PID namespace, its idea of its
++	 PID will differ from our idea of its PID.  When we scan the
++	 child's thread list, we'll mistakenly think it has no threads
++	 since the thread PID fields won't match the PID we give to
++	 libthread_db.  */
++      char *our_pid_ns = linux_proc_pid_get_ns (getpid (), "pid");
++      char *inferior_pid_ns = linux_proc_pid_get_ns (
++	ptid_get_pid (inferior_ptid), "pid");
++
++      if (our_pid_ns != NULL && inferior_pid_ns != NULL
++	  && strcmp (our_pid_ns, inferior_pid_ns) != 0)
++	{
++	  warning (_ ("Target and debugger are in different PID "
++		      "namespaces; thread lists and other data are "
++		      "likely unreliable"));
++	}
++
++      xfree (our_pid_ns);
++      xfree (inferior_pid_ns);
++    }
++}
++
+ static void
+ thread_db_new_objfile (struct objfile *objfile)
+ {
+@@ -1084,7 +1141,10 @@
+      correctly.  */
+ 
+   if (objfile != NULL)
+-    check_for_thread_db ();
++    {
++      check_pid_namespace_match ();
++      check_for_thread_db ();
++    }
+ }
+ 
+ /* Attach to a new thread.  This function is called when we receive a

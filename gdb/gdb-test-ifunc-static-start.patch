@@ -1,0 +1,64 @@
+https://bugzilla.redhat.com/show_bug.cgi?id=632259
+
+commit 90b1513f9291220ad2d0314fc8c327219873bc25
+commit 86dd523433b348f0740848dec5842e63037ae6b3
+
+diff --git a/gdb/testsuite/gdb.base/gnu-ifunc.exp b/gdb/testsuite/gdb.base/gnu-ifunc.exp
+index 8ecf558..a14d8d0 100644
+--- a/gdb/testsuite/gdb.base/gnu-ifunc.exp
++++ b/gdb/testsuite/gdb.base/gnu-ifunc.exp
+@@ -18,12 +18,17 @@ if {[skip_shlib_tests]} {
+ }
+ 
+ set testfile "gnu-ifunc"
++set executable ${testfile}
+ set srcfile ${testfile}.c
+-set binfile ${objdir}/${subdir}/${testfile}
++set binfile ${objdir}/${subdir}/${executable}
++set staticexecutable ${executable}-static
++set staticbinfile ${objdir}/${subdir}/${staticexecutable}
+ 
+ set libfile "${testfile}-lib"
+ set libsrc ${libfile}.c
+ set lib_so ${objdir}/${subdir}/${libfile}.so
++# $lib_o must not have {debug}, it would override the gnu-ifunc ELF markers.
++set lib_o ${objdir}/${subdir}/${libfile}.o
+ 
+ # We need DWARF for the "final" function as we "step" into the function and GDB
+ # would step-over the "final" function if there would be no line number debug
+@@ -47,14 +52,16 @@ if [get_compiler_info ${binfile}] {
+ }
+ 
+ if { [gdb_compile_shlib ${srcdir}/${subdir}/$libsrc $lib_so $lib_opts] != ""
+-     || [gdb_compile ${srcdir}/${subdir}/$srcfile $binfile executable $exec_opts] != ""} {
++     || [gdb_compile ${srcdir}/${subdir}/$srcfile $binfile executable $exec_opts] != ""
++     || [gdb_compile ${srcdir}/${subdir}/$libsrc $lib_o object {}] != ""
++     || [gdb_compile "${srcdir}/${subdir}/$srcfile $lib_o" $staticbinfile executable {debug}] != ""} {
+     untested "Could not compile either $libsrc or $srcfile."
+     return -1
+ }
+ 
+ # Start with a fresh gdb.
+ 
+-clean_restart $testfile
++clean_restart $executable
+ gdb_load_shlibs ${lib_so}
+ 
+ if ![runto_main] then {
+@@ -108,3 +115,16 @@ gdb_test_multiple $test $test {
+     }
+ }
+ gdb_test "info sym $expect_out(1,string)" "gnu_ifunc in section .*" "info sym <gnu_ifunc-address>"
++
++
++# Test statically linked ifunc resolving during inferior start.
++# https://bugzilla.redhat.com/show_bug.cgi?id=624967
++
++if ![target_info exists gdb_stub] {
++    clean_restart $staticexecutable
++
++    gdb_breakpoint "gnu_ifunc"
++    gdb_breakpoint "main"
++    gdb_run_cmd
++    gdb_test "" "Breakpoint \[0-9\]*, main .*" "static gnu_ifunc"
++}

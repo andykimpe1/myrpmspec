@@ -1,0 +1,592 @@
+http://sourceware.org/ml/gdb-patches/2010-10/msg00175.html
+Subject: Re: [patch] python: save/restore/fix error state
+
+On Fri, 08 Oct 2010 22:08:27 +0200, Doug Evans wrote:
+> The comment above this code says:
+> 
+>   /* Note: If an exception occurs python will print the traceback and
+>      clear the error indicator.  */
+> 
+> ISTM that either this comment is wrong or the above patch is wrong, or
+> some combination thereof.
+
+This comment is right, Python has no bug there, other gdb/python/ code has
+bugs.  That is some gdb/python/ code returned success value while still
+leaving the python exception set.  Such case is undefined and unchecked by
+Python.  Python error state does not follow the errno POSIX semantics
+	The setting of errno after a successful call to a function is
+	unspecified [...].
+as Python requires instead:
+	The Python error state after a successful call to a function must be
+	cleared.
+
+I have checked callers of these functions, as a closure on the callers of the
+top py-utils.c functions.  That does not mean this Python error state handling
+verification is complete:
+	python_string_to_unicode unicode_to_encoded_string
+	unicode_to_encoded_python_string unicode_to_target_string
+	unicode_to_target_python_string python_string_to_target_string
+	python_string_to_target_python_string python_string_to_host_string
+	target_string_to_unicode gdbpy_obj_to_string gdbpy_exception_to_string
+	get_addr_from_python convert_value_from_python frapy_read_var
+	gdbpy_get_display_hint valpy_getitem FIXME set_parameter_value
+	compute_enum_values infpy_read_memory infpy_write_memory
+	infpy_search_memory valpy_new valpy_call valpy_binop valpy_richcompare
+	pretty_print_one_value set_attr parmpy_init
+
+Therefore I have removed the check after PyRun_SimpleFile.
+
+No regressions on {x86_64,x86_64-m32,i686}-fedora14snapshot-linux-gnu.
+
+
+Thanks,
+Jan
+
+
+gdb/
+2010-10-09  Jan Kratochvil  <jan.kratochvil@redhat.com>
+
+	* python/py-breakpoint.c (bppy_set_condition): New comment.
+	* python/py-cmd.c (cmdpy_function): Call also gdbpy_print_stack for
+	failed PyUnicode_Decode.
+	(cmdpy_completer): Skip element for failed
+	python_string_to_host_string.
+	(cmdpy_init): Return -1 on failed python_string_to_host_string.
+	* python/py-frame.c (frapy_read_var): Extend the function comment.
+	* python/py-function.c (fnpy_init): Return -1 on failed
+	python_string_to_host_string.
+	* python/py-inferior.c (infpy_read_memory, infpy_write_memory): Extend
+	the function comment.
+	(infpy_search_memory): Extend the function comment.  Remove the
+	PyErr_SetString call on already set error state.
+	* python/py-param.c (set_parameter_value): Extend the function
+	comment.  Return -1 on failed python_string_to_host_string, twice.
+	(set_attr): Extend the function comment.
+	(compute_enum_values): Extend the function comment.  New variable
+	back_to.  Protect self->enumeration by BACK_TO cleanups.  Return 0 on
+	failed python_string_to_host_string.
+	(get_doc_string): Call gdbpy_print_stack on failed
+	python_string_to_host_string.
+	(parmpy_init): Extend the function comment.
+	* python/py-prettyprint.c (pretty_print_one_value): Likewise.
+	(gdbpy_get_display_hint, print_children): Call gdbpy_print_stack on
+	failed python_string_to_host_string.
+	* python/py-value.c (valpy_new, valpy_getitem, valpy_call)
+	(valpy_binop, valpy_richcompare): Extend the function comment.
+	* python/python.c
+	(struct python_env) <error_type, error_value, error_traceback>: New
+	fields.
+	(restore_python_env): Handle PyErr_Occurred.  Call PyErr_Restore.
+	(ensure_python_env): Call PyErr_Fetch.
+	* varobj.c (update_dynamic_varobj_children): Call gdbpy_print_stack on
+	failed convert_value_from_python.
+	(value_get_print_value): Call gdbpy_print_stack on failed
+	python_string_to_target_python_string.
+
+gdb/testsuite/
+2010-10-09  Jan Kratochvil  <jan.kratochvil@redhat.com>
+
+	* gdb.python/py-error.exp: New file.
+	* gdb.python/py-error.py: New file.
+
+Index: gdb-7.2/gdb/python/py-breakpoint.c
+===================================================================
+--- gdb-7.2.orig/gdb/python/py-breakpoint.c	2010-10-12 18:27:54.000000000 +0200
++++ gdb-7.2/gdb/python/py-breakpoint.c	2010-10-12 18:28:58.000000000 +0200
+@@ -420,6 +420,9 @@ bppy_get_condition (PyObject *self, void
+   return PyString_Decode (str, strlen (str), host_charset (), NULL);
+ }
+ 
++/* Returns 0 on success.  Returns -1 on error, with a python exception set.
++   */
++
+ static int
+ bppy_set_condition (PyObject *self, PyObject *newvalue, void *closure)
+ {
+Index: gdb-7.2/gdb/python/py-cmd.c
+===================================================================
+--- gdb-7.2.orig/gdb/python/py-cmd.c	2010-10-12 18:27:54.000000000 +0200
++++ gdb-7.2/gdb/python/py-cmd.c	2010-10-12 18:28:58.000000000 +0200
+@@ -138,7 +138,10 @@ cmdpy_function (struct cmd_list_element 
+     args = "";
+   argobj = PyUnicode_Decode (args, strlen (args), host_charset (), NULL);
+   if (! argobj)
+-    error (_("Could not convert arguments to Python string."));
++    {
++      gdbpy_print_stack ();
++      error (_("Could not convert arguments to Python string."));
++    }
+ 
+   ttyobj = from_tty ? Py_True : Py_False;
+   Py_INCREF (ttyobj);
+@@ -255,6 +258,12 @@ cmdpy_completer (struct cmd_list_element
+ 	      continue;
+ 	    }
+ 	  result[out] = python_string_to_host_string (elt);
++	  if (result[out] == NULL)
++	    {
++	      /* Skip problem elements.  */
++	      PyErr_Clear ();
++	      continue;
++	    }
+ 	  ++out;
+ 	}
+       result[out] = NULL;
+@@ -465,7 +474,15 @@ cmdpy_init (PyObject *self, PyObject *ar
+       PyObject *ds_obj = PyObject_GetAttr (self, gdbpy_doc_cst);
+ 
+       if (ds_obj && gdbpy_is_string (ds_obj))
+-	docstring = python_string_to_host_string (ds_obj);
++	{
++	  docstring = python_string_to_host_string (ds_obj);
++	  if (docstring == NULL)
++	    {
++	      xfree (cmd_name);
++	      xfree (pfx_name);
++	      return -1;
++	    }
++	}
+     }
+   if (! docstring)
+     docstring = xstrdup (_("This command is not documented."));
+Index: gdb-7.2/gdb/python/py-frame.c
+===================================================================
+--- gdb-7.2.orig/gdb/python/py-frame.c	2010-06-28 23:16:03.000000000 +0200
++++ gdb-7.2/gdb/python/py-frame.c	2010-10-12 18:28:58.000000000 +0200
+@@ -385,7 +385,8 @@ frapy_find_sal (PyObject *self, PyObject
+    start the search from that block, otherwise search from the frame's
+    current block (determined by examining the resume address of the
+    frame).  The variable argument must be a string or an instance of a
+-   gdb.Symbol.  The block argument must be an instance of gdb.Block.  */
++   gdb.Symbol.  The block argument must be an instance of gdb.Block.  Returns
++   NULL on error, with a python exception set.  */
+ static PyObject *
+ frapy_read_var (PyObject *self, PyObject *args)
+ {
+Index: gdb-7.2/gdb/python/py-function.c
+===================================================================
+--- gdb-7.2.orig/gdb/python/py-function.c	2010-05-17 23:23:25.000000000 +0200
++++ gdb-7.2/gdb/python/py-function.c	2010-10-12 18:28:58.000000000 +0200
+@@ -113,7 +113,14 @@ fnpy_init (PyObject *self, PyObject *arg
+     {
+       PyObject *ds_obj = PyObject_GetAttrString (self, "__doc__");
+       if (ds_obj && gdbpy_is_string (ds_obj))
+-	docstring = python_string_to_host_string (ds_obj);
++	{
++	  docstring = python_string_to_host_string (ds_obj);
++	  if (docstring == NULL)
++	    {
++	      Py_DECREF (self);
++	      return -1;
++	    }
++	}
+     }
+   if (! docstring)
+     docstring = xstrdup (_("This function is not documented."));
+Index: gdb-7.2/gdb/python/py-inferior.c
+===================================================================
+--- gdb-7.2.orig/gdb/python/py-inferior.c	2010-06-28 23:16:03.000000000 +0200
++++ gdb-7.2/gdb/python/py-inferior.c	2010-10-12 18:28:58.000000000 +0200
+@@ -293,7 +293,8 @@ gdbpy_inferiors (PyObject *unused, PyObj
+ 
+ /* Implementation of gdb.read_memory (address, length).
+    Returns a Python buffer object with LENGTH bytes of the inferior's
+-   memory at ADDRESS.  Both arguments are integers.  */
++   memory at ADDRESS.  Both arguments are integers.  Returns NULL on error,
++   with a python exception set.  */
+ static PyObject *
+ infpy_read_memory (PyObject *self, PyObject *args, PyObject *kw)
+ {
+@@ -361,7 +362,8 @@ infpy_read_memory (PyObject *self, PyObj
+    Writes the contents of BUFFER (a Python object supporting the read
+    buffer protocol) at ADDRESS in the inferior's memory.  Write LENGTH
+    bytes from BUFFER, or its entire contents if the argument is not
+-   provided.  The function returns nothing.  */
++   provided.  The function returns nothing.  Returns NULL on error, with
++   a python exception set.  */
+ static PyObject *
+ infpy_write_memory (PyObject *self, PyObject *args, PyObject *kw)
+ {
+@@ -473,7 +475,8 @@ get_char_buffer (PyObject *self, Py_ssiz
+    search from ADDRESS.  PATTERN is the pattern to search for (and
+    must be a Python object supporting the buffer protocol).
+    Returns a Python Long object holding the address where the pattern
+-   was located, or if the pattern was not found, returns None.  */
++   was located, or if the pattern was not found, returns None.  Returns NULL
++   on error, with a python exception set.  */
+ static PyObject *
+ infpy_search_memory (PyObject *self, PyObject *args, PyObject *kw)
+ {
+@@ -511,12 +514,7 @@ infpy_search_memory (PyObject *self, PyO
+ 	}
+     }
+   else
+-    {
+-      PyErr_SetString (PyExc_RuntimeError,
+-		       _("Cannot get search address/range from Python."));
+-
+-      return NULL;
+-    }
++    return NULL;
+ 
+   if (!PyObject_CheckReadBuffer (pattern))
+     {
+Index: gdb-7.2/gdb/python/py-param.c
+===================================================================
+--- gdb-7.2.orig/gdb/python/py-param.c	2010-05-17 23:23:25.000000000 +0200
++++ gdb-7.2/gdb/python/py-param.c	2010-10-12 18:28:58.000000000 +0200
+@@ -110,8 +110,8 @@ get_attr (PyObject *obj, PyObject *attr_
+   return PyObject_GenericGetAttr (obj, attr_name);
+ }
+ 
+-/* Set a parameter value from a Python value.  Return 0 on success, -1
+-   on failure.  */
++/* Set a parameter value from a Python value.  Return 0 on success.  Returns
++   -1 on error, with a python exception set.  */
+ static int
+ set_parameter_value (parmpy_object *self, PyObject *value)
+ {
+@@ -142,7 +142,11 @@ set_parameter_value (parmpy_object *self
+ 	    self->value.stringval = NULL;
+ 	}
+       else
+-	self->value.stringval = python_string_to_host_string (value);
++	{
++	  self->value.stringval = python_string_to_host_string (value);
++	  if (self->value.stringval == NULL)
++	    return -1;
++	}
+       break;
+ 
+     case var_enum:
+@@ -158,6 +162,8 @@ set_parameter_value (parmpy_object *self
+ 	  }
+ 
+ 	str = python_string_to_host_string (value);
++	if (str == NULL)
++	  return -1;
+ 	for (i = 0; self->enumeration[i]; ++i)
+ 	  if (! strcmp (self->enumeration[i], str))
+ 	    break;
+@@ -258,7 +264,7 @@ set_parameter_value (parmpy_object *self
+   return 0;
+ }
+ 
+-/* Set an attribute.  */
++/* Set an attribute.  Returns -1 on error, with a python exception set.  */
+ static int
+ set_attr (PyObject *obj, PyObject *attr_name, PyObject *val)
+ {
+@@ -358,12 +364,13 @@ add_setshow_generic (int parmclass, enum
+     }
+ }
+ 
+-/* A helper which computes enum values.  Returns 1 on success, 0 on
+-   error.  */
++/* A helper which computes enum values.  Returns 1 on success.  Returns 0 on
++   error, with a python exception set.  */
+ static int
+ compute_enum_values (parmpy_object *self, PyObject *enum_values)
+ {
+   Py_ssize_t size, i;
++  struct cleanup *back_to;
+ 
+   if (! enum_values)
+     {
+@@ -390,6 +397,7 @@ compute_enum_values (parmpy_object *self
+     }
+ 
+   self->enumeration = xmalloc ((size + 1) * sizeof (char *));
++  back_to = make_cleanup (free_current_contents, &self->enumeration);
+   memset (self->enumeration, 0, (size + 1) * sizeof (char *));
+ 
+   for (i = 0; i < size; ++i)
+@@ -397,16 +405,27 @@ compute_enum_values (parmpy_object *self
+       PyObject *item = PySequence_GetItem (enum_values, i);
+ 
+       if (! item)
+-	return 0;
++	{
++	  do_cleanups (back_to);
++	  return 0;
++	}
+       if (! gdbpy_is_string (item))
+ 	{
++	  do_cleanups (back_to);
+ 	  PyErr_SetString (PyExc_RuntimeError, 
+ 			   _("The enumeration item not a string."));
+ 	  return 0;
+ 	}
+       self->enumeration[i] = python_string_to_host_string (item);
++      if (self->enumeration[i] == NULL)
++	{
++	  do_cleanups (back_to);
++	  return 0;
++	}
++      make_cleanup (xfree, (char *) self->enumeration[i]);
+     }
+ 
++  discard_cleanups (back_to);
+   return 1;
+ }
+ 
+@@ -422,7 +441,11 @@ get_doc_string (PyObject *object, PyObje
+       PyObject *ds_obj = PyObject_GetAttr (object, attr);
+ 
+       if (ds_obj && gdbpy_is_string (ds_obj))
+-	result = python_string_to_host_string (ds_obj);
++	{
++	  result = python_string_to_host_string (ds_obj);
++	  if (result == NULL)
++	    gdbpy_print_stack ();
++	}
+     }
+   if (! result)
+     result = xstrdup (_("This command is not documented."));
+@@ -449,8 +472,9 @@ get_doc_string (PyObject *object, PyObje
+ 
+    The documentation for the parameter is taken from the doc string
+    for the python class.
+-   
+-*/
++
++   Returns -1 on error, with a python exception set.  */
++
+ static int
+ parmpy_init (PyObject *self, PyObject *args, PyObject *kwds)
+ {
+Index: gdb-7.2/gdb/python/py-prettyprint.c
+===================================================================
+--- gdb-7.2.orig/gdb/python/py-prettyprint.c	2010-10-12 18:27:57.000000000 +0200
++++ gdb-7.2/gdb/python/py-prettyprint.c	2010-10-12 18:28:58.000000000 +0200
+@@ -185,8 +185,8 @@ find_pretty_printer (PyObject *value)
+    is returned.  If the function returns Py_NONE that means the pretty
+    printer returned the Python None as a value.  Otherwise, if the
+    function returns a value,  *OUT_VALUE is set to the value, and NULL
+-   is returned.  On error, *OUT_VALUE is set to NULL, and NULL is
+-   returned.  */
++   is returned.  On error, *OUT_VALUE is set to NULL, NULL is
++   returned, with a python exception set.  */
+ 
+ static PyObject *
+ pretty_print_one_value (PyObject *printer, struct value **out_value)
+@@ -232,7 +232,11 @@ gdbpy_get_display_hint (PyObject *printe
+   if (hint)
+     {
+       if (gdbpy_is_string (hint))
+-	result = python_string_to_host_string (hint);
++	{
++	  result = python_string_to_host_string (hint);
++	  if (result == NULL)
++	    gdbpy_print_stack ();
++	}
+       Py_DECREF (hint);
+     }
+   else
+@@ -574,7 +578,10 @@ print_children (PyObject *printer, const
+ 	  else
+ 	    {
+ 	      output = python_string_to_host_string (py_v);
+-	      fputs_filtered (output, stream);
++	      if (!output)
++		gdbpy_print_stack ();
++	      else
++		fputs_filtered (output, stream);
+ 	      xfree (output);
+ 	    }
+ 	}
+Index: gdb-7.2/gdb/python/py-value.c
+===================================================================
+--- gdb-7.2.orig/gdb/python/py-value.c	2010-10-12 18:27:54.000000000 +0200
++++ gdb-7.2/gdb/python/py-value.c	2010-10-12 18:28:58.000000000 +0200
+@@ -114,7 +114,8 @@ note_value (value_object *value_obj)
+   values_in_python = value_obj;
+ }
+ 
+-/* Called when a new gdb.Value object needs to be allocated.  */
++/* Called when a new gdb.Value object needs to be allocated.  Returns NULL on
++   error, with a python exception set.  */
+ static PyObject *
+ valpy_new (PyTypeObject *subtype, PyObject *args, PyObject *keywords)
+ {
+@@ -334,7 +335,7 @@ valpy_length (PyObject *self)
+ }
+ 
+ /* Given string name of an element inside structure, return its value
+-   object.  */
++   object.  Returns NULL on error, with a python exception set.  */
+ static PyObject *
+ valpy_getitem (PyObject *self, PyObject *key)
+ {
+@@ -468,7 +469,8 @@ enum valpy_opcode
+   ((TYPE_CODE (TYPE) == TYPE_CODE_REF) ? (TYPE_TARGET_TYPE (TYPE)) : (TYPE))
+ 
+ /* Returns a value object which is the result of applying the operation
+-   specified by OPCODE to the given arguments.  */
++   specified by OPCODE to the given arguments.  Returns NULL on error, with
++   a python exception set.  */
+ static PyObject *
+ valpy_binop (enum valpy_opcode opcode, PyObject *self, PyObject *other)
+ {
+@@ -723,7 +725,8 @@ valpy_xor (PyObject *self, PyObject *oth
+   return valpy_binop (VALPY_BITXOR, self, other);
+ }
+ 
+-/* Implements comparison operations for value objects.  */
++/* Implements comparison operations for value objects.  Returns NULL on error,
++   with a python exception set.  */
+ static PyObject *
+ valpy_richcompare (PyObject *self, PyObject *other, int op)
+ {
+Index: gdb-7.2/gdb/python/python.c
+===================================================================
+--- gdb-7.2.orig/gdb/python/python.c	2010-10-12 18:27:54.000000000 +0200
++++ gdb-7.2/gdb/python/python.c	2010-10-12 18:28:58.000000000 +0200
+@@ -82,6 +82,7 @@ struct python_env
+   PyGILState_STATE state;
+   struct gdbarch *gdbarch;
+   const struct language_defn *language;
++  PyObject *error_type, *error_value, *error_traceback;
+ };
+ 
+ static void
+@@ -89,6 +90,16 @@ restore_python_env (void *p)
+ {
+   struct python_env *env = (struct python_env *)p;
+ 
++  /* Leftover Python error is forbidden by Python Exception Handling.  */
++  if (PyErr_Occurred ())
++    {
++      /* This order is similar to the one calling error afterwards. */
++      gdbpy_print_stack ();
++      warning (_("internal error: Unhandled Python exception"));
++    }
++
++  PyErr_Restore (env->error_type, env->error_value, env->error_traceback);
++
+   PyGILState_Release (env->state);
+   python_gdbarch = env->gdbarch;
+   python_language = env->language;
+@@ -111,6 +122,9 @@ ensure_python_env (struct gdbarch *gdbar
+   python_gdbarch = gdbarch;
+   python_language = language;
+ 
++  /* Save it and ensure ! PyErr_Occurred () afterwards.  */
++  PyErr_Fetch (&env->error_type, &env->error_value, &env->error_traceback);
++  
+   return make_cleanup (restore_python_env, env);
+ }
+ 
+Index: gdb-7.2/gdb/testsuite/gdb.python/py-error.exp
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.python/py-error.exp	2010-10-12 18:28:58.000000000 +0200
+@@ -0,0 +1,56 @@
++# Copyright (C) 2010 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# Test error while loading *-gdb.py.  IBM1047 is chosen as possibly supported
++# by glibc but unsupported by Python
++
++set testfile "py-error"
++
++load_lib gdb-python.exp
++
++# Start with a fresh gdb.
++gdb_exit
++gdb_start
++
++# Skip all tests if Python scripting is not enabled.
++if { [skip_python_tests] } { continue }
++
++set charset "IBM1047"
++
++set test2 "main reached"
++
++set test "set host-charset $charset"
++set test_regex [string_to_regexp $test]
++gdb_test_multiple $test $test {
++    -re "^$test_regex\r\n$gdb_prompt $" {
++	pass $test
++    }
++    -re "^$test_regex\r\nUndefined item: \"$charset\"\\.\r\n$gdb_prompt $" {
++	xfail $test
++	untested $test2
++	set test2 ""
++    }
++}
++
++if {$test2 == ""} {
++    return 0
++}
++
++set remote_python_file [remote_download host ${srcdir}/${subdir}/${testfile}.py]
++
++# argc=LookupError: unknown encoding: IBM1047
++gdb_test "source $remote_python_file" "Traceback.*ClassName.*\r\nLookupError: unknown encoding: $charset" $test2
++
++gdb_test "p 1" " = 1" "no delayed error"
+Index: gdb-7.2/gdb/testsuite/gdb.python/py-error.py
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.python/py-error.py	2010-10-12 18:28:58.000000000 +0200
+@@ -0,0 +1,25 @@
++# Copyright (C) 2010 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++import gdb
++
++class ClassName(gdb.Command):
++    'a'
++    def __init__(self):
++        gdb.Command.__init__ (self, "ClassName", gdb.COMMAND_DATA, prefix=True)
++    def invoke(self, args, from_tty):
++        print
++
++ClassName()
+Index: gdb-7.2/gdb/varobj.c
+===================================================================
+--- gdb-7.2.orig/gdb/varobj.c	2010-10-12 18:27:54.000000000 +0200
++++ gdb-7.2/gdb/varobj.c	2010-10-12 18:28:58.000000000 +0200
+@@ -1054,6 +1054,8 @@ update_dynamic_varobj_children (struct v
+ 	    error (_("Invalid item from the child list"));
+ 
+ 	  v = convert_value_from_python (py_v);
++	  if (v == NULL)
++	    gdbpy_print_stack ();
+ 	  install_dynamic_child (var, can_mention ? changed : NULL,
+ 				 can_mention ? new : NULL,
+ 				 can_mention ? unchanged : NULL,
+@@ -2542,6 +2544,8 @@ value_get_print_value (struct value *val
+ 			type = builtin_type (gdbarch)->builtin_char;
+ 			Py_DECREF (py_str);
+ 		      }
++		    else
++		      gdbpy_print_stack ();
+ 		  }
+ 		Py_DECREF (output);
+ 	      }

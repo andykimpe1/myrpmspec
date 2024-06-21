@@ -1,0 +1,133 @@
+URL: <https://gcc.gnu.org/ml/gcc-patches/2010-12/msg00417.html>
+Message-Id: <20101205193453.428A72461AB@ruffy.mtv.corp.google.com>
+
+  From: dje at google dot com (Doug Evans)
+  To: gcc-patches at sourceware dot org
+  Subject: [RFA] rewrite splay_tree_foreach_helper to be non-recursive
+  Date: Sun,  5 Dec 2010 11:34:53 -0800 (PST)
+
+  Hi.
+  Splay trees are worst case O(n) in the depth of tree, and I have an
+  example with ~300000 entries (reading of the address table piece of the
+  .gdb_index section for a large program).
+  gdb segfaults because it runs out of stack.
+  This patch converts splay_tree_foreach_helper to be non-recursive.
+
+  One might want to use malloc here and return if it runs out of space
+  (library utilities should let the caller deal with such things),
+  but the API doesn't really provide for it, and the new version's behaviour
+  is no different than the existing behaviour.
+  It didn't make sense to create another foreach API call just for this,
+  so I just rewrote the existing one.
+
+  One might want gdb/addrmap.c to use something besides splay-trees,
+  but that's more work, and this patch is generally useful anyways.
+
+  Tested by running the gdb testsuite on amd64-linux, no regressions.
+  Ok to check in?
+
+Comments from Sergio Durigan Junior:
+
+  This patch does not have a testcase.  The bug reported by Miroslav
+  Franc reproduces every time with
+  device-mapper-persistent-data-debuginfo-0.2.8-2.el6.{ppc64,s390x},
+  but unfortunately it is quite hard to come up with a minimal
+  reproducer.
+
+commit 98f0b5d4e51f85fd717cda948174ec5c43305e08
+Author: DJ Delorie <dj@redhat.com>
+Date:   Wed Dec 8 16:24:43 2010 +0000
+
+    merge from gcc
+
+2010-12-08  Doug Evans  <dje@google.com>
+
+	* splay-tree.c (splay_tree_foreach_helper): Remove arg `sp',
+	all callers updated.  Rewrite to be non-recursive.
+
+Index: gdb-7.2/libiberty/splay-tree.c
+===================================================================
+--- gdb-7.2.orig/libiberty/splay-tree.c
++++ gdb-7.2/libiberty/splay-tree.c
+@@ -44,7 +44,7 @@ static inline void rotate_left (splay_tr
+ static inline void rotate_right (splay_tree_node *,
+ 				splay_tree_node, splay_tree_node);
+ static void splay_tree_splay (splay_tree, splay_tree_key);
+-static int splay_tree_foreach_helper (splay_tree, splay_tree_node,
++static int splay_tree_foreach_helper (splay_tree_node,
+                                       splay_tree_foreach_fn, void*);
+ 
+ /* Deallocate NODE (a member of SP), and all its sub-trees.  */
+@@ -204,25 +204,51 @@ splay_tree_splay (splay_tree sp, splay_t
+    value is returned.  Otherwise, this function returns 0.  */
+ 
+ static int
+-splay_tree_foreach_helper (splay_tree sp, splay_tree_node node,
++splay_tree_foreach_helper (splay_tree_node node,
+                            splay_tree_foreach_fn fn, void *data)
+ {
+   int val;
++  splay_tree_node *stack;
++  int stack_ptr, stack_size;
+ 
+-  if (!node)
+-    return 0;
++  /* A non-recursive implementation is used to avoid filling the stack
++     for large trees.  Splay trees are worst case O(n) in the depth of
++     the tree.  */
++
++#define INITIAL_STACK_SIZE 100
++  stack_size = INITIAL_STACK_SIZE;
++  stack_ptr = 0;
++  stack = XNEWVEC (splay_tree_node, stack_size);
++  val = 0;
++
++  for (;;)
++    {
++      while (node != NULL)
++	{
++	  if (stack_ptr == stack_size)
++	    {
++	      stack_size *= 2;
++	      stack = XRESIZEVEC (splay_tree_node, stack, stack_size);
++	    }
++	  stack[stack_ptr++] = node;
++	  node = node->left;
++	}
+ 
+-  val = splay_tree_foreach_helper (sp, node->left, fn, data);
+-  if (val)
+-    return val;
+-
+-  val = (*fn)(node, data);
+-  if (val)
+-    return val;
++      if (stack_ptr == 0)
++	break;
+ 
+-  return splay_tree_foreach_helper (sp, node->right, fn, data);
+-}
++      node = stack[--stack_ptr];
+ 
++      val = (*fn) (node, data);
++      if (val)
++	break;
++
++      node = node->right;
++    }
++
++  XDELETEVEC (stack);
++  return val;
++}
+ 
+ /* An allocator and deallocator based on xmalloc.  */
+ static void *
+@@ -537,7 +563,7 @@ splay_tree_successor (splay_tree sp, spl
+ int
+ splay_tree_foreach (splay_tree sp, splay_tree_foreach_fn fn, void *data)
+ {
+-  return splay_tree_foreach_helper (sp, sp->root, fn, data);
++  return splay_tree_foreach_helper (sp->root, fn, data);
+ }
+ 
+ /* Splay-tree comparison function, treating the keys as ints.  */

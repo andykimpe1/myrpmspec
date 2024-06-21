@@ -1,0 +1,3598 @@
+commit d21606aeeaf31eca7ed2b3a67ace52adc6dbf17d
+Author: Sergio Durigan Junior <sergiodj@redhat.com>
+Date:   Tue Mar 29 10:49:57 2011 -0300
+
+    patch 3: bulk of new work
+
+Index: gdb-7.2/gdb/Makefile.in
+===================================================================
+--- gdb-7.2.orig/gdb/Makefile.in	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/Makefile.in	2011-08-11 18:24:28.000000000 +0200
+@@ -192,12 +192,12 @@ SUBDIR_CLI_OBS = \
+ 	cli-dump.o \
+ 	cli-decode.o cli-script.o cli-cmds.o cli-setshow.o \
+ 	cli-logging.o \
+-	cli-interp.o
++	cli-interp.o cli-utils.o
+ SUBDIR_CLI_SRCS = \
+ 	cli/cli-dump.c \
+ 	cli/cli-decode.c cli/cli-script.c cli/cli-cmds.c cli/cli-setshow.c \
+ 	cli/cli-logging.c \
+-	cli/cli-interp.c
++	cli/cli-interp.c cli/cli-utils.c
+ SUBDIR_CLI_DEPS =
+ SUBDIR_CLI_LDFLAGS=
+ SUBDIR_CLI_CFLAGS=
+@@ -702,8 +702,8 @@ SFILES = ada-exp.y ada-lang.c ada-typepr
+ 	sentinel-frame.c \
+ 	serial.c ser-base.c ser-unix.c \
+ 	solib.c solib-target.c source.c \
+-	stabsread.c stack.c std-regs.c symfile.c symfile-mem.c symmisc.c \
+-	symtab.c \
++	stabsread.c stack.c stap-probe.c std-regs.c \
++	symfile.c symfile-mem.c symmisc.c symtab.c \
+ 	target.c target-descriptions.c target-memory.c \
+ 	thread.c top.c tracepoint.c \
+ 	trad-frame.c \
+@@ -741,7 +741,7 @@ exec.h m32r-tdep.h osabi.h gdbcore.h sol
+ i386bsd-nat.h xml-support.h xml-tdesc.h alphabsd-tdep.h gdb_obstack.h \
+ ia64-tdep.h ada-lang.h varobj.h frv-tdep.h nto-tdep.h serial.h \
+ c-lang.h d-lang.h frame.h event-loop.h block.h cli/cli-setshow.h	\
+-cli/cli-decode.h cli/cli-cmds.h cli/cli-dump.h \
++cli/cli-decode.h cli/cli-cmds.h cli/cli-dump.h cli/cli-utils.h \
+ cli/cli-script.h macrotab.h symtab.h version.h gnulib/wchar.in.h \
+ gnulib/string.in.h gnulib/str-two-way.h \
+ gnulib/stdint.in.h remote.h gdb.h sparc-nat.h gdbserver/win32-low.h \
+@@ -787,7 +787,7 @@ annotate.h sim-regno.h dictionary.h dfp.
+ remote-fileio.h i386-linux-tdep.h vax-tdep.h objc-lang.h \
+ sentinel-frame.h bcache.h symfile.h windows-tdep.h linux-tdep.h \
+ gdb_usleep.h jit.h python/python.h python/python-internal.h \
+-xml-syscall.h ada-operator.inc microblaze-tdep.h
++xml-syscall.h ada-operator.inc microblaze-tdep.h stap-probe.h
+ 
+ # Header files that already have srcdir in them, or which are in objdir.
+ 
+@@ -873,7 +873,7 @@ COMMON_OBS = $(DEPFILES) $(CONFIG_OBS) $
+ 	prologue-value.o memory-map.o xml-support.o xml-syscall.o \
+ 	target-descriptions.o target-memory.o xml-tdesc.o xml-builtin.o \
+ 	inferior.o osdata.o gdb_usleep.o record.o gcore.o \
+-	jit.o progspace.o
++	jit.o progspace.o stap-probe.o
+ 
+ # Definitions for the syscall's XML files and dir
+ XML_SYSCALLS_DIR = syscalls/
+@@ -1770,6 +1770,10 @@ cli-setshow.o: $(srcdir)/cli/cli-setshow
+ 	$(COMPILE) $(srcdir)/cli/cli-setshow.c
+ 	$(POSTCOMPILE)
+ 
++cli-utils.o: $(srcdir)/cli/cli-utils.c
++	$(COMPILE) $(srcdir)/cli/cli-utils.c
++	$(POSTCOMPILE)
++
+ 
+ #
+ # GDBTK sub-directory
+Index: gdb-7.2/gdb/NEWS
+===================================================================
+--- gdb-7.2.orig/gdb/NEWS	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/NEWS	2011-08-11 18:24:28.000000000 +0200
+@@ -274,6 +274,10 @@ show record memory-query
+ disassemble
+   The disassemble command now supports "start,+length" form of two arguments.
+ 
++* GDB now has support for SystemTap <sys/sdt.h> probes.  You can set a
++  breakpoint using the new "probe:" linespec and inspect the probe
++  arguments using the new $_probe_arg family of convenience variables.
++
+ * Python scripting
+ 
+ ** GDB now provides a new directory location, called the python directory,
+Index: gdb-7.2/gdb/breakpoint.c
+===================================================================
+--- gdb-7.2.orig/gdb/breakpoint.c	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/breakpoint.c	2011-08-11 18:24:28.000000000 +0200
+@@ -63,6 +63,8 @@
+ #include "xml-syscall.h"
+ #include "parser-defs.h"
+ #include "regcache.h"
++#include "gdb_regex.h"
++#include "stap-probe.h"
+ 
+ /* readline include files */
+ #include "readline/readline.h"
+@@ -1580,6 +1582,40 @@ should_be_inserted (struct bp_location *
+   return 1;
+ }
+ 
++/* See the comment in breakpoint.h.  */
++
++void
++modify_semaphore (struct bp_location *loc, int set)
++{
++  struct gdbarch *arch = loc->gdbarch;
++  gdb_byte bytes[sizeof (LONGEST)];
++  /* The ABI specifies "unsigned short".  */
++  struct type *type = builtin_type (arch)->builtin_unsigned_short;
++  CORE_ADDR address = loc->semaphore;
++  ULONGEST value;
++
++  if (address == 0)
++    return;
++
++  /* Swallow errors.  */
++  if (target_read_memory (address, bytes, TYPE_LENGTH (type)) != 0)
++    return;
++
++  value = extract_unsigned_integer (bytes, TYPE_LENGTH (type),
++				    gdbarch_byte_order (arch));
++  /* Note that we explicitly don't worry about overflow or
++     underflow.  */
++  if (set)
++    ++value;
++  else
++    --value;
++
++  store_unsigned_integer (bytes, TYPE_LENGTH (type),
++			  gdbarch_byte_order (arch), value);
++
++  target_write_memory (address, bytes, TYPE_LENGTH (type));
++}
++
+ /* Insert a low-level "breakpoint" of some type.  BPT is the breakpoint.
+    Any error messages are printed to TMP_ERROR_STREAM; and DISABLED_BREAKS,
+    and HW_BREAKPOINT_ERROR are used to report problems.
+@@ -1669,6 +1705,8 @@ Note: automatically using hardware break
+ 	  else
+ 	    val = target_insert_breakpoint (bpt->gdbarch,
+ 					    &bpt->target_info);
++
++	  modify_semaphore (bpt, 1);
+ 	}
+       else
+ 	{
+@@ -2444,6 +2482,8 @@ remove_breakpoint_1 (struct bp_location 
+ 	    val = target_remove_hw_breakpoint (b->gdbarch, &b->target_info);
+ 	  else
+ 	    val = target_remove_breakpoint (b->gdbarch, &b->target_info);
++
++	  modify_semaphore (b, 0);
+ 	}
+       else
+ 	{
+@@ -5694,6 +5734,7 @@ set_raw_breakpoint (struct gdbarch *gdba
+   b->loc->requested_address = sal.pc;
+   b->loc->address = adjusted_address;
+   b->loc->pspace = sal.pspace;
++  b->loc->semaphore = sal.semaphore;
+ 
+   /* Store the program space that was used to set the breakpoint, for
+      breakpoint resetting.  */
+@@ -6788,6 +6829,7 @@ clone_momentary_breakpoint (struct break
+   copy->loc->address = orig->loc->address;
+   copy->loc->section = orig->loc->section;
+   copy->loc->pspace = orig->loc->pspace;
++  copy->loc->semaphore = orig->loc->semaphore;
+ 
+   if (orig->source_file == NULL)
+     copy->source_file = NULL;
+@@ -7010,6 +7052,7 @@ add_location_to_breakpoint (struct break
+   loc->address = adjust_breakpoint_address (loc->gdbarch,
+ 					    loc->requested_address, b->type);
+   loc->pspace = sal->pspace;
++  loc->semaphore = sal->semaphore;
+   gdb_assert (loc->pspace != NULL);
+   loc->section = sal->section;
+ 
+Index: gdb-7.2/gdb/breakpoint.h
+===================================================================
+--- gdb-7.2.orig/gdb/breakpoint.h	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/breakpoint.h	2011-08-11 18:24:28.000000000 +0200
+@@ -333,6 +333,11 @@ struct bp_location
+      processor's architectual constraints.  */
+   CORE_ADDR requested_address;
+ 
++  /* If the location comes from a SystemTap probe point, and the probe
++     has an associated semaphore variable, then this is the address of
++     the semaphore.  Otherwise, this is zero.  */
++  CORE_ADDR semaphore;
++
+   char *function_name;
+ 
+   /* Details of the placed breakpoint, when inserted.  */
+@@ -1117,4 +1122,11 @@ extern void end_rbreak_breakpoints (void
+ extern void breakpoints_relocate (struct objfile *objfile,
+ 				  struct section_offsets *delta);
+ 
++/* Set or clear a SystemTap semaphore.  LOC is the location which may
++   hold a semaphore.  SET is non-zero if the semaphore should be set,
++   or zero if the semaphore should be cleared.  Semaphores act as
++   reference counters, so calls to this function must be paired.  */
++
++extern void modify_semaphore (struct bp_location *location, int set);
++
+ #endif /* !defined (BREAKPOINT_H) */
+Index: gdb-7.2/gdb/coffread.c
+===================================================================
+--- gdb-7.2.orig/gdb/coffread.c	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/coffread.c	2011-08-11 18:24:28.000000000 +0200
+@@ -2138,6 +2138,7 @@ static struct sym_fns coff_sym_fns =
+ 				   a file.  */
+   NULL,                         /* sym_read_linetable  */
+   default_symfile_relocate,	/* sym_relocate: Relocate a debug section.  */
++  NULL,				/* sym_probe_fns */
+   &psym_functions,
+   NULL				/* next: pointer to next struct sym_fns */
+ };
+Index: gdb-7.2/gdb/dbxread.c
+===================================================================
+--- gdb-7.2.orig/gdb/dbxread.c	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/dbxread.c	2011-08-11 18:24:28.000000000 +0200
+@@ -3586,6 +3586,7 @@ static struct sym_fns aout_sym_fns =
+ 				   a file.  */
+   NULL,                         /* sym_read_linetable */
+   default_symfile_relocate,	/* sym_relocate: Relocate a debug section.  */
++  NULL,				/* sym_probe_fns */
+   &psym_functions,
+   NULL				/* next: pointer to next struct sym_fns */
+ };
+Index: gdb-7.2/gdb/doc/gdb.texinfo
+===================================================================
+--- gdb-7.2.orig/gdb/doc/gdb.texinfo	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/doc/gdb.texinfo	2011-08-11 18:24:28.000000000 +0200
+@@ -3278,6 +3278,7 @@ all breakpoints in that range are operat
+ * Conditions::                  Break conditions
+ * Break Commands::              Breakpoint command lists
+ * Save Breakpoints::            How to save breakpoints in a file
++* Static Probe Points::         Listing static probe points
+ * Error in Breakpoints::        ``Cannot insert breakpoints''
+ * Breakpoint-related Warnings:: ``Breakpoint address adjusted...''
+ @end menu
+@@ -4482,6 +4483,50 @@ and remove the breakpoint definitions yo
+ that can no longer be recreated.
+ @end table
+ 
++@node Static Probe Points
++@subsection Static Probe Points
++
++@cindex SystemTap static probe point
++@cindex sdt-probe
++The @sc{gnu}/Linux tool @code{SystemTap} provides a way for
++applications to embed static probes, using @file{sys/sdt.h}.  @value{GDBN}
++can list the available probes, and you can put breakpoints at the
++probe points (@pxref{Specify Location}).
++
++You can examine the available @code{SystemTap} static probes using
++@code{info probes}:
++
++@table @code
++@kindex info probes
++@item info probes [@var{provider} [@var{name} [@var{objfile}]]]
++List the available @code{SystemTap} static probes.
++
++If given, @var{provider} is a regular expression used to select which
++providers to list.  If omitted, all providers are listed.
++
++If given, @var{name} is a regular expression used to select which
++probes to list.  If omitted, all probes are listed.
++
++If given, @var{objfile} is a regular expression used to select which
++object files (executable or shared libraries) to examine.  If not
++given, all object files are considered.
++@end table
++
++@vindex $_probe_arg@r{, convenience variable}
++A probe may specify up to ten arguments.  These are available at the
++point at which the probe is defined---that is, when the current PC is
++at the probe's location.  The arguments are available using the
++convenience variables (@pxref{Convenience Vars})
++@code{$_probe_arg0}@dots{}@code{$_probe_arg9}.  Each probe argument is
++an integer of the appropriate size; types are not preserved.  The
++convenience variable @code{$_probe_argc} holds the number of arguments
++at the current probe point.
++
++These variables are always available, but attempts to access them at
++any location other than a probe point will cause @value{GDBN} to give
++an error.
++
++
+ @c  @ifclear BARETARGET
+ @node Error in Breakpoints
+ @subsection ``Cannot insert breakpoints''
+@@ -6387,6 +6432,29 @@ specify the function unambiguously, e.g.
+ functions with identical names in different source files.
+ @end table
+ 
++@cindex SystemTap static probe point
++@item probe:@r{[}@var{objfile}:@r{]}@r{[}@var{provider}:@r{]}@var{name}
++The @sc{gnu}/Linux tool @code{SystemTap} provides a way for
++applications to embed static probes.  This form of linespec specifies
++the location of such a static probe.  See
++@uref{http://sourceware.org/systemtap/wiki/AddingUserSpaceProbingToApps}
++for more information on static probes.
++
++If @var{objfile} is given, only probes coming from that shared library
++or executable are considered.  If @var{provider} is given, then only
++probes from that provider are considered.
++
++@xref{Static Probe Points}, for more information on finding and using
++static probes.
++
++Some probes have an associated semaphore variable; for instance, this
++happens automatically if you defined your probe using a DTrace-style
++@file{.d} file.  If your probe has a semaphore, @value{GDBN} will
++automatically enable it when you specify a breakpoint using the
++@samp{probe:} notation.  But, if you put a breakpoint at a probe's
++location by some other method (e.g., @code{break file:line}), then
++@value{GDBN} will not automatically set the semaphore.
++
+ @end table
+ 
+ 
+@@ -8321,6 +8389,10 @@ to match the format in which the data wa
+ The variable @code{$_exitcode} is automatically set to the exit code when
+ the program being debugged terminates.
+ 
++@item $_probe_argc
++@itemx $_probe_arg0@dots{}$_probe_arg9
++Arguments to a SystemTap static probe.  @xref{Static Probe Points}.
++
+ @item $_sdata
+ @vindex $_sdata@r{, inspect, convenience variable}
+ The variable @code{$_sdata} contains extra collected static tracepoint
+@@ -10040,6 +10112,16 @@ Collect all function arguments.
+ @item $locals
+ Collect all local variables.
+ 
++@item $_probe_argc
++Collects the number of arguments from the @code{SystemTap} probe at
++which the tracepoint is located.
++@xref{Static Probe Points,,Static Probe Points}
++
++@item $_probe_arg@var{N}
++Where @var{N} varies from 0 to 9.  Collects the @var{N}th argument
++from the @code{SystemTap} probe at which the tracepoint is located.
++@xref{Static Probe Points,,Static Probe Points}
++
+ @item $_sdata
+ @vindex $_sdata@r{, collect}
+ Collect static tracepoint marker specific data.  Only available for
+Index: gdb-7.2/gdb/elfread.c
+===================================================================
+--- gdb-7.2.orig/gdb/elfread.c	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/elfread.c	2011-08-11 18:24:28.000000000 +0200
+@@ -43,6 +43,8 @@
+ #include "gdbcmd.h"
+ #include "observer.h"
+ #include "elf/external.h"
++#include "stap-probe.h"
++#include "arch-utils.h"
+ 
+ extern void _initialize_elfread (void);
+ 
+@@ -60,6 +62,21 @@ struct elfinfo
+     asection *mdebugsect;	/* Section pointer for .mdebug section */
+   };
+ 
++/* Per-objfile data for SystemTap probe info.  */
++
++static const struct objfile_data *stap_probe_key = NULL;
++
++/* Per-objfile data about SystemTap probes.  */
++
++struct stap_probe_per_objfile
++  {
++    /* The number of probes in this objfile.  */
++    int stap_num_probes;
++
++    /* The probes themselves.  */
++    struct stap_probe *probes;
++  };
++
+ static void free_elfinfo (void *);
+ 
+ /* Locate the segments in ABFD.  */
+@@ -2271,7 +2288,266 @@ elfstab_offset_sections (struct objfile 
+     complaint (&symfile_complaints,
+ 	       _("elf/stab section information missing for %s"), filename);
+ }
++
++/* Helper function that parses the information contained in a
++   SystemTap's probe.  Basically, the information consists in:
++
++   - Probe's PC address;
++   - Link-time section address of `.stapsdt.base' section;
++   - Link-time address of the semaphore variable, or ZERO if the
++     probe doesn't have an associated semaphore;
++   - Probe's provider name;
++   - Probe's name;
++   - Probe's argument format.  */
++
++static void
++handle_probe (struct objfile *objfile, struct sdt_note *el,
++	      struct stap_probe *ret, CORE_ADDR base)
++{
++  bfd *abfd = objfile->obfd;
++  int size = bfd_get_arch_size (abfd) / 8;
++  struct gdbarch *gdbarch = get_objfile_arch (objfile);
++  struct type *ptr_type = builtin_type (gdbarch)->builtin_data_ptr;
++  CORE_ADDR base_ref;
++
++  /* Provider and the name of the probe.  */
++  ret->provider = (const char *) &el->data[3 * size];
++  ret->name = memchr (ret->provider, '\0',
++		      (unsigned long *) el->data
++		      + el->size - (unsigned long *) ret->provider);
++  /* Making sure there is a name.  */
++  if (!ret->name)
++    complaint (&symfile_complaints, _("corrupt probe when reading `%s'"),
++	       objfile->name);
++  else
++    ++ret->name;
++
++  /* Retrieving the probe's address.  */
++  ret->address = extract_typed_address ((const gdb_byte *) &el->data[0],
++					ptr_type);
++  /* Link-time sh_addr of `.stapsdt.base' section.  */
++  base_ref = extract_typed_address ((const gdb_byte *) &el->data[size],
++				    ptr_type);
++  /* Semaphore address.  */
++  ret->sem_addr = extract_typed_address ((const gdb_byte *) &el->data[2 * size],
++					 ptr_type);
++
++  ret->address += (ANOFFSET (objfile->section_offsets,
++			     SECT_OFF_TEXT (objfile))
++		   + base - base_ref);
++  if (ret->sem_addr)
++    ret->sem_addr += (ANOFFSET (objfile->section_offsets,
++				SECT_OFF_DATA (objfile))
++		      + base - base_ref);
++
++  /* Arguments.  We can only extract the argument format if there is a valid
++     name for this probe.  */
++  if (ret->name)
++    {
++      ret->args = memchr (ret->name, '\0',
++			  (unsigned long *) el->data
++			  + el->size - (unsigned long *) ret->name);
++
++      if (ret->args++ != NULL
++	  || memchr (ret->args, '\0', (unsigned long *) el->data
++		     + el->size - (unsigned long *) ret->name)
++	  != el->data + el->size - 1)
++	complaint (&symfile_complaints, _("corrupt probe when reading `%s'"),
++		   objfile->name);
++    }
++  else
++    ret->args = NULL;
++}
++
++/* The name of the SystemTap section where we will find information about
++   the probes.  */
++
++#define STAP_BASE_SECTION_NAME ".stapsdt.base"
++
++/* Helper function which tries to find the base address of the SystemTap
++   base section named STAP_BASE_SECTION_NAME.  */
++
++static void
++get_base_address_1 (bfd *abfd, asection *sect, void *obj)
++{
++  bfd_vma *base = (bfd_vma *) obj;
++
++  if (*base == (bfd_vma) -1
++      && (sect->flags & (SEC_DATA | SEC_ALLOC | SEC_HAS_CONTENTS))
++      && sect->name && !strcmp (sect->name, STAP_BASE_SECTION_NAME))
++    *base = sect->vma;
++}
++
++/* Helper function which iterates over every section in the BFD file,
++   trying to find the base address of the SystemTap base section.
++   Returns the section address if found, or -1 otherwise.  */
++
++static bfd_vma
++get_base_address (bfd *obfd)
++{
++  bfd_vma base = (bfd_vma) -1;
++
++  bfd_map_over_sections (obfd, get_base_address_1, (void *) &base);
++
++  return base;
++}
++
++/* Implementation of `sym_get_probes', as documented in symfile.h.  */
++
++static const struct stap_probe *
++elf_get_probes (struct objfile *objfile, int *num_probes)
++{
++  struct stap_probe *ret = NULL;
++  struct stap_probe_per_objfile *probes_per_objfile;
++
++  /* Initially, no probes.  */
++  *num_probes = 0;
++
++  /* Have we parsed this objfile's probes already?  */
++  probes_per_objfile
++    = (struct stap_probe_per_objfile *) objfile_data (objfile,
++						      stap_probe_key);
++
++  if (!probes_per_objfile)
++    {
++      /* If we are here, then this is the first time we are parsing the
++	 probe's information.  We basically have to count how many probes
++	 the objfile has, and then fill in the necessary information
++	 for each one.  */
++
++      bfd *obfd = objfile->obfd;
++      bfd_vma base = get_base_address (obfd);
++      struct sdt_note *iter;
++      int i;
++      int n = 0;
++
++      if (! elf_tdata (obfd)->sdt_note_head)
++	/* There isn't any probe here.  */
++	return NULL;
++
++      /* Allocating space for probe info.  */
++      for (iter = elf_tdata (obfd)->sdt_note_head;
++	   iter;
++	   iter = iter->next, ++n);
++
++      ret = xcalloc (n, sizeof (struct stap_probe));
++
++      /* Parsing each probe's information.  */
++      for (iter = elf_tdata (obfd)->sdt_note_head, i = 0;
++	   iter;
++	   iter = iter->next, i++)
++	/* We first have to handle all the information about the
++	   probe which is present in the section.  */
++	handle_probe (objfile, iter, &ret[i], base);
++
++      /* Creating a cache for these probes in the objfile's registry.  */
++      probes_per_objfile = xmalloc (sizeof (struct stap_probe_per_objfile));
++
++      probes_per_objfile->stap_num_probes = n;
++      probes_per_objfile->probes = ret;
++
++      set_objfile_data (objfile, stap_probe_key, probes_per_objfile);
++    }
++  else
++    ret = probes_per_objfile->probes;
++
++  *num_probes = probes_per_objfile->stap_num_probes;
++
++  return ret;
++}
++
++/* Implementation of `sym_get_probe_argument_count', as documented in
++   symfile.h.  */
++
++static int
++elf_get_probe_argument_count (struct objfile *objfile,
++			      const struct stap_probe *probe)
++{
++  const char *pargs = probe->args;
++
++  if (!pargs || !*pargs || *pargs == ':')
++    /* No arguments.  */
++    return 0;
++
++  return stap_get_probe_argument_count (probe);
++}
++
++/* Implementation of `sym_evaluate_probe_argument', as documented in
++   symfile.h.  */
++
++static struct value *
++elf_evaluate_probe_argument (struct objfile *objfile,
++			     const struct stap_probe *probe,
++			     struct frame_info *frame,
++			     int n)
++{
++  return stap_evaluate_probe_argument (objfile, probe, frame, n);
++}
++
++/* Implementation of `sym_compile_to_ax', as documented in symfile.h.  */
++
++static void
++elf_compile_to_ax (struct objfile *objfile,
++		   const struct stap_probe *probe,
++		   struct agent_expr *expr,
++		   struct axs_value *value,
++		   int n)
++{
++  stap_compile_to_ax (objfile, probe, expr, value, n);
++}
++
++/* Implementation of `sym_relocate_probe', as documented in symfile.h.  */
++
++static void
++elf_symfile_relocate_probe (struct objfile *objfile,
++			    struct section_offsets *new_offsets,
++			    struct section_offsets *delta)
++{
++  int i;
++  struct stap_probe_per_objfile *p
++    = (struct stap_probe_per_objfile *) objfile_data (objfile,
++						      stap_probe_key);
++
++  if (!p)
++    /* No probe to relocate.  */
++    return;
++
++  for (i = 0; i < p->stap_num_probes; i++)
++    {
++      p->probes[i].address += ANOFFSET (delta, SECT_OFF_TEXT (objfile));
++      if (p->probes[i].sem_addr)
++	p->probes[i].sem_addr += ANOFFSET (delta, SECT_OFF_DATA (objfile));
++    }
++}
++
++/* Helper function used to free the space allocated for storing SystemTap
++   probe information.  */
++
++static void
++stap_probe_key_free (struct objfile *objfile, void *d)
++{
++  int i;
++  struct stap_probe_per_objfile *data = (struct stap_probe_per_objfile *) d;
++
++  for (i = 0; i < data->stap_num_probes; i++)
++    stap_free_parsed_args (data->probes[i].parsed_args);
++  xfree (data->probes);
++  xfree (data);
++}
++
+ 
++
++/* Implementation `sym_probe_fns', as documented in symfile.h.  */
++
++static const struct sym_probe_fns elf_probe_fns =
++{
++  elf_get_probes,		/* sym_get_probes */
++  elf_get_probe_argument_count,	/* sym_get_probe_argument_count */
++  elf_evaluate_probe_argument,	/* sym_evaluate_probe_argument */
++  elf_compile_to_ax,		/* sym_compile_to_ax */
++  elf_symfile_relocate_probe,	/* sym_relocate_probe */
++};
++
+ /* Register that we are able to handle ELF object file formats.  */
+ 
+ static struct sym_fns elf_sym_fns =
+@@ -2286,6 +2562,7 @@ static struct sym_fns elf_sym_fns =
+ 				   a file.  */
+   NULL,                         /* sym_read_linetable */
+   default_symfile_relocate,	/* sym_relocate: Relocate a debug section.  */
++  &elf_probe_fns,		/* sym_probe_fns */
+   &psym_functions,
+   NULL				/* next: pointer to next struct sym_fns */
+ };
+@@ -2304,6 +2581,7 @@ static struct sym_fns elf_sym_fns_gdb_in
+ 				   a file.  */
+   NULL,                         /* sym_read_linetable */
+   default_symfile_relocate,	/* sym_relocate: Relocate a debug section.  */
++  &elf_probe_fns,		/* sym_probe_fns */
+   &dwarf2_gdb_index_functions,
+   NULL				/* next: pointer to next struct sym_fns */
+ };
+@@ -2311,6 +2589,8 @@ static struct sym_fns elf_sym_fns_gdb_in
+ void
+ _initialize_elfread (void)
+ {
++  stap_probe_key
++    = register_objfile_data_with_cleanup (NULL, stap_probe_key_free);
+   add_symtab_fns (&elf_sym_fns);
+ 
+   add_setshow_zinteger_cmd ("build-id-verbose", no_class, &build_id_verbose,
+Index: gdb-7.2/gdb/linespec.c
+===================================================================
+--- gdb-7.2.orig/gdb/linespec.c	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/linespec.c	2011-08-11 18:24:28.000000000 +0200
+@@ -41,6 +41,7 @@
+ #include "mi/mi-cmds.h"
+ #include "target.h"
+ #include "arch-utils.h"
++#include "stap-probe.h"
+ 
+ /* We share this one with symtab.c, but it is not exported widely. */
+ 
+@@ -677,6 +678,7 @@ find_method_overload_end (char *p)
+    PC returned is 0.
+    FILE:FUNCTION -- likewise, but prefer functions in that file.
+    *EXPR -- line in which address EXPR appears.
++   probe:[OBJFILE:][PROVIDER:]NAME -- a systemtap static probe
+ 
+    This may all be followed by an "if EXPR", which we ignore.
+ 
+@@ -745,6 +747,9 @@ decode_line_1 (char **argptr, int funfir
+   if (**argptr == '*')
+     return decode_indirect (argptr);
+ 
++  if (strncmp (*argptr, "probe:", 6) == 0)
++    return parse_stap_probe (argptr, canonical);
++
+   is_quoted = (*argptr
+ 	       && strchr (get_gdb_completer_quote_characters (),
+ 			  **argptr) != NULL);
+Index: gdb-7.2/gdb/machoread.c
+===================================================================
+--- gdb-7.2.orig/gdb/machoread.c	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/machoread.c	2011-08-11 18:24:28.000000000 +0200
+@@ -849,6 +849,7 @@ static struct sym_fns macho_sym_fns = {
+ 				   a file.  */
+   NULL,                         /* sym_read_linetable */
+   macho_symfile_relocate,	/* sym_relocate: Relocate a debug section.  */
++  NULL,				/* sym_get_probes */
+   &psym_functions,
+   NULL                          /* next: pointer to next struct sym_fns */
+ };
+Index: gdb-7.2/gdb/mipsread.c
+===================================================================
+--- gdb-7.2.orig/gdb/mipsread.c	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/mipsread.c	2011-08-11 18:24:28.000000000 +0200
+@@ -402,6 +402,7 @@ static struct sym_fns ecoff_sym_fns =
+ 				   a file.  */
+   NULL,                         /* sym_read_linetable */
+   default_symfile_relocate,	/* sym_relocate: Relocate a debug section.  */
++  NULL,				/* sym_probe_fns */
+   &psym_functions,
+   NULL				/* next: pointer to next struct sym_fns */
+ };
+Index: gdb-7.2/gdb/objfiles.c
+===================================================================
+--- gdb-7.2.orig/gdb/objfiles.c	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/objfiles.c	2011-08-11 18:24:28.000000000 +0200
+@@ -856,6 +856,11 @@ objfile_relocate1 (struct objfile *objfi
+   if (objfile->separate_debug_objfile_backlink == NULL)
+     breakpoints_relocate (objfile, delta);
+ 
++  /* Relocating SystemTap probes.  */
++  if (objfile->sf && objfile->sf->sym_probe_fns)
++    objfile->sf->sym_probe_fns->sym_relocate_probe (objfile,
++						    new_offsets, delta);
++
+   /* Data changed.  */
+   return 1;
+ }
+Index: gdb-7.2/gdb/somread.c
+===================================================================
+--- gdb-7.2.orig/gdb/somread.c	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/somread.c	2011-08-11 18:24:28.000000000 +0200
+@@ -439,6 +439,7 @@ static struct sym_fns som_sym_fns =
+ 				   a file.  */
+   NULL,                         /* sym_read_linetable */
+   default_symfile_relocate,	/* sym_relocate: Relocate a debug section.  */
++  NULL,				/* sym_get_probes */
+   &psym_functions,
+   NULL				/* next: pointer to next struct sym_fns */
+ };
+Index: gdb-7.2/gdb/stap-probe.c
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/stap-probe.c	2011-08-11 18:24:28.000000000 +0200
+@@ -0,0 +1,2042 @@
++/* SystemTap probe support for GDB.
++
++   Copyright (C) 2011 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#include "defs.h"
++#include "stap-probe.h"
++#include "vec.h"
++#include "ui-out.h"
++#include "gdb_regex.h"
++#include "objfiles.h"
++#include "arch-utils.h"
++#include "command.h"
++#include "filenames.h"
++#include "value.h"
++#include "exceptions.h"
++#include "ax.h"
++#include "ax-gdb.h"
++#include "user-regs.h"
++#include "complaints.h"
++#include "cli/cli-utils.h"
++#include "linespec.h"
++#include "cli/cli-dump.h"
++
++#include <ctype.h>
++
++/* This define is used to inform whether we are compiling an agent
++   expression or not.  */
++
++#define STAP_COMPILING_AGENT_EXPR_P(eval_info) \
++  (eval_info->aexpr != NULL)
++
++/* The various possibilities of bitness defined for a probe's argument.
++
++   The relationship is:
++
++   - STAP_ARG_BITNESS_UNDEFINED:  The user hasn't specified the bitness.
++   - STAP_ARG_BITNESS_32BIT_UNSIGNED:  argument string starts with `4@'.
++   - STAP_ARG_BITNESS_32BIT_SIGNED:  argument string starts with `-4@'.
++   - STAP_ARG_BITNESS_64BIT_UNSIGNED:  argument string starts with `8@'.
++   - STAP_ARG_BITNESS_64BIT_SIGNED:  argument string starts with `-8@'.  */
++
++enum stap_arg_bitness
++{
++  STAP_ARG_BITNESS_UNDEFINED,
++  STAP_ARG_BITNESS_32BIT_UNSIGNED,
++  STAP_ARG_BITNESS_32BIT_SIGNED,
++  STAP_ARG_BITNESS_64BIT_UNSIGNED,
++  STAP_ARG_BITNESS_64BIT_SIGNED,
++};
++
++/* The following structure represents a single argument for the probe.  */
++
++struct stap_probe_arg
++{
++  /* The bitness of this argument.  */
++  enum stap_arg_bitness bitness;
++
++  /* The string representing this argument.  */
++  char *arg_str;
++};
++
++/* The maximum number of arguments that a probe can have,
++   as defined in <sys/sdt.h>.  */
++
++#define STAP_MAX_ARGS 10
++
++/* Structure that holds information about all arguments of a probe.  */
++
++struct stap_args_info
++{
++  /* The number of valid parsed arguments.  */
++  int n_args;
++
++  /* The probe to which these arguments belong.  */
++  struct stap_probe *probe;
++
++  /* Information about each argument.  */
++  struct stap_probe_arg *arg;
++};
++
++/* Structure that contains all the necessary information to evaluate
++   an expression.  */
++
++struct stap_evaluation_info
++{
++  /* The constant pointer which holds the expression. This is primarily
++     used for printing error messages.  Evaluation functions should
++     not modify this pointer directly; instead, they should use the
++     EXP_BUFFER pointer below.  */
++  const char *saved_expr;
++
++  /* Modifiable version of the above pointer.  */
++  char *exp_buf;
++
++  /* The pointer to the current gdbarch.  */
++  struct gdbarch *gdbarch;
++
++  /* The pointer to the current frame, used when accessing registers'
++     contents.  */
++  struct frame_info *frame;
++
++  /* The bitness specified for this argument.  */
++  enum stap_arg_bitness bitness;
++
++  /* If the above flag is true (one), this field will contain the
++     pointer to the agent expression.  */
++  struct agent_expr *aexpr;
++
++  /* The value we are modifying (for agent expression).  */
++  struct axs_value *avalue;
++};
++
++/* This dummy variable is used when parsing a probe's argument fails.
++   In this case, the number of arguments for this probe is zero, so that's
++   why this variable is useful.  */
++
++static struct stap_args_info dummy_stap_args_info =
++  { 0, NULL, NULL };
++
++static struct value *stap_evaluate_probe_argument_2
++  (struct stap_evaluation_info *eval_info,
++   struct value *lhs, int prec);
++
++static struct value *stap_evaluate_conditionally
++  (struct stap_evaluation_info *eval_info);
++
++/* Helper function which decides to skip whitespaces or not in a probe's
++   argument string.  Basically, if we are inside a parenthesis expression
++   (i.e., inside a subexpression), we can skip whitespaces; otherwise we
++   cannot.  */
++
++static void
++stap_skip_whitespace_cond (char **s, int inside_paren)
++{
++  if (inside_paren)
++    *s = skip_spaces (*s);
++}
++
++/* Helper function which parses a single argument in a probe's argument
++   string, based on various rules (which can be learned from the `gas'
++   manual).  It returns 1 on success, or 0 otherwise.  */
++
++static int
++stap_parse_arg (const char **p)
++{
++  char *cur = (char *) *p;
++  int done = 0;
++  int paren_open = 0;
++
++  while (!done)
++    {
++      switch (*cur)
++	{
++	case ' ': case 0:
++	  /* If we're here, then we have already parsed everything
++	     from this argument.  */
++	  if (paren_open)
++	    return 0;
++	  done = 1;
++	  break;
++
++	case '(':
++	  ++paren_open;
++	  ++cur;
++	  stap_skip_whitespace_cond (&cur, paren_open);
++	  break;
++
++	case ')':
++	  if (!paren_open)
++	    return 0;
++
++	  --paren_open;
++	  ++cur;
++	  if (paren_open)
++	    cur = skip_spaces (cur);
++	  break;
++
++	case '+': case '-':
++	case '*': case '/':
++	case '>': case '<': case '|': case '&':
++	case '^': case '!':
++	    {
++	      char c = *cur;
++
++	      ++cur;
++	      switch (*cur)
++		{
++		case '>':
++		  if (c != '<' && c != '>')
++		    return 0;
++
++		  ++cur;
++		  break;
++
++		case '<':
++		  if (c != '<')
++		    return 0;
++
++		  ++cur;
++		  break;
++
++		case '=':
++		  if (c != '=' && c != '<' && c != '>' && c != '!')
++		    return 0;
++
++		  ++cur;
++		  break;
++
++		case '|':
++		  if (c != '|')
++		    return 0;
++
++		  ++cur;
++		  break;
++
++		case '&':
++		  if (c != '&')
++		    return 0;
++
++		  ++cur;
++		  break;
++
++		default:
++		  break;
++		}
++	      /* Infix operators take two arguments, one on either
++		 side.  Skipping the whitespaces that may happen on the
++		 right side.  */
++	      stap_skip_whitespace_cond (&cur, paren_open);
++	    }
++	  break;
++
++	case '%':
++	    {
++	      ++cur;
++	      stap_skip_whitespace_cond (&cur, paren_open);
++	      if (*cur >= 'a' && *cur <= 'z')
++		{
++		  /* We're dealing with a register name.  */
++		  while (isalnum (*cur))
++		    ++cur;
++
++		  stap_skip_whitespace_cond (&cur, paren_open);
++
++		  /* Some registers (e.g. floating-point register stack
++		     registers on Intel i386) have the following syntax:
++
++		     `%st(0)', `%st(1)', and so on.
++
++		     So it's ok to expect parenthesis here.  */
++		  if (*cur == '(')
++		    {
++		      ++cur;
++		      stap_skip_whitespace_cond (&cur, paren_open);
++		      if (!isdigit (*cur))
++			/* This is an error, since we only expect numbers
++			   inside this parenthesis.  */
++			return 0;
++		      ++cur;
++		      stap_skip_whitespace_cond (&cur, paren_open);
++		      if (*cur != ')')
++			/* We only expect one number.  */
++			return 0;
++		      ++cur;
++		      stap_skip_whitespace_cond (&cur, paren_open);
++		    }
++		}
++	    }
++	  break;
++
++	case '$':
++	    {
++	      /* This is an integer constant.  */
++	      ++cur;
++	      stap_skip_whitespace_cond (&cur, paren_open);
++
++	      while (isdigit (*cur))
++		++cur;
++
++	      stap_skip_whitespace_cond (&cur, paren_open);
++	    }
++	  break;
++
++	case '0': case '1': case '2': case '3': case '4':
++	case '5': case '6': case '7': case '8': case '9':
++	    {
++	      char *old = cur;
++
++	      /* Number.  */
++	      while (isdigit (*cur))
++		++cur;
++
++	      /* We have to do a lookahead here, because the user may
++		 input `2 + 2' (with spaces), and this is not an error.  */
++	      cur = skip_spaces (cur);
++
++	      switch (*cur)
++		{
++		case '+': case '-':
++		  /* We may find the `@' sign, and it means that the
++		     argument has finished, so we shouldn't advance the
++		     pointer.  */
++		  if (cur[1] && (cur[1] == '4' || cur[1] == '8')
++		      && cur[2] && cur[2] == '@')
++		    {
++		      cur = old;
++		      goto fin;
++		    }
++		  break;
++
++		case '*': case '/': case '>': case '<':
++		case '|': case '&': case '^': case '!':
++		  /* This is a binary operation, which means we'll
++		     have to find another number after the operator.  */
++		  break;
++
++		case '(':
++		  /* We may also have sentences in the form:
++
++		     `4 (%rax)'  */
++		  break;
++		}
++	    }
++fin:
++	  break;
++	}
++    }
++
++  *p = cur;
++
++  return 1;
++}
++
++/* Helper function which is responsible for freeing the space allocated to
++   hold information about a probe's arguments.  */
++
++static void
++stap_free_args_info (void *args_info_ptr)
++{
++  struct stap_args_info *a = (struct stap_args_info *) args_info_ptr;
++  int i;
++
++  for (i = 0; i < a->n_args; i++)
++    xfree (a->arg[i].arg_str);
++
++  xfree (a->arg);
++  xfree (a);
++}
++
++/* Function which parses an argument string from PROBE, correctly splitting
++   the arguments and storing their information in properly ways.  This function
++   only separates the arguments, but does not evaluate them.
++
++   Consider the following argument string:
++
++   `4@%eax 4@$10'
++
++   We have two arguments, `%eax' and `$10', both with 32-bit unsigned bitness.
++   This function basically handles them, properly filling some structures with
++   this information.  */
++
++static void
++stap_parse_probe_arguments (struct stap_probe *probe)
++{
++  struct stap_args_info *args_info;
++  struct cleanup *back_to;
++  const char *cur = probe->args;
++  int current_arg = -1;
++  /* This is a state-machine parser, which means we will always be
++     in a known state when parsing an argument.  The state could be
++     either `NEW_ARG' if we are parsing a new argument, `BITNESS' if
++     we are parsing the bitness-definition part (i.e., `4@'), or
++     `PARSE_ARG' if we are actually parsing the argument part.  */
++  enum
++    {
++      NEW_ARG,
++      BITNESS,
++      PARSE_ARG,
++    } current_state;
++
++  /* For now, we assume everything is not going to work.  */
++  probe->parsed_args = &dummy_stap_args_info;
++
++  if (!cur || !*cur || *cur == ':')
++    return;
++
++  args_info = xmalloc (sizeof (struct stap_args_info));
++  args_info->n_args = 0;
++  back_to = make_cleanup (stap_free_args_info, args_info);
++  args_info->arg = xcalloc (STAP_MAX_ARGS, sizeof (struct stap_probe_arg));
++
++  /* Ok, let's start.  */
++  current_state = NEW_ARG;
++
++  while (*cur)
++    {
++      switch (current_state)
++	{
++	case NEW_ARG:
++	  ++current_arg;
++
++	  if (current_arg >= STAP_MAX_ARGS)
++	    {
++	      complaint (&symfile_complaints,
++			 _("probe `%s' has more arguments than the maximum "
++			   "allowed"), probe->name);
++	      do_cleanups (back_to);
++	      return;
++	    }
++
++	  current_state = BITNESS;
++	  break;
++
++	case BITNESS:
++	    {
++	      enum stap_arg_bitness b;
++	      int got_minus = 0;
++
++	      /* We expect to find something like:
++
++		 N@OP
++
++		 Where `N' can be [+,-][4,8].  This is not mandatory, so
++		 we check it here.  If we don't find it, go to the next
++		 state.  */
++	      if ((*cur == '-' && cur[1] && cur[2] != '@')
++		  && cur[1] != '@')
++		{
++		  current_state = PARSE_ARG;
++		  args_info->arg[current_arg].bitness
++		    = STAP_ARG_BITNESS_UNDEFINED;
++		  break;
++		}
++
++	      if (*cur == '-')
++		{
++		  /* Discard the `-'.  */
++		  ++cur;
++		  got_minus = 1;
++		}
++
++	      if (*cur == '4')
++		b = got_minus ? STAP_ARG_BITNESS_32BIT_SIGNED
++		  : STAP_ARG_BITNESS_32BIT_UNSIGNED;
++	      else if (*cur == '8')
++		b = got_minus ? STAP_ARG_BITNESS_64BIT_SIGNED
++		  : STAP_ARG_BITNESS_64BIT_UNSIGNED;
++	      else
++		{
++		  /* We have an error, because we don't expect anything
++		     except 4 and 8.  */
++		  complaint (&symfile_complaints,
++			     _("unrecognized bitness `%c' for probe `%s'"),
++			     *cur, probe->name);
++		  do_cleanups (back_to);
++		  return;
++		}
++
++	      args_info->arg[current_arg].bitness = b;
++	      /* Discard the number and the `@' sign.  */
++	      cur += 2;
++	      /* Move on.  */
++	      current_state = PARSE_ARG;
++	    }
++	  break;
++
++	case PARSE_ARG:
++	    {
++	      const char *start = cur;
++
++	      if (!stap_parse_arg (&cur))
++		{
++		  /* We have tried to parse this argument, but it's
++		     malformed.  This is an error.  */
++		  do_cleanups (back_to);
++		  return;
++		}
++
++	      args_info->arg[current_arg].arg_str
++		= savestring (start, cur - start);
++	      ++args_info->n_args;
++	      /* Start it over again.  */
++	      cur = skip_spaces ((char *) cur);
++	      current_state = NEW_ARG;
++	    }
++	  break;
++	}
++
++      if (!*cur && current_state != NEW_ARG)
++	{
++	  /* We reached the end of the argument string, but we're
++	     still in the middle of the process of parsing an argument.
++	     It means the argument string is malformed.  */
++	  complaint (&symfile_complaints,
++		     _("malformed argument for probe `%s'"),
++		     probe->name);
++	  do_cleanups (back_to);
++	  return;
++	}
++    }
++
++  args_info->arg = xrealloc (args_info->arg,
++			      args_info->n_args
++			      * sizeof (struct stap_probe_arg));
++  args_info->probe = probe;
++
++  probe->parsed_args = args_info;
++
++  discard_cleanups (back_to);
++}
++
++/* See definition in stap-probe.h.  */
++
++int
++stap_get_probe_argument_count (const struct stap_probe *probe)
++{
++  if (!probe->parsed_args)
++    stap_parse_probe_arguments ((struct stap_probe *) probe);
++
++  return probe->parsed_args->n_args;
++}
++
++/* Returns the operator precedence level of OP, or zero if the operator
++   code was not recognized.
++   The levels were taken from the gas manual.  */
++
++static int
++stap_get_operator_prec (enum exp_opcode op)
++{
++  switch (op)
++    {
++    case BINOP_LOGICAL_OR:
++      return 1;
++
++    case BINOP_LOGICAL_AND:
++      return 2;
++
++    case BINOP_ADD: case BINOP_SUB:
++    case BINOP_EQUAL: case BINOP_NOTEQUAL:
++    case BINOP_LESS: case BINOP_LEQ:
++    case BINOP_GTR: case BINOP_GEQ:
++      return 3;
++
++    case BINOP_BITWISE_IOR: case BINOP_BITWISE_AND:
++    case BINOP_BITWISE_XOR: case UNOP_LOGICAL_NOT:
++      return 4;
++
++    case BINOP_MUL: case BINOP_DIV: case BINOP_REM:
++    case BINOP_LSH: case BINOP_RSH:
++      return 5;
++
++    default:
++      return 0;
++    }
++}
++
++/* Given S, this function reads the operator in it and fills the OP
++   pointer with its code.  Returns 1 on success, zero if the operator
++   was not recognized.  */
++
++static int
++stap_get_opcode (char **s, enum exp_opcode *op)
++{
++  char c = **s;
++  int ret = 1;
++
++  *s += 1;
++
++  switch (c)
++    {
++    case '*':
++      *op = BINOP_MUL;
++      break;
++
++    case '/':
++      *op = BINOP_DIV;
++      break;
++
++    case '%':
++      {
++	if (isalpha (**s))
++	  {
++	    /* Dealing with a register name.  */
++	    ret = 0;
++	    break;
++	  }
++
++	*op = BINOP_REM;
++      }
++    break;
++
++    case '<':
++      *op = BINOP_LESS;
++      if (**s == '<')
++	{
++	  *s += 1;
++	  *op = BINOP_LSH;
++	}
++      else if (**s == '=')
++	{
++	  *s += 1;
++	  *op = BINOP_LEQ;
++	}
++      else if (**s == '>')
++	{
++	  *s += 1;
++	  *op = BINOP_NOTEQUAL;
++	}
++    break;
++
++    case '>':
++      *op = BINOP_GTR;
++      if (**s == '>')
++	{
++	  *s += 1;
++	  *op = BINOP_RSH;
++	}
++      else if (**s == '=')
++	{
++	  *s += 1;
++	  *op = BINOP_GEQ;
++	}
++    break;
++
++    case '|':
++      *op = BINOP_BITWISE_IOR;
++      if (**s == '|')
++	{
++	  *s += 1;
++	  *op = BINOP_LOGICAL_OR;
++	}
++    break;
++
++    case '&':
++      *op = BINOP_BITWISE_AND;
++      if (**s == '&')
++	{
++	  *s += 1;
++	  *op = BINOP_LOGICAL_AND;
++	}
++    break;
++
++    case '^':
++      *op = BINOP_BITWISE_XOR;
++      break;
++
++    case '!':
++      *op = UNOP_LOGICAL_NOT;
++      break;
++
++    case '+':
++      *op = BINOP_ADD;
++      break;
++
++    case '-':
++      *op = BINOP_SUB;
++      break;
++
++    case '=':
++      if (**s != '=')
++	{
++	  ret = 0;
++	  break;
++	}
++      *op = BINOP_EQUAL;
++      break;
++
++    default:
++      /* We didn't find any operator.  */
++      *s -= 1;
++      return 0;
++    }
++
++  return ret;
++}
++
++/* Given the operator OPCODE, this function generates agent bytecode
++   for it.  */
++
++static void
++stap_opcode_to_ax (struct stap_evaluation_info *eval_info,
++		   enum exp_opcode opcode)
++{
++  struct agent_expr *expr = eval_info->aexpr;
++
++  switch (opcode)
++    {
++    case BINOP_MUL:
++      ax_simple (expr, aop_mul);
++      break;
++
++    case BINOP_DIV:
++      ax_simple (expr, aop_div_signed);
++      break;
++
++    case BINOP_REM:
++      ax_simple (expr, aop_rem_unsigned);
++      break;
++
++    case BINOP_LESS:
++      ax_simple (expr, aop_less_signed);
++      break;
++
++    case BINOP_LEQ:
++      /* A <= B is !(B < A) */
++      ax_simple (expr, aop_swap);
++      ax_simple (expr, aop_less_signed);
++      ax_simple (expr, aop_log_not);
++      break;
++
++    case BINOP_GTR:
++      /* A > B is B < A */
++      ax_simple (expr, aop_swap);
++      ax_simple (expr, aop_less_signed);
++      break;
++
++    case BINOP_GEQ:
++      /* A >= B is !(A < B) */
++      ax_simple (expr, aop_less_signed);
++      ax_simple (expr, aop_log_not);
++      break;
++
++    case BINOP_NOTEQUAL:
++      ax_simple (expr, aop_equal);
++      ax_simple (expr, aop_log_not);
++      break;
++
++    case BINOP_LSH:
++      ax_simple (expr, aop_lsh);
++      break;
++
++    case BINOP_RSH:
++      ax_simple (expr, aop_rsh_unsigned);
++      break;
++
++    case BINOP_BITWISE_IOR:
++      ax_simple (expr, aop_bit_or);
++      break;
++     
++    case BINOP_LOGICAL_OR:
++      error (_("Operator logical-or (`||') not supported yet."));
++      break;
++
++    case BINOP_BITWISE_AND:
++      ax_simple (expr, aop_bit_and);
++      break;
++
++    case BINOP_LOGICAL_AND:
++      error (_("Operator logical-and (`&&') not supported yet."));
++      break;
++
++    case BINOP_BITWISE_XOR:
++      ax_simple (expr, aop_bit_xor);
++      break;
++
++    case UNOP_LOGICAL_NOT:
++      ax_simple (expr, aop_log_not);
++      break;
++
++    case BINOP_ADD:
++      ax_simple (expr, aop_add);
++      break;
++
++    case BINOP_SUB:
++      ax_simple (expr, aop_sub);
++      break;
++
++    case BINOP_EQUAL:
++      ax_simple (expr, aop_equal);
++      break;
++
++    default:
++      error (_("Invalid operator."));
++    }
++}
++
++/* Returns 1 if *S is an operator, zero otherwise.  */
++
++static int
++stap_is_operator (char *s)
++{
++  char op;
++
++  if (!s || !*s)
++    return 0;
++
++  op = *s;
++
++  if (*s == '%' && isalpha (s[1]))
++    /* Register name.  */
++    return 0;
++
++  return (op == '+' || op == '-' || op == '*' || op == '/'
++	  || op == '>' || op == '<' || op == '!' || op == '^'
++	  || op == '|' || op == '&' || op == '%' || op == '=');
++}
++
++/* This function fetches the value of the register whose
++   name starts in the expression buffer.  It also applies any register
++   displacements (e.g., `-4(%eax)'), and indirects the contents of the
++   register (e.g., `(%eax)').  It returns RET if the operation has succeeded,
++   or calls `error' otherwise.  */
++
++static struct value *
++stap_fetch_reg_value (struct stap_evaluation_info *eval_info,
++		      struct value *displacement)
++{
++  const char *start;
++  char *s = eval_info->exp_buf;
++  struct gdbarch *gdbarch = eval_info->gdbarch;
++  struct frame_info *frame = eval_info->frame;
++  enum stap_arg_bitness bitness = eval_info->bitness;
++  char *regname;
++  int len, regnum, indirect_p = 0;
++  struct value *ret = NULL;
++  
++  /* The function which called us did not check if the expression
++     buffer was empty.  */
++  gdb_assert (s && *s);
++
++  if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++    /* If we are compiling, we cannot return NULL because that would
++       lead to errors in future evaluations.  That's why we just make
++       this dummy value, representing that the return value of this
++       function is not NULL.  */
++    ret = value_from_longest (builtin_type (gdbarch)->builtin_int, 0);
++
++  /* Valid register name on x86 platforms are:
++
++     [paren]%{a-z0-9}[paren]
++
++     Let's check for that here.  */
++  if (*s == '(')
++    {
++      ++s;
++      if (!*s || *s != '%'
++	  || (*s == '%' && !isalpha (s[1])))
++	error (_("Invalid register name on expression `%s'."),
++	       eval_info->saved_expr);
++      ++s;
++      /* The presence of parenthesis means that we want to indirect
++	 the register.  */
++      indirect_p = 1;
++    }
++  else if (*s == '%')
++    {
++      ++s;
++      if (!*s || !isalpha (*s))
++	error (_("Invalid register name on expression `%s'."),
++	       eval_info->saved_expr);
++    }
++  else
++    error (_("Invalid register name on expression `%s'."),
++	   eval_info->saved_expr);
++
++  if (displacement && !indirect_p)
++    /* We cannot apply displacement to non-indirect register access.  */
++    error (_("Trying to apply displacement without indirecting register "
++	     "on expression `%s'."), eval_info->saved_expr);
++
++  /* Ok, let's calculate the size of the register name.  */
++  start = s;
++  while (isalnum (*s))
++    ++s;
++
++  len = s - start;
++
++  if (indirect_p && *s == ')')
++    ++s;
++
++  regname = alloca (len + 1);
++  strncpy (regname, start, len);
++  regname[len] = '\0';
++
++  /* Translating the register name into the corresponding number.  */
++  regnum = user_reg_map_name_to_regnum (gdbarch, regname, len);
++
++  if (regnum == -1)
++    error (_("Invalid register name `%s' on expression `%s'."),
++	   regname, eval_info->saved_expr);
++
++  if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++    ax_reg (eval_info->aexpr, regnum);
++  else
++    ret = value_of_register (regnum, frame);
++
++  if (indirect_p)
++    {
++      struct type *t = NULL;
++      enum agent_op aop = aop_ref32;
++
++      /* If the user has specified that the register must be indirected,
++	 we should know what's the correct type to cast it before making
++	 the indirection.  This type corresponds to the bitness specified
++	 before the `@' sign on the argument string, or it defaults to
++	 `unsigned long' if the `@' were not present.  */
++
++      switch (bitness)
++	{
++	case STAP_ARG_BITNESS_UNDEFINED:
++	  if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++	    {
++	      if (gdbarch_addr_bit (gdbarch) == 32)
++		aop = aop_ref32;
++	      else
++		aop = aop_ref64;
++	    }
++	  else
++	    {
++	      if (gdbarch_addr_bit (gdbarch) == 32)
++		t = lookup_pointer_type
++		  (builtin_type (gdbarch)->builtin_uint32);
++	      else
++		t = lookup_pointer_type
++		  (builtin_type (gdbarch)->builtin_uint64);
++	    }
++	  break;
++
++	case STAP_ARG_BITNESS_32BIT_SIGNED:
++	  if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++	    aop = aop_ref32;
++	  else
++	    t = lookup_pointer_type
++	      (builtin_type (gdbarch)->builtin_int32);
++	  break;
++
++	case STAP_ARG_BITNESS_32BIT_UNSIGNED:
++	  if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++	    aop = aop_ref32;
++	  else
++	    t = lookup_pointer_type
++	      (builtin_type (gdbarch)->builtin_uint32);
++	  break;
++
++	case STAP_ARG_BITNESS_64BIT_SIGNED:
++	  if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++	    aop = aop_ref64;
++	  else
++	    t = lookup_pointer_type
++	      (builtin_type (gdbarch)->builtin_int64);
++	  break;
++
++	case STAP_ARG_BITNESS_64BIT_UNSIGNED:
++	  if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++	    aop = aop_ref64;
++	  else
++	    t = lookup_pointer_type
++	      (builtin_type (gdbarch)->builtin_uint64);
++	  break;
++
++	default:
++	  internal_error (__FILE__, __LINE__,
++			  _("Undefined bitness for probe."));
++	  break;
++	}
++
++      if (displacement)
++	{
++	  if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++	    {
++	      ax_const_l (eval_info->aexpr, value_as_long (displacement));
++	      ax_simple (eval_info->aexpr, aop_add);
++	    }
++	  else
++	    ret = value_ptradd (ret, value_as_long (displacement));
++	}
++
++      if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++	{
++	  if (trace_kludge)
++	    {
++	      gdb_assert (aop == aop_ref32 || aop == aop_ref64);
++	      ax_trace_quick (eval_info->aexpr, aop == aop_ref32 ? 4 : 8);
++	    }
++	  ax_simple (eval_info->aexpr, aop);
++	}
++      else
++	{
++	  ret = value_cast (t, ret);
++	  ret = value_ind (ret);
++	}
++    }
++
++  /* Updating the expression buffer pointer, because we have made
++     some modifications to it before.  */
++  eval_info->exp_buf = s;
++
++  return ret;
++}
++
++/* This function tries to evaluate a single operand of the expression.
++
++   Single operands can be:
++
++   - unary operators `-' and `~';
++   - integer constants (beginning with `$');
++   - register access, with/out displacement and indirection.  */
++
++static struct value *
++stap_evaluate_single_operand (struct stap_evaluation_info *eval_info)
++{
++  struct gdbarch *gdbarch = eval_info->gdbarch;
++  struct frame_info *frame = eval_info->frame;
++  enum stap_arg_bitness bitness = eval_info->bitness;
++  struct value *res = NULL;
++
++  if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++    /* If we are compiling, we cannot return NULL because that would
++       lead to errors in future evaluations.  That's why we just make
++       this dummy value, representing that the return value of this
++       function is not NULL.  */
++    res = value_from_longest (builtin_type (gdbarch)->builtin_int, 0);
++
++  switch (*eval_info->exp_buf)
++    {
++    case '-': case '~':
++	{
++	  char c = *eval_info->exp_buf;
++
++	  /* This is an unary operator (either `-' or `~').
++
++	     If it is followed by a parenthesis, and this parenthesis
++	     is NOT followed by a `%', then we are dealing with an expression
++	     like `-(2 + 3)' or `~(2 + 3)'.  We just have to treat separately
++	     and return the result after applying the operation (`-' or `~').
++
++	     If it is followed by a digit, then we have only one choice:  it
++	     is a displacement argument for a register access, like
++	     `-4(%eax)'.  It also means that the operator can *only* be `-',
++	     and the characters immediately after the number *must* be `(%'.
++
++	     If it is followed by a `$', then it is an integer constant, and
++	     we should apply the correct operation to it.  */
++
++	  ++eval_info->exp_buf;
++	  eval_info->exp_buf = skip_spaces (eval_info->exp_buf);
++	  if (*eval_info->exp_buf
++	      && *eval_info->exp_buf == '('
++	      && eval_info->exp_buf[1] != '%')
++	    {
++	      struct value *tmp_res;
++
++	      /* We're not dealing with a register name, but with an
++		 expression like `-(2 + 3)' or `~(2 + 3)'.  We first have
++		 to evaluate the right side of the expression (i.e., the
++		 parenthesis), and then apply the specified operation
++		 (either `-' or `~') to it.  */
++	      tmp_res = stap_evaluate_conditionally (eval_info);
++
++	      if (c == '-')
++		{
++		  if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++		    {
++		      /* We have to add `-1' to the stack, and multiply
++			 the two values.  */
++		      ax_const_l (eval_info->aexpr, -1);
++		      ax_simple (eval_info->aexpr, aop_mul);
++		    }
++		  else
++		    res = value_neg (tmp_res);
++		}
++	      else
++		{
++		  if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++		    ax_simple (eval_info->aexpr, aop_bit_not);
++		  else
++		    res = value_complement (tmp_res);
++		}
++	    }
++	  else if (isdigit (*eval_info->exp_buf))
++	    {
++	      int number;
++
++	      /* This is a number, so it MUST be a register displacement.
++		 The only operator allowed here is `-', it MUST be
++		 followed by a number, and the number MUST be followed by
++		 `(%'.  */
++	      if (c != '-')
++		error (_("Invalid operator `%c' for register displacement "
++			 "on expression `%s'."), c, eval_info->saved_expr);
++
++	      number = strtol (eval_info->exp_buf,
++			       &eval_info->exp_buf, 0) * -1;
++
++	      if (!*eval_info->exp_buf
++		  || *eval_info->exp_buf != '('
++		  || (*eval_info->exp_buf == '('
++		      && eval_info->exp_buf[1] != '%'))
++		error (_("Invalid method of indirecting a register on "
++			 "expression `%s'."), eval_info->saved_expr);
++
++	      res
++		= value_from_longest (builtin_type (gdbarch)->builtin_int,
++				      number);
++
++	      res = stap_fetch_reg_value (eval_info, res);
++	    }
++	  else if (*eval_info->exp_buf == '$')
++	    {
++	      int number;
++
++	      /* Last case.  We are dealing with an integer constant, so
++		 we must read it and then apply the necessary operation,
++		 either `-' or `~'.  */
++	      ++eval_info->exp_buf;
++	      number = strtol (eval_info->exp_buf,
++			       &eval_info->exp_buf, 0);
++
++	      if (!STAP_COMPILING_AGENT_EXPR_P (eval_info))
++		res
++		  = value_from_longest (builtin_type (gdbarch)->builtin_int,
++					number);
++	      else
++		ax_const_l (eval_info->aexpr, number);
++
++	      eval_info->exp_buf = skip_spaces (eval_info->exp_buf);
++
++	      if (c == '-')
++		{
++		  if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++		    ax_simple (eval_info->aexpr, aop_log_not);
++		  else
++		    res = value_neg (res);
++		}
++	      else
++		{
++		  if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++		    ax_simple (eval_info->aexpr, aop_bit_not);
++		  else
++		    res = value_complement (res);
++		}
++	    }
++	  else
++	    error (_("Invalid operand to unary operator `%c' on "
++		     "expression `%s'."), c, eval_info->saved_expr);
++	}
++      break;
++
++    case '0': case '1': case '2': case '3': case '4':
++    case '5': case '6': case '7': case '8': case '9':
++      {
++	int number = strtol (eval_info->exp_buf, &eval_info->exp_buf, 0);
++
++	/* This is a register displacement with a positive value.  We read
++	   the number, and then check for the mandatory `(%' part.  */
++	if (!*eval_info->exp_buf
++	    || !(*eval_info->exp_buf == '('
++		 && eval_info->exp_buf[1] == '%'))
++	  error (_("Invalid register access on expression `%s'."),
++		 eval_info->saved_expr);
++
++	res = value_from_longest (builtin_type (gdbarch)->builtin_int,
++				  number);
++
++	res = stap_fetch_reg_value (eval_info, res);
++      }
++    break;
++
++    case '$':
++      {
++	int number;
++
++	/* This is an integer constant.  We just have to read the number
++	   and return it.  */
++	++eval_info->exp_buf;
++	eval_info->exp_buf = skip_spaces (eval_info->exp_buf);
++
++	number = strtol (eval_info->exp_buf, &eval_info->exp_buf, 0);
++
++	if (STAP_COMPILING_AGENT_EXPR_P (eval_info))
++	  ax_const_l (eval_info->aexpr, number);
++	else
++	  res = value_from_longest (builtin_type (gdbarch)->builtin_int,
++				    number);
++
++	eval_info->exp_buf = skip_spaces (eval_info->exp_buf);
++      }
++    break;
++
++    case '(': case '%':
++      {
++	/* Register access, with or without indirection.  */
++	res = stap_fetch_reg_value (eval_info, /*displacement=*/NULL);
++	eval_info->exp_buf = skip_spaces (eval_info->exp_buf);
++      }
++    break;
++
++    default:
++      {
++	error (_("Operator `%c' not recognized on expression `%s'."),
++	       *eval_info->exp_buf, eval_info->saved_expr);
++      }
++    }
++
++  return res;
++}
++
++/* This function is responsible for checking the necessary type of evaluation
++   depending on what is the next "thing" in the buffer.  Valid values are:
++
++   - Unary operators;
++   - Integer constants;
++   - Register displacement, indirection, and direct access;
++   - Parenthesized operand.  */
++
++static struct value *
++stap_evaluate_conditionally (struct stap_evaluation_info *eval_info)
++{
++  char *s = eval_info->exp_buf;
++  struct value *ret = NULL;
++
++  if (*s == '-' || *s == '~' /* Unary operators.  */
++      || *s == '$' /* Number (integer constant).  */
++      || (isdigit (*s) && s[1] == '(' && s[2] == '%') /* Displacement.  */
++      || (*s == '(' && s[1] == '%') /* Register indirection.  */
++      || (*s == '%' && isalpha (s[1]))) /* Register value.  */
++    /* This is a single operand, so just evaluate it and return.  */
++    ret = stap_evaluate_single_operand (eval_info);
++  else if (*s == '(')
++    {
++      /* We are dealing with a parenthesized operand.  It means we
++	 have to evaluate it as it was a separate expression, without
++	 left-side or precedence.  */
++      ++eval_info->exp_buf;
++      eval_info->exp_buf = skip_spaces (eval_info->exp_buf);
++
++      ret = stap_evaluate_probe_argument_2 (eval_info,
++					    /*lhs=*/NULL, /*prec=*/0);
++
++      if (*eval_info->exp_buf != ')')
++	error (_("Missign close-paren on expression `%s'."),
++	       eval_info->saved_expr);
++
++      ++eval_info->exp_buf;
++      eval_info->exp_buf = skip_spaces (eval_info->exp_buf);
++    }
++  else
++    error (_("Cannot evaluate expression `%s'."),
++	   eval_info->saved_expr);
++
++  return ret;
++}
++
++/* Evaluation function for probe's argument expressions.  LHS represents
++   the left side of the expression, and PREC is the precedence of the
++   last operator identified before calling the function.  */
++
++static struct value *
++stap_evaluate_probe_argument_2 (struct stap_evaluation_info *eval_info,
++				struct value *lhs, int prec)
++{
++  struct value *rhs = NULL;
++  int compiling_p = STAP_COMPILING_AGENT_EXPR_P (eval_info);
++
++  /* This is an operator-precedence parser and evaluator.
++
++     We work with left- and right-sides of expressions, and
++     evaluate them depending on the precedence of the operators
++     we find.  */
++
++  eval_info->exp_buf = skip_spaces (eval_info->exp_buf);
++
++  if (!lhs)
++    /* We were called without a left-side, either because this is the
++       first call, or because we were called to evaluate a parenthesized
++       expression.  It doesn't really matter; we have to evaluate the
++       left-side in order to continue the process.  */
++    lhs = stap_evaluate_conditionally (eval_info);
++
++  /* Start to evaluate the right-side, and to "join" left and right sides
++     depending on the operation specified.
++
++     This loop shall continue until we run out of characters in the input,
++     or until we find a close-parenthesis, which means that we've reached
++     the end of a sub-expression.  */
++  while (eval_info->exp_buf
++	 && *eval_info->exp_buf
++	 && *eval_info->exp_buf != ')')
++    {
++      char *tmp_exp_buf;
++      enum exp_opcode opcode;
++      int cur_prec;
++
++      if (!stap_is_operator (eval_info->exp_buf))
++	error (_("Invalid operator `%c' on expression `%s'."),
++	       *eval_info->exp_buf, eval_info->saved_expr);
++
++      /* We have to save the current value of the expression buffer because
++	 the `stap_get_opcode' modifies it in order to get the current
++	 operator.  If this operator's precedence is lower than PREC, we
++	 should return and not advance the expression buffer pointer.  */
++      tmp_exp_buf = eval_info->exp_buf;
++      stap_get_opcode (&tmp_exp_buf, &opcode);
++
++      cur_prec = stap_get_operator_prec (opcode);
++      if (cur_prec < prec)
++	/* If the precedence of the operator that we are seeing now is
++	   lower than the precedence of the first operator seen before
++	   this evaluation process began, it means we should stop evaluating
++	   and return.  */
++	break;
++
++      eval_info->exp_buf = tmp_exp_buf;
++      eval_info->exp_buf = skip_spaces (eval_info->exp_buf);
++
++      /* Evaluate the right-side of the expression.  */
++      rhs = stap_evaluate_conditionally (eval_info);
++
++      /* While we still have operators, try to evaluate another
++	 right-side, but using the current right-side as a left-side.  */
++      while (*eval_info->exp_buf
++	     && stap_is_operator (eval_info->exp_buf))
++	{
++	  enum exp_opcode lookahead_opcode;
++	  int lookahead_prec;
++
++	  /* Saving the current expression buffer position.  The explanation
++	     is the same as above.  */
++	  tmp_exp_buf = eval_info->exp_buf;
++	  stap_get_opcode (&tmp_exp_buf, &lookahead_opcode);
++	  lookahead_prec = stap_get_operator_prec (lookahead_opcode);
++
++	  if (lookahead_prec <= prec)
++	    /* If we are dealing with an operator whose precedence is lower
++	       than the first one, just abandon the attempt.  */
++	    break;
++
++	  rhs = stap_evaluate_probe_argument_2 (eval_info,
++						rhs, lookahead_prec);
++	}
++
++      /* Now, "join" both left and right sides into one left-side, using
++	 the specified operator.  */
++      if (compiling_p)
++	stap_opcode_to_ax (eval_info, opcode);
++      else
++	lhs = value_binop (lhs, rhs, opcode);
++    }
++
++  return lhs;
++}
++
++/* This function fills the necessary arguments for the evaluation function
++   to work.  */
++
++static struct value *
++stap_evaluate_probe_argument_1 (struct objfile *objfile,
++				const struct stap_probe *probe,
++				struct frame_info *frame,
++				int n)
++{
++  struct stap_evaluation_info eval_info;
++  char *s = (char *) probe->parsed_args->arg[n].arg_str;
++  struct value *res, *vs[4];
++
++  /* Filling necessary information for evaluation function.  */
++  eval_info.saved_expr = s;
++  eval_info.exp_buf = s;
++  eval_info.gdbarch = get_objfile_arch (objfile);
++  eval_info.frame = frame;
++  eval_info.bitness = probe->parsed_args->arg[n].bitness;
++  /* We are not compiling to an agent expression.  */
++  eval_info.aexpr = NULL;
++  eval_info.avalue = NULL;
++
++  res = stap_evaluate_probe_argument_2 (&eval_info,
++					/*lhs=*/NULL, /*prec=*/0);
++
++  if (!res)
++    error (_("Could not evaluate expression `%s'."),
++	   eval_info.saved_expr);
++
++  return res;
++}
++
++/* See definition in stap-probe.h.  */
++
++struct value *
++stap_evaluate_probe_argument (struct objfile *objfile,
++			      const struct stap_probe *probe,
++			      struct frame_info *frame,
++			      int n)
++{
++  if (!probe->parsed_args)
++    stap_parse_probe_arguments ((struct stap_probe *) probe);
++
++  if (!probe->parsed_args->arg
++      || n >= probe->parsed_args->n_args)
++    return NULL;
++
++  return stap_evaluate_probe_argument_1 (objfile, probe, frame, n);
++}
++
++/* Helper function which compiles the probe's argument N into an
++   agent expression, suitable for using with tracepoints.  */
++
++static void
++stap_compile_to_ax_1 (struct objfile *objfile,
++		      const struct stap_probe *probe,
++		      struct agent_expr *expr,
++		      struct axs_value *value,
++		      int n)
++{
++  struct stap_evaluation_info eval_info;
++  struct gdbarch *gdbarch = expr->gdbarch;
++  char *s = (char *) probe->parsed_args->arg[n].arg_str;
++
++  /* Filling necessary information for evaluation function.  */
++  eval_info.saved_expr = s;
++  eval_info.exp_buf = s;
++  eval_info.gdbarch = expr->gdbarch;
++  eval_info.frame = NULL;
++  eval_info.bitness = probe->parsed_args->arg[n].bitness;
++  /* We are compiling to an agent expression.  */
++  eval_info.aexpr = expr;
++  eval_info.avalue = value;
++
++  /* We can always use this kind.  */
++  value->kind = axs_rvalue;
++
++  /* Figuring out the correct type for this axs_value.  */
++  switch (eval_info.bitness)
++    {
++    case STAP_ARG_BITNESS_UNDEFINED:
++      if (gdbarch_addr_bit (gdbarch) == 32)
++	value->type = builtin_type (gdbarch)->builtin_uint32;
++      else
++	value->type = builtin_type (gdbarch)->builtin_uint64;
++      break;
++
++    case STAP_ARG_BITNESS_32BIT_SIGNED:
++      value->type = builtin_type (gdbarch)->builtin_int32;
++      break;
++
++    case STAP_ARG_BITNESS_32BIT_UNSIGNED:
++      value->type = builtin_type (gdbarch)->builtin_uint32;
++      break;
++
++    case STAP_ARG_BITNESS_64BIT_SIGNED:
++      value->type = builtin_type (gdbarch)->builtin_int64;
++      break;
++
++    case STAP_ARG_BITNESS_64BIT_UNSIGNED:
++      value->type = builtin_type (gdbarch)->builtin_uint64;
++      break;
++
++    default:
++      internal_error (__FILE__, __LINE__,
++		      _("Undefined bitness for probe."));
++      break;
++    }
++
++  stap_evaluate_probe_argument_2 (&eval_info,
++				  /*lhs=*/NULL, /*prec=*/0);
++}
++
++/* See definition in stap-probe.h.  */
++
++void
++stap_compile_to_ax (struct objfile *objfile,
++		    const struct stap_probe *probe,
++		    struct agent_expr *expr,
++		    struct axs_value *value,
++		    int n)
++{
++  if (!probe->parsed_args)
++    stap_parse_probe_arguments ((struct stap_probe *) probe);
++
++  if (!probe->parsed_args->arg
++      || n >= probe->parsed_args->n_args)
++    return;
++
++  stap_compile_to_ax_1 (objfile, probe, expr, value, n);
++}
++
++struct value *
++stap_safe_evaluate_at_pc (struct frame_info *frame, int n)
++{
++  const struct stap_probe *probe;
++  struct objfile *objfile;
++  int n_probes;
++
++  probe = find_probe_by_pc (get_frame_pc (frame), &objfile);
++  if (!probe)
++    return NULL;
++  gdb_assert (objfile->sf && objfile->sf->sym_probe_fns);
++
++  n_probes
++    = objfile->sf->sym_probe_fns->sym_get_probe_argument_count (objfile,
++								probe);
++  if (n >= n_probes)
++    return NULL;
++
++  return objfile->sf->sym_probe_fns->sym_evaluate_probe_argument (objfile,
++								  probe,
++								  frame,
++								  n);
++}
++
++/* This function frees the space allocated to hold information about
++   the probe's parsed arguments.  */
++
++void
++stap_free_parsed_args (struct stap_args_info *parsed_args)
++{
++  int i;
++
++  if (!parsed_args
++      || parsed_args == &dummy_stap_args_info
++      || parsed_args->n_args == 0)
++    return;
++
++  for (i = 0; i < parsed_args->n_args; i++)
++    xfree (parsed_args->arg[i].arg_str);
++
++  xfree (parsed_args->arg);
++  xfree (parsed_args);
++}
++
++/* A utility structure.  A VEC of these is built when handling "info
++   probes".  */
++
++struct stap_probe_and_objfile
++{
++  /* The probe.  */
++  const struct stap_probe *probe;
++  /* The probe's objfile.  */
++  struct objfile *objfile;
++};
++
++typedef struct stap_probe_and_objfile stap_entry;
++DEF_VEC_O (stap_entry);
++
++/* A helper function for collect_probes that compiles a regexp and
++   throws an exception on error.  This installs a cleanup to free the
++   resulting pattern on success.  If RX is NULL, this does nothing.  */
++
++static void
++compile_rx_or_error (regex_t *pattern, const char *rx, const char *message)
++{
++  int code;
++
++  if (!rx)
++    return;
++
++  code = regcomp (pattern, rx, REG_NOSUB);
++  if (code == 0)
++    make_regfree_cleanup (pattern);
++  else
++    {
++      char *err = get_regcomp_error (code, pattern);
++
++      make_cleanup (xfree, err);
++      error (_("%s: %s"), message, err);
++    }
++}
++
++/* Make a vector of probes matching OBJNAME, PROVIDER, and PROBE.
++   Each argument is a regexp, or NULL, which matches anything.  */
++
++static VEC (stap_entry) *
++collect_probes (char *objname, char *provider, char *probe)
++{
++  struct objfile *objfile;
++  VEC (stap_entry) *result = NULL;
++  struct cleanup *cleanup;
++  regex_t obj_pat, prov_pat, probe_pat;
++
++  cleanup = make_cleanup (VEC_cleanup (stap_entry), &result);
++
++  compile_rx_or_error (&prov_pat, provider, _("Invalid provider regexp"));
++  compile_rx_or_error (&probe_pat, probe, _("Invalid probe regexp"));
++  compile_rx_or_error (&obj_pat, objname, _("Invalid object file regexp"));
++
++  ALL_OBJFILES (objfile)
++  {
++    const struct stap_probe *probes;
++    int i, num_probes;
++
++    if (! objfile->sf || ! objfile->sf->sym_probe_fns)
++      continue;
++
++    if (objname)
++      {
++	if (regexec (&obj_pat, objfile->name, 0, NULL, 0) != 0)
++	  continue;
++      }
++
++    probes = objfile->sf->sym_probe_fns->sym_get_probes (objfile, &num_probes);
++    for (i = 0; i < num_probes; ++i)
++      {
++	stap_entry entry;
++
++	if (provider)
++	  {
++	    if (regexec (&prov_pat, probes[i].provider, 0, NULL, 0) != 0)
++	      continue;
++	  }
++
++	if (probe)
++	  {
++	    if (regexec (&probe_pat, probes[i].name, 0, NULL, 0) != 0)
++	      continue;
++	  }
++
++	entry.probe = &probes[i];
++	entry.objfile = objfile;
++	VEC_safe_push (stap_entry, result, &entry);
++      }
++  }
++
++  discard_cleanups (cleanup);
++  return result;
++}
++
++/* A qsort comparison function for stap_entry objects.  */
++
++static int
++compare_entries (const void *a, const void *b)
++{
++  const stap_entry *ea = a;
++  const stap_entry *eb = b;
++  int v;
++
++  v = strcmp (ea->probe->provider, eb->probe->provider);
++  if (v)
++    return v;
++
++  v = strcmp (ea->probe->name, eb->probe->name);
++  if (v)
++    return v;
++
++  if (ea->probe->address < eb->probe->address)
++    return -1;
++  if (ea->probe->address > eb->probe->address)
++    return 1;
++
++  return strcmp (ea->objfile->name, eb->objfile->name);
++}
++
++/* Implementation of the "info probes" command.  */
++
++static void
++info_probes_command (char *arg, int from_tty)
++{
++  char *provider, *probe = NULL, *objname = NULL;
++  struct cleanup *cleanup = make_cleanup (null_cleanup, NULL);
++  VEC (stap_entry) *items;
++  int i, addr_width, any_found;
++  stap_entry *entry;
++
++  provider = extract_arg (&arg);
++  if (provider)
++    {
++      make_cleanup (xfree, provider);
++
++      probe = extract_arg (&arg);
++      if (probe)
++	{
++	  make_cleanup (xfree, probe);
++
++	  objname = extract_arg (&arg);
++	  if (objname)
++	    make_cleanup (xfree, objname);
++	}
++    }
++
++  items = collect_probes (objname, provider, probe);
++  make_cleanup (VEC_cleanup (stap_entry), &items);
++  make_cleanup_ui_out_table_begin_end (uiout, 5,
++				       VEC_length (stap_entry, items),
++				       "SystemTapProbes");
++
++  if (! VEC_empty (stap_entry, items))
++    qsort (VEC_address (stap_entry, items),
++	   VEC_length (stap_entry, items),
++	   sizeof (stap_entry),
++	   compare_entries);
++
++  addr_width = 4 + (gdbarch_ptr_bit (get_current_arch ()) / 4);
++
++  ui_out_table_header (uiout, 10, ui_left, "provider", _("Provider"));
++  ui_out_table_header (uiout, 10, ui_left, "name", _("Name"));
++  ui_out_table_header (uiout, addr_width - 1, ui_left, "addr", _("Where"));
++  ui_out_table_header (uiout, addr_width - 1, ui_left, "semaphore",
++		       _("Semaphore"));
++  ui_out_table_header (uiout, 30, ui_left, "object", _("Object"));
++  ui_out_table_body (uiout);
++
++  for (i = 0; VEC_iterate (stap_entry, items, i, entry); ++i)
++    {
++      struct cleanup *inner;
++
++      inner = make_cleanup_ui_out_tuple_begin_end (uiout, "probe");
++
++      ui_out_field_string (uiout, "provider", entry->probe->provider);
++      ui_out_field_string (uiout, "name", entry->probe->name);
++      ui_out_field_core_addr (uiout, "addr", get_current_arch (),
++			      entry->probe->address);
++      if (entry->probe->sem_addr == 0)
++	ui_out_field_skip (uiout, "semaphore");
++      else
++      ui_out_field_core_addr (uiout, "semaphore", get_current_arch (),
++			      entry->probe->sem_addr);
++      ui_out_field_string (uiout, "object", entry->objfile->name);
++      ui_out_text (uiout, "\n");
++
++      do_cleanups (inner);
++    }
++
++  any_found = ! VEC_empty (stap_entry, items);
++  do_cleanups (cleanup);
++
++  if (! any_found)
++    ui_out_message (uiout, 0, _("No probes matched.\n"));
++}
++
++
++
++/* See definition in stap-probe.h.  */
++
++VEC (stap_probe_p) *
++find_probes_in_objfile (struct objfile *objfile,
++			const char *provider,
++			const char *name)
++{
++  const struct stap_probe *probes;
++  int i, num_probes;
++  VEC (stap_probe_p) *result = NULL;
++
++  if (! objfile->sf || ! objfile->sf->sym_probe_fns)
++    return NULL;
++
++  probes = objfile->sf->sym_probe_fns->sym_get_probes (objfile, &num_probes);
++  for (i = 0; i < num_probes; ++i)
++    {
++      if (strcmp (probes[i].provider, provider) != 0)
++	continue;
++
++      if (strcmp (probes[i].name, name) != 0)
++	continue;
++
++      VEC_safe_push (stap_probe_p, result, &probes[i]);
++    }
++
++  return result;
++}
++
++/* See definition in stap-probe.h.  */
++
++struct symtabs_and_lines
++parse_stap_probe (char **argptr, struct linespec_result *canonical)
++{
++  char *full_arg = extract_arg (argptr);
++  char *arg = xstrdup (full_arg);
++  char *objfile_name = NULL, *provider = NULL, *name, *p;
++  struct cleanup *cleanup;
++  struct symtabs_and_lines result;
++  struct objfile *objfile;
++
++  result.sals = NULL;
++  result.nelts = 0;
++
++  /* The caller ensured that this starts with 'probe:'.  */
++  gdb_assert (arg && strncmp (arg, "probe:", 6) == 0);
++  cleanup = make_cleanup (xfree, arg);
++  make_cleanup (xfree, full_arg);
++  arg += 6;
++
++  /* Extract each word from the argument, separated by ":"s.  */
++  p = strchr (arg, ':');
++  if (p == NULL)
++    {
++      /* This is `probe:name'.  */
++      name = arg;
++    }
++  else
++    {
++      char *hold = p + 1;
++
++      *p = '\0';
++      p = strchr (hold, ':');
++      if (p == NULL)
++	{
++	  /* This is `probe:provider:name'.  */
++	  provider = arg;
++	  name = hold;
++	}
++      else
++	{
++	  /* This is `probe:objfile:provider:name'.  */
++	  *p = '\0';
++	  objfile_name = arg;
++	  provider = hold;
++	  name = p + 1;
++	}
++    }
++
++  if (*name == '\0')
++    error (_("no probe name specified"));
++  if (provider && *provider == '\0')
++    error (_("invalid provider name"));
++  if (objfile_name && *objfile_name == '\0')
++    error (_("invalid objfile name"));
++
++  if (canonical)
++    canonical->canonical = NULL;
++
++  ALL_OBJFILES (objfile)
++  {
++    const struct stap_probe *probes;
++    int i, num_probes;
++
++    if (! objfile->sf || ! objfile->sf->sym_probe_fns)
++      continue;
++
++    if (objfile_name
++	&& FILENAME_CMP (objfile->name, objfile_name) != 0
++	&& FILENAME_CMP (lbasename (objfile->name), objfile_name) != 0)
++      continue;
++
++    probes = objfile->sf->sym_probe_fns->sym_get_probes (objfile, &num_probes);
++    for (i = 0; i < num_probes; ++i)
++      {
++	struct symtab_and_line *sal;
++
++	if (provider && strcmp (probes[i].provider, provider) != 0)
++	  continue;
++
++	if (strcmp (probes[i].name, name) != 0)
++	  continue;
++
++	++result.nelts;
++	result.sals = xrealloc (result.sals,
++				result.nelts * sizeof (struct symtab_and_line));
++	sal = &result.sals[result.nelts - 1];
++
++	init_sal (sal);
++
++	sal->pc = probes[i].address;
++	sal->explicit_pc = 1;
++	sal->section = find_pc_overlay (sal->pc);
++	sal->pspace = current_program_space;
++	sal->semaphore = probes[i].sem_addr;
++
++	if (canonical)
++	  {
++	    canonical->canonical = xrealloc (canonical->canonical,
++					     result.nelts * sizeof (char *));
++	    canonical->canonical[result.nelts - 1] = xstrdup (full_arg);
++	  }
++      }
++  }
++
++  if (result.nelts == 0)
++    {
++      throw_error (NOT_FOUND_ERROR,
++		   _("No probe matching objfile=`%s', provider=`%s', name=`%s'"),
++		   objfile_name ? objfile_name : _("<any>"),
++		   provider ? provider : _("<any>"),
++		   name);
++    }
++
++  if (canonical)
++    {
++      canonical->pre_expanded = 1;
++    }
++
++  do_cleanups (cleanup);
++
++  return result;
++}
++
++
++
++/* See definition in stap-probe.h.  */
++
++const struct stap_probe *
++find_probe_by_pc (CORE_ADDR pc, struct objfile **objfile_out)
++{
++  struct objfile *objfile;
++
++  ALL_OBJFILES (objfile)
++  {
++    const struct stap_probe *probes;
++    int i, num_probes;
++    stap_entry entry;
++
++    if (! objfile->sf || ! objfile->sf->sym_probe_fns)
++      continue;
++
++    /* If this proves too inefficient, we can replace with a hash.  */
++    probes = objfile->sf->sym_probe_fns->sym_get_probes (objfile, &num_probes);
++    for (i = 0; i < num_probes; ++i)
++      {
++	if (probes[i].address == pc)
++	  {
++	    *objfile_out = objfile;
++	    return &probes[i];
++	  }
++      }
++  }
++
++  return NULL;
++}
++
++/* This is called to compute the value of one of the $_probe_arg*
++   convenience variables.  */
++
++static struct value *
++compute_probe_arg (struct gdbarch *arch, struct internalvar *ivar,
++		   void *data)
++{
++  struct frame_info *frame = get_selected_frame (_("No frame selected"));
++  CORE_ADDR pc = get_frame_pc (frame);
++  int sel = (int) (uintptr_t) data;
++  struct objfile *objfile;
++  const struct stap_probe *pc_probe;
++  int n_probes;
++
++  /* SEL==10 means "_probe_argc".  */
++  gdb_assert (sel >= 0 && sel <= STAP_MAX_ARGS);
++
++  pc_probe = find_probe_by_pc (pc, &objfile);
++  if (pc_probe == NULL)
++    error (_("No SystemTap probe at PC %s"), core_addr_to_string (pc));
++
++  n_probes
++    = objfile->sf->sym_probe_fns->sym_get_probe_argument_count (objfile,
++								pc_probe);
++  if (sel == 10)
++    return value_from_longest (builtin_type (arch)->builtin_int, n_probes);
++
++  if (sel >= n_probes)
++    error (_("Invalid probe argument %d -- probe has %d arguments available"),
++	   sel, n_probes);
++
++  return objfile->sf->sym_probe_fns->sym_evaluate_probe_argument (objfile,
++								  pc_probe,
++								  frame, sel);
++}
++
++/* This is called to compile one of the $_probe_arg* convenience
++   variables into an agent expression.  */
++
++static void
++compile_probe_arg (struct internalvar *ivar, struct agent_expr *expr,
++		   struct axs_value *value, void *data)
++{
++  CORE_ADDR pc = expr->scope;
++  int sel = (int) (uintptr_t) data;
++  struct objfile *objfile;
++  const struct stap_probe *pc_probe;
++  int n_probes;
++
++  /* SEL==10 means "_probe_argc".  */
++  gdb_assert (sel >= 0 && sel <= 10);
++
++  pc_probe = find_probe_by_pc (pc, &objfile);
++  if (pc_probe == NULL)
++    error (_("No SystemTap probe at PC %s"), core_addr_to_string (pc));
++
++  n_probes
++    = objfile->sf->sym_probe_fns->sym_get_probe_argument_count (objfile,
++								pc_probe);
++  if (sel == 10)
++    {
++      value->kind = axs_rvalue;
++      value->type = builtin_type (expr->gdbarch)->builtin_int;
++      ax_const_l (expr, n_probes);
++      return;
++    }
++
++  gdb_assert (sel >= 0);
++  if (sel >= n_probes)
++    error (_("Invalid probe argument %d -- probe has %d arguments available"),
++	   sel, n_probes);
++
++  objfile->sf->sym_probe_fns->sym_compile_to_ax (objfile, pc_probe,
++						 expr, value, sel);
++}
++
++
++
++/* Implementation of `$_probe_arg*' set of variables.  */
++
++static const struct internalvar_funcs probe_funcs =
++{
++  compute_probe_arg,
++  compile_probe_arg,
++  NULL
++};
++
++void
++_initialize_stap_probe (void)
++{
++  add_info ("probes", info_probes_command, _("\
++Show available static probes.\n\
++Usage: info probes [PROVIDER [NAME [OBJECT]]]\n\
++Each argument is a regular expression, used to select probes.\n\
++PROVIDER matches probe provider names.\n\
++NAME matches the probe names.\n\
++OBJECT match the executable or shared library name."));
++
++  create_internalvar_type_lazy ("_probe_argc", &probe_funcs,
++				(void *) (uintptr_t) 10);
++  create_internalvar_type_lazy ("_probe_arg0", &probe_funcs,
++				(void *) (uintptr_t) 0);
++  create_internalvar_type_lazy ("_probe_arg1", &probe_funcs,
++				(void *) (uintptr_t) 1);
++  create_internalvar_type_lazy ("_probe_arg2", &probe_funcs,
++				(void *) (uintptr_t) 2);
++  create_internalvar_type_lazy ("_probe_arg3", &probe_funcs,
++				(void *) (uintptr_t) 3);
++  create_internalvar_type_lazy ("_probe_arg4", &probe_funcs,
++				(void *) (uintptr_t) 4);
++  create_internalvar_type_lazy ("_probe_arg5", &probe_funcs,
++				(void *) (uintptr_t) 5);
++  create_internalvar_type_lazy ("_probe_arg6", &probe_funcs,
++				(void *) (uintptr_t) 6);
++  create_internalvar_type_lazy ("_probe_arg7", &probe_funcs,
++				(void *) (uintptr_t) 7);
++  create_internalvar_type_lazy ("_probe_arg8", &probe_funcs,
++				(void *) (uintptr_t) 8);
++  create_internalvar_type_lazy ("_probe_arg9", &probe_funcs,
++				(void *) (uintptr_t) 9);
++}
+Index: gdb-7.2/gdb/stap-probe.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/stap-probe.h	2011-08-11 18:24:28.000000000 +0200
+@@ -0,0 +1,115 @@
++/* SystemTap probe support for GDB.
++
++   Copyright (C) 2011 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#if !defined (STAP_PROBE_H)
++#define STAP_PROBE_H 1
++
++#include "vec.h"
++
++struct stap_args_info;
++struct axs_value;
++struct linespec_result;
++
++/* Main structure which holds information about a SystemTap probe.  */
++
++struct stap_probe
++{
++  /* The provider of this probe.  */
++  const char *provider;
++
++  /* The name of the probe.  */
++  const char *name;
++
++  /* The address where the probe is inserted.  */
++  CORE_ADDR address;
++
++  /* The address of the probe's semaphore, or 0 if this probe does not
++     have an associated semaphore.  */
++  CORE_ADDR sem_addr;
++
++  /* Probe's arguments.  Users should generally not examine this, but
++     should instead extract information about the arguments using the
++     methods provided in sym_probe_fns.  */
++  const char *args;
++
++  /* Probe's arguments after parsing.  This is an opaque structure that
++     will hold information about the arguments pointed by ARGS.  */
++  struct stap_args_info *parsed_args;
++};
++
++typedef const struct stap_probe *stap_probe_p;
++DEF_VEC_P (stap_probe_p);
++
++/* A helper for linespec that decodes a stap probe specification.  It
++   returns a symtabs_and_lines object and updates *ARGPTR or throws an
++   error.  */
++
++extern struct symtabs_and_lines parse_stap_probe (char **argptr,
++						  struct linespec_result *canon);
++
++/* Search OBJFILE for a probe with the given PROVIDER and NAME.
++   Return a VEC of all probes that were found.  If no matching probe
++   is found, return NULL.  The caller must free the VEC.  */
++
++extern VEC (stap_probe_p) *find_probes_in_objfile (struct objfile *objfile,
++						   const char *provider,
++						   const char *name);
++
++/* Given a PC, find an associated SystemTap probe.  If a probe is
++   found, set *OBJFILE_OUT to the probe's objfile, and return the
++   probe.  If no probe is found, return NULL.  */
++
++extern const struct stap_probe *find_probe_by_pc (CORE_ADDR pc,
++						  struct objfile **objfile_out);
++
++/* Given PROBE, returns the number of arguments present in that probe's
++   argument string.  */
++
++extern int stap_get_probe_argument_count (const struct stap_probe *probe);
++
++/* Given PARSED_ARGS, frees the space allocated to hold information about
++   the probe's parsed arguments.  */
++
++extern void stap_free_parsed_args (struct stap_args_info *parsed_args);
++
++/* Evaluates the probe's argument N, returning a value corresponding
++   to it.  */
++
++extern struct value *stap_evaluate_probe_argument (struct objfile *objfile,
++						   const struct stap_probe *probe,
++						   struct frame_info *frame,
++						   int n);
++
++/* Compile the probe's argument N to agent expression.  */
++
++struct agent_expr;
++extern void stap_compile_to_ax (struct objfile *objfile,
++				const struct stap_probe *probe,
++				struct agent_expr *expr,
++				struct axs_value *value,
++				int n);
++
++/* A convenience function that finds a probe at the PC in FRAME and
++   evaluates argument N.  If there is no probe at that location, or if
++   the probe does not have enough arguments, this returns NULL.  */
++
++extern struct value *stap_safe_evaluate_at_pc (struct frame_info *frame,
++					       int n);
++
++#endif /* !defined (STAP_PROBE_H) */
+Index: gdb-7.2/gdb/symfile.h
+===================================================================
+--- gdb-7.2.orig/gdb/symfile.h	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/symfile.h	2011-08-11 18:24:28.000000000 +0200
+@@ -31,6 +31,11 @@ struct objfile;
+ struct obj_section;
+ struct obstack;
+ struct block;
++struct stap_probe;
++struct value;
++struct frame_info;
++struct agent_expr;
++struct axs_value;
+ 
+ /* Partial symbols are stored in the psymbol_cache and pointers to
+    them are kept in a dynamically grown array that is obtained from
+@@ -283,6 +288,52 @@ struct quick_symbol_functions
+ 				void *data);
+ };
+ 
++/* Structure of functions used for SystemTap probe support.  If one of
++   these functions is provided, all must be.  */
++
++struct sym_probe_fns
++{
++  /* If non-NULL, return an array of SystemTap probe objects.  The
++     number of objects is returned in *NUM_PROBES.  */
++  const struct stap_probe *(*sym_get_probes) (struct objfile *,
++					      int *num_probes);
++
++  /* Return the number of arguments available to PROBE.  PROBE will
++     have come from a call to this objfile's sym_get_probes method.
++     If you provide an implementation of sym_get_probes, you must
++     implement this method as well.  */
++  int (*sym_get_probe_argument_count) (struct objfile *objfile,
++				       const struct stap_probe *probe);
++
++  /* Evaluate the Nth argument available to PROBE.  PROBE will have
++     come from a call to this objfile's sym_get_probes method.  N will
++     be between 0 and the number of arguments available to this probe.
++     FRAME is the frame in which the evaluation is done; the frame's
++     PC will match the address of the probe.  If you provide an
++     implementation of sym_get_probes, you must implement this method
++     as well.  */
++  struct value *(*sym_evaluate_probe_argument) (struct objfile *objfile,
++						const struct stap_probe *probe,
++						struct frame_info *frame,
++						int n);
++
++  /* Compile the Nth probe argument to an agent expression.  PROBE
++     will have come from a call to this objfile's sym_get_probes
++     method.  N will be between 0 and the number of arguments
++     available to this probe.  EXPR and VALUE are the agent expression
++     that is being updated.  */
++  void (*sym_compile_to_ax) (struct objfile *objfile,
++			     const struct stap_probe *probe,
++			     struct agent_expr *expr,
++			     struct axs_value *value,
++			     int n);
++
++  /* Relocate the probe section of OBJFILE.  */
++  void (*sym_relocate_probe) (struct objfile *objfile,
++			      struct section_offsets *new_offsets,
++			      struct section_offsets *delta);
++};
++
+ /* Structure to keep track of symbol reading functions for various
+    object file types.  */
+ 
+@@ -346,6 +397,10 @@ struct sym_fns
+ 
+   bfd_byte *(*sym_relocate) (struct objfile *, asection *sectp, bfd_byte *buf);
+ 
++  /* If non-NULL, this objfile has probe support, and all the probe
++     functions referred to here will be non-NULL.  */
++  const struct sym_probe_fns *sym_probe_fns;
++
+   /* The "quick" (aka partial) symbol functions for this symbol
+      reader.  */
+   const struct quick_symbol_functions *qf;
+Index: gdb-7.2/gdb/symtab.c
+===================================================================
+--- gdb-7.2.orig/gdb/symtab.c	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/symtab.c	2011-08-11 18:24:28.000000000 +0200
+@@ -719,6 +719,7 @@ init_sal (struct symtab_and_line *sal)
+   sal->end = 0;
+   sal->explicit_pc = 0;
+   sal->explicit_line = 0;
++  sal->semaphore = 0;
+ }
+ 
+ 
+Index: gdb-7.2/gdb/symtab.h
+===================================================================
+--- gdb-7.2.orig/gdb/symtab.h	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/symtab.h	2011-08-11 18:24:28.000000000 +0200
+@@ -1085,6 +1085,10 @@ struct symtab_and_line
+   CORE_ADDR end;
+   int explicit_pc;
+   int explicit_line;
++
++  /* If non-zero, the semaphore location associated with a SystemTap
++     probe.  */
++  CORE_ADDR semaphore;
+ };
+ 
+ extern void init_sal (struct symtab_and_line *sal);
+Index: gdb-7.2/gdb/testsuite/gdb.base/default.exp
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/gdb.base/default.exp	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/testsuite/gdb.base/default.exp	2011-08-11 18:24:28.000000000 +0200
+@@ -578,6 +578,17 @@ gdb_test_list_exact "show convenience" "
+ 	{$_sdata = void} \
+ 	{$_siginfo = void} \
+ 	{$_thread = 0} \
++	{$_probe_argc = <error: No frame selected>} \
++	{$_probe_arg0 = <error: No frame selected>} \
++	{$_probe_arg1 = <error: No frame selected>} \
++	{$_probe_arg2 = <error: No frame selected>} \
++	{$_probe_arg3 = <error: No frame selected>} \
++	{$_probe_arg4 = <error: No frame selected>} \
++	{$_probe_arg5 = <error: No frame selected>} \
++	{$_probe_arg6 = <error: No frame selected>} \
++	{$_probe_arg7 = <error: No frame selected>} \
++	{$_probe_arg8 = <error: No frame selected>} \
++	{$_probe_arg9 = <error: No frame selected>} \
+     }
+ 
+ #test show directories
+Index: gdb-7.2/gdb/testsuite/gdb.base/stap-probe.c
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.base/stap-probe.c	2011-08-11 18:24:28.000000000 +0200
+@@ -0,0 +1,69 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2011 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#if USE_PROBES
++
++#define _SDT_HAS_SEMAPHORES
++__extension__ unsigned short teste_user_semaphore __attribute__ ((unused)) __attribute__ ((section (".probes")));
++#define TEST teste_user_semaphore
++
++__extension__ unsigned short teste_two_semaphore __attribute__ ((unused)) __attribute__ ((section (".probes")));
++#define TEST2 teste_two_semaphore
++
++#else
++
++#define TEST 1
++#define TEST2 1
++
++#endif
++
++#include <sys/sdt.h>
++
++/* We only support SystemTap and only the v3 form.  */
++#if _SDT_NOTE_TYPE != 3
++#error "not using SystemTap v3 probes"
++#endif
++
++void
++m1 (void)
++{
++  if (TEST2)
++    STAP_PROBE (teste, two);
++}
++
++void
++m2 (void)
++{
++  if (TEST2)
++    STAP_PROBE (teste, two);
++}
++
++int
++f (int x)
++{
++  if (TEST)
++    STAP_PROBE1(teste, user, x);
++  return x+5;
++}
++
++int
++main()
++{
++  f(f(23));
++  m1();
++  m2();
++}
+Index: gdb-7.2/gdb/testsuite/gdb.base/stap-probe.exp
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.base/stap-probe.exp	2011-08-11 18:24:28.000000000 +0200
+@@ -0,0 +1,72 @@
++# Copyright (C) 2011 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++set testfile stap-probe
++
++# Run the tests.  We run the tests two different ways: once with a
++# plain probe, and once with a probe that has an associated semaphore.
++# This returns -1 on failure to compile or start, 0 otherwise.
++proc stap_test {{arg ""}} {
++    global testfile hex
++
++    if {$arg != ""} {
++    	set arg "additional_flags=$arg"
++	set addendum ", with semaphore"
++    } else {
++	set addendum ", no semaphore"
++    }
++
++    if {[prepare_for_testing ${testfile}.exp ${testfile} ${testfile}.c \
++	   [concat $arg debug]]} {
++	return -1
++    }
++
++    if ![runto_main] {
++	return -1
++    }
++
++    gdb_test "print \$_probe_argc" "No SystemTap probe at PC $hex" \
++	"check argument not at probe point$addendum"
++
++    gdb_test "info probes" \
++	"teste *user *$hex .*" \
++	"info probes$addendum"
++    
++    if {[runto "probe:teste:user"]} {
++	pass "run to probe:teste:user$addendum"
++    } else {
++	fail "run to probe:teste:user$addendum"
++    }
++
++    # Test probe arguments.
++    gdb_test "print \$_probe_argc" " = 1" "print \$_probe_argc$addendum"
++    gdb_test "print \$_probe_arg0 == x" " = 1" "check \$_probe_arg0$addendum"
++    gdb_test "print \$_probe_arg1" \
++    	"Invalid probe argument 1 -- probe has 1 arguments available" \
++    	"check \$_probe_arg1$addendum"
++
++    # Set a breakpoint with multiple probe locations.
++    gdb_test "break probe:teste:two" \
++	"Breakpoint .* at $hex.*2 locations.*" \
++	"set multi-location probe breakpoint$addendum"
++
++    return 0
++}
++
++if {[stap_test] == -1} {
++    untested stap-probe.exp
++    return -1
++}
++stap_test "-DUSE_PROBES"
+Index: gdb-7.2/gdb/testsuite/gdb.trace/stap-trace.c
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.trace/stap-trace.c	2011-08-11 18:24:28.000000000 +0200
+@@ -0,0 +1,71 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2011 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#if USE_PROBES
++
++#define _SDT_HAS_SEMAPHORES
++__extension__ unsigned short teste_user_semaphore __attribute__ ((unused)) __attribute__ ((section (".probes")));
++#define TEST teste_user_semaphore
++
++__extension__ unsigned short teste_two_semaphore __attribute__ ((unused)) __attribute__ ((section (".probes")));
++#define TEST2 teste_two_semaphore
++
++#else
++
++#define TEST 1
++#define TEST2 1
++
++#endif /* USE_PROBES */
++
++#include <sys/sdt.h>
++
++/* We only support SystemTap and only the v3 form.  */
++#if _SDT_NOTE_TYPE != 3
++#error "not using SystemTap v3 probes"
++#endif
++
++void
++m1 (int x)
++{
++  if (TEST2)
++    STAP_PROBE1 (teste, two, x);
++}
++
++int
++f (int x)
++{
++  if (TEST)
++    STAP_PROBE1(teste, user, x);
++  return x+5;
++}
++
++void
++nothing (void)
++{
++  int a = 1 + 1;
++  return;
++}
++
++int
++main()
++{
++  f (f (23));
++  m1 (46);
++  nothing (); /* end-here */
++
++  return 0;
++}
+Index: gdb-7.2/gdb/testsuite/gdb.trace/stap-trace.exp
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.trace/stap-trace.exp	2011-08-11 18:24:28.000000000 +0200
+@@ -0,0 +1,129 @@
++# Copyright 2011
++# Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++load_lib "trace-support.exp"
++
++if $tracelevel then {
++	strace $tracelevel
++}
++
++set testfile "stap-trace"
++set srcfile ${testfile}.c
++set executable $testfile
++set binfile $objdir/$subdir/$executable
++
++set ws "\[\r\n\t \]+"
++set cr "\[\r\n\]+"
++
++# Only x86 and x86_64 targets are supported for now.
++
++if { ![istarget "x86_64-*"] && ![istarget "i?86-*"] } {
++    continue
++}
++
++proc compile_stap_bin {{ arg "" }} {
++    global srcfile
++    global binfile
++    global srcdir
++    global subdir
++
++    if { $arg != "" } {
++	set arg "additional_flags=$arg"
++    }
++
++    if { [gdb_compile "$srcdir/$subdir/$srcfile" $binfile \
++	    executable [concat $arg debug nowarnings]] != "" } {
++	untested "Could not compile ${srcfile}"
++	return -1
++    }
++}
++
++proc prepare_for_trace_test {} {
++    global executable
++
++    clean_restart $executable
++
++    if { ![runto_main] } {
++	perror "Could not run to `main'."
++	continue
++    }
++
++    gdb_breakpoint [gdb_get_line_number "end-here"]
++}
++
++proc run_trace_experiment { test_probe msg } {
++    global gdb_prompt
++
++    set test "collect $msg: start trace experiment"
++    gdb_test_multiple "tstart" "$test" {
++	-re "^tstart\r\n$gdb_prompt $" {
++	    pass "$test"
++	}
++    }
++
++    gdb_test "continue" \
++	    "Continuing.*Breakpoint \[0-9\]+.*" \
++	    "collect $msg: run trace experiment"
++    gdb_test "tstop" \
++	    "\[\r\n\]+" \
++	    "collect $msg: stop trace experiment"
++    gdb_test "tfind start" \
++	    "#0 .*" \
++	    "collect $msg: tfind test frame"
++}
++
++proc gdb_collect_probe_arg { msg probe val_arg0 } {
++    global gdb_prompt
++    global cr
++
++    prepare_for_trace_test
++
++    gdb_test "trace $probe" \
++	    "Tracepoint \[0-9\]+ at .*" \
++	    "collect $msg: set tracepoint"
++    gdb_trace_setactions "collect $msg: define actions" \
++	    "" \
++	    "collect \$_probe_arg0" "^$"
++
++    # Begin the test.
++    run_trace_experiment $msg $probe
++
++    gdb_test "print \$_probe_arg0" \
++	    "\\$\[0-9\]+ = $val_arg0$cr" \
++	    "collect $msg: collected probe arg0"
++}
++
++compile_stap_bin ""
++
++clean_restart $executable
++if { ![runto_main] } {
++    perror "Could not run to `main'."
++    continue
++}
++
++if { ![gdb_target_supports_trace] } {
++    # Test cannot run on this target.
++    return 1;
++}
++
++gdb_collect_probe_arg "probe args without semaphore" "probe:user" "23"
++gdb_exit
++
++compile_stap_bin "-DUSE_PROBES"
++gdb_collect_probe_arg "probe args with semaphore" "probe:two" "46"
++
++# Finished!
++gdb_test "tfind none" ".*" ""
+Index: gdb-7.2/gdb/tracepoint.c
+===================================================================
+--- gdb-7.2.orig/gdb/tracepoint.c	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/tracepoint.c	2011-08-11 18:24:28.000000000 +0200
+@@ -1560,6 +1560,8 @@ start_tracing (void)
+ 
+   for (ix = 0; VEC_iterate (breakpoint_p, tp_vec, ix, t); ix++)
+     {
++      struct bp_location *loc;
++
+       if ((t->type == bp_fast_tracepoint
+ 	   ? !may_insert_fast_tracepoints
+ 	   : !may_insert_tracepoints))
+@@ -1568,6 +1570,9 @@ start_tracing (void)
+       t->number_on_target = 0;
+       target_download_tracepoint (t);
+       t->number_on_target = t->number;
++
++      for (loc = t->loc; loc; loc = loc->next)
++	modify_semaphore (loc, 1);
+     }
+   VEC_free (breakpoint_p, tp_vec);
+ 
+@@ -1628,7 +1633,28 @@ trace_stop_command (char *args, int from
+ void
+ stop_tracing (void)
+ {
++  VEC(breakpoint_p) *tp_vec = NULL;
++  int ix;
++  struct breakpoint *t;
++
+   target_trace_stop ();
++
++  tp_vec = all_tracepoints ();
++  for (ix = 0; VEC_iterate (breakpoint_p, tp_vec, ix, t); ix++)
++    {
++      struct bp_location *loc;
++
++      if ((t->type == bp_fast_tracepoint
++	   ? !may_insert_fast_tracepoints
++	   : !may_insert_tracepoints))
++	continue;
++
++      for (loc = t->loc; loc; loc = loc->next)
++	modify_semaphore (loc, 0);
++    }
++
++  VEC_free (breakpoint_p, tp_vec);
++
+   /* should change in response to reply? */
+   current_trace_status ()->running = 0;
+ }
+Index: gdb-7.2/gdb/xcoffread.c
+===================================================================
+--- gdb-7.2.orig/gdb/xcoffread.c	2011-08-11 18:23:32.000000000 +0200
++++ gdb-7.2/gdb/xcoffread.c	2011-08-11 18:24:28.000000000 +0200
+@@ -3051,6 +3051,7 @@ static struct sym_fns xcoff_sym_fns =
+ 				   a file.  */
+   aix_process_linenos,          /* sym_read_linetable */
+   default_symfile_relocate,	/* sym_relocate: Relocate a debug section.  */
++  NULL,				/* sym_probe_fns */
+   &psym_functions,
+   NULL				/* next: pointer to next struct sym_fns */
+ };
+Index: gdb-7.2/gdb/cli/cli-utils.c
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/cli/cli-utils.c	2011-08-11 18:27:38.000000000 +0200
+@@ -0,0 +1,66 @@
++/* CLI utilities.
++
++   Copyright (c) 2011 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#include "defs.h"
++#include "cli/cli-utils.h"
++#include "gdb_string.h"
++#include "cli/cli-dump.h"
++
++#include <ctype.h>
++
++/* See documentation in cli-utils.h.  */
++
++char *
++skip_to_space (char *chp)
++{
++  if (chp == NULL)
++    return NULL;
++  while (*chp && !isspace (*chp))
++    chp++;
++  return chp;
++}
++
++/* See documentation in cli-utils.h.  */
++
++char *
++extract_arg (char **arg)
++{
++  char *result, *copy;
++
++  if (!*arg)
++    return NULL;
++
++  /* Find the start of the argument.  */
++  *arg = skip_spaces (*arg);
++  if (! **arg)
++    return NULL;
++  result = *arg;
++
++  /* Find the end of the argument.  */
++  *arg = skip_to_space (*arg + 1);
++
++  if (result == *arg)
++    return NULL;
++
++  copy = xmalloc (*arg - result + 1);
++  memcpy (copy, result, *arg - result);
++  copy[*arg - result] = '\0';
++
++  return copy;
++}
+Index: gdb-7.2/gdb/cli/cli-utils.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/cli/cli-utils.h	2011-08-11 18:26:02.000000000 +0200
+@@ -0,0 +1,34 @@
++/* CLI utilities.
++
++   Copyright (c) 2011 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#ifndef CLI_UTILS_H
++#define CLI_UTILS_H
++
++/* Skip leading non-whitespace characters in INP, returning an updated
++   pointer.  If INP is NULL, return NULL.  */
++
++extern char *skip_to_space (char *inp);
++
++/* A helper function to extract an argument from *ARG.  An argument is
++   delimited by whitespace.  The return value is either NULL if no
++   argument was found, or an xmalloc'd string.  */
++
++extern char *extract_arg (char **arg);
++
++#endif /* CLI_UTILS_H */

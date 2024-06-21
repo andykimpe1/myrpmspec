@@ -1,0 +1,101 @@
+From 3c9f743f7cbc3e5a5474ae896465a3b4b55b56af Mon Sep 17 00:00:00 2001
+From: siddhesh <siddhesh>
+Date: Fri, 24 Aug 2012 03:57:22 +0000
+Subject: [PATCH]         * h8300-tdep.c (h8300_push_dummy_call): Replace unsafe alloca
+         with xmalloc/cleanup.
+         * mt-tdep.c (mt_push_dummy_call): Likewise.
+         * tilegx-tdep.c (tilegx_push_dummy_call): Likewise.
+         * xstormy16-tdep.c (xstormy16_push_dummy_call): Likewise.
+
+---
+ gdb/ChangeLog        |    8 ++++++++
+ gdb/h8300-tdep.c     |    6 +++++-
+ gdb/mt-tdep.c        |    8 ++++++--
+ gdb/tilegx-tdep.c    |    8 ++++++--
+ gdb/xstormy16-tdep.c |    8 ++++++--
+ 5 files changed, 31 insertions(+), 7 deletions(-)
+
+Index: gdb-7.2/gdb/h8300-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/h8300-tdep.c
++++ gdb-7.2/gdb/h8300-tdep.c
+@@ -667,13 +667,15 @@ h8300_push_dummy_call (struct gdbarch *g
+ 
+   for (argument = 0; argument < nargs; argument++)
+     {
++      struct cleanup *back_to;
+       struct type *type = value_type (args[argument]);
+       int len = TYPE_LENGTH (type);
+       char *contents = (char *) value_contents (args[argument]);
+ 
+       /* Pad the argument appropriately.  */
+       int padded_len = align_up (len, wordsize);
+-      gdb_byte *padded = alloca (padded_len);
++      gdb_byte *padded = xmalloc (padded_len);
++      back_to = make_cleanup (xfree, padded);
+ 
+       memset (padded, 0, padded_len);
+       memcpy (len < wordsize ? padded + padded_len - len : padded,
+@@ -722,6 +724,8 @@ h8300_push_dummy_call (struct gdbarch *g
+ 	     subsequent arguments go on the stack.  */
+ 	  reg = E_ARGLAST_REGNUM + 1;
+ 	}
++
++      do_cleanups (back_to);
+     }
+ 
+   /* Store return address.  */
+Index: gdb-7.2/gdb/mt-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/mt-tdep.c
++++ gdb-7.2/gdb/mt-tdep.c
+@@ -834,16 +834,20 @@ mt_push_dummy_call (struct gdbarch *gdba
+   for (j = nargs - 1; j >= i; j--)
+     {
+       gdb_byte *val;
++      struct cleanup *back_to;
++      const gdb_byte *contents = value_contents (args[j]);
+       
+       /* Right-justify the value in an aligned-length buffer.  */
+       typelen = TYPE_LENGTH (value_type (args[j]));
+       slacklen = (wordsize - (typelen % wordsize)) % wordsize;
+-      val = alloca (typelen + slacklen);
+-      memcpy (val, value_contents (args[j]), typelen);
++      val = xmalloc (typelen + slacklen);
++      back_to = make_cleanup (xfree, val);
++      memcpy (val, contents, typelen);
+       memset (val + typelen, 0, slacklen);
+       /* Now write this data to the stack.  */
+       stack_dest -= typelen + slacklen;
+       write_memory (stack_dest, val, typelen + slacklen);
++      do_cleanups (back_to);
+     }
+ 
+   /* Finally, if a param needs to be split between registers and stack, 
+Index: gdb-7.2/gdb/xstormy16-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/xstormy16-tdep.c
++++ gdb-7.2/gdb/xstormy16-tdep.c
+@@ -279,16 +279,20 @@ xstormy16_push_dummy_call (struct gdbarc
+   for (j = nargs - 1; j >= i; j--)
+     {
+       char *val;
++      struct cleanup *back_to;
++      const gdb_byte *bytes = value_contents (args[j]);
+ 
+       typelen = TYPE_LENGTH (value_enclosing_type (args[j]));
+       slacklen = typelen & 1;
+-      val = alloca (typelen + slacklen);
+-      memcpy (val, value_contents (args[j]), typelen);
++      val = xmalloc (typelen + slacklen);
++      back_to = make_cleanup (xfree, val);
++      memcpy (val, bytes, typelen);
+       memset (val + typelen, 0, slacklen);
+ 
+       /* Now write this data to the stack. The stack grows upwards. */
+       write_memory (stack_dest, val, typelen + slacklen);
+       stack_dest += typelen + slacklen;
++      do_cleanups (back_to);
+     }
+ 
+   store_unsigned_integer (buf, xstormy16_pc_size, byte_order, bp_addr);

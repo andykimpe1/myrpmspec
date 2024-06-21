@@ -1,0 +1,215 @@
+Date: Tue, 21 Aug 2012 15:25:40 +0530
+From: Siddhesh Poyarekar <siddhesh at redhat dot com>
+To: gdb-patches at sourceware dot org
+Subject: [PATCH] Expand fortran array bounds sizes to LONGEST
+Message-ID: <20120821152540.013b4d99@spoyarek>
+
+Hi,
+
+Range bounds for a gdb type can have LONGEST values for low and high
+bounds. Fortran range bounds functions however use only int. The larger
+ranges don't compile by default on gcc, but it is possible to override
+the check in the compiler by using -fno-range-check. As a result, this
+check is necessary so that we don't print junk in case of an overflow.
+
+Attached patch does this expansion and also includes a test case that
+verifies that the problem is fixed. I have also verified on x86_64 that
+this patch does not cause any regressions.
+
+Regards,
+Siddhesh
+
+gdb/ChangeLog:
+
+	* f-lang.h (f77_get_upperbound): Return LONGEST.
+	(f77_get_lowerbound): Likewise.
+	* f-typeprint.c (f_type_print_varspec_suffix): Expand
+	UPPER_BOUND and LOWER_BOUND to LONGEST.  Use plongest to format
+	print them.
+	(f_type_print_base): Expand UPPER_BOUND to LONGEST.  Use
+	plongest to format print it.
+	* f-valprint.c (f77_get_lowerbound): Return LONGEST.
+	(f77_get_upperbound): Likewise.
+	(f77_get_dynamic_length_of_aggregate): Expand UPPER_BOUND,
+	LOWER_BOUND to LONGEST.
+	(f77_create_arrayprint_offset_tbl): Likewise.
+
+testsuite/ChangeLog:
+
+	* gdb.fortran/array-bounds.exp: New test case.
+	* gdb.fortran/array-bounds.f: New test case.
+
+Index: gdb-7.2-patched/gdb/f-lang.h
+===================================================================
+--- gdb-7.2-patched.orig/gdb/f-lang.h
++++ gdb-7.2-patched/gdb/f-lang.h
+@@ -66,9 +66,9 @@ enum f90_range_type
+ extern char *real_main_name;	/* Name of main function */
+ extern int real_main_c_value;	/* C_value field of main function */
+ 
+-extern int f77_get_upperbound (struct type *);
++extern LONGEST f77_get_upperbound (struct type *);
+ 
+-extern int f77_get_lowerbound (struct type *);
++extern LONGEST f77_get_lowerbound (struct type *);
+ 
+ extern void f77_get_dynamic_array_length (struct type *);
+ 
+Index: gdb-7.2-patched/gdb/f-typeprint.c
+===================================================================
+--- gdb-7.2-patched.orig/gdb/f-typeprint.c
++++ gdb-7.2-patched/gdb/f-typeprint.c
+@@ -183,7 +183,7 @@ f_type_print_varspec_suffix (struct type
+ 			     int show, int passed_a_ptr, int demangled_args,
+ 			     int arrayprint_recurse_level)
+ {
+-  int upper_bound, lower_bound;
++  LONGEST upper_bound, lower_bound;
+ 
+   /* No static variables are permitted as an error call may occur during
+      execution of this function.  */
+@@ -213,7 +213,7 @@ f_type_print_varspec_suffix (struct type
+ 
+       lower_bound = f77_get_lowerbound (type);
+       if (lower_bound != 1)	/* Not the default.  */
+-	fprintf_filtered (stream, "%d:", lower_bound);
++	fprintf_filtered (stream, "%s:", plongest (lower_bound));
+ 
+       /* Make sure that, if we have an assumed size array, we
+          print out a warning and print the upperbound as '*' */
+@@ -223,7 +223,7 @@ f_type_print_varspec_suffix (struct type
+       else
+ 	{
+ 	  upper_bound = f77_get_upperbound (type);
+-	  fprintf_filtered (stream, "%d", upper_bound);
++	  fprintf_filtered (stream, "%s", plongest (upper_bound));
+ 	}
+ 
+       if (TYPE_CODE (TYPE_TARGET_TYPE (type)) != TYPE_CODE_ARRAY)
+@@ -292,7 +292,7 @@ void
+ f_type_print_base (struct type *type, struct ui_file *stream, int show,
+ 		   int level)
+ {
+-  int upper_bound;
++  LONGEST upper_bound;
+   int index;
+ 
+   QUIT;
+@@ -378,7 +378,7 @@ f_type_print_base (struct type *type, st
+       else
+ 	{
+ 	  upper_bound = f77_get_upperbound (type);
+-	  fprintf_filtered (stream, "character*%d", upper_bound);
++	  fprintf_filtered (stream, "character*%s", plongest (upper_bound));
+ 	}
+       break;
+ 
+Index: gdb-7.2-patched/gdb/f-valprint.c
+===================================================================
+--- gdb-7.2-patched.orig/gdb/f-valprint.c
++++ gdb-7.2-patched/gdb/f-valprint.c
+@@ -58,7 +58,7 @@ LONGEST f77_array_offset_tbl[MAX_FORTRAN
+ 
+ #define F77_DIM_BYTE_STRIDE(n) (f77_array_offset_tbl[n][0])
+ 
+-int
++LONGEST
+ f77_get_lowerbound (struct type *type)
+ {
+   f_object_address_data_valid_or_error (type);
+@@ -69,7 +69,7 @@ f77_get_lowerbound (struct type *type)
+   return TYPE_ARRAY_LOWER_BOUND_VALUE (type);
+ }
+ 
+-int
++LONGEST
+ f77_get_upperbound (struct type *type)
+ {
+   f_object_address_data_valid_or_error (type);
+@@ -93,8 +93,8 @@ f77_get_upperbound (struct type *type)
+ static void
+ f77_get_dynamic_length_of_aggregate (struct type *type)
+ {
+-  int upper_bound = -1;
+-  int lower_bound = 1;
++  LONGEST upper_bound = -1;
++  LONGEST lower_bound = 1;
+ 
+   /* Recursively go all the way down into a possibly multi-dimensional
+      F77 array and get the bounds.  For simple arrays, this is pretty
+@@ -128,7 +128,7 @@ f77_create_arrayprint_offset_tbl (struct
+   struct type *tmp_type;
+   LONGEST eltlen;
+   int ndimen = 1;
+-  int upper, lower;
++  LONGEST upper, lower;
+ 
+   tmp_type = type;
+ 
+Index: gdb-7.2-patched/gdb/testsuite/gdb.fortran/array-bounds.exp
+===================================================================
+--- /dev/null
++++ gdb-7.2-patched/gdb/testsuite/gdb.fortran/array-bounds.exp
+@@ -0,0 +1,36 @@
++# Copyright 2012 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# This file is part of the gdb testsuite.  It contains test to ensure that
++# array bounds accept LONGEST.
++
++if { [skip_fortran_tests] } { return -1 }
++
++set testfile "array-bounds"
++set srcfile ${testfile}.f
++
++if {[prepare_for_testing $testfile.exp $testfile $srcfile {debug additional_flags=-fno-range-check f77}]} {
++    print "compile failed"
++    return -1
++}
++
++if { ![runto MAIN__] } {
++    perror "Could not run to breakpoint `MAIN__'."
++    continue
++}
++
++gdb_test "print &foo" {.*\(4294967296:4294967297\).*}
++gdb_test "print &bar" {.*\(-4294967297:-4294967296\).*}
++
+Index: gdb-7.2-patched/gdb/testsuite/gdb.fortran/array-bounds.f
+===================================================================
+--- /dev/null
++++ gdb-7.2-patched/gdb/testsuite/gdb.fortran/array-bounds.f
+@@ -0,0 +1,21 @@
++c Copyright 2012 Free Software Foundation, Inc.
++
++c This program is free software; you can redistribute it and/or modify
++c it under the terms of the GNU General Public License as published by
++c the Free Software Foundation; either version 3 of the License, or
++c (at your option) any later version.
++c
++c This program is distributed in the hope that it will be useful,
++c but WITHOUT ANY WARRANTY; without even the implied warranty of
++c MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++c GNU General Public License for more details.
++c
++c You should have received a copy of the GNU General Public License
++c along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++        dimension foo(4294967296:4294967297)
++        dimension bar(-4294967297:-4294967296)
++        foo=bar
++        stop
++        end
++

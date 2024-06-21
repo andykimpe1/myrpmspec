@@ -1,0 +1,164 @@
+Comments from Sergio Durigan Junior:
+
+  The "proper" fix for this whole problem would be to backport the
+  "ambiguous linespec" patch series.  However, it is really not
+  recommended to do that for RHEL GDB, because the patch series is too
+  big and could introduce unwanted regressions.  Instead, what we
+  chose to do was to replace the gdb_assert call by a warning (which
+  allows the user to continue the debugging session), and tell the
+  user that, although more than one location was found for his/her
+  breakpoint, only one will be used.
+
+Index: gdb-7.2/gdb/breakpoint.c
+===================================================================
+--- gdb-7.2.orig/gdb/breakpoint.c
++++ gdb-7.2/gdb/breakpoint.c
+@@ -5632,6 +5632,7 @@ set_raw_breakpoint_without_location (str
+   b->ops = NULL;
+   b->condition_not_parsed = 0;
+   b->related_breakpoint = b;
++  b->have_warned_found_sals_not_one_p = 0;
+ 
+   /* Add this breakpoint to the end of the chain
+      so that a list of breakpoints will come out in order
+@@ -10394,7 +10395,13 @@ addr_string_to_sals (struct breakpoint *
+ 
+   if (!not_found)
+     {
+-      gdb_assert (my_pre_expanded || sals.nelts == 1);
++      if (!(my_pre_expanded || sals.nelts == 1)
++	  && !b->have_warned_found_sals_not_one_p)
++	{
++	  warning (_("Found more than one location for breakpoint #%d; "
++		     "only the first location will be used."), b->number);
++	  b->have_warned_found_sals_not_one_p = 1;
++	}
+ 
+       resolve_sal_pc (&sals.sals[0]);
+       if (b->condition_not_parsed && s && s[0])
+Index: gdb-7.2/gdb/breakpoint.h
+===================================================================
+--- gdb-7.2.orig/gdb/breakpoint.h
++++ gdb-7.2/gdb/breakpoint.h
+@@ -572,6 +572,11 @@ struct breakpoint
+        breakpoints, we will use this index to try to find the same
+        marker again.  */
+     int static_trace_marker_id_idx;
++
++    /* Flag to indicate whether we have already warned the user about
++       finding more than one location for a pending breakpoint.  Ref:
++       RH BZ 1186476.  */
++    int have_warned_found_sals_not_one_p;
+   };
+ 
+ typedef struct breakpoint *breakpoint_p;
+Index: gdb-7.2/gdb/testsuite/gdb.cp/gdb-rhbz1186476-internal-error-unqualified-name-re-set-main.cc
+===================================================================
+--- /dev/null
++++ gdb-7.2/gdb/testsuite/gdb.cp/gdb-rhbz1186476-internal-error-unqualified-name-re-set-main.cc
+@@ -0,0 +1,22 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2015 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++int
++main (int argc, char *argv[])
++{
++  return 0;
++}
+Index: gdb-7.2/gdb/testsuite/gdb.cp/gdb-rhbz1186476-internal-error-unqualified-name-re-set.cc
+===================================================================
+--- /dev/null
++++ gdb-7.2/gdb/testsuite/gdb.cp/gdb-rhbz1186476-internal-error-unqualified-name-re-set.cc
+@@ -0,0 +1,26 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2015 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++class C
++  {
++    public:
++      C () {}
++      C (int x) {}
++  };
++
++C a;
++C b (1);
+Index: gdb-7.2/gdb/testsuite/gdb.cp/gdb-rhbz1186476-internal-error-unqualified-name-re-set.exp
+===================================================================
+--- /dev/null
++++ gdb-7.2/gdb/testsuite/gdb.cp/gdb-rhbz1186476-internal-error-unqualified-name-re-set.exp
+@@ -0,0 +1,47 @@
++# Copyright 2015 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++if { [skip_cplus_tests] } { continue }
++if { [skip_shlib_tests] } { continue }
++if { [is_remote target] } { continue }
++if { [target_info exists use_gdb_stub] } { continue }
++
++set testfile gdb-rhbz1186476-internal-error-unqualified-name-re-set-main
++set srcfile $testfile.cc
++set executable $testfile
++set binfile $objdir/$subdir/$executable
++
++set libtestfile gdb-rhbz1186476-internal-error-unqualified-name-re-set
++set libsrcfile $libtestfile.cc
++set sofile $objdir/$subdir/lib$libtestfile.so
++
++# Create and source the file that provides information about the compiler
++# used to compile the test case.
++if [get_compiler_info ${binfile} "c++"] {
++    return -1
++}
++
++if { [gdb_compile_shlib $srcdir/$subdir/$libsrcfile $sofile {debug c++ "additional_flags=-fPIC"}] != ""
++     || [gdb_compile $srcdir/$subdir/$srcfile $binfile executable [list additional_flags=-Wl,-rpath,[file dirname ${sofile}] "c++" shlib=${sofile} ]] != ""} {
++    untested $libtestfile.exp
++    return -1
++}
++
++clean_restart $executable
++
++gdb_test_no_output "set breakpoint pending on"
++# gdb_breakpoint would print a failure because of some warning messages
++gdb_test "break C::C" "Breakpoint $decimal \\(C::C\\) pending."
++gdb_test "run" "warning: Found more than one location for breakpoint #$decimal; only the first location will be used.(\r\n)+Breakpoint $decimal, C::C.*"

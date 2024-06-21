@@ -1,0 +1,157 @@
+Implement qXfer:exec-file:read in gdbserver
+
+From: Gary Benson <gbenson@redhat.com>
+
+This commit implements the "qXfer:exec-file:read" packet in gdbserver.
+
+gdb/gdbserver/ChangeLog:
+
+	* target.h (struct target_ops) <pid_to_exec_file>: New field.
+	* linux-low.c (linux_target_ops): Initialize pid_to_exec_file.
+	* server.c (handle_qxfer_exec_file): New function.
+	(qxfer_packets): Add exec-file entry.
+	(handle_query): Report qXfer:exec-file:read as supported packet.
+---
+ gdb/gdbserver/linux-low.c |   19 +++++++++++++++++++
+ gdb/gdbserver/server.c    |   40 ++++++++++++++++++++++++++++++++++++++++
+ gdb/gdbserver/target.h    |    7 +++++++
+ 3 files changed, 66 insertions(+)
+
+Index: gdb-7.2/gdb/gdbserver/linux-low.c
+===================================================================
+--- gdb-7.2.orig/gdb/gdbserver/linux-low.c	2016-08-04 21:37:38.505235865 +0200
++++ gdb-7.2/gdb/gdbserver/linux-low.c	2016-08-04 21:43:51.841585448 +0200
+@@ -5075,6 +5075,39 @@
+     return NULL;
+ }
+ 
++// gdb/common/common-utils.c
++int
++xsnprintf (char *str, size_t size, const char *format, ...)
++{
++  va_list args;
++  int ret;
++
++  va_start (args, format);
++  ret = vsnprintf (str, size, format, args);
++  gdb_assert (ret < size);
++  va_end (args);
++
++  return ret;
++}
++
++// gdb/nat/linux-procfs.c
++static char *
++linux_proc_pid_to_exec_file (int pid)
++{
++  static char buf[PATH_MAX];
++  char name[PATH_MAX];
++  ssize_t len;
++
++  xsnprintf (name, PATH_MAX, "/proc/%d/exe", pid);
++  len = readlink (name, buf, PATH_MAX - 1);
++  if (len <= 0)
++    strcpy (buf, name);
++  else
++    buf[len] = '\0';
++
++  return buf;
++}
++
+ static struct target_ops linux_target_ops = {
+   linux_create_inferior,
+   linux_attach,
+@@ -5131,7 +5164,8 @@
+   linux_cancel_breakpoints,
+   linux_stabilize_threads,
+   linux_install_fast_tracepoint_jump_pad,
+-  linux_emit_ops
++  linux_emit_ops,
++  linux_proc_pid_to_exec_file,
+ };
+ 
+ static void
+Index: gdb-7.2/gdb/gdbserver/server.c
+===================================================================
+--- gdb-7.2.orig/gdb/gdbserver/server.c	2016-08-04 21:37:38.505235865 +0200
++++ gdb-7.2/gdb/gdbserver/server.c	2016-08-04 21:37:47.037312415 +0200
+@@ -820,6 +820,42 @@
+   return (*the_target->read_auxv) (offset, readbuf, len);
+ }
+ 
++/* Handle qXfer:exec-file:read.  */
++
++static int
++handle_qxfer_exec_file (const char *const_annex,
++			gdb_byte *readbuf, const gdb_byte *writebuf,
++			ULONGEST offset, LONGEST len)
++{
++  char *annex, *file;
++  ULONGEST pid;
++  int total_len;
++
++  if (the_target->pid_to_exec_file == NULL || writebuf != NULL)
++    return -2;
++
++  annex = alloca (strlen (const_annex) + 1);
++  strcpy (annex, const_annex);
++  annex = unpack_varlen_hex (annex, &pid);
++  if (annex[0] != '\0' || pid == 0)
++    return -1;
++
++  file = (*the_target->pid_to_exec_file) (pid);
++  if (file == NULL)
++    return -1;
++
++  total_len = strlen (file);
++
++  if (offset > total_len)
++    return -1;
++
++  if (offset + len > total_len)
++    len = total_len - offset;
++
++  memcpy (readbuf, file + offset, len);
++  return len;
++}
++
+ /* Handle qXfer:features:read.  */
+ 
+ static int
+@@ -1076,6 +1112,7 @@
+ static const struct qxfer qxfer_packets[] =
+   {
+     { "auxv", handle_qxfer_auxv },
++    { "exec-file", handle_qxfer_exec_file},
+     { "features", handle_qxfer_features },
+     { "libraries", handle_qxfer_libraries },
+     { "osdata", handle_qxfer_osdata },
+@@ -1442,6 +1479,9 @@
+ 	  strcat (own_buf, ";qXfer:statictrace:read+");
+ 	}
+ 
++      if (the_target->pid_to_exec_file != NULL)
++	strcat (own_buf, ";qXfer:exec-file:read+");
++
+       return;
+     }
+ 
+Index: gdb-7.2/gdb/gdbserver/target.h
+===================================================================
+--- gdb-7.2.orig/gdb/gdbserver/target.h	2016-08-04 21:37:38.506235874 +0200
++++ gdb-7.2/gdb/gdbserver/target.h	2016-08-04 21:37:47.074312747 +0200
+@@ -355,6 +355,14 @@
+   /* Return the bytecode operations vector for the current inferior.
+      Returns NULL if bytecode compilation is not supported.  */
+   struct emit_ops *(*emit_ops) (void);
++
++  /* Return the full absolute name of the executable file that was
++     run to create the process PID.  If the executable file cannot
++     be determined, NULL is returned.  Otherwise, a pointer to a
++     character string containing the pathname is returned.  This
++     string should be copied into a buffer by the client if the string
++     will not be immediately used, or if it must persist.  */
++  char *(*pid_to_exec_file) (int pid);
+ };
+ 
+ extern struct target_ops *the_target;

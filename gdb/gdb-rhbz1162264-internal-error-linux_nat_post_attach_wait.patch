@@ -1,0 +1,165 @@
+  Message-ID: <54E37CE7.50703@redhat.com>
+  Date: Tue, 17 Feb 2015 17:39:51 +0000
+  From: Pedro Alves <palves@redhat.com>
+  To: Sergio Durigan Junior <sergiodj@redhat.com>
+  Subject: [debug-list] [PATCH] RH BZ #1162264 - gdb/linux-nat.c:1411:
+   internal-error:,
+   linux_nat_post_attach_wait: Assertion `pid == new_pid' failed.
+
+  Hi.
+
+  Ref: https://bugzilla.redhat.com/show_bug.cgi?id=1162264
+
+  So I spend a few more hours today trying to reproduce the
+  EACCES, to no avail.  Also, unfortunately, none of the attach
+  bugs exposed by attach-many-short-lived-threads.exp test
+  can explain this.
+
+  It seems to be that really the best we can do is cope with
+  the error, like in the patch below.
+
+  Note that the backtrace at
+
+   https://bugzilla.redhat.com/show_bug.cgi?id=1162264#c3 :
+
+  shows that this triggers for the main thread already:
+
+  ...
+  #6  0x000000000044fd2e in linux_nat_post_attach_wait (ptid=..., first=1, cloned=0x1d84368,
+  ...
+
+  (note "first=1").
+
+  For upstream, I think linux_nat_attach should be adjusted to work
+  like gdbserver -- that is, leave the initial waitpid to the main
+  wait code, like all other events, instead of synchronously
+  doing waitpid(PID).  That'll get rid of linux_nat_post_attach_wait
+  altogether.  But that's too invasive for a bug fix.
+
+  >From 072c61aeb9adc64e1eb45c120061b85fbf6f4d25 Mon Sep 17 00:00:00 2001
+  From: Pedro Alves <palves@redhat.com>
+  Date: Tue, 17 Feb 2015 17:11:05 +0000
+  Subject: [PATCH] RH BZ #1162264 - gdb/linux-nat.c:1411: internal-error:
+   linux_nat_post_attach_wait: Assertion `pid == new_pid' failed.
+
+  According to BZ #1162264, it can happen that we manage to attach to a
+  process, but then waitpid on it fails with EACCES.  That's unexpected,
+  and gdb hits an assertion.  But given this is an error that is out of
+  our control, we should handle it gracefully.  I wasn't able to
+  reproduce the EACCES, but hacking in the error, like:
+
+  |  --- a/gdb/linux-nat.c
+  |  +++ b/gdb/linux-nat.c
+  |  @@ -1409,7 +1409,7 @@ linux_nat_post_attach_wait (ptid_t ptid, int first, int *cloned,
+  | 	   *cloned = 1;
+  | 	 }
+  | 
+  |  -  if (new_pid != pid)
+  |  +  if (new_pid != pid || 1)
+  | 	 {
+  | 	   int saved_errno = errno;
+  | 
+  |  @@ -1423,6 +1423,7 @@ linux_nat_post_attach_wait (ptid_t ptid, int first, int *cloned,
+  | 	   ptrace (PTRACE_DETACH, pid, 0, 0);
+  | 
+  | 	   errno = saved_errno;
+  |  +      errno = EACCES;
+  | 	   perror_with_name (_("waitpid"));
+  | 	 }
+
+  ... I could confirm that the error handling works properly.  On the
+  EACCES case, we get:
+
+   (gdb) attach 1202
+   Attaching to process 1202
+   Unable to attach: waitpid: Permission denied.
+   (gdb) info inferiors
+     Num  Description       Executable
+   * 1    <null>
+   (gdb)
+
+  No test because the conditions that lead to the waitpid error are
+  unknown.
+
+  gdb/ChangeLog:
+  2015-02-17  Pedro Alves  <palves@redhat.com>
+
+	  * linux-nat.c: Include "exceptions.h".
+	  (linux_nat_post_attach_wait): If waitpid returns an excepted
+	  result, detach and error out instead of asserting.
+	  (linux_nat_attach): Wrap linux_nat_post_attach_wait in TRY_CATCH.
+	  Mourn inferior and rethrow in case of error while waiting for the
+	  initial stop.
+---
+ gdb/linux-nat.c | 34 +++++++++++++++++++++++++++++++---
+ 1 file changed, 31 insertions(+), 3 deletions(-)
+
+Index: gdb-7.2/gdb/linux-nat.c
+===================================================================
+--- gdb-7.2.orig/gdb/linux-nat.c
++++ gdb-7.2/gdb/linux-nat.c
+@@ -56,6 +56,7 @@
+ #include "terminal.h"
+ #include <sys/vfs.h>
+ #include "solib.h"
++#include "exceptions.h"
+ 
+ #ifndef SPUFS_MAGIC
+ #define SPUFS_MAGIC 0x23c9b64e
+@@ -1408,7 +1409,22 @@ linux_nat_post_attach_wait (ptid_t ptid,
+       *cloned = 1;
+     }
+ 
+-  gdb_assert (pid == new_pid);
++  if (new_pid != pid)
++    {
++      int saved_errno = errno;
++
++      /* Unexpected waitpid result.  EACCES has been observed on RHEL
++	 6.5 (RH BZ #1162264).  This is most likely a kernel bug, thus
++	 out of our control, so treat it as invalid input.  The LWP's
++	 state is indeterminate at this point, so best we can do is
++	 error out, otherwise we'd probably end up wedged later on.
++
++	 In case we're still attached.  */
++      ptrace (PTRACE_DETACH, pid, 0, 0);
++
++      errno = saved_errno;
++      perror_with_name (_("waitpid"));
++    }
+ 
+   if (!WIFSTOPPED (status))
+     {
+@@ -1562,8 +1578,9 @@ static void
+ linux_nat_attach (struct target_ops *ops, char *args, int from_tty)
+ {
+   struct lwp_info *lp;
+-  int status;
++  int status = 0;
+   ptid_t ptid;
++  volatile struct gdb_exception ex;
+ 
+   linux_ops->to_attach (ops, args, from_tty);
+ 
+@@ -1575,8 +1592,19 @@ linux_nat_attach (struct target_ops *ops
+   /* Add the initial process as the first LWP to the list.  */
+   lp = add_lwp (ptid);
+ 
+-  status = linux_nat_post_attach_wait (lp->ptid, 1, &lp->cloned,
+-				       &lp->signalled);
++  TRY_CATCH (ex, RETURN_MASK_ERROR)
++    {
++      status = linux_nat_post_attach_wait (lp->ptid, 1, &lp->cloned,
++					   &lp->signalled);
++    }
++  if (ex.reason < 0)
++    {
++      target_terminal_ours ();
++      target_mourn_inferior ();
++
++      error (_("Unable to attach: %s"), ex.message);
++    }
++
+   if (!WIFSTOPPED (status))
+     {
+       if (WIFEXITED (status))

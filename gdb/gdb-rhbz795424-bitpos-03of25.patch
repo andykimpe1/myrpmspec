@@ -1,0 +1,529 @@
+From dfd32e4e7ae35a6e083c81b33dc0e4022c492be6 Mon Sep 17 00:00:00 2001
+From: Jan Kratochvil <jan.kratochvil@redhat.com>
+Date: Wed, 18 Apr 2012 06:46:45 +0000
+Subject: [PATCH] gdb/
+ 	PR symtab/7259:
+ 	* ada-exp.y (convert_char_literal): Use TYPE_FIELD_ENUMVAL.
+ 	* ada-lang.c (ada_discrete_type_high_bound)
+ 	(ada_discrete_type_low_bound): Use TYPE_FIELD_ENUMVAL for
+ 	TYPE_CODE_ENUM.
+ 	(ada_identical_enum_types_p): Use TYPE_FIELD_ENUMVAL.
+ 	(pos_atr, value_val_atr): Use TYPE_FIELD_ENUMVAL for TYPE_CODE_ENUM.
+ 	* ada-typeprint.c (print_enum_type): Change variable lastval to LONGEST.
+ 	Use TYPE_FIELD_ENUMVAL.
+ 	* ada-valprint.c (print_optional_low_bound, ada_print_scalar)
+ 	(ada_val_print_1): Use TYPE_FIELD_ENUMVAL for TYPE_CODE_ENUM.
+ 	* c-typeprint.c (c_type_print_base): Move variable lastval to inner
+ 	block, change it to LONGEST.  Use TYPE_FIELD_ENUMVAL for
+ 	TYPE_CODE_ENUM.
+ 	* coffread.c (coff_read_enum_type): Use SET_FIELD_ENUMVAL.
+ 	* dwarf2read.c (process_enumeration_scope): Likewise.
+ 	* gdb-gdb.py (TypeFlagsPrinter): Use field.enumval instead of
+ 	field.bitpos.
+ 	(class StructMainTypePrettyPrinter): Support also
+ 	FIELD_LOC_KIND_ENUMVAL.
+ 	* gdbtypes.c (get_discrete_bounds): Use TYPE_FIELD_ENUMVAL for
+ 	TYPE_CODE_ENUM.
+ 	(recursive_dump_type): Use TYPE_FIELD_ENUMVAL for TYPE_CODE_ENUM.
+ 	(copy_type_recursive): Support also FIELD_LOC_KIND_ENUMVAL.
+ 	* gdbtypes.h (enum field_loc_kind): New FIELD_LOC_KIND_ENUMVAL.
+ 	(struct main_type.flds_bnds.fields.loc): Adjust bitpos comment.  New
+ 	field enumval.
+ 	(struct main_type.flds_bnds.bields): Adjust loc_kind and bitsize to
+ 	accommodate enumval.
+ 	(struct call_site): Adjust loc_kind to accommodate enumval.
+ 	(FIELD_ENUMVAL, FIELD_ENUMVAL_LVAL, SET_FIELD_ENUMVAL)
+ 	(TYPE_FIELD_ENUMVAL): New macros.
+ 	* m2-typeprint.c (m2_enum): Use TYPE_FIELD_ENUMVAL.
+ 	* mdebugread.c (parse_symbol): Use TYPE_FIELD_ENUMVAL for
+ 	TYPE_CODE_ENUM.
+ 	* p-typeprint.c (pascal_type_print_base): Likewise.
+ 	* python/lib/gdb/printing.py (class FlagEnumerationPrinter): Use
+ 	enumval.
+ 	* python/lib/gdb/types.py (make_enum_dict): Likewise.
+ 	* python/py-type.c (convert_field): New variable addrstring.  Use
+ 	TYPE_FIELD_ENUMVAL for TYPE_CODE_ENUM.
+ 	(check_types_equal): Support also FIELD_LOC_KIND_ENUMVAL.
+ 	* stabsread.c (read_enum_type): Use SET_FIELD_ENUMVAL.
+ 	* typepint.c (print_type_scalar): Use TYPE_FIELD_ENUMVAL for
+ 	TYPE_CODE_ENUM.
+ 	* valprint.c (generic_val_print): Likewise.
+
+gdb/testsuite/
+	PR symtab/7259:
+	* gdb.base/enumval.c: New test case.
+	* gdb.base/enumval.exp: New test case.
+	* gdb.python/py-type.exp (test_enums): Use field.enumval instead of
+	field.bitpos.
+---
+ gdb/ChangeLog                        |   49 ++++++++++++++++++++++++++++++++++
+ gdb/ada-exp.y                        |    2 +-
+ gdb/ada-lang.c                       |   12 ++++----
+ gdb/ada-typeprint.c                  |   10 ++++---
+ gdb/ada-valprint.c                   |    6 ++--
+ gdb/c-typeprint.c                    |   12 ++++----
+ gdb/coffread.c                       |    2 +-
+ gdb/dwarf2read.c                     |    2 +-
+ gdb/gdb-gdb.py                       |    6 +++-
+ gdb/gdbtypes.c                       |   27 ++++++++++++------
+ gdb/gdbtypes.h                       |   19 +++++++++---
+ gdb/m2-typeprint.c                   |    7 +++--
+ gdb/mdebugread.c                     |    2 +-
+ gdb/p-typeprint.c                    |    7 +++--
+ gdb/python/lib/gdb/printing.py       |    4 +-
+ gdb/python/lib/gdb/types.py          |    4 +-
+ gdb/python/py-type.c                 |   20 ++++++++++++-
+ gdb/stabsread.c                      |    2 +-
+ gdb/testsuite/ChangeLog              |    9 ++++++
+ gdb/testsuite/gdb.python/py-type.exp |    4 +-
+ gdb/typeprint.c                      |    2 +-
+ gdb/valprint.c                       |    6 ++--
+ 22 files changed, 156 insertions(+), 58 deletions(-)
+
+Index: gdb-7.2/gdb/ada-exp.y
+===================================================================
+--- gdb-7.2.orig/gdb/ada-exp.y
++++ gdb-7.2/gdb/ada-exp.y
+@@ -1454,7 +1454,7 @@ convert_char_literal (struct type *type,
+   for (f = 0; f < TYPE_NFIELDS (type); f += 1)
+     {
+       if (strcmp (name, TYPE_FIELD_NAME (type, f)) == 0)
+-	return TYPE_FIELD_BITPOS (type, f);
++	return TYPE_FIELD_ENUMVAL (type, f);
+     }
+   return val;
+ }
+Index: gdb-7.2/gdb/ada-lang.c
+===================================================================
+--- gdb-7.2.orig/gdb/ada-lang.c
++++ gdb-7.2/gdb/ada-lang.c
+@@ -644,7 +644,7 @@ ada_discrete_type_high_bound (struct typ
+     case TYPE_CODE_RANGE:
+       return TYPE_HIGH_BOUND (type);
+     case TYPE_CODE_ENUM:
+-      return TYPE_FIELD_BITPOS (type, TYPE_NFIELDS (type) - 1);
++      return TYPE_FIELD_ENUMVAL (type, TYPE_NFIELDS (type) - 1);
+     case TYPE_CODE_BOOL:
+       return 1;
+     case TYPE_CODE_CHAR:
+@@ -655,7 +655,7 @@ ada_discrete_type_high_bound (struct typ
+     }
+ }
+ 
+-/* The largest value in the domain of TYPE, a discrete type, as an integer.  */
++/* The smallest value in the domain of TYPE, a discrete type, as an integer.  */
+ LONGEST
+ ada_discrete_type_low_bound (struct type *type)
+ {
+@@ -664,7 +664,7 @@ ada_discrete_type_low_bound (struct type
+     case TYPE_CODE_RANGE:
+       return TYPE_LOW_BOUND (type);
+     case TYPE_CODE_ENUM:
+-      return TYPE_FIELD_BITPOS (type, 0);
++      return TYPE_FIELD_ENUMVAL (type, 0);
+     case TYPE_CODE_BOOL:
+       return 0;
+     case TYPE_CODE_CHAR:
+@@ -7719,7 +7719,7 @@ pos_atr (struct value *arg)
+ 
+       for (i = 0; i < TYPE_NFIELDS (type); i += 1)
+         {
+-          if (v == TYPE_FIELD_BITPOS (type, i))
++          if (v == TYPE_FIELD_ENUMVAL (type, i))
+             return i;
+         }
+       error (_("enumeration value is invalid: can't find 'POS"));
+@@ -7750,7 +7750,7 @@ value_val_atr (struct type *type, struct
+ 
+       if (pos < 0 || pos >= TYPE_NFIELDS (type))
+         error (_("argument to 'VAL out of range"));
+-      return value_from_longest (type, TYPE_FIELD_BITPOS (type, pos));
++      return value_from_longest (type, TYPE_FIELD_ENUMVAL (type, pos));
+     }
+   else
+     return value_from_longest (type, value_as_long (arg));
+Index: gdb-7.2/gdb/ada-typeprint.c
+===================================================================
+--- gdb-7.2.orig/gdb/ada-typeprint.c
++++ gdb-7.2/gdb/ada-typeprint.c
+@@ -270,7 +270,8 @@ static void
+ print_enum_type (struct type *type, struct ui_file *stream)
+ {
+   int len = TYPE_NFIELDS (type);
+-  int i, lastval;
++  int i;
++  LONGEST lastval;
+ 
+   fprintf_filtered (stream, "(");
+   wrap_here (" ");
+@@ -283,10 +284,11 @@ print_enum_type (struct type *type, stru
+ 	fprintf_filtered (stream, ", ");
+       wrap_here ("    ");
+       fputs_filtered (ada_enum_name (TYPE_FIELD_NAME (type, i)), stream);
+-      if (lastval != TYPE_FIELD_BITPOS (type, i))
++      if (lastval != TYPE_FIELD_ENUMVAL (type, i))
+ 	{
+-	  fprintf_filtered (stream, " => %d", TYPE_FIELD_BITPOS (type, i));
+-	  lastval = TYPE_FIELD_BITPOS (type, i);
++	  fprintf_filtered (stream, " => %s",
++			    plongest (TYPE_FIELD_ENUMVAL (type, i)));
++	  lastval = TYPE_FIELD_ENUMVAL (type, i);
+ 	}
+       lastval += 1;
+     }
+Index: gdb-7.2/gdb/ada-valprint.c
+===================================================================
+--- gdb-7.2.orig/gdb/ada-valprint.c
++++ gdb-7.2/gdb/ada-valprint.c
+@@ -109,7 +109,7 @@ print_optional_low_bound (struct ui_file
+ 	return 0;
+       break;
+     case TYPE_CODE_ENUM:
+-      if (low_bound == TYPE_FIELD_BITPOS (index_type, 0))
++      if (low_bound == TYPE_FIELD_ENUMVAL (index_type, 0))
+ 	return 0;
+       break;
+     case TYPE_CODE_UNDEF:
+@@ -395,7 +395,7 @@ ada_print_scalar (struct type *type, LON
+       len = TYPE_NFIELDS (type);
+       for (i = 0; i < len; i++)
+ 	{
+-	  if (TYPE_FIELD_BITPOS (type, i) == val)
++	  if (TYPE_FIELD_ENUMVAL (type, i) == val)
+ 	    {
+ 	      break;
+ 	    }
+@@ -811,7 +811,7 @@ ada_val_print_1 (struct type *type, cons
+       for (i = 0; i < len; i++)
+ 	{
+ 	  QUIT;
+-	  if (val == TYPE_FIELD_BITPOS (type, i))
++	  if (val == TYPE_FIELD_ENUMVAL (type, i))
+ 	    {
+ 	      break;
+ 	    }
+Index: gdb-7.2/gdb/c-typeprint.c
+===================================================================
+--- gdb-7.2.orig/gdb/c-typeprint.c
++++ gdb-7.2/gdb/c-typeprint.c
+@@ -701,7 +701,6 @@ c_type_print_base (struct type *type, st
+ {
+   int i;
+   int len, real_len;
+-  int lastval;
+   char *mangled_name;
+   char *demangled_name;
+   char *demangled_no_static;
+@@ -1141,9 +1140,10 @@ c_type_print_base (struct type *type, st
+ 	}
+       else if (show > 0 || TYPE_TAG_NAME (type) == NULL)
+ 	{
++	  LONGEST lastval = 0;
++
+ 	  fprintf_filtered (stream, "{");
+ 	  len = TYPE_NFIELDS (type);
+-	  lastval = 0;
+ 	  for (i = 0; i < len; i++)
+ 	    {
+ 	      QUIT;
+@@ -1151,10 +1151,11 @@ c_type_print_base (struct type *type, st
+ 		fprintf_filtered (stream, ", ");
+ 	      wrap_here ("    ");
+ 	      fputs_filtered (TYPE_FIELD_NAME (type, i), stream);
+-	      if (lastval != TYPE_FIELD_BITPOS (type, i))
++	      if (lastval != TYPE_FIELD_ENUMVAL (type, i))
+ 		{
+-		  fprintf_filtered (stream, " = %d", TYPE_FIELD_BITPOS (type, i));
+-		  lastval = TYPE_FIELD_BITPOS (type, i);
++		  fprintf_filtered (stream, " = %s",
++				    plongest (TYPE_FIELD_ENUMVAL (type, i)));
++		  lastval = TYPE_FIELD_ENUMVAL (type, i);
+ 		}
+ 	      lastval++;
+ 	    }
+Index: gdb-7.2/gdb/coffread.c
+===================================================================
+--- gdb-7.2.orig/gdb/coffread.c
++++ gdb-7.2/gdb/coffread.c
+@@ -2109,7 +2109,7 @@ coff_read_enum_type (int index, int leng
+ 
+ 	  SYMBOL_TYPE (xsym) = type;
+ 	  TYPE_FIELD_NAME (type, n) = SYMBOL_LINKAGE_NAME (xsym);
+-	  SET_FIELD_BITPOS (TYPE_FIELD (type, n), SYMBOL_VALUE (xsym));
++	  SET_FIELD_ENUMVAL (TYPE_FIELD (type, n), SYMBOL_VALUE (xsym));
+ 	  if (SYMBOL_VALUE (xsym) < 0)
+ 	    unsigned_enum = 0;
+ 	  TYPE_FIELD_BITSIZE (type, n) = 0;
+Index: gdb-7.2/gdb/dwarf2read.c
+===================================================================
+--- gdb-7.2.orig/gdb/dwarf2read.c
++++ gdb-7.2/gdb/dwarf2read.c
+@@ -6963,7 +6963,7 @@ process_enumeration_scope (struct die_in
+ 
+ 		  FIELD_NAME (fields[num_fields]) = SYMBOL_LINKAGE_NAME (sym);
+ 		  FIELD_TYPE (fields[num_fields]) = NULL;
+-		  SET_FIELD_BITPOS (fields[num_fields], SYMBOL_VALUE (sym));
++		  SET_FIELD_ENUMVAL (fields[num_fields], SYMBOL_VALUE (sym));
+ 		  FIELD_BITSIZE (fields[num_fields]) = 0;
+ 
+ 		  num_fields++;
+Index: gdb-7.2/gdb/gdb-gdb.py
+===================================================================
+--- gdb-7.2.orig/gdb/gdb-gdb.py
++++ gdb-7.2/gdb/gdb-gdb.py
+@@ -99,10 +99,10 @@ class TypeFlagsPrinter:
+             return
+         # Note: TYPE_FLAG_MIN is a duplicate of TYPE_FLAG_UNSIGNED,
+         # so exclude it from the list we are building.
+-        TYPE_FLAGS = [TypeFlag(field.name, field.bitpos)
++        TYPE_FLAGS = [TypeFlag(field.name, field.enumval)
+                       for field in flags.fields()
+                       if field.name != 'TYPE_FLAG_MIN']
+-        TYPE_FLAGS += [TypeFlag(field.name, field.bitpos)
++        TYPE_FLAGS += [TypeFlag(field.name, field.enumval)
+                        for field in iflags.fields()]
+         TYPE_FLAGS.sort()
+ 
+@@ -154,6 +154,8 @@ class StructMainTypePrettyPrinter:
+         loc_kind = str(field_val['loc_kind'])
+         if loc_kind == "FIELD_LOC_KIND_BITPOS":
+             return 'bitpos = %d' % loc_val['bitpos']
++        elif loc_kind == "FIELD_LOC_KIND_ENUMVAL":
++            return 'enumval = %d' % loc_val['enumval']
+         elif loc_kind == "FIELD_LOC_KIND_PHYSADDR":
+             return 'physaddr = 0x%x' % loc_val['physaddr']
+         elif loc_kind == "FIELD_LOC_KIND_PHYSNAME":
+Index: gdb-7.2/gdb/gdbtypes.c
+===================================================================
+--- gdb-7.2.orig/gdb/gdbtypes.c
++++ gdb-7.2/gdb/gdbtypes.c
+@@ -802,13 +802,13 @@ get_discrete_bounds (struct type *type, 
+ 	     entries */
+ 	  int i;
+ 
+-	  *lowp = *highp = TYPE_FIELD_BITPOS (type, 0);
++	  *lowp = *highp = TYPE_FIELD_ENUMVAL (type, 0);
+ 	  for (i = 0; i < TYPE_NFIELDS (type); i++)
+ 	    {
+-	      if (TYPE_FIELD_BITPOS (type, i) < *lowp)
+-		*lowp = TYPE_FIELD_BITPOS (type, i);
+-	      if (TYPE_FIELD_BITPOS (type, i) > *highp)
+-		*highp = TYPE_FIELD_BITPOS (type, i);
++	      if (TYPE_FIELD_ENUMVAL (type, i) < *lowp)
++		*lowp = TYPE_FIELD_ENUMVAL (type, i);
++	      if (TYPE_FIELD_ENUMVAL (type, i) > *highp)
++		*highp = TYPE_FIELD_ENUMVAL (type, i);
+ 	    }
+ 
+ 	  /* Set unsigned indicator if warranted.  */
+@@ -3050,10 +3050,15 @@ recursive_dump_type (struct type *type, 
+   puts_filtered ("\n");
+   for (idx = 0; idx < TYPE_NFIELDS (type); idx++)
+     {
+-      printfi_filtered (spaces + 2,
+-			"[%d] bitpos %d bitsize %d type ",
+-			idx, TYPE_FIELD_BITPOS (type, idx),
+-			TYPE_FIELD_BITSIZE (type, idx));
++      if (TYPE_CODE (type) == TYPE_CODE_ENUM)
++	printfi_filtered (spaces + 2,
++			  "[%d] enumval %s type ",
++			  idx, plongest (TYPE_FIELD_ENUMVAL (type, idx)));
++      else
++	printfi_filtered (spaces + 2,
++			  "[%d] bitpos %d bitsize %d type ",
++			  idx, TYPE_FIELD_BITPOS (type, idx),
++			  TYPE_FIELD_BITSIZE (type, idx));
+       gdb_print_host_address (TYPE_FIELD_TYPE (type, idx), gdb_stdout);
+       printf_filtered (" name '%s' (",
+ 		       TYPE_FIELD_NAME (type, idx) != NULL
+@@ -3309,6 +3314,10 @@ copy_type_recursive_1 (struct objfile *o
+ 	      SET_FIELD_BITPOS (TYPE_FIELD (new_type, i),
+ 				TYPE_FIELD_BITPOS (type, i));
+ 	      break;
++	    case FIELD_LOC_KIND_ENUMVAL:
++	      SET_FIELD_ENUMVAL (TYPE_FIELD (new_type, i),
++				 TYPE_FIELD_ENUMVAL (type, i));
++	      break;
+ 	    case FIELD_LOC_KIND_PHYSADDR:
+ 	      SET_FIELD_PHYSADDR (TYPE_FIELD (new_type, i),
+ 				  TYPE_FIELD_STATIC_PHYSADDR (type, i));
+Index: gdb-7.2/gdb/gdbtypes.h
+===================================================================
+--- gdb-7.2.orig/gdb/gdbtypes.h
++++ gdb-7.2/gdb/gdbtypes.h
+@@ -397,6 +397,7 @@ enum type_instance_flag_value
+ enum field_loc_kind
+   {
+     FIELD_LOC_KIND_BITPOS,	/* bitpos */
++    FIELD_LOC_KIND_ENUMVAL,    /* enumval */
+     /* This address is unrelocated by the objfile's ANOFFSET.  */
+     FIELD_LOC_KIND_PHYSADDR,	/* physaddr */
+     FIELD_LOC_KIND_PHYSNAME	/* physname */
+@@ -573,11 +574,14 @@ struct main_type
+ 	/* Position of this field, counting in bits from start of
+ 	   containing structure.
+ 	   For gdbarch_bits_big_endian=1 targets, it is the bit offset to the MSB.
+-	   For gdbarch_bits_big_endian=0 targets, it is the bit offset to the LSB.
+-	   For a range bound or enum value, this is the value itself. */
++	   For gdbarch_bits_big_endian=0 targets, it is the bit offset to the
++	   LSB.  */
+ 
+ 	int bitpos;
+ 
++	/* Enum value.  */
++	LONGEST enumval;
++
+ 	/* For a static field, if TYPE_FIELD_STATIC_HAS_ADDR then physaddr
+ 	   is the location (in the target) of the static field.
+ 	   Otherwise, physname is the mangled label of the static field. */
+@@ -595,7 +599,7 @@ struct main_type
+       unsigned int artificial : 1;
+ 
+       /* Discriminant for union field_location.  */
+-      ENUM_BITFIELD(field_loc_kind) loc_kind : 2;
++      ENUM_BITFIELD(field_loc_kind) loc_kind : 3;
+ 
+       /* Size of this field, in bits, or zero if not packed.
+ 	 If non-zero in an array type, indicates the element size in
+@@ -603,7 +607,7 @@ struct main_type
+ 	 For an unpacked field, the field's type's length
+ 	 says how many bytes the field occupies.  */
+ 
+-      unsigned int bitsize : 29;
++      unsigned int bitsize : 28;
+ 
+       /* In a struct or union type, type of this field.
+ 	 In a function or member type, type of this argument.
+@@ -1086,12 +1090,17 @@ extern void allocate_gnat_aux_type (stru
+ #define FIELD_NAME(thisfld) ((thisfld).name)
+ #define FIELD_LOC_KIND(thisfld) ((thisfld).loc_kind)
+ #define FIELD_BITPOS(thisfld) ((thisfld).loc.bitpos)
++#define FIELD_ENUMVAL_LVAL(thisfld) ((thisfld).loc.enumval)
++#define FIELD_ENUMVAL(thisfld) (FIELD_ENUMVAL_LVAL (thisfld) + 0)
+ #define FIELD_STATIC_PHYSNAME(thisfld) ((thisfld).loc.physname)
+ /* This address is unrelocated by the objfile's ANOFFSET.  */
+ #define FIELD_STATIC_PHYSADDR(thisfld) ((thisfld).loc.physaddr)
+ #define SET_FIELD_BITPOS(thisfld, bitpos)			\
+   (FIELD_LOC_KIND (thisfld) = FIELD_LOC_KIND_BITPOS,		\
+    FIELD_BITPOS (thisfld) = (bitpos))
++#define SET_FIELD_ENUMVAL(thisfld, enumval)			\
++  (FIELD_LOC_KIND (thisfld) = FIELD_LOC_KIND_ENUMVAL,		\
++   FIELD_ENUMVAL_LVAL (thisfld) = (enumval))
+ #define SET_FIELD_PHYSNAME(thisfld, name)			\
+   (FIELD_LOC_KIND (thisfld) = FIELD_LOC_KIND_PHYSNAME,		\
+    FIELD_STATIC_PHYSNAME (thisfld) = (name))
+@@ -1107,6 +1116,7 @@ extern void allocate_gnat_aux_type (stru
+ #define TYPE_FIELD_NAME(thistype, n) FIELD_NAME(TYPE_FIELD(thistype, n))
+ #define TYPE_FIELD_LOC_KIND(thistype, n) FIELD_LOC_KIND (TYPE_FIELD (thistype, n))
+ #define TYPE_FIELD_BITPOS(thistype, n) FIELD_BITPOS (TYPE_FIELD (thistype, n))
++#define TYPE_FIELD_ENUMVAL(thistype, n) FIELD_ENUMVAL (TYPE_FIELD (thistype, n))
+ #define TYPE_FIELD_STATIC_PHYSNAME(thistype, n) FIELD_STATIC_PHYSNAME (TYPE_FIELD (thistype, n))
+ /* This address is unrelocated by the objfile's ANOFFSET.  */
+ #define TYPE_FIELD_STATIC_PHYSADDR(thistype, n) FIELD_STATIC_PHYSADDR (TYPE_FIELD (thistype, n))
+Index: gdb-7.2/gdb/m2-typeprint.c
+===================================================================
+--- gdb-7.2.orig/gdb/m2-typeprint.c
++++ gdb-7.2/gdb/m2-typeprint.c
+@@ -607,10 +607,11 @@ m2_enum (struct type *type, struct ui_fi
+ 	    fprintf_filtered (stream, ", ");
+ 	  wrap_here ("    ");
+ 	  fputs_filtered (TYPE_FIELD_NAME (type, i), stream);
+-	  if (lastval != TYPE_FIELD_BITPOS (type, i))
++	  if (lastval != TYPE_FIELD_ENUMVAL (type, i))
+ 	    {
+-	      fprintf_filtered (stream, " = %d", TYPE_FIELD_BITPOS (type, i));
+-	      lastval = TYPE_FIELD_BITPOS (type, i);
++	      fprintf_filtered (stream, " = %s",
++				plongest (TYPE_FIELD_ENUMVAL (type, i)));
++	      lastval = TYPE_FIELD_ENUMVAL (type, i);
+ 	    }
+ 	  lastval++;
+ 	}
+Index: gdb-7.2/gdb/mdebugread.c
+===================================================================
+--- gdb-7.2.orig/gdb/mdebugread.c
++++ gdb-7.2/gdb/mdebugread.c
+@@ -1037,7 +1037,7 @@ parse_symbol (SYMR *sh, union aux_ext *a
+ 		if (tsym.st != stMember)
+ 		  break;
+ 
+-		SET_FIELD_BITPOS (*f, tsym.value);
++		SET_FIELD_ENUMVAL (*f, tsym.value);
+ 		FIELD_TYPE (*f) = t;
+ 		FIELD_NAME (*f) = debug_info->ss + cur_fdr->issBase + tsym.iss;
+ 		FIELD_BITSIZE (*f) = 0;
+Index: gdb-7.2/gdb/p-typeprint.c
+===================================================================
+--- gdb-7.2.orig/gdb/p-typeprint.c
++++ gdb-7.2/gdb/p-typeprint.c
+@@ -738,10 +738,11 @@ pascal_type_print_base (struct type *typ
+ 		fprintf_filtered (stream, ", ");
+ 	      wrap_here ("    ");
+ 	      fputs_filtered (TYPE_FIELD_NAME (type, i), stream);
+-	      if (lastval != TYPE_FIELD_BITPOS (type, i))
++	      if (lastval != TYPE_FIELD_ENUMVAL (type, i))
+ 		{
+-		  fprintf_filtered (stream, " := %d", TYPE_FIELD_BITPOS (type, i));
+-		  lastval = TYPE_FIELD_BITPOS (type, i);
++		  fprintf_filtered (stream, " := %s",
++				    plongest (TYPE_FIELD_ENUMVAL (type, i)));
++		  lastval = TYPE_FIELD_ENUMVAL (type, i);
+ 		}
+ 	      lastval++;
+ 	    }
+Index: gdb-7.2/gdb/python/py-type.c
+===================================================================
+--- gdb-7.2.orig/gdb/python/py-type.c
++++ gdb-7.2/gdb/python/py-type.c
+@@ -157,11 +157,23 @@ convert_field (struct type *type, int fi
+ 
+   if (!field_is_static (&TYPE_FIELD (type, field)))
+     {
+-      arg = PyLong_FromLong (TYPE_FIELD_BITPOS (type, field));
++      const char *attrstring;
++
++      if (TYPE_CODE (type) == TYPE_CODE_ENUM)
++	{
++	  arg = gdb_py_long_from_longest (TYPE_FIELD_ENUMVAL (type, field));
++	  attrstring = "enumval";
++	}
++      else
++	{
++	  arg = PyLong_FromLong (TYPE_FIELD_BITPOS (type, field));
++	  attrstring = "bitpos";
++	}
++
+       if (!arg)
+ 	goto fail;
+ 
+-      if (PyObject_SetAttrString (result, "bitpos", arg) < 0)
++      if (PyObject_SetAttrString (result, attrstring, arg) < 0)
+ 	goto failarg;
+     }
+ 
+Index: gdb-7.2/gdb/stabsread.c
+===================================================================
+--- gdb-7.2.orig/gdb/stabsread.c
++++ gdb-7.2/gdb/stabsread.c
+@@ -3701,7 +3701,7 @@ read_enum_type (char **pp, struct type *
+ 
+ 	  SYMBOL_TYPE (xsym) = type;
+ 	  TYPE_FIELD_NAME (type, n) = SYMBOL_LINKAGE_NAME (xsym);
+-	  TYPE_FIELD_BITPOS (type, n) = SYMBOL_VALUE (xsym);
++	  SET_FIELD_ENUMVAL (TYPE_FIELD (type, n), SYMBOL_VALUE (xsym));
+ 	  TYPE_FIELD_BITSIZE (type, n) = 0;
+ 	}
+       if (syms == osyms)
+Index: gdb-7.2/gdb/typeprint.c
+===================================================================
+--- gdb-7.2.orig/gdb/typeprint.c
++++ gdb-7.2/gdb/typeprint.c
+@@ -221,7 +221,7 @@ print_type_scalar (struct type *type, LO
+       len = TYPE_NFIELDS (type);
+       for (i = 0; i < len; i++)
+ 	{
+-	  if (TYPE_FIELD_BITPOS (type, i) == val)
++	  if (TYPE_FIELD_ENUMVAL (type, i) == val)
+ 	    {
+ 	      break;
+ 	    }

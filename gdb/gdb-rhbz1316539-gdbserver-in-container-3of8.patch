@@ -1,0 +1,79 @@
+Locate executables on remote stubs without multiprocess extensions
+
+From: Gary Benson <gbenson@redhat.com>
+
+This commit allows GDB to determine filenames of main executables
+when debugging using remote stubs without multiprocess extensions.
+The qXfer:exec-file:read packet is extended to allow an empty
+annex, with the meaning that the remote stub should supply the
+filename of whatever it thinks is the current process.
+
+gdb/ChangeLog:
+
+	* remote.c (remote_add_inferior): Call exec_file_locate_attach
+	for fake PIDs as well as real ones.
+	(remote_pid_to_exec_file): Send empty annex if PID is fake.
+
+gdb/doc/ChangeLog:
+
+	* gdb.texinfo (General Query Packets): Document
+	qXfer:exec-file:read with empty annex.
+
+gdb/gdbserver/ChangeLog:
+
+	* server.c (handle_qxfer_exec_file): Use current process
+	if annex is empty.
+---
+ gdb/gdbserver/server.c |   26 +++++++++++++++++++++-----
+ 1 file changed, 21 insertions(+), 5 deletions(-)
+
+Index: gdb-7.2/gdb/gdbserver/server.c
+===================================================================
+--- gdb-7.2.orig/gdb/gdbserver/server.c	2016-08-04 21:37:47.000000000 +0200
++++ gdb-7.2/gdb/gdbserver/server.c	2016-08-04 21:44:40.960026140 +0200
+@@ -18,6 +18,7 @@
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+ 
+ #include "server.h"
++#include "linux-low.h"
+ 
+ #if HAVE_UNISTD_H
+ #include <unistd.h>
+@@ -827,17 +828,32 @@
+ 			gdb_byte *readbuf, const gdb_byte *writebuf,
+ 			ULONGEST offset, LONGEST len)
+ {
+-  char *annex, *file;
++  char *file;
+   ULONGEST pid;
+   int total_len;
+ 
+   if (the_target->pid_to_exec_file == NULL || writebuf != NULL)
+     return -2;
+ 
+-  annex = alloca (strlen (const_annex) + 1);
+-  strcpy (annex, const_annex);
+-  annex = unpack_varlen_hex (annex, &pid);
+-  if (annex[0] != '\0' || pid == 0)
++  if (const_annex[0] == '\0')
++    {
++      if (current_inferior == NULL)
++	return -1;
++
++      pid = ptid_get_pid (current_inferior->entry.id);
++    }
++  else
++    {
++      char *annex = alloca (strlen (const_annex) + 1);
++
++      strcpy (annex, const_annex);
++      annex = unpack_varlen_hex (annex, &pid);
++
++      if (annex[0] != '\0')
++	return -1;
++    }
++
++  if (pid <= 0)
+     return -1;
+ 
+   file = (*the_target->pid_to_exec_file) (pid);

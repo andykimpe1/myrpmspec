@@ -1,0 +1,74 @@
+http://sourceware.org/ml/gdb-cvs/2011-09/msg00121.html
+
+### src/gdb/ChangeLog	2011/09/19 10:50:53	1.13352
+### src/gdb/ChangeLog	2011/09/19 19:01:38	1.13353
+## -1,3 +1,9 @@
++2011-09-19  Doug Evans  <dje@google.com>
++
++	* python/py-auto-load.c (source_section_scripts): Fix file
++	descriptor leak.
++	* python/python.c (source_python_script_for_objfile): Tweak comments.
++
+ 2011-09-18  Yao Qi  <yao@codesourcery.com>
+ 	    Ulrich Weigand  <ulrich.weigand@linaro.org>
+ 
+Index: gdb-7.2/gdb/python/python.c
+===================================================================
+--- gdb-7.2.orig/gdb/python/python.c
++++ gdb-7.2/gdb/python/python.c
+@@ -781,7 +781,10 @@ gdbpy_progspaces (PyObject *unused1, PyO
+ static struct objfile *gdbpy_current_objfile;
+ 
+ /* Set the current objfile to OBJFILE and then read STREAM,FILE as
+-   Python code.  */
++   Python code.
++   STREAM is left open, it is up to the caller to close it.
++   If an exception occurs python will print the traceback and
++   clear the error indicator.  */
+ 
+ void
+ source_python_script_for_objfile (struct objfile *objfile,
+@@ -792,8 +795,6 @@ source_python_script_for_objfile (struct
+   cleanups = ensure_python_env (get_objfile_arch (objfile), current_language);
+   gdbpy_current_objfile = objfile;
+ 
+-  /* Note: If an exception occurs python will print the traceback and
+-     clear the error indicator.  */
+   PyRun_SimpleFile (stream, file);
+ 
+   do_cleanups (cleanups);
+Index: gdb-7.2/gdb/python/py-auto-load.c
+===================================================================
+--- gdb-7.2.orig/gdb/python/py-auto-load.c
++++ gdb-7.2/gdb/python/py-auto-load.c
+@@ -296,9 +296,6 @@ source_section_scripts (struct objfile *
+       in_hash_table = maybe_add_script (pspace_info->loaded_scripts, file,
+ 					opened ? full_path : NULL);
+ 
+-      if (opened)
+-	free (full_path);
+-
+       if (! opened)
+ 	{
+ 	  /* We don't throw an error, the program is still debuggable.  */
+@@ -310,12 +307,15 @@ Use `info auto-load-scripts [REGEXP]' to
+ 		       GDBPY_AUTO_SECTION_NAME, objfile->name);
+ 	      pspace_info->script_not_found_warning_printed = TRUE;
+ 	    }
+-	  continue;
+ 	}
+-
+-      /* If this file is not currently loaded, load it.  */
+-      if (! in_hash_table)
+-	source_python_script_for_objfile (objfile, stream, file);
++      else
++	{
++	  /* If this file is not currently loaded, load it.  */
++	  if (! in_hash_table)
++	    source_python_script_for_objfile (objfile, stream, file);
++	  fclose (stream);
++	  free (full_path);
++	}
+     }
+ }
+ 

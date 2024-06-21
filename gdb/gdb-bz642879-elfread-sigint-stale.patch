@@ -1,0 +1,85 @@
+http://sourceware.org/ml/gdb-patches/2010-09/msg00192.html
+Subject: [patch] Fix ELF stale reference  [Re: [patch] .gdb_index: Do not crash on NOBITS]
+
+On Wed, 08 Sep 2010 21:40:12 +0200, Tom Tromey wrote:
+> >>>>> "Jan" == Jan Kratochvil <jan.kratochvil@redhat.com> writes:
+> 
+> Jan> which should not be fatal but due to some other bugs therein it can
+> Jan> crash GDB.
+> 
+> I am curious about these other bugs.
+
++      /* Memory gets permanently referenced from ABFD after
++	 bfd_get_synthetic_symtab so it must not get freed before ABFD gets.
++	 It happens only in the case when elf_slurp_reloc_table sees
++	 asection->relocation NULL.  Determining which section is asection is
++	 done by _bfd_elf_get_synthetic_symtab which is all a bfd
++	 implementation detail, though.  */
+
+That is from:
+
+#0  in elf_slurp_reloc_table_from_section (abfd, asect, rel_hdr, reloc_count=1170, relents, symbols, dynamic=1) at elfcode.h:1482
+#1  in bfd_elf64_slurp_reloc_table (abfd, asect, symbols, dynamic=1) at elfcode.h:1563
+#2  in _bfd_elf_get_synthetic_symtab (abfd, symcount=0, syms, dynsymcount=1792, dynsyms, ret) at elf.c:9269
+#3  in elf_symfile_read (objfile, symfile_flags=6) at elfread.c:809
+
+Where
+	  elfcode.h:elf_slurp_reloc_table_from_section
+contains
+          ps = symbols + ELF_R_SYM (rela.r_info) - 1;
+          relent->sym_ptr_ptr = ps;
+
+`symbols' here is elf_symfile_read's `dyn_symbol_table'.  `dyn_symbol_table'
+got immediately xfree'd but the freed memory remained referenced by
+asect->relocation (containing the RELENT memory above, stored there by
+elf_slurp_reloc_table).
+
+asect->relocation probably does not get used if ABFD is not being read-in the
+second time, which happens only if OBJFILE is being created the second time,
+which happens due to the error call in the previous mail.
+
+
+I was curious there elf_symfile_read uses 0 for COPY_NAMES in a similar case:
+      elf_symtab_read (objfile, ST_REGULAR, symcount, symbol_table, 0);
+where SYMBOL_TABLE is also immediately xfreed.  But that seems to be correct as
+elf_slurp_symbol_table uses 
+      symbase = (elf_symbol_type *) bfd_zalloc (abfd, amt);
+for the content where later elfread.c's SYMBOL_TABLE points to.  Only the
+pointers get xfreed which is OK.
+
+
+No regressions on {x86_64,x86_64-m32,i686}-fedora14snapshot-linux-gnu.
+
+
+Thanks,
+Jan
+
+
+gdb/
+2010-09-09  Jan Kratochvil  <jan.kratochvil@redhat.com>
+
+	Fix stale memory references.
+	* elfread.c: Include libbfd.h.
+	(elf_symfile_read): Replace xmalloc by bfd_alloc, drop xfree, new
+	comment.
+
+--- a/gdb/elfread.c
++++ b/gdb/elfread.c
+@@ -792,8 +793,14 @@ elf_symfile_read (struct objfile *objfile, int symfile_flags)
+ 
+   if (storage_needed > 0)
+     {
+-      dyn_symbol_table = (asymbol **) xmalloc (storage_needed);
+-      make_cleanup (xfree, dyn_symbol_table);
++      /* Memory gets permanently referenced from ABFD after
++	 bfd_get_synthetic_symtab so it must not get freed before ABFD gets.
++	 It happens only in the case when elf_slurp_reloc_table sees
++	 asection->relocation NULL.  Determining which section is asection is
++	 done by _bfd_elf_get_synthetic_symtab which is all a bfd
++	 implementation detail, though.  */
++
++      dyn_symbol_table = bfd_alloc (abfd, storage_needed);
+       dynsymcount = bfd_canonicalize_dynamic_symtab (objfile->obfd,
+ 						     dyn_symbol_table);
+ 
+

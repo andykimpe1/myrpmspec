@@ -1,0 +1,677 @@
+http://sourceware.org/ml/gdb-cvs/2011-05/msg00101.html
+
+### src/gdb/ChangeLog	2011/05/13 22:07:56	1.13005
+### src/gdb/ChangeLog	2011/05/13 22:11:45	1.13006
+## -1,3 +1,24 @@
++2011-05-13  Doug Evans  <dje@google.com>
++
++	* NEWS: Mention "info auto-load-scripts".
++	* python/py-auto-load.c (struct auto_load_pspace_info): New member
++	script_not_found_warning_printed.
++	(init_loaded_scripts_info): Renamed from create_loaded_scripts_hash,
++	all callers updated.  Initialize script_not_found_warning_printed.
++	(get_auto_load_pspace_data_for_loading): New function.
++	(maybe_add_script): New function.
++	(source_section_scripts): Simplify.  Only print one warning regardless
++	of the number of auto-load scripts not found.
++	(clear_section_scripts): Clear script_not_found_warning_printed.
++	(auto_load_objfile_script): Record script in hash table.
++	(count_matching_scripts): New function.
++	(maybe_print_script): Renamed from maybe_print_section_script, all
++	callers updated.  Rewrite to use ui_out_*.
++	(info_auto_load_scripts): Renamed from
++	maintenance_print_section_scripts, all callers updated.
++	(gdbpy_initialize_auto_load): "maintenance print section-scripts"
++	renamed as "info auto-load-scripts".
++
+ 2011-05-13  Tom Tromey  <tromey@redhat.com>
+ 
+ 	* dwarf2expr.c (read_uleb128): Cast intermediate result.
+Index: gdb-7.2/gdb/NEWS
+===================================================================
+--- gdb-7.2.orig/gdb/NEWS
++++ gdb-7.2/gdb/NEWS
+@@ -31,6 +31,12 @@
+ * The "maint set python auto-load on|off" command has been renamed to
+   "set auto-load-scripts on|off".
+ 
++* New commands
++
++info auto-load-scripts [REGEXP]
++  This command was formerly named "maintenance print section-scripts".
++  It is now generally useful and is no longer a maintenance-only command.
++
+ *** Changes in GDB 7.2
+ 
+ * Shared library support for remote targets by default
+Index: gdb-7.2/gdb/doc/gdb.texinfo
+===================================================================
+--- gdb-7.2.orig/gdb/doc/gdb.texinfo
++++ gdb-7.2/gdb/doc/gdb.texinfo
+@@ -22801,7 +22801,8 @@ command, or because the inferior has loa
+ The auto-loading feature is useful for supplying application-specific
+ debugging commands and scripts.
+ 
+-Auto-loading can be enabled or disabled.
++Auto-loading can be enabled or disabled,
++and the list of auto-loaded scripts can be printed.
+ 
+ @table @code
+ @kindex set auto-load-scripts
+@@ -22811,6 +22812,19 @@ Enable or disable the auto-loading of Py
+ @kindex show auto-load-scripts
+ @item show auto-load-scripts
+ Show whether auto-loading of Python scripts is enabled or disabled.
++
++@kindex info auto-load-scripts
++@cindex print list of auto-loaded scripts
++@item info auto-load-scripts [@var{regexp}]
++Print the list of all scripts that gdb auto-loaded, or tried to auto-load.
++If @var{regexp} is supplied only scripts with matching names are printed.
++
++@smallexample
++(gdb) info auto-load-scripts
++Loaded Script
++  Yes  py-section-script.py
++	full name: /tmp/py-section-script.py
++@end smallexample
+ @end table
+ 
+ When reading an auto-loaded file, @value{GDBN} sets the
+Index: gdb-7.2/gdb/python/py-auto-load.c
+===================================================================
+--- gdb-7.2.orig/gdb/python/py-auto-load.c
++++ gdb-7.2/gdb/python/py-auto-load.c
+@@ -18,6 +18,7 @@
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+ 
+ #include "defs.h"
++#include "filenames.h"
+ #include "gdb_string.h"
+ #include "gdb_regex.h"
+ #include "top.h"
+@@ -68,11 +69,15 @@ struct auto_load_pspace_info
+ {
+   /* For each program space we keep track of loaded scripts.  */
+   struct htab *loaded_scripts;
++
++  /* Non-zero if we've issued the warning about an auto-load script not being
++     found.  We only want to issue this warning once.  */
++  int script_not_found_warning_printed;
+ };
+ 
+ /* Objects of this type are stored in the loaded script hash table.  */
+ 
+-struct loaded_script_entry
++struct loaded_script
+ {
+   /* Name as provided by the objfile.  */
+   const char *name;
+@@ -132,7 +137,7 @@ get_auto_load_pspace_data (struct progra
+ static hashval_t
+ hash_loaded_script_entry (const void *data)
+ {
+-  const struct loaded_script_entry *e = data;
++  const struct loaded_script *e = data;
+ 
+   return htab_hash_string (e->name);
+ }
+@@ -142,17 +147,17 @@ hash_loaded_script_entry (const void *da
+ static int
+ eq_loaded_script_entry (const void *a, const void *b)
+ {
+-  const struct loaded_script_entry *ea = a;
+-  const struct loaded_script_entry *eb = b;
++  const struct loaded_script *ea = a;
++  const struct loaded_script *eb = b;
+ 
+   return strcmp (ea->name, eb->name) == 0;
+ }
+ 
+-/* Create the hash table used for loaded scripts.
++/* Initialize the table to track loaded scripts.
+    Each entry is hashed by the full path name.  */
+ 
+ static void
+-create_loaded_scripts_hash (struct auto_load_pspace_info *pspace_info)
++init_loaded_scripts_info (struct auto_load_pspace_info *pspace_info)
+ {
+   /* Choose 31 as the starting size of the hash table, somewhat arbitrarily.
+      Space for each entry is obtained with one malloc so we can free them
+@@ -162,6 +167,64 @@ create_loaded_scripts_hash (struct auto_
+ 					     hash_loaded_script_entry,
+ 					     eq_loaded_script_entry,
+ 					     xfree);
++
++  pspace_info->script_not_found_warning_printed = FALSE;
++}
++
++/* Wrapper on get_auto_load_pspace_data to also allocate the hash table
++   for loading scripts.  */
++
++static struct auto_load_pspace_info *
++get_auto_load_pspace_data_for_loading (struct program_space *pspace)
++{
++  struct auto_load_pspace_info *info;
++
++  info = get_auto_load_pspace_data (pspace);
++  if (info->loaded_scripts == NULL)
++    init_loaded_scripts_info (info);
++
++  return info;
++}
++
++/* Add script NAME to hash table HTAB.
++   FULL_PATH is NULL if the script wasn't found.
++   The result is true if the script was already in the hash table.  */
++
++static int
++maybe_add_script (struct htab *htab, const char *name, const char *full_path)
++{
++  struct loaded_script **slot, entry;
++  int in_hash_table;
++
++  entry.name = name;
++  entry.full_path = full_path;
++  slot = (struct loaded_script **) htab_find_slot (htab, &entry, INSERT);
++  in_hash_table = *slot != NULL;
++
++  /* If this script is not in the hash table, add it.  */
++
++  if (! in_hash_table)
++    {
++      char *p;
++
++      /* Allocate all space in one chunk so it's easier to free.  */
++      *slot = xmalloc (sizeof (**slot)
++		       + strlen (name) + 1
++		       + (full_path != NULL ? (strlen (full_path) + 1) : 0));
++      p = ((char*) *slot) + sizeof (**slot);
++      strcpy (p, name);
++      (*slot)->name = p;
++      if (full_path != NULL)
++	{
++	  p += strlen (p) + 1;
++	  strcpy (p, full_path);
++	  (*slot)->full_path = p;
++	}
++      else
++	(*slot)->full_path = NULL;
++    }
++
++  return in_hash_table;
+ }
+ 
+ /* Load scripts specified in OBJFILE.
+@@ -182,11 +245,8 @@ source_section_scripts (struct objfile *
+ {
+   const char *p;
+   struct auto_load_pspace_info *pspace_info;
+-  struct loaded_script_entry **slot, entry;
+ 
+-  pspace_info = get_auto_load_pspace_data (current_program_space);
+-  if (pspace_info->loaded_scripts == NULL)
+-    create_loaded_scripts_hash (pspace_info);
++  pspace_info = get_auto_load_pspace_data_for_loading (current_program_space);
+ 
+   for (p = start; p < end; ++p)
+     {
+@@ -226,51 +286,29 @@ source_section_scripts (struct objfile *
+       opened = find_and_open_script (file, 1 /*search_path*/,
+ 				     &stream, &full_path, 1 /* from_tty */);
+ 
+-      /* If the file is not found, we still record the file in the hash table,
+-	 we only want to print an error message once.
+-	 IWBN if complaints.c were more general-purpose.  */
++      /* If one script isn't found it's not uncommon for more to not be
++	 found either.  We don't want to print an error message for each
++	 script, too much noise.  Instead, we print the warning once and tell
++	 the user how to find the list of scripts that weren't loaded.
+ 
+-      entry.name = file;
+-      if (opened)
+-	entry.full_path = full_path;
+-      else
+-	entry.full_path = NULL;
+-      slot = ((struct loaded_script_entry **)
+-	      htab_find_slot (pspace_info->loaded_scripts,
+-			      &entry, INSERT));
+-      in_hash_table = *slot != NULL;
+-
+-      /* If this file is not in the hash table, add it.  */
+-      if (! in_hash_table)
+-	{
+-	  char *p;
++	 IWBN if complaints.c were more general-purpose.  */
+ 
+-	  *slot = xmalloc (sizeof (**slot)
+-			   + strlen (file) + 1
+-			   + (opened ? (strlen (full_path) + 1) : 0));
+-	  p = ((char*) *slot) + sizeof (**slot);
+-	  strcpy (p, file);
+-	  (*slot)->name = p;
+-	  if (opened)
+-	    {
+-	      p += strlen (p) + 1;
+-	      strcpy (p, full_path);
+-	      (*slot)->full_path = p;
+-	    }
+-	  else
+-	    (*slot)->full_path = NULL;
+-	}
++      in_hash_table = maybe_add_script (pspace_info->loaded_scripts, file,
++					opened ? full_path : NULL);
+ 
+       if (opened)
+ 	free (full_path);
+ 
+       if (! opened)
+ 	{
+-	  /* We don't throw an error, the program is still debuggable.
+-	     Check in_hash_table to only print the warning once.  */
+-	  if (! in_hash_table)
+-	    warning (_("%s (referenced in %s): %s"),
+-		     file, GDBPY_AUTO_SECTION_NAME, safe_strerror (errno));
++	  /* We don't throw an error, the program is still debuggable.  */
++	  if (! pspace_info->script_not_found_warning_printed)
++	    {
++	      warning (_("Missing auto-load scripts referenced in %s.\n\
++Use `info auto-load-scripts [REGEXP]' to list them."),
++		       GDBPY_AUTO_SECTION_NAME);
++	      pspace_info->script_not_found_warning_printed = TRUE;
++	    }
+ 	  continue;
+ 	}
+ 
+@@ -322,6 +360,7 @@ clear_section_scripts (void)
+     {
+       htab_delete (info->loaded_scripts);
+       info->loaded_scripts = NULL;
++      info->script_not_found_warning_printed = FALSE;
+     }
+ }
+ 
+@@ -378,6 +417,19 @@ auto_load_objfile_script (struct objfile
+ 
+   if (input)
+     {
++      struct auto_load_pspace_info *pspace_info;
++
++      /* Add this script to the hash table too so "info auto-load-scripts"
++	 can print it.  */
++      pspace_info =
++	get_auto_load_pspace_data_for_loading (current_program_space);
++      maybe_add_script (pspace_info->loaded_scripts, debugfile, debugfile);
++
++      /* To preserve existing behaviour we don't check for whether the
++	 script was already in the table, and always load it.
++	 It's highly unlikely that we'd ever load it twice,
++	 and these scripts are required to be idempotent under multiple
++	 loads anyway.  */
+       source_python_script_for_objfile (objfile, input, debugfile);
+       fclose (input);
+     }
+@@ -418,56 +470,133 @@ load_auto_scripts_for_objfile (struct ob
+     }
+ }
+ 
++/* Collect scripts to be printed in a vec.  */
++
++typedef struct loaded_script *loaded_script_ptr;
++DEF_VEC_P (loaded_script_ptr);
++
+ /* Traversal function for htab_traverse.
+-   Print the entry if specified in the regex.  */
++   Collect the entry if it matches the regexp.  */
+ 
+ static int
+-maybe_print_section_script (void **slot, void *info)
++collect_matching_scripts (void **slot, void *info)
++{
++  struct loaded_script *script = *slot;
++  VEC (loaded_script_ptr) *scripts = info;
++
++  if (re_exec (script->name))
++    VEC_safe_push (loaded_script_ptr, scripts, script);
++
++  return 1;
++}
++
++/* Print SCRIPT.  */
++
++static void
++print_script (struct loaded_script *script)
+ {
+-  struct loaded_script_entry *entry = *slot;
++  struct cleanup *chain;
++
++  chain = make_cleanup_ui_out_tuple_begin_end (uiout, NULL);
+ 
+-  if (re_exec (entry->name))
++  ui_out_field_string (uiout, "loaded", script->full_path ? "Yes" : "No");
++  ui_out_field_string (uiout, "script", script->name);
++  ui_out_text (uiout, "\n");
++
++  /* If the name isn't the full path, print it too.  */
++  if (script->full_path != NULL
++      && strcmp (script->name, script->full_path) != 0)
+     {
+-      printf_filtered (_("Script name: %s\n"), entry->name);
+-      printf_filtered (_("  Full name: %s\n"),
+-		       entry->full_path ? entry->full_path : _("unknown"));
++      ui_out_text (uiout, "\tfull name: ");
++      ui_out_field_string (uiout, "full_path", script->full_path);
++      ui_out_text (uiout, "\n");
+     }
+ 
+-  return 1;
++  do_cleanups (chain);
+ }
+ 
+-/* "maint print section-scripts" command.  */
++/* Helper for info_auto_load_scripts to sort the scripts by name.  */
++
++static int
++sort_scripts_by_name (const void *ap, const void *bp)
++{
++  const struct loaded_script *a = *(const struct loaded_script **) ap;
++  const struct loaded_script *b = *(const struct loaded_script **) bp;
++
++  return FILENAME_CMP (a->name, b->name);
++}
++
++/* "info auto-load-scripts" command.  */
+ 
+ static void
+-maintenance_print_section_scripts (char *pattern, int from_tty)
++info_auto_load_scripts (char *pattern, int from_tty)
+ {
+   struct auto_load_pspace_info *pspace_info;
++  struct cleanup *script_chain;
++  VEC (loaded_script_ptr) *scripts;
++  int nr_scripts;
+ 
+   dont_repeat ();
+ 
++  pspace_info = get_auto_load_pspace_data (current_program_space);
++
+   if (pattern && *pattern)
+     {
+       char *re_err = re_comp (pattern);
+ 
+       if (re_err)
+ 	error (_("Invalid regexp: %s"), re_err);
+-
+-      printf_filtered (_("Objfile scripts matching %s:\n"), pattern);
+     }
+   else
+     {
+       re_comp ("");
+-      printf_filtered (_("Objfile scripts:\n"));
+     }
+ 
+-  pspace_info = get_auto_load_pspace_data (current_program_space);
+-  if (pspace_info == NULL || pspace_info->loaded_scripts == NULL)
+-    return;
++  /* We need to know the number of rows before we build the table.
++     Plus we want to sort the scripts by name.
++     So first traverse the hash table collecting the matching scripts.  */
++
++  scripts = VEC_alloc (loaded_script_ptr, 10);
++  script_chain = make_cleanup (VEC_cleanup (loaded_script_ptr), &scripts);
++
++  if (pspace_info != NULL && pspace_info->loaded_scripts != NULL)
++    {
++      immediate_quit++;
++      htab_traverse_noresize (pspace_info->loaded_scripts,
++			      collect_matching_scripts, scripts);
++      immediate_quit--;
++    }
++
++  nr_scripts = VEC_length (loaded_script_ptr, scripts);
++  make_cleanup_ui_out_table_begin_end (uiout, 2, nr_scripts,
++				       "AutoLoadedScriptsTable");
+ 
+-  immediate_quit++;
+-  htab_traverse_noresize (pspace_info->loaded_scripts,
+-			  maybe_print_section_script, NULL);
+-  immediate_quit--;
++  ui_out_table_header (uiout, 6, ui_center, "loaded", "Loaded");
++  ui_out_table_header (uiout, 70, ui_left, "script", "Script");
++  ui_out_table_body (uiout);
++
++  if (nr_scripts > 0)
++    {
++      int i;
++      loaded_script_ptr script;
++
++      qsort (VEC_address (loaded_script_ptr, scripts),
++	     VEC_length (loaded_script_ptr, scripts),
++	     sizeof (loaded_script_ptr), sort_scripts_by_name);
++      for (i = 0; VEC_iterate (loaded_script_ptr, scripts, i, script); ++i)
++	print_script (script);
++    }
++
++  do_cleanups (script_chain);
++
++  if (nr_scripts == 0)
++    {
++      if (pattern && *pattern)
++	ui_out_message (uiout, 0, "No auto-load scripts matching %s.\n",
++			pattern);
++      else
++	ui_out_message (uiout, 0, "No auto-load scripts.\n");
++    }
+ }
+ 
+ void
+@@ -488,9 +617,10 @@ an executable or shared library."),
+ 			   &setlist,
+ 			   &showlist);
+ 
+-  add_cmd ("section-scripts", class_maintenance, maintenance_print_section_scripts,
+-	   _("Print dump of auto-loaded section scripts matching REGEXP."),
+-	   &maintenanceprintlist);
++  add_info ("auto-load-scripts",
++	    info_auto_load_scripts,
++	    _("Print the list of automatically loaded scripts.\n\
++Usage: info auto-load-scripts [REGEXP]"));
+ }
+ 
+ #else /* ! HAVE_PYTHON */
+Index: gdb-7.2/gdb/testsuite/gdb.python/py-objfile-script.c
+===================================================================
+--- /dev/null
++++ gdb-7.2/gdb/testsuite/gdb.python/py-objfile-script.c
+@@ -0,0 +1,39 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2011 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++struct ss
++{
++  int a;
++  int b;
++};
++
++void
++init_ss (struct ss *s, int a, int b)
++{
++  s->a = a;
++  s->b = b;
++}
++
++int
++main ()
++{
++  struct ss ss;
++
++  init_ss (&ss, 1, 2);
++
++  return 0;      /* break to inspect struct and union */
++}
+Index: gdb-7.2/gdb/testsuite/gdb.python/py-objfile-script.exp
+===================================================================
+--- /dev/null
++++ gdb-7.2/gdb/testsuite/gdb.python/py-objfile-script.exp
+@@ -0,0 +1,60 @@
++# Copyright (C) 2011 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# This file is part of the GDB testsuite.  It tests automagic loading of
++# -gdb.py scripts.
++
++if $tracelevel then {
++    strace $tracelevel
++}
++
++set testfile "py-objfile-script"
++set srcfile ${testfile}.c
++set binfile ${objdir}/${subdir}/${testfile}
++if { [gdb_compile "${srcdir}/${subdir}/${srcfile}" "${binfile}" executable {debug}] != "" } {
++    untested "Couldn't compile ${srcfile}"
++    return -1
++}
++
++# Start with a fresh gdb.
++gdb_exit
++gdb_start
++
++# Skip all tests if Python scripting is not enabled.
++if { [skip_python_tests] } { continue }
++
++# Make the -gdb.py script available to gdb, it is automagically loaded by gdb.
++# Care is taken to put it in the same directory as the binary so that
++# gdb will find it.
++set remote_python_file [remote_download host ${srcdir}/${subdir}/${testfile}-gdb.py ${subdir}/${testfile}-gdb.py]
++
++gdb_reinitialize_dir $srcdir/$subdir
++gdb_load ${binfile}
++
++# Verify gdb loaded the script.
++gdb_test "info auto-load-scripts" "Yes.*/${testfile}-gdb.py.*"
++
++if ![runto_main] {
++    perror "couldn't run to main"
++    return
++}
++
++gdb_test "b [gdb_get_line_number {break to inspect} ${testfile}.c ]" \
++    ".*Breakpoint.*"
++gdb_test "continue" ".*Breakpoint.*"
++
++gdb_test "print ss" " = a=<1> b=<2>"
++
++remote_file host delete ${remote_python_file}
+Index: gdb-7.2/gdb/testsuite/gdb.python/py-section-script.exp
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/gdb.python/py-section-script.exp
++++ gdb-7.2/gdb/testsuite/gdb.python/py-section-script.exp
+@@ -51,6 +51,14 @@ gdb_start
+ gdb_reinitialize_dir $srcdir/$subdir
+ gdb_load ${binfile}
+ 
++# Verify gdb loaded the script.
++gdb_test "info auto-load-scripts" "Yes.*${testfile}.py.*full name: .*/${testfile}.py.*"
++# Again, with a regexp this time.
++gdb_test "info auto-load-scripts ${testfile}" "Yes.*${testfile}.py.*full name: .*/${testfile}.py.*"
++# Again, with a regexp that matches no scripts.
++gdb_test "info auto-load-scripts no-script-matches-this" \
++  "No auto-load scripts matching no-script-matches-this."
++
+ if ![runto_main] {
+     perror "couldn't run to main"
+     return
+Index: gdb-7.2/gdb/testsuite/gdb.python/py-objfile-script-gdb.py
+===================================================================
+--- /dev/null
++++ gdb-7.2/gdb/testsuite/gdb.python/py-objfile-script-gdb.py
+@@ -0,0 +1,63 @@
++# Copyright (C) 2011 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# This file is part of the GDB testsuite.
++
++import re
++
++class pp_ss:
++    def __init__(self, val):
++        self.val = val
++
++    def to_string(self):
++        return "a=<" + str(self.val["a"]) + "> b=<" + str(self.val["b"]) + ">"
++
++def lookup_function (val):
++    "Look-up and return a pretty-printer that can print val."
++
++    # Get the type.
++    type = val.type
++
++    # If it points to a reference, get the reference.
++    if type.code == gdb.TYPE_CODE_REF:
++        type = type.target ()
++
++    # Get the unqualified type, stripped of typedefs.
++    type = type.unqualified ().strip_typedefs ()
++
++    # Get the type name.
++    typename = type.tag
++
++    if typename == None:
++        return None
++
++    # Iterate over local dictionary of types to determine
++    # if a printer is registered for that type.  Return an
++    # instantiation of the printer if found.
++    for function in pretty_printers_dict:
++        if function.match (typename):
++            return pretty_printers_dict[function] (val)
++
++    # Cannot find a pretty printer.  Return None.
++
++    return None
++
++def register_pretty_printers ():
++    pretty_printers_dict[re.compile ('^ss$')]  = pp_ss
++
++pretty_printers_dict = {}
++
++register_pretty_printers ()
++gdb.current_progspace().pretty_printers.append (lookup_function)

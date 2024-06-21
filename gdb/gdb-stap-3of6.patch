@@ -1,0 +1,129 @@
+commit ef9fe0b2edcf9d1a97cc995d14c2c863d10fa701
+Author: Sergio Durigan Junior <sergiodj@redhat.com>
+Date:   Mon Mar 28 21:15:11 2011 -0300
+
+    patch 1: pre_expanded change.
+
+Index: gdb-7.2/gdb/breakpoint.c
+===================================================================
+--- gdb-7.2.orig/gdb/breakpoint.c	2011-08-11 18:53:58.000000000 +0200
++++ gdb-7.2/gdb/breakpoint.c	2011-08-11 18:54:23.000000000 +0200
+@@ -7353,6 +7353,15 @@ create_breakpoints_sal (struct gdbarch *
+ {
+   int i;
+ 
++  if (canonical->pre_expanded)
++    {
++      create_breakpoint_sal (gdbarch, sals, canonical->canonical[0],
++			     cond_string, type, disposition,
++			     thread, task, ignore_count, ops,
++			     from_tty, enabled);
++      return;
++    }
++
+   for (i = 0; i < sals.nelts; ++i)
+     {
+       struct symtabs_and_lines expanded = 
+@@ -7866,7 +7875,7 @@ create_breakpoint (struct gdbarch *gdbar
+       mention (b);
+     }
+   
+-  if (sals.nelts > 1)
++  if (sals.nelts > 1 && !canonical.pre_expanded)
+     {
+       warning (_("Multiple breakpoints were set.\n"
+ 		 "Use the \"delete\" command to delete unwanted breakpoints."));
+@@ -10255,12 +10264,14 @@ breakpoints_relocate (struct objfile *ob
+    On return, FOUND will be 1 if any SaL was found, zero otherwise.  */
+ 
+ static struct symtabs_and_lines
+-addr_string_to_sals (struct breakpoint *b, char *addr_string, int *found)
++addr_string_to_sals (struct breakpoint *b, char *addr_string, int *found,
++		     int *pre_expanded)
+ {
+   char *s;
+   int marker_spec, not_found;
+   struct symtabs_and_lines sals = {0};
+   struct gdb_exception e;
++  int my_pre_expanded = 0;
+ 
+   s = addr_string;
+   marker_spec = b->type == bp_static_tracepoint && is_marker_spec (s);
+@@ -10279,8 +10290,27 @@ addr_string_to_sals (struct breakpoint *
+ 	    error (_("marker %s not found"), b->static_trace_marker_id);
+ 	}
+       else
+-	sals = decode_line_1 (&s, 1, (struct symtab *) NULL, 0,
+-			      NULL, &not_found);
++	{
++	  struct linespec_result canonical;
++
++	  init_linespec_result (&canonical);
++	  sals = decode_line_1 (&s, 1, (struct symtab *) NULL, 0,
++				&canonical, &not_found);
++
++	  /* We don't need the contents.  */
++	  if (canonical.canonical)
++	    {
++	      int i;
++
++	      for (i = 0; i < sals.nelts; ++i)
++		xfree (canonical.canonical[i]);
++	      xfree (canonical.canonical);
++	    }
++
++	  my_pre_expanded = canonical.pre_expanded;
++	  if (pre_expanded)
++	    *pre_expanded = my_pre_expanded;
++	}
+     }
+   if (e.reason < 0)
+     {
+@@ -10313,7 +10343,7 @@ addr_string_to_sals (struct breakpoint *
+ 
+   if (!not_found)
+     {
+-      gdb_assert (sals.nelts == 1);
++      gdb_assert (my_pre_expanded || sals.nelts == 1);
+ 
+       resolve_sal_pc (&sals.sals[0]);
+       if (b->condition_not_parsed && s && s[0])
+@@ -10351,17 +10381,21 @@ re_set_breakpoint (struct breakpoint *b)
+   struct symtabs_and_lines sals;
+   struct symtabs_and_lines expanded = {0};
+   struct cleanup *cleanups = make_cleanup (null_cleanup, NULL);
++  int pre_expanded = 0;
+ 
+   input_radix = b->input_radix;
+   save_current_space_and_thread ();
+   switch_to_program_space_and_thread (b->pspace);
+   set_language (b->language);
+ 
+-  sals = addr_string_to_sals (b, b->addr_string, &found);
++  sals = addr_string_to_sals (b, b->addr_string, &found, &pre_expanded);
+   if (found)
+     {
+       make_cleanup (xfree, sals.sals);
+-      expanded = expand_line_sal_maybe (sals.sals[0]);
++      if (pre_expanded)
++	expanded = sals;
++      else
++	expanded = expand_line_sal_maybe (sals.sals[0]);
+     }
+ 
+   update_breakpoint_locations (b, expanded);
+Index: gdb-7.2/gdb/linespec.h
+===================================================================
+--- gdb-7.2.orig/gdb/linespec.h	2011-08-11 18:53:58.000000000 +0200
++++ gdb-7.2/gdb/linespec.h	2011-08-11 18:54:01.000000000 +0200
+@@ -31,6 +31,10 @@ struct linespec_result
+      element in it are allocated with xmalloc and must be freed by the
+      caller.  */
+   char **canonical;
++
++  /* If non-zero, the linespec result should be considered to be a
++     "pre-expanded" multi-location linespec.  */
++  int pre_expanded;
+ };
+ 
+ /* Initialize a linespec_result.  */

@@ -1,0 +1,455 @@
+From 6036748e86813b227838f980f7f43f3d896ac301 Mon Sep 17 00:00:00 2001
+From: Tom Tromey <tromey@redhat.com>
+Date: Wed, 26 Jan 2011 20:53:43 +0000
+Subject: [PATCH] 	* python/python.c (gdbpy_solib_name): Use gdb_py_longest and
+ 	GDB_PY_LL_ARG.
+ 	* python/python-internal.h (GDB_PY_LL_ARG, GDB_PY_LLU_ARG): New
+ 	macros.
+ 	(gdb_py_longest, gdb_py_ulongest): New typedefs.
+ 	(gdb_py_long_from_longest, gdb_py_long_from_ulongest)
+ 	(gdb_py_long_as_ulongest): New defines.
+ 	(gdb_py_object_from_longest, gdb_py_object_from_ulongest)
+ 	(gdb_py_int_as_long): Declare.
+ 	* python/py-value.c (valpy_lazy_string): Use gdb_py_longest,
+ 	GDB_PY_LL_ARG, gdb_py_object_from_longest.
+ 	(valpy_long): Add comment.
+ 	* python/py-utils.c (get_addr_from_python): Use
+ 	gdb_py_long_as_ulongest.  Handle overflow properly.
+ 	(gdb_py_object_from_longest): New function.
+ 	(gdb_py_object_from_ulongest): Likewise.
+ 	(gdb_py_int_as_long): Likewise.
+ 	* python/py-type.c (typy_array): Use gdb_py_int_as_long.
+ 	* python/py-symtab.c (salpy_get_pc): Use
+ 	gdb_py_long_from_ulongest.
+ 	(salpy_get_line): Use PyInt_FromLong.
+ 	* python/py-param.c (set_parameter_value): Use
+ 	gdb_py_int_as_long.
+ 	* python/py-lazy-string.c (stpy_get_address): Use
+ 	gdb_py_long_from_ulongest.
+ 	* python/py-frame.c (frapy_pc): Use gdb_py_long_from_ulongest.
+ 	* python/py-cmd.c (cmdpy_completer): Use gdb_py_int_as_long.
+ 	* python/py-breakpoint.c (bppy_set_thread): Use
+ 	gdb_py_int_as_long.
+ 	(bppy_set_task): Likewise.
+ 	(bppy_set_ignore_count): Likewise.
+ 	(bppy_set_hit_count): Likewise.
+ 	* python/py-block.c (blpy_get_start): Use
+ 	gdb_py_object_from_ulongest.
+ 	(blpy_get_end): Likewise.
+ 	(gdbpy_block_for_pc): Use gdb_py_ulongest and GDB_PY_LLU_ARG.
+
+---
+ gdb/ChangeLog                |   39 +++++++++++++++++++
+ gdb/python/py-block.c        |    8 ++--
+ gdb/python/py-breakpoint.c   |   32 +++++++++++----
+ gdb/python/py-cmd.c          |    9 +++-
+ gdb/python/py-frame.c        |    2 +-
+ gdb/python/py-lazy-string.c  |    2 +-
+ gdb/python/py-param.c        |    4 +-
+ gdb/python/py-symtab.c       |    4 +-
+ gdb/python/py-type.c         |    8 ++--
+ gdb/python/py-utils.c        |   86 +++++++++++++++++++++++++++++-------------
+ gdb/python/py-value.c        |   19 ++-------
+ gdb/python/python-internal.h |   30 ++++++++++++++
+ gdb/python/python.c          |   13 +-----
+ 13 files changed, 181 insertions(+), 75 deletions(-)
+
+Index: gdb-7.2-patched/gdb/python/py-block.c
+===================================================================
+--- gdb-7.2-patched.orig/gdb/python/py-block.c
++++ gdb-7.2-patched/gdb/python/py-block.c
+@@ -109,7 +109,7 @@ blpy_get_start (PyObject *self, void *cl
+ 
+   BLPY_REQUIRE_VALID (self, block);
+ 
+-  return PyLong_FromUnsignedLongLong (BLOCK_START (block));
++  return gdb_py_object_from_ulongest (BLOCK_START (block));
+ }
+ 
+ static PyObject *
+@@ -119,7 +119,7 @@ blpy_get_end (PyObject *self, void *clos
+ 
+   BLPY_REQUIRE_VALID (self, block);
+ 
+-  return PyLong_FromUnsignedLongLong (BLOCK_END (block));
++  return gdb_py_object_from_ulongest (BLOCK_END (block));
+ }
+ 
+ static PyObject *
+@@ -268,12 +268,12 @@ blpy_block_syms_dealloc (PyObject *obj)
+ PyObject *
+ gdbpy_block_for_pc (PyObject *self, PyObject *args)
+ {
+-  unsigned PY_LONG_LONG pc;
++  gdb_py_ulongest pc;
+   struct block *block;
+   struct obj_section *section;
+   struct symtab *symtab;
+ 
+-  if (!PyArg_ParseTuple (args, "K", &pc))
++  if (!PyArg_ParseTuple (args, GDB_PY_LLU_ARG, &pc))
+     return NULL;
+ 
+   section = find_pc_mapped_section (pc);
+Index: gdb-7.2-patched/gdb/python/py-breakpoint.c
+===================================================================
+--- gdb-7.2-patched.orig/gdb/python/py-breakpoint.c
++++ gdb-7.2-patched/gdb/python/py-breakpoint.c
+@@ -233,7 +233,7 @@ static int
+ bppy_set_thread (PyObject *self, PyObject *newvalue, void *closure)
+ {
+   breakpoint_object *self_bp = (breakpoint_object *) self;
+-  int id;
++  long id;
+ 
+   BPPY_SET_REQUIRE_VALID (self_bp);
+ 
+@@ -245,7 +245,9 @@ bppy_set_thread (PyObject *self, PyObjec
+     }
+   else if (PyInt_Check (newvalue))
+     {
+-      id = (int) PyInt_AsLong (newvalue);
++      if (! gdb_py_int_as_long (newvalue, &id))
++	return -1;
++
+       if (! valid_thread_id (id))
+ 	{
+ 	  PyErr_SetString (PyExc_RuntimeError, 
+@@ -272,7 +274,7 @@ static int
+ bppy_set_task (PyObject *self, PyObject *newvalue, void *closure)
+ {
+   breakpoint_object *self_bp = (breakpoint_object *) self;
+-  int id;
++  long id;
+ 
+   BPPY_SET_REQUIRE_VALID (self_bp);
+ 
+@@ -284,7 +286,9 @@ bppy_set_task (PyObject *self, PyObject 
+     }
+   else if (PyInt_Check (newvalue))
+     {
+-      id = (int) PyInt_AsLong (newvalue);
++      if (! gdb_py_int_as_long (newvalue, &id))
++	return -1;
++
+       if (! valid_task_id (id))
+ 	{
+ 	  PyErr_SetString (PyExc_RuntimeError, 
+@@ -329,7 +333,9 @@ bppy_set_ignore_count (PyObject *self, P
+       return -1;
+     }
+ 
+-  value = PyInt_AsLong (newvalue);
++  if (! gdb_py_int_as_long (newvalue, &value))
++    return -1;
++
+   if (value < 0)
+     value = 0;
+   set_ignore_count (self_bp->number, (int) value, 0);
+@@ -351,11 +357,19 @@ bppy_set_hit_count (PyObject *self, PyOb
+ 		       _("Cannot delete `hit_count' attribute."));
+       return -1;
+     }
+-  else if (! PyInt_Check (newvalue) || PyInt_AsLong (newvalue) != 0)
++  else
+     {
+-      PyErr_SetString (PyExc_AttributeError,
+-		       _("The value of `hit_count' must be zero."));
+-      return -1;
++      long value;
++
++      if (! gdb_py_int_as_long (newvalue, &value))
++	return -1;
++
++      if (value != 0)
++	{
++	  PyErr_SetString (PyExc_AttributeError,
++			   _("The value of `hit_count' must be zero."));
++	  return -1;
++	}
+     }
+ 
+   self_bp->bp->hit_count = 0;
+Index: gdb-7.2-patched/gdb/python/py-cmd.c
+===================================================================
+--- gdb-7.2-patched.orig/gdb/python/py-cmd.c
++++ gdb-7.2-patched/gdb/python/py-cmd.c
+@@ -272,9 +272,14 @@ cmdpy_completer (struct cmd_list_element
+     {
+       /* User code may also return one of the completion constants,
+ 	 thus requesting that sort of completion.  */
+-      long value = PyInt_AsLong (resultobj);
++      long value;
+ 
+-      if (value >= 0 && value < (long) N_COMPLETERS)
++      if (! gdb_py_int_as_long (resultobj, &value))
++	{
++	  /* Ignore.  */
++	  PyErr_Clear ();
++	}
++      else if (value >= 0 && value < (long) N_COMPLETERS)
+ 	result = completers[value].completer (command, text, word);
+     }
+ 
+Index: gdb-7.2-patched/gdb/python/py-frame.c
+===================================================================
+--- gdb-7.2-patched.orig/gdb/python/py-frame.c
++++ gdb-7.2-patched/gdb/python/py-frame.c
+@@ -201,7 +201,7 @@ frapy_pc (PyObject *self, PyObject *args
+     }
+   GDB_PY_HANDLE_EXCEPTION (except);
+ 
+-  return PyLong_FromUnsignedLongLong (pc);
++  return gdb_py_long_from_ulongest (pc);
+ }
+ 
+ /* Implementation of gdb.Frame.block (self) -> gdb.Block.
+Index: gdb-7.2-patched/gdb/python/py-lazy-string.c
+===================================================================
+--- gdb-7.2-patched.orig/gdb/python/py-lazy-string.c
++++ gdb-7.2-patched/gdb/python/py-lazy-string.c
+@@ -53,7 +53,7 @@ stpy_get_address (PyObject *self, void *
+ {
+   lazy_string_object *self_string = (lazy_string_object *) self;
+ 
+-  return PyLong_FromUnsignedLongLong (self_string->address);
++  return gdb_py_long_from_ulongest (self_string->address);
+ }
+ 
+ static PyObject *
+Index: gdb-7.2-patched/gdb/python/py-param.c
+===================================================================
+--- gdb-7.2-patched.orig/gdb/python/py-param.c
++++ gdb-7.2-patched/gdb/python/py-param.c
+@@ -228,7 +228,9 @@ set_parameter_value (parmpy_object *self
+ 	    return -1;
+ 	  }
+ 
+-	l = PyInt_AsLong (value);
++	if (! gdb_py_int_as_long (value, &l))
++	  return -1;
++
+ 	if (self->type == var_uinteger)
+ 	  {
+ 	    ok = (l >= 0 && l <= UINT_MAX);
+Index: gdb-7.2-patched/gdb/python/py-symtab.c
+===================================================================
+--- gdb-7.2-patched.orig/gdb/python/py-symtab.c
++++ gdb-7.2-patched/gdb/python/py-symtab.c
+@@ -186,7 +186,7 @@ salpy_get_pc (PyObject *self, void *clos
+ 
+   SALPY_REQUIRE_VALID (self, sal);
+ 
+-  return PyLong_FromUnsignedLongLong (sal->pc);
++  return gdb_py_long_from_ulongest (sal->pc);
+ }
+ 
+ static PyObject *
+@@ -196,7 +196,7 @@ salpy_get_line (PyObject *self, void *cl
+ 
+   SALPY_REQUIRE_VALID (self, sal);
+ 
+-  return PyLong_FromUnsignedLongLong (sal->line);
++  return PyInt_FromLong (sal->line);
+ }
+ 
+ static PyObject *
+Index: gdb-7.2-patched/gdb/python/py-utils.c
+===================================================================
+--- gdb-7.2-patched.orig/gdb/python/py-utils.c
++++ gdb-7.2-patched/gdb/python/py-utils.c
+@@ -285,39 +285,73 @@ get_addr_from_python (PyObject *obj, COR
+ {
+   if (gdbpy_is_value_object (obj))
+     *addr = value_as_address (value_object_to_value (obj));
+-  else if (PyLong_Check (obj))
++  else
+     {
+-      /* Assume CORE_ADDR corresponds to unsigned long.  */
+-      *addr = PyLong_AsUnsignedLong (obj);
+-      if (PyErr_Occurred () != NULL)
++      PyObject *num = PyNumber_Long (obj);
++      gdb_py_ulongest val;
++
++      if (num == NULL)
+ 	return 0;
+-    }
+-  else if (PyInt_Check (obj))
+-    {
+-      long val;
+ 
+-      /* Assume CORE_ADDR corresponds to unsigned long.  */
+-      val = PyInt_AsLong (obj);
++      val = gdb_py_long_as_ulongest (num);
++      Py_XDECREF (num);
++      if (PyErr_Occurred ())
++	return 0;
+ 
+-      if (val >= 0)
+-	*addr = val;
+-      else
+-      {
+-	/* If no error ocurred, VAL is indeed negative.  */
+-	if (PyErr_Occurred () != NULL)
++      if (sizeof (val) > sizeof (CORE_ADDR) && ((CORE_ADDR) val) != val)
++	{
++	  PyErr_SetString (PyExc_ValueError,
++			   _("Overflow converting to address."));
+ 	  return 0;
++	}
+ 
+-	PyErr_SetString (PyExc_ValueError,
+-			 _("Supplied address is negative."));
+-	return 0;
+-      }
+-    }
+-  else
+-    {
+-      PyErr_SetString (PyExc_TypeError,
+-		       _("Invalid type for address."));
+-      return 0;
++      *addr = val;
+     }
+ 
+   return 1;
+ }
++
++/* Convert a LONGEST to the appropriate Python object -- either an
++   integer object or a long object, depending on its value.  */
++
++PyObject *
++gdb_py_object_from_longest (LONGEST l)
++{
++#ifdef HAVE_LONG_LONG		/* Defined by Python.  */
++  /* If we have 'long long', and the value overflows a 'long', use a
++     Python Long; otherwise use a Python Int.  */
++  if (sizeof (l) > sizeof (long)
++      && (l > PyInt_GetMax () || l < (- (LONGEST) PyInt_GetMax ()) - 1))
++    return PyLong_FromLongLong (l);
++#endif
++  return PyInt_FromLong (l);
++}
++
++/* Convert a ULONGEST to the appropriate Python object -- either an
++   integer object or a long object, depending on its value.  */
++
++PyObject *
++gdb_py_object_from_ulongest (ULONGEST l)
++{
++#ifdef HAVE_LONG_LONG		/* Defined by Python.  */
++  /* If we have 'long long', and the value overflows a 'long', use a
++     Python Long; otherwise use a Python Int.  */
++  if (sizeof (l) > sizeof (unsigned long) && l > PyInt_GetMax ())
++    return PyLong_FromUnsignedLongLong (l);
++#endif
++
++  if (l > PyInt_GetMax ())
++    return PyLong_FromUnsignedLong (l);
++
++  return PyInt_FromLong (l);
++}
++
++/* Like PyInt_AsLong, but returns 0 on failure, 1 on success, and puts
++   the value into an out parameter.  */
++
++int
++gdb_py_int_as_long (PyObject *obj, long *result)
++{
++  *result = PyInt_AsLong (obj);
++  return ! (*result == -1 && PyErr_Occurred ());
++}
+Index: gdb-7.2-patched/gdb/python/py-value.c
+===================================================================
+--- gdb-7.2-patched.orig/gdb/python/py-value.c
++++ gdb-7.2-patched/gdb/python/py-value.c
+@@ -238,13 +238,13 @@ valpy_get_type (PyObject *self, void *cl
+ static PyObject *
+ valpy_lazy_string (PyObject *self, PyObject *args, PyObject *kw)
+ {
+-  int length = -1;
++  gdb_py_longest length = -1;
+   struct value *value = ((value_object *) self)->value;
+   const char *user_encoding = NULL;
+   static char *keywords[] = { "encoding", "length", NULL };
+   PyObject *str_obj;
+ 
+-  if (!PyArg_ParseTupleAndKeywords (args, kw, "|si", keywords,
++  if (!PyArg_ParseTupleAndKeywords (args, kw, "|s" GDB_PY_LL_ARG, keywords,
+ 				    &user_encoding, &length))
+     return NULL;
+ 
+@@ -838,14 +838,7 @@ valpy_int (PyObject *self)
+     }
+   GDB_PY_HANDLE_EXCEPTION (except);
+ 
+-#ifdef HAVE_LONG_LONG		/* Defined by Python.  */
+-  /* If we have 'long long', and the value overflows a 'long', use a
+-     Python Long; otherwise use a Python Int.  */
+-  if (sizeof (l) > sizeof (long) && (l > PyInt_GetMax ()
+-				     || l < (- (LONGEST) PyInt_GetMax ()) - 1))
+-    return PyLong_FromLongLong (l);
+-#endif
+-  return PyInt_FromLong (l);
++  return gdb_py_object_from_longest (l);
+ }
+ 
+ /* Implements conversion to long.  */
+@@ -870,11 +863,7 @@ valpy_long (PyObject *self)
+     }
+   GDB_PY_HANDLE_EXCEPTION (except);
+ 
+-#ifdef HAVE_LONG_LONG		/* Defined by Python.  */
+-  return PyLong_FromLongLong (l);
+-#else
+-  return PyLong_FromLong (l);
+-#endif
++  return gdb_py_long_from_longest (l);
+ }
+ 
+ /* Implements conversion to float.  */
+Index: gdb-7.2-patched/gdb/python/python-internal.h
+===================================================================
+--- gdb-7.2-patched.orig/gdb/python/python-internal.h
++++ gdb-7.2-patched/gdb/python/python-internal.h
+@@ -69,6 +69,32 @@ typedef int Py_ssize_t;
+ #define PyEval_ReleaseLock() 0
+ #endif
+ 
++/* Python supplies HAVE_LONG_LONG and some `long long' support when it
++   is available.  These defines let us handle the differences more
++   cleanly.  */
++#ifdef HAVE_LONG_LONG
++
++#define GDB_PY_LL_ARG "L"
++#define GDB_PY_LLU_ARG "K"
++typedef PY_LONG_LONG gdb_py_longest;
++typedef unsigned PY_LONG_LONG gdb_py_ulongest;
++#define gdb_py_long_from_longest PyLong_FromLongLong
++#define gdb_py_long_from_ulongest PyLong_FromUnsignedLongLong
++#define gdb_py_long_as_ulongest PyLong_AsUnsignedLongLong
++
++#else /* HAVE_LONG_LONG */
++
++#define GDB_PY_LL_ARG "L"
++#define GDB_PY_LLU_ARG "K"
++typedef long gdb_py_longest;
++typedef unsigned long gdb_py_ulongest;
++#define gdb_py_long_from_longest PyLong_FromLong
++#define gdb_py_long_from_ulongest PyLong_FromUnsignedLong
++#define gdb_py_long_as_ulongest PyLong_AsUnsignedLong
++
++#endif /* HAVE_LONG_LONG */
++
++
+ /* In order to be able to parse symtab_and_line_to_sal_object function 
+    a real symtab_and_line structure is needed.  */
+ #include "symtab.h"
+@@ -250,4 +276,8 @@ extern PyObject *gdbpy_gdberror_exc;
+ 
+ int get_addr_from_python (PyObject *obj, CORE_ADDR *addr);
+ 
++PyObject *gdb_py_object_from_longest (LONGEST l);
++PyObject *gdb_py_object_from_ulongest (ULONGEST l);
++int gdb_py_int_as_long (PyObject *, long *);
++
+ #endif /* GDB_PYTHON_INTERNAL_H */

@@ -1,0 +1,148 @@
+URL: <https://sourceware.org/ml/gdb-patches/2011-05/msg00465.html>
+Message-ID: <4DD59F1C.6040608@redhat.com>
+
+  From: Keith Seitz <keiths at redhat dot com>
+  To: gdb-patches at sourceware dot org
+  Subject: [RFA] Anonymous namespaces and linespecs
+  Date: Thu, 19 May 2011 15:52:12 -0700
+
+  Hi,
+
+  This is actually a patch for symtab/12704, reported by Jan:
+
+  (gdb) b 'FOO::(anonymous namespace)::BAR()'
+  Junk at end of arguments.
+
+
+  This is happening because along with the physname patch, there was also 
+  alot of mucking around with decode_line_1 and decode_compound. This is 
+  fallout from that. [Remember: we used to push almost everything through 
+  decode_variable -- in which the quoting is /required/.]
+
+  If we see "(anonymous namespace)", we must keep it as a significant part 
+  of the name. On the upside, we now no longer have to quote this stuff, 
+  either.
+
+  This patch also contains one cleanup. The string "(anonymous namespace)" 
+  was beginning to proliferate throughout the sources. I've added a macro 
+  to cp-support.h to define this string and changed all the places it had 
+  been hard-coded.
+
+commit 2b1dbab03d9b512f15900cb274f69214bd88d3bc
+Author: Keith Seitz <keiths@redhat.com>
+Date:   Tue May 31 21:54:07 2011 +0000
+
+    	PR symtab/12704
+    	* cp-namespace.c (ANONYMOUS_NAMESPACE_LEN): Remove.
+    	(cp_scan_for_anonymous_namespaces): Use CP_ANONYMOUS_NAMESPACE_STR
+    	and CP_ANONYMOUS_NAMESPACE_LEN.
+    	(cp_is_anonymous): Likewise.
+    	* cp-support.h (CP_ANONYMOUS_NAMESPACE_STR): Define.
+    	(CP_ANONYMOUS_NAMESPACE_LEN): Define.
+    	* dwarf2read.c (namespace_name): Likewise.
+    	(fixup_partial_die): Likewise.
+    	* linespec.c (decode_compound): If CP_ANONYMOUS_NAMESPACE_STR is
+    	seen in the input, keep it.
+
+Index: gdb-7.2.old/gdb/cp-namespace.c
+===================================================================
+--- gdb-7.2.old.orig/gdb/cp-namespace.c
++++ gdb-7.2.old/gdb/cp-namespace.c
+@@ -70,10 +70,6 @@ static void maintenance_cplus_namespace
+ /* Check to see if SYMBOL refers to an object contained within an
+    anonymous namespace; if so, add an appropriate using directive.  */
+ 
+-/* Optimize away strlen ("(anonymous namespace)").  */
+-
+-#define ANONYMOUS_NAMESPACE_LEN 21
+-
+ void
+ cp_scan_for_anonymous_namespaces (const struct symbol *const symbol,
+ 				  struct objfile *const objfile)
+@@ -95,10 +91,11 @@ cp_scan_for_anonymous_namespaces (const
+ 
+       while (name[next_component] == ':')
+ 	{
+-	  if ((next_component - previous_component) == ANONYMOUS_NAMESPACE_LEN
++	  if (((next_component - previous_component)
++	       == CP_ANONYMOUS_NAMESPACE_LEN)
+ 	      && strncmp (name + previous_component,
+-			  "(anonymous namespace)",
+-			  ANONYMOUS_NAMESPACE_LEN) == 0)
++			  CP_ANONYMOUS_NAMESPACE_STR,
++			  CP_ANONYMOUS_NAMESPACE_LEN) == 0)
+ 	    {
+ 	      int dest_len = (previous_component == 0 ? 0 : previous_component - 2);
+ 	      int src_len = next_component;
+@@ -223,7 +220,7 @@ cp_set_block_scope (const struct symbol
+ int
+ cp_is_anonymous (const char *namespace)
+ {
+-  return (strstr (namespace, "(anonymous namespace)")
++  return (strstr (namespace, CP_ANONYMOUS_NAMESPACE_STR)
+ 	  != NULL);
+ }
+ 
+Index: gdb-7.2.old/gdb/cp-support.h
+===================================================================
+--- gdb-7.2.old.orig/gdb/cp-support.h
++++ gdb-7.2.old/gdb/cp-support.h
+@@ -36,6 +36,14 @@ struct objfile;
+ struct type;
+ struct demangle_component;
+ 
++/* A string representing the name of the anonymous namespace used in GDB.  */
++
++#define CP_ANONYMOUS_NAMESPACE_STR "(anonymous namespace)"
++
++/* The length of the string representing the anonymous namespace.  */
++
++#define CP_ANONYMOUS_NAMESPACE_LEN 21
++
+ /* This struct is designed to store data from using directives.  It
+    says that names from namespace IMPORT_SRC should be visible within namespace
+    IMPORT_DEST.  These form a linked list; NEXT is the next element of the
+Index: gdb-7.2.old/gdb/dwarf2read.c
+===================================================================
+--- gdb-7.2.old.orig/gdb/dwarf2read.c
++++ gdb-7.2.old/gdb/dwarf2read.c
+@@ -7462,7 +7462,7 @@ namespace_name (struct die_info *die, in
+ 
+   *is_anonymous = (name == NULL);
+   if (*is_anonymous)
+-    name = "(anonymous namespace)";
++    name = CP_ANONYMOUS_NAMESPACE_STR;
+ 
+   return name;
+ }
+@@ -9098,7 +9098,7 @@ fixup_partial_die (struct partial_die_in
+     part_die->name = "(anonymous class)";
+ 
+   if (part_die->name == NULL && part_die->tag == DW_TAG_namespace)
+-    part_die->name = "(anonymous namespace)";
++    part_die->name = CP_ANONYMOUS_NAMESPACE_STR;
+ 
+   if (part_die->tag == DW_TAG_structure_type
+       || part_die->tag == DW_TAG_class_type
+Index: gdb-7.2.old/gdb/linespec.c
+===================================================================
+--- gdb-7.2.old.orig/gdb/linespec.c
++++ gdb-7.2.old/gdb/linespec.c
+@@ -1326,8 +1326,15 @@ decode_compound (char **argptr, int funf
+ 	    {
+ 	      /* PASS2: We'll keep getting here, until P points to one of the
+ 		 break characters, at which point we exit this loop.  */
+-	      if (strchr (break_characters, *p) == NULL)
+-		p++;
++	      if (*p)
++		{
++		  if (p[1] == '('
++		      && strncmp (&p[1], CP_ANONYMOUS_NAMESPACE_STR,
++				  CP_ANONYMOUS_NAMESPACE_LEN) == 0)
++		    p += CP_ANONYMOUS_NAMESPACE_LEN;
++		  else if (strchr (break_characters, *p) == NULL)
++		    ++p;
++		}
+ 	    }
+ 	}
+ 

@@ -1,0 +1,99 @@
+This patch fixes the bug <https://bugzilla.redhat.com/show_bug.cgi?id=921685>.
+
+The bug is actually a regression caused by
+`gdb-rhbz756116-autoload-23of49.patch', which incorrectly registers a "python"
+prefix command again (the "python" prefix command is originally registered
+in gdb/python/python.c).  It causes GDB command mechanism to get confused
+and mix "maint set python auto-load" and "maint set python print-stack".
+
+This patch solves this by avoiding the unecessary double-registration of
+the "python" prefix, and registering "maint set python auto-load" inside
+gdb/python/python.c.
+
+diff -pruN gdb-7.2/gdb/python/py-auto-load.c gdb-7.2-new/gdb/python/py-auto-load.c
+--- gdb-7.2/gdb/python/py-auto-load.c	2013-03-20 16:04:10.281828660 -0300
++++ gdb-7.2-new/gdb/python/py-auto-load.c	2013-03-20 16:01:20.443835397 -0300
+@@ -41,8 +41,12 @@
+ /* User-settable option to enable/disable auto-loading of Python scripts:
+    set auto-load python-scripts on|off
+    This is true if we should auto-load associated Python scripts when an
+-   objfile is opened, false otherwise.  */
+-static int auto_load_python_scripts = 1;
++   objfile is opened, false otherwise.
++
++   In order to maintain backward compatibility with RHEL versions, this
++   variable is used inside python.c in order to create the "maint set/show
++   python auto-load" commands.  */
++int auto_load_python_scripts = 1;
+ 
+ static void gdbpy_load_auto_script_for_objfile (struct objfile *objfile,
+ 						FILE *file,
+@@ -300,34 +304,10 @@ Print the list of automatically loaded P
+   deprecate_cmd (cmd, "info auto-load python-scripts");
+ 
+   /* RHEL backward compatibility.  */
+-  {
+-    /* Lists for 'maint set python' commands.  */
+-    static struct cmd_list_element *set_python_list;
+-    static struct cmd_list_element *show_python_list;
+-
+-    add_prefix_cmd ("python", no_class, show_python,
+-		    _("Prefix command for python maintenance settings."),
+-		    &show_python_list, "maintenance show python ", 0,
+-		    &maintenance_show_cmdlist);
+-    add_prefix_cmd ("python", no_class, set_python,
+-		    _("Prefix command for python maintenance settings."),
+-		    &set_python_list, "maintenance set python ", 0,
+-		    &maintenance_set_cmdlist);
+-
+-    add_setshow_boolean_cmd ("auto-load", class_maintenance,
+-			     &auto_load_python_scripts, _("\
+-Enable or disable auto-loading of Python code when an object is opened."), _("\
+-Show whether Python code will be auto-loaded when an object is opened."), _("\
+-Enables or disables auto-loading of Python code when an object is opened."),
+-			     NULL, NULL,
+-			     &set_python_list,
+-			     &show_python_list);
+-
+-    /* The output is not fully backward compatible.  */
+-    add_cmd ("section-scripts", class_maintenance, info_auto_load_python_scripts,
+-	     _("Print dump of auto-loaded section scripts matching REGEXP."),
+-	     &maintenanceprintlist);
+-  }
++  /* The output is not fully backward compatible.  */
++  add_cmd ("section-scripts", class_maintenance, info_auto_load_python_scripts,
++	  _("Print dump of auto-loaded section scripts matching REGEXP."),
++	  &maintenanceprintlist);
+ }
+ 
+ #else /* ! HAVE_PYTHON */
+diff -pruN gdb-7.2/gdb/python/python.c gdb-7.2-new/gdb/python/python.c
+--- gdb-7.2/gdb/python/python.c	2013-03-20 16:04:07.894831396 -0300
++++ gdb-7.2-new/gdb/python/python.c	2013-03-20 16:01:22.500850910 -0300
+@@ -36,6 +36,9 @@
+    false otherwise.  */
+ static int gdbpy_should_print_stack = 1;
+ 
++/* See description in py-auto-load.c.  */
++extern int auto_load_python_scripts;
++
+ #ifdef HAVE_PYTHON
+ 
+ #include "python.h"
+@@ -982,6 +985,16 @@ Enables or disables printing of Python s
+ 			   &set_python_list,
+ 			   &show_python_list);
+ 
++  /* RHEL backward compatibility.  */
++  add_setshow_boolean_cmd ("auto-load", class_maintenance,
++			   &auto_load_python_scripts, _("\
++Enable or disable auto-loading of Python code when an object is opened."), _("\
++Show whether Python code will be auto-loaded when an object is opened."), _("\
++Enables or disables auto-loading of Python code when an object is opened."),
++			     NULL, NULL,
++			   &set_python_list,
++			   &show_python_list);
++
+ #ifdef HAVE_PYTHON
+ #ifdef WITH_PYTHON_PATH
+   /* Work around problem where python gets confused about where it is,

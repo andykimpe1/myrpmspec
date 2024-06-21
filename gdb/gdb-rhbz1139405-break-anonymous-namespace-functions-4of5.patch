@@ -1,0 +1,180 @@
+URL: <https://sourceware.org/ml/gdb-patches/2011-05/msg00495.html>
+Message-ID: <4DD6B72D.3060706@redhat.com>
+
+  From: Keith Seitz <keiths at redhat dot com>
+  To: gdb-patches at sourceware dot org
+  Subject: [RFA] "Error in re-setting breakpoint," c++/12750
+  Date: Fri, 20 May 2011 11:47:09 -0700
+
+  Hi,
+
+  This bug is a regression caused by some breakpoint canonicalization 
+  churn that committed a while ago. Basically:
+
+  (gdb) break xxx::fun1
+  Breakpoint 1 at 0xblahblah: file main.cc, line blah.
+  (gdb) run
+  Starting program: a.out
+  Error in re-setting breakpoint 1: Can't find member of namespace, class, 
+    struct, or union named "main.cc:xxx::fun1"
+
+  As you can see, the first time decode_line_1 is called (with 
+  "xxx::fun1"), parsing the linespec succeeds. The breakpoint code stores 
+  a canonicalized version of this string ("main.cc:xxx::fun1"), and 
+  decode_line_1 is unable to properly parse this.
+
+  The attached patch is an attempt to correct this. It essentially makes 
+  two changes: 1) look up the file symtab first; 2) pass this file symtab 
+  to any function which might call lookup_symbol[_*], and use this symtab 
+  to determine the appropriate block to search.
+
+  The test case included here will require the patch for symtab/12704. I 
+  ran across this bug while working on that bug, so I've included a test 
+  for that specific case, too.
+
+commit fd336a18dfa251dab345e0541133fdc2cf50244c
+Author: Keith Seitz <keiths@redhat.com>
+Date:   Tue May 31 22:14:21 2011 +0000
+
+    	PR c++/12750
+    	* gdb.cp/static-method.cc: New file.
+    	* gdb.cp/static-method.exp: New file.
+
+Index: gdb-7.2/gdb/testsuite/gdb.cp/static-method.cc
+===================================================================
+--- /dev/null
++++ gdb-7.2/gdb/testsuite/gdb.cp/static-method.cc
+@@ -0,0 +1,46 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2011 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++namespace xxx
++{
++  namespace
++  {
++    static int func (void) { return 0; } // xxx::func
++    class A
++    {
++    public:
++      static int func (void) { return 0; } // xxx::A::func
++    };
++  }
++}
++
++int
++test_function (void)
++{
++  return xxx::func () + xxx::A::func ();
++}
++
++int
++main (void)
++{
++  int i, x;
++
++  for (i = 0; i < 1000; ++i)
++    x += test_function ();
++
++  return x;
++}
+Index: gdb-7.2/gdb/testsuite/gdb.cp/static-method.exp
+===================================================================
+--- /dev/null
++++ gdb-7.2/gdb/testsuite/gdb.cp/static-method.exp
+@@ -0,0 +1,82 @@
++# Copyright 2011 Free Software Foundation, Inc.
++#
++# Contributed by Red Hat, originally written by Keith Seitz.
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# This file is part of the gdb testsuite.
++
++# A helper proc which sets a breakpoint at FUNC and attempts to
++# run to the breakpoint.
++proc test_breakpoint {func result} {
++    set DEC {[0-9]}
++
++    # Return to the top of the test function every time.
++    delete_breakpoints
++    if {![gdb_breakpoint test_function]} {
++        fail "set test_function breakpoint for $func"
++    } elseif {[gdb_test "continue" \
++		   "Continuing.\r\n\r\nBreakpoint $DEC+,.*test_function.*" \
++		   ""] != 0} {
++        fail "continue to test_function for $func"
++    } else {
++        gdb_breakpoint "$func"
++        gdb_test "continue" \
++            "Continuing.\r\n\r\nBreakpoint $DEC+,.*$result.*" \
++            "continue to $func"
++    }
++}
++
++if {[skip_cplus_tests]} { continue }
++
++# Tests for c++/12750
++set testfile "static-method"
++set srcfile $testfile.cc
++
++if {[prepare_for_testing $testfile $testfile $srcfile {c++ debug}]} {
++    return -1
++}
++
++if {![runto_main]} {
++    perror "couldn't run to breakpoint"
++    continue
++}
++
++set ans {(anonymous namespace)}
++set methods {}
++lappend methods "xxx::${ans}::func"
++lappend methods "xxx::${ans}::A::func"
++
++gdb_test_no_output "set listsize 1" ""
++
++foreach test $methods {
++    # The result we expect is the source code name of the symbol,
++    # i.e., without "(anonymous namespace)".
++    regsub -all [string_to_regexp "${ans}::"] $test "" expected
++    set result ".*// [string_to_regexp $expected]"
++
++    # Test whether the function/method can be "list"ed
++    # with the filename pre-pended.
++    gdb_test "list ${srcfile}:$test" $result
++    gdb_test "list '${srcfile}:$test'" $result
++    gdb_test "list '${srcfile}':$test'" $result
++    gdb_test "list ${srcfile}:'$test'" $result
++
++    # Test setting and hitting a breakoint at the function/method.
++    test_breakpoint $test $expected
++    test_breakpoint "'$test'" $expected
++}
++
++gdb_exit
++return 0

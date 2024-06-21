@@ -1,0 +1,115 @@
+Original message by Jan Kratochvil:
+
+  Message-ID: <20120308193952.GA31141@host2.jankratochvil.net>
+
+  On Wed, 07 Mar 2012 20:46:55 +0100, Joel Brobecker wrote:
+  > FWIW: I didn't see any regression with our testsuite and GCC 4.7.
+
+  Checked it in, with a new testcase for one part of it.
+
+  The part
+  -      if (type_sig->type_offset != die->offset)
+  +      if (type_sig->per_cu.offset + type_sig->type_offset
+  +         != die->offset)
+
+  comes from:
+	Re: [1/4] RFC: skip DIEs which only declare an enum
+	http://sourceware.org/ml/gdb-patches/2011-07/msg00428.html
+  and while it has no new testcase:
+  (1) after changing it the debug output clearly shows it is right:
+      type_sig->type_offset=0x25 != die->offset=0x82e
+      type_sig->type_offset=0x3c != die->offset=0x7ce
+      ->
+      type_sig->type_offset=0x821 != die->offset=0x82e
+      type_sig->type_offset=0x7d4 != die->offset=0x7ce
+  (2) it is also shown in the [patch 2/2] enforcing
+      proper .debug_*-section vs.  CU relative offset types.
+
+  For the dwarf2_fetch_die_location_block part it was even easy to write
+  a testcase showing now FAIL->PASS.
+
+commit 7fe25d9bd274089557e2947f7ba09b6e333533cd
+Author: Jan Kratochvil <jan.kratochvil@redhat.com>
+Date:   Thu Mar 8 19:37:08 2012 +0000
+
+    gdb/
+    	Fix CU relative vs. absolute DIE offsets.
+    	* dwarf2loc.h (dwarf2_fetch_die_location_block): Rename parameter
+    	offset to offset_in_cu.
+    	* dwarf2read.c (process_enumeration_scope): Add CU offset to
+    	TYPE_OFFSET.
+    	(dwarf2_fetch_die_location_block): Rename parameter offset to
+    	offset_in_cu.  New variable offset, add CU offset to OFFSET_IN_CU.
+    
+    gdb/testsuite/
+    	Fix CU relative vs. absolute DIE offsets.
+    	* gdb.dwarf2/dw2-op-call.S: New compilation unit preceding the existing
+    	one.
+
+Index: gdb-7.2/gdb/dwarf2loc.h
+===================================================================
+--- gdb-7.2.orig/gdb/dwarf2loc.h
++++ gdb-7.2/gdb/dwarf2loc.h
+@@ -46,7 +46,7 @@ int dwarf2_per_cu_offset_size (struct dw
+ CORE_ADDR dwarf2_per_cu_text_offset (struct dwarf2_per_cu_data *cu);
+ 
+ struct dwarf2_locexpr_baton dwarf2_fetch_die_location_block
+-  (unsigned int offset, struct dwarf2_per_cu_data *per_cu);
++  (unsigned int offset_in_cu, struct dwarf2_per_cu_data *per_cu);
+ 
+ /* The symbol location baton types used by the DWARF-2 reader (i.e.
+    SYMBOL_LOCATION_BATON for a LOC_COMPUTED symbol).  "struct
+Index: gdb-7.2/gdb/dwarf2read.c
+===================================================================
+--- gdb-7.2.orig/gdb/dwarf2read.c
++++ gdb-7.2/gdb/dwarf2read.c
+@@ -7018,7 +7018,8 @@ process_enumeration_scope (struct die_in
+ 	= lookup_signatured_type_at_offset (dwarf2_per_objfile->objfile,
+ 					    cu->per_cu->debug_type_section,
+ 					    cu->per_cu->offset);
+-      if (type_sig->type_offset != die->offset)
++      if (type_sig->per_cu.offset + type_sig->type_offset
++	  != die->offset)
+ 	return;
+     }
+ 
+@@ -12870,9 +12871,10 @@ follow_die_ref (struct die_info *src_die
+    dwarf2_locexpr_baton->data.  */
+ 
+ struct dwarf2_locexpr_baton
+-dwarf2_fetch_die_location_block (unsigned int offset,
++dwarf2_fetch_die_location_block (unsigned int offset_in_cu,
+ 				 struct dwarf2_per_cu_data *per_cu)
+ {
++  unsigned int offset = per_cu->offset + offset_in_cu;
+   struct dwarf2_cu *cu = per_cu->cu;
+   struct die_info *die;
+   struct attribute *attr;
+Index: gdb-7.2/gdb/testsuite/gdb.dwarf2/dw2-op-call.S
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/gdb.dwarf2/dw2-op-call.S
++++ gdb-7.2/gdb/testsuite/gdb.dwarf2/dw2-op-call.S
+@@ -23,6 +23,23 @@ array2:	.2byte	2
+ array3:	.2byte	3
+ 
+ 	.section .debug_info
++.Lcu0_begin:
++	/* CU header */
++	.4byte	.Lcu0_end - .Lcu0_start		/* Length of Compilation Unit */
++.Lcu0_start:
++	.2byte	2				/* DWARF Version */
++	.4byte	.Labbrev1_begin			/* Offset into abbrev section */
++	.byte	4				/* Pointer size */
++
++	/* CU die */
++	.uleb128 1				/* Abbrev: DW_TAG_compile_unit */
++	.ascii	"file0.txt\0"			/* DW_AT_name */
++	.ascii	"GNU C 3.3.3\0"			/* DW_AT_producer */
++	.byte	2				/* DW_LANG_C (C) */
++
++	.byte	0				/* End of children of CU */
++.Lcu0_end:
++
+ .Lcu1_begin:
+ 	/* CU header */
+ 	.4byte	.Lcu1_end - .Lcu1_start		/* Length of Compilation Unit */

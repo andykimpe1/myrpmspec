@@ -1,0 +1,83 @@
+FYI: fix memory leak in apropos_command
+http://sourceware.org/ml/gdb-patches/2011-01/msg00364.html
+http://sourceware.org/ml/gdb-cvs/2011-01/msg00130.html
+
+[ cli/cli-cmds.c part dropped.  ]
+
+### src/gdb/ChangeLog	2011/01/17 16:20:51	1.12486
+### src/gdb/ChangeLog	2011/01/17 16:50:39	1.12487
+## -1,5 +1,15 @@
+ 2011-01-17  Tom Tromey  <tromey@redhat.com>
+ 
++	* cli/cli-cmds.c (apropos_command): Free the compiled regex.  Use
++	get_regcomp_error.
++	* utils.c: Include gdb_regex.h.
++	(do_regfree_cleanup): New function.
++	(make_regfree_cleanup): Likewise.
++	(get_regcomp_error): Likewise.
++	* gdb_regex.h (make_regfree_cleanup, get_regcomp_error): Declare.
++
++2011-01-17  Tom Tromey  <tromey@redhat.com>
++
+ 	* cli/cli-cmds.c (apropos_command): Fix formatting.  Don't call
+ 	re_compile_fastmap.
+ 
+--- src/gdb/gdb_regex.h	2011/01/01 15:33:05	1.10
++++ src/gdb/gdb_regex.h	2011/01/17 16:50:42	1.11
+@@ -28,4 +28,8 @@
+ # include <regex.h>
+ #endif
+ 
++/* From utils.c.  */
++struct cleanup *make_regfree_cleanup (regex_t *);
++char *get_regcomp_error (int, regex_t *);
++
+ #endif /* not GDB_REGEX_H */
+--- src/gdb/utils.c	2011/01/12 01:23:28	1.244
++++ src/gdb/utils.c	2011/01/17 16:50:42	1.245
+@@ -73,6 +73,7 @@
+ 
+ #include "gdb_usleep.h"
+ #include "interps.h"
++#include "gdb_regex.h"
+ 
+ #if !HAVE_DECL_MALLOC
+ extern PTR malloc ();		/* ARI: PTR */
+@@ -1643,6 +1644,37 @@
+ }
+ 
+ 
++/* A cleanup function that calls regfree.  */
++
++static void
++do_regfree_cleanup (void *r)
++{
++  regfree (r);
++}
++
++/* Create a new cleanup that frees the compiled regular expression R.  */
++
++struct cleanup *
++make_regfree_cleanup (regex_t *r)
++{
++  return make_cleanup (do_regfree_cleanup, r);
++}
++
++/* Return an xmalloc'd error message resulting from a regular
++   expression compilation failure.  */
++
++char *
++get_regcomp_error (int code, regex_t *rx)
++{
++  size_t length = regerror (code, rx, NULL, 0);
++  char *result = xmalloc (length);
++
++  regerror (code, rx, result, length);
++  return result;
++}
++
++
++
+ /* This function supports the query, nquery, and yquery functions.
+    Ask user a y-or-n question and return 0 if answer is no, 1 if
+    answer is yes, or default the answer to the specified default

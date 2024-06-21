@@ -1,0 +1,239 @@
+From 1e20d6a28a174d91cfb851925764e1947acaf052 Mon Sep 17 00:00:00 2001
+From: Jan Kratochvil <jan.kratochvil@redhat.com>
+Date: Wed, 18 Apr 2012 06:52:25 +0000
+Subject: [PATCH] gdb/
+ 	Fix 64-bit constants on 32-bit hosts.
+ 	* dwarf2read.c (read_unsigned_leb128): Change declaration return type
+ 	from unsigned long to ULONGEST.
+ 	(read_signed_leb128): Change declaration return type from long to
+ 	LONGEST.
+ 	(dwarf2_const_value_attr): Change declaration parameter value from long
+ 	to LONGEST.
+ 	(dwarf2_compute_name): Change variable value from long to LONGEST.
+ 	(read_unsigned_leb128): Change return type, variable result and some
+ 	casts from unsigned long to ULONGEST.
+ 	(read_signed_leb128): Change return type, variable result and some
+ 	casts from long to LONGEST.
+ 	(dwarf2_const_value_data, dwarf2_const_value_attr): Change parameter
+ 	value from long to LONGEST.
+ 	(dwarf2_const_value): Change variable value from long to LONGEST.
+ 	* symmisc.c (print_symbol): Change SYMBOL_VALUE format strings to use
+ 	plongest and hex_string.
+ 	* symtab.h (struct general_symbol_info): Change ivalue from long to
+ 	LONGEST, remove the comment.
+ 	* tracepoint.c (validate_actionline, collect_symbol, scope_info):
+ 	Change SYMBOL_VALUE format strings to use plongest and hex_string.
+
+---
+ gdb/ChangeLog    |   24 ++++++++++++++++++++++++
+ gdb/dwarf2read.c |   28 ++++++++++++++--------------
+ gdb/symmisc.c    |   27 +++++++++++++++------------
+ gdb/symtab.h     |    5 +----
+ gdb/tracepoint.c |   25 +++++++++++++------------
+ 5 files changed, 67 insertions(+), 42 deletions(-)
+
+Index: gdb-7.2/gdb/dwarf2read.c
+===================================================================
+--- gdb-7.2.orig/gdb/dwarf2read.c
++++ gdb-7.2/gdb/dwarf2read.c
+@@ -975,9 +975,9 @@ static char *read_indirect_string (bfd *
+                                    const struct comp_unit_head *,
+                                    unsigned int *);
+ 
+-static unsigned long read_unsigned_leb128 (bfd *, gdb_byte *, unsigned int *);
++static ULONGEST read_unsigned_leb128 (bfd *, gdb_byte *, unsigned int *);
+ 
+-static long read_signed_leb128 (bfd *, gdb_byte *, unsigned int *);
++static LONGEST read_signed_leb128 (bfd *, gdb_byte *, unsigned int *);
+ 
+ static gdb_byte *skip_leb128 (bfd *, gdb_byte *);
+ 
+@@ -9540,10 +9540,10 @@ read_indirect_string (bfd *abfd, gdb_byt
+   return (char *) (dwarf2_per_objfile->str.buffer + str_offset);
+ }
+ 
+-static unsigned long
++static ULONGEST
+ read_unsigned_leb128 (bfd *abfd, gdb_byte *buf, unsigned int *bytes_read_ptr)
+ {
+-  unsigned long result;
++  ULONGEST result;
+   unsigned int num_read;
+   int i, shift;
+   unsigned char byte;
+@@ -9557,7 +9557,7 @@ read_unsigned_leb128 (bfd *abfd, gdb_byt
+       byte = bfd_get_8 (abfd, buf);
+       buf++;
+       num_read++;
+-      result |= ((unsigned long)(byte & 127) << shift);
++      result |= ((ULONGEST) (byte & 127) << shift);
+       if ((byte & 128) == 0)
+ 	{
+ 	  break;
+@@ -9568,10 +9568,10 @@ read_unsigned_leb128 (bfd *abfd, gdb_byt
+   return result;
+ }
+ 
+-static long
++static LONGEST
+ read_signed_leb128 (bfd *abfd, gdb_byte *buf, unsigned int *bytes_read_ptr)
+ {
+-  long result;
++  LONGEST result;
+   int i, shift, num_read;
+   unsigned char byte;
+ 
+@@ -9584,7 +9584,7 @@ read_signed_leb128 (bfd *abfd, gdb_byte 
+       byte = bfd_get_8 (abfd, buf);
+       buf++;
+       num_read++;
+-      result |= ((long)(byte & 127) << shift);
++      result |= ((LONGEST) (byte & 127) << shift);
+       shift += 7;
+       if ((byte & 128) == 0)
+ 	{
+@@ -9592,7 +9592,7 @@ read_signed_leb128 (bfd *abfd, gdb_byte 
+ 	}
+     }
+   if ((shift < 8 * sizeof (result)) && (byte & 0x40))
+-    result |= -(((long)1) << shift);
++    result |= -(((LONGEST) 1) << shift);
+   *bytes_read_ptr = num_read;
+   return result;
+ }
+Index: gdb-7.2/gdb/symmisc.c
+===================================================================
+--- gdb-7.2.orig/gdb/symmisc.c
++++ gdb-7.2/gdb/symmisc.c
+@@ -546,9 +546,9 @@ print_symbol (void *args)
+       switch (SYMBOL_CLASS (symbol))
+ 	{
+ 	case LOC_CONST:
+-	  fprintf_filtered (outfile, "const %ld (0x%lx)",
+-			    SYMBOL_VALUE (symbol),
+-			    SYMBOL_VALUE (symbol));
++	  fprintf_filtered (outfile, "const %s (%s)",
++			    plongest (SYMBOL_VALUE (symbol)),
++			    hex_string (SYMBOL_VALUE (symbol)));
+ 	  break;
+ 
+ 	case LOC_CONST_BYTES:
+@@ -576,28 +576,31 @@ print_symbol (void *args)
+ 
+ 	case LOC_REGISTER:
+ 	  if (SYMBOL_IS_ARGUMENT (symbol))
+-	    fprintf_filtered (outfile, "parameter register %ld",
+-			      SYMBOL_VALUE (symbol));
++	    fprintf_filtered (outfile, "parameter register %s",
++			      plongest (SYMBOL_VALUE (symbol)));
+ 	  else
+-	    fprintf_filtered (outfile, "register %ld", SYMBOL_VALUE (symbol));
++	    fprintf_filtered (outfile, "register %s",
++			      plongest (SYMBOL_VALUE (symbol)));
+ 	  break;
+ 
+ 	case LOC_ARG:
+-	  fprintf_filtered (outfile, "arg at offset 0x%lx",
+-			    SYMBOL_VALUE (symbol));
++	  fprintf_filtered (outfile, "arg at offset %s",
++			    hex_string (SYMBOL_VALUE (symbol)));
+ 	  break;
+ 
+ 	case LOC_REF_ARG:
+-	  fprintf_filtered (outfile, "reference arg at 0x%lx", SYMBOL_VALUE (symbol));
++	  fprintf_filtered (outfile, "reference arg at %s",
++			    hex_string (SYMBOL_VALUE (symbol)));
+ 	  break;
+ 
+ 	case LOC_REGPARM_ADDR:
+-	  fprintf_filtered (outfile, "address parameter register %ld", SYMBOL_VALUE (symbol));
++	  fprintf_filtered (outfile, "address parameter register %s",
++			    plongest (SYMBOL_VALUE (symbol)));
+ 	  break;
+ 
+ 	case LOC_LOCAL:
+-	  fprintf_filtered (outfile, "local at offset 0x%lx",
+-			    SYMBOL_VALUE (symbol));
++	  fprintf_filtered (outfile, "local at offset %s",
++			    hex_string (SYMBOL_VALUE (symbol)));
+ 	  break;
+ 
+ 	case LOC_TYPEDEF:
+Index: gdb-7.2/gdb/symtab.h
+===================================================================
+--- gdb-7.2.orig/gdb/symtab.h
++++ gdb-7.2/gdb/symtab.h
+@@ -102,10 +102,7 @@ struct general_symbol_info
+ 
+   union
+   {
+-    /* The fact that this is a long not a LONGEST mainly limits the
+-       range of a LOC_CONST.  Since LOC_CONST_BYTES exists, I'm not
+-       sure that is a big deal.  */
+-    long ivalue;
++    LONGEST ivalue;
+ 
+     struct block *block;
+ 
+Index: gdb-7.2/gdb/tracepoint.c
+===================================================================
+--- gdb-7.2.orig/gdb/tracepoint.c
++++ gdb-7.2/gdb/tracepoint.c
+@@ -643,9 +643,9 @@ validate_actionline (char **line, struct
+ 		{
+ 		  if (SYMBOL_CLASS (exp->elts[2].symbol) == LOC_CONST)
+ 		    {
+-		      error (_("constant `%s' (value %ld) will not be collected."),
++		      error (_("constant `%s' (value %s) will not be collected."),
+ 			     SYMBOL_PRINT_NAME (exp->elts[2].symbol),
+-			     SYMBOL_VALUE (exp->elts[2].symbol));
++			     plongest (SYMBOL_VALUE (exp->elts[2].symbol)));
+ 		    }
+ 		  else if (SYMBOL_CLASS (exp->elts[2].symbol) == LOC_OPTIMIZED_OUT)
+ 		    {
+@@ -880,8 +880,8 @@ collect_symbol (struct collection_list *
+ 		       SYMBOL_CLASS (sym));
+       break;
+     case LOC_CONST:
+-      printf_filtered ("constant %s (value %ld) will not be collected.\n",
+-		       SYMBOL_PRINT_NAME (sym), SYMBOL_VALUE (sym));
++      printf_filtered ("constant %s (value %s) will not be collected.\n",
++		       SYMBOL_PRINT_NAME (sym), plongest (SYMBOL_VALUE (sym)));
+       break;
+     case LOC_STATIC:
+       offset = SYMBOL_VALUE_ADDRESS (sym);
+@@ -2346,8 +2346,9 @@ scope_info (char *args, int from_tty)
+ 	      count--;		/* don't count this one */
+ 	      continue;
+ 	    case LOC_CONST:
+-	      printf_filtered ("a constant with value %ld (0x%lx)",
+-			       SYMBOL_VALUE (sym), SYMBOL_VALUE (sym));
++	      printf_filtered ("a constant with value %s (%s)",
++			       plongest (SYMBOL_VALUE (sym)),
++			       hex_string (SYMBOL_VALUE (sym)));
+ 	      break;
+ 	    case LOC_CONST_BYTES:
+ 	      printf_filtered ("constant bytes: ");
+@@ -2379,16 +2380,16 @@ scope_info (char *args, int from_tty)
+ 				 gdbarch_register_name (gdbarch, regno));
+ 	      break;
+ 	    case LOC_ARG:
+-	      printf_filtered ("an argument at stack/frame offset %ld",
+-			       SYMBOL_VALUE (sym));
++	      printf_filtered ("an argument at stack/frame offset %s",
++			       plongest (SYMBOL_VALUE (sym)));
+ 	      break;
+ 	    case LOC_LOCAL:
+-	      printf_filtered ("a local variable at frame offset %ld",
+-			       SYMBOL_VALUE (sym));
++	      printf_filtered ("a local variable at frame offset %s",
++			       plongest (SYMBOL_VALUE (sym)));
+ 	      break;
+ 	    case LOC_REF_ARG:
+-	      printf_filtered ("a reference argument at offset %ld",
+-			       SYMBOL_VALUE (sym));
++	      printf_filtered ("a reference argument at offset %s",
++			       plongest (SYMBOL_VALUE (sym)));
+ 	      break;
+ 	    case LOC_REGPARM_ADDR:
+ 	      /* Note comment at LOC_REGISTER.  */

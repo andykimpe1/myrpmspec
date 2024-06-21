@@ -1,0 +1,100 @@
+--- ./gdb/elfread.c	2011-03-22 19:49:38.000000000 +0100
++++ ./gdb/elfread.c	2011-03-22 19:46:01.000000000 +0100
+@@ -718,6 +718,9 @@ gnu_ifunc_record_cache_unchecked (const 
+   return msym_new;
+ }
+ 
++static struct minimal_symbol *
++  resolve_gnu_ifunc_by_cache (const char *function_name);
++
+ /* Check first the cache if it - unlikely - has not been populated since
+    bp_gnu_ifunc_resolver has been created.  gnu_ifunc_record_cache_unchecked
+    could create a duplicate symbol otherwise.  */
+@@ -731,7 +734,10 @@ gnu_ifunc_record_cache (struct gdbarch *
+   msym = resolve_gnu_ifunc_by_cache (function_name);
+   if (msym == NULL)
+     gnu_ifunc_record_cache_unchecked (function_name, function_address);
+-  else if (SYMBOL_VALUE_ADDRESS (msym) != function_address)
++  else
++    {
++      CORE_ADDR msym_address = gdbarch_convert_from_func_ptr_addr (gdbarch, SYMBOL_VALUE_ADDRESS (msym), &current_target);
++if (msym_address != function_address)
+     {
+       /* This case indicates buggy inferior program.  GDB would need to update
+ 	 its MSYM cache symbol for function_address.  Anyway FUNCTION_NAME is
+@@ -740,9 +746,10 @@ gnu_ifunc_record_cache (struct gdbarch *
+ 
+       warning (_("gnu-indirect-function \"%s\" has changed its resolved "
+ 		 "function_address from %s to %s; GDB is using the former one"),
+-	       function_name, paddress (gdbarch, SYMBOL_VALUE_ADDRESS (msym)),
++	       function_name, paddress (gdbarch, msym_address),
+ 	       paddress (gdbarch, function_address));
+     }
++    }
+ }
+ 
+ static struct minimal_symbol *
+@@ -782,6 +789,7 @@ resolve_gnu_ifunc_by_got (const char *fu
+       if (target_read_memory (pointer_address, buf, ptr_size) != 0)
+ 	continue;
+       function_address = extract_typed_address (buf, ptr_type);
++      function_address = gdbarch_convert_from_func_ptr_addr (gdbarch, function_address, &current_target);
+ 
+       msym = gnu_ifunc_record_cache_unchecked (function_name, function_address);
+       if (msym == NULL)
+@@ -792,7 +800,7 @@ resolve_gnu_ifunc_by_got (const char *fu
+   return NULL;
+ }
+ 
+-struct minimal_symbol *
++static struct minimal_symbol *
+ resolve_gnu_ifunc_by_cache (const char *function_name)
+ {
+   char *function_name_gnu_ifunc_tgt;
+--- ./gdb/infcall.c	2011-03-22 19:49:38.000000000 +0100
++++ ./gdb/infcall.c	2011-03-22 19:42:52.000000000 +0100
+@@ -256,11 +256,12 @@ gnu_ifunc_resolve (struct gdbarch *gdbar
+      while ADDRESS is a possible function descriptor..  */
+   address_val = call_function_by_hand (function, 0, NULL);
+   address = value_as_address (address_val);
++  address = gdbarch_convert_from_func_ptr_addr (gdbarch, address, &current_target);
+ 
+   if (name_at_pc)
+     gnu_ifunc_record_cache (gdbarch, name_at_pc, address);
+ 
+-  return gdbarch_convert_from_func_ptr_addr (gdbarch, address, &current_target);
++  return address;
+ }
+ 
+ static struct type *
+--- ./gdb/symtab.h	2011-03-22 19:49:38.000000000 +0100
++++ ./gdb/symtab.h	2011-03-22 19:41:27.000000000 +0100
+@@ -960,9 +960,6 @@ extern void clear_pc_function_cache (voi
+ extern int resolve_gnu_ifunc (const char *function_name,
+ 			      CORE_ADDR *function_addressp);
+ 
+-extern struct minimal_symbol *resolve_gnu_ifunc_by_cache
+-  (const char *function_name);
+-
+ extern void gnu_ifunc_record_cache (struct gdbarch *gdbarch,
+ 				    const char *function_name,
+ 				    CORE_ADDR function_address);
+--- ./gdb/testsuite/gdb.base/gnu-ifunc.exp	2011-03-22 19:49:38.000000000 +0100
++++ ./gdb/testsuite/gdb.base/gnu-ifunc.exp	2011-03-22 20:04:17.000000000 +0100
+@@ -105,7 +105,15 @@ gdb_test "frame" "#0 +(0x\[0-9a-f\]+ in 
+ # Check any commands not doing an inferior call still compute with address of
+ # the gnu-ifunc resolver.
+ 
+-gdb_test "p gnu_ifunc" " = {<text gnu-indirect-function variable, no debug info>} 0x\[0-9a-f\]+ <gnu_ifunc>" "p gnu_ifunc executing"
++if {[istarget powerpc64-*] && [is_lp64_target]} {
++    # With only minimal symbols GDB provides the function descriptors.  With
++    # full debug info the function code would be displayed.
++    set func_prefix {\.}
++} else {
++    set func_prefix {}
++}
++
++gdb_test "p gnu_ifunc" " = {<text gnu-indirect-function variable, no debug info>} 0x\[0-9a-f\]+ <${func_prefix}gnu_ifunc>" "p gnu_ifunc executing"
+ gdb_test "info sym gnu_ifunc" "gnu_ifunc in section .*" "info sym gnu_ifunc executing"
+ 
+ set test "info addr gnu_ifunc"

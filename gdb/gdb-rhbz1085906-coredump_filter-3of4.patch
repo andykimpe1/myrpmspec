@@ -1,0 +1,1090 @@
+commit df8411da087dc05481926f4c4a82deabc5bc3859
+Author: Sergio Durigan Junior <sergiodj@redhat.com>
+Date:   Tue Mar 31 19:32:34 2015 -0400
+
+    Implement support for checking /proc/PID/coredump_filter
+    
+    This patch, as the subject says, extends GDB so that it is able to use
+    the contents of the file /proc/PID/coredump_filter when generating a
+    corefile.  This file contains a bit mask that is a representation of
+    the different types of memory mappings in the Linux kernel; the user
+    can choose to dump or not dump a certain type of memory mapping by
+    enabling/disabling the respective bit in the bit mask.  Currently,
+    here is what is supported:
+    
+      bit 0  Dump anonymous private mappings.
+      bit 1  Dump anonymous shared mappings.
+      bit 2  Dump file-backed private mappings.
+      bit 3  Dump file-backed shared mappings.
+      bit 4 (since Linux 2.6.24)
+             Dump ELF headers.
+      bit 5 (since Linux 2.6.28)
+             Dump private huge pages.
+      bit 6 (since Linux 2.6.28)
+             Dump shared huge pages.
+    
+    (This table has been taken from core(5), but you can also read about it
+    on Documentation/filesystems/proc.txt inside the Linux kernel source
+    tree).
+    
+    The default value for this file, used by the Linux kernel, is 0x33,
+    which means that bits 0, 1, 4 and 5 are enabled.  This is also the
+    default for GDB implemented in this patch, FWIW.
+    
+    Well, reading the file is obviously trivial.  The hard part, mind you,
+    is how to determine the types of the memory mappings.  For that, I
+    extended the code of gdb/linux-tdep.c:linux_find_memory_regions_full and
+    made it rely *much more* on the information gathered from
+    /proc/<PID>/smaps.  This file contains a "verbose dump" of the
+    inferior's memory mappings, and we were not using as much information as
+    we could from it.  If you want to read more about this file, take a look
+    at the proc(5) manpage (I will also write a blog post soon about
+    everything I had to learn to get this patch done, and when I it is ready
+    I will post it here).
+    
+    With Oleg Nesterov's help, we could improve the current algorithm for
+    determining whether a memory mapping is anonymous/file-backed,
+    private/shared.  GDB now also respects the MADV_DONTDUMP flag and does
+    not dump the memory mapping marked as so, and will always dump
+    "[vsyscall]" or "[vdso]" mappings (just like the Linux kernel).
+    
+    In a nutshell, what the new code is doing is:
+    
+    - If the mapping is associated to a file whose name ends with
+      " (deleted)", or if the file is "/dev/zero", or if it is "/SYSV%08x"
+      (shared memory), or if there is no file associated with it, or if
+      the AnonHugePages: or the Anonymous: fields in the /proc/PID/smaps
+      have contents, then GDB considers this mapping to be anonymous.
+      There is a special case in this, though: if the memory mapping is a
+      file-backed one, but *also* contains "Anonymous:" or
+      "AnonHugePages:" pages, then GDB considers this mapping to be *both*
+      anonymous and file-backed, just like the Linux kernel does.  What
+      that means is simple: this mapping will be dumped if the user
+      requested anonymous mappings *or* if the user requested file-backed
+      mappings to be present in the corefile.
+    
+      It is worth mentioning that, from all those checks described above,
+      the most fragile is the one to see if the file name ends with
+      " (deleted)".  This does not necessarily mean that the mapping is
+      anonymous, because the deleted file associated with the mapping may
+      have been a hard link to another file, for example.  The Linux
+      kernel checks to see if "i_nlink == 0", but GDB cannot easily do
+      this check (as it has been discussed, GDB would need to run as root,
+      and would need to check the contents of the /proc/PID/map_files/
+      directory in order to determine whether the deleted was a hardlink
+      or not).  Therefore, we made a compromise here, and we assume that
+      if the file name ends with " (deleted)", then the mapping is indeed
+      anonymous.  FWIW, this is something the Linux kernel could do
+      better: expose this information in a more direct way.
+    
+    - If we see the flag "sh" in the VmFlags: field (in /proc/PID/smaps),
+      then certainly the memory mapping is shared (VM_SHARED).  If we have
+      access to the VmFlags, and we don't see the "sh" there, then
+      certainly the mapping is private.  However, older Linux kernels (see
+      the code for more details) do not have the VmFlags field; in that
+      case, we use another heuristic: if we see 'p' in the permission
+      flags, then we assume that the mapping is private, even though the
+      presence of the 's' flag there would mean VM_MAYSHARE, which means
+      the mapping could still be private.  This should work OK enough,
+      however.
+    
+    Finally, it is worth mentioning that I added a new command, 'set
+    use-coredump-filter on/off'.  When it is 'on', it will read the
+    coredump_filter' file (if it exists) and use its value; otherwise, it
+    will use the default value mentioned above (0x33) to decide which memory
+    mappings to dump.
+    
+    gdb/ChangeLog:
+    2015-03-31  Sergio Durigan Junior  <sergiodj@redhat.com>
+    	    Jan Kratochvil  <jan.kratochvil@redhat.com>
+    	    Oleg Nesterov  <oleg@redhat.com>
+    
+    	PR corefiles/16092
+    	* linux-tdep.c: Include 'gdbcmd.h' and 'gdb_regex.h'.
+    	New enum identifying the various options of the coredump_filter
+    	file.
+    	(struct smaps_vmflags): New struct.
+    	(use_coredump_filter): New variable.
+    	(decode_vmflags): New function.
+    	(mapping_is_anonymous_p): Likewise.
+    	(dump_mapping_p): Likewise.
+    	(linux_find_memory_regions_full): New variables
+    	'coredumpfilter_name', 'coredumpfilterdata', 'pid', 'filterflags'.
+    	Removed variable 'modified'.  Read /proc/<PID>/smaps file; improve
+    	parsing of its information.  Implement memory mapping filtering
+    	based on its contents.
+    	(show_use_coredump_filter): New function.
+    	(_initialize_linux_tdep): New command 'set use-coredump-filter'.
+    	* NEWS: Mention the possibility of using the
+    	'/proc/PID/coredump_filter' file when generating a corefile.
+    	Mention new command 'set use-coredump-filter'.
+    
+    gdb/doc/ChangeLog:
+    2015-03-31  Sergio Durigan Junior  <sergiodj@redhat.com>
+    
+    	PR corefiles/16092
+    	* gdb.texinfo (gcore): Mention new command 'set
+    	use-coredump-filter'.
+    	(set use-coredump-filter): Document new command.
+    
+    gdb/testsuite/ChangeLog:
+    2015-03-31  Sergio Durigan Junior  <sergiodj@redhat.com>
+    
+    	PR corefiles/16092
+    	* gdb.base/coredump-filter.c: New file.
+    	* gdb.base/coredump-filter.exp: Likewise.
+
+Index: gdb-7.2/gdb/NEWS
+===================================================================
+--- gdb-7.2.orig/gdb/NEWS	2015-10-02 23:03:34.835808174 +0200
++++ gdb-7.2/gdb/NEWS	2015-10-02 23:03:37.311824861 +0200
+@@ -1,6 +1,14 @@
+ 		What has changed in GDB?
+ 	     (Organized release by release)
+ 
++* GDB now honors the content of the file /proc/PID/coredump_filter
++  (PID is the process ID) on GNU/Linux systems.  This file can be used
++  to specify the types of memory mappings that will be included in a
++  corefile.  For more information, please refer to the manual page of
++  "core(5)".  GDB also has a new command: "set use-coredump-filter
++  on|off".  It allows to set whether GDB will read the content of the
++  /proc/PID/coredump_filter file when generating a corefile.
++
+ *** Changes since GDB 7.2
+ 
+ * GDB now supports thread debugging of core dumps on GNU/Linux.
+Index: gdb-7.2/gdb/doc/gdb.texinfo
+===================================================================
+--- gdb-7.2.orig/gdb/doc/gdb.texinfo	2015-10-02 23:03:36.632820285 +0200
++++ gdb-7.2/gdb/doc/gdb.texinfo	2015-10-02 23:03:37.320824922 +0200
+@@ -9095,6 +9095,39 @@ specified, the file name defaults to @fi
+ 
+ Note that this command is implemented only for some systems (as of
+ this writing, @sc{gnu}/Linux, FreeBSD, Solaris, Unixware, and S390).
++
++On @sc{gnu}/Linux, this command can take into account the value of the
++file @file{/proc/@var{pid}/coredump_filter} when generating the core
++dump (@pxref{set use-coredump-filter}).
++
++@kindex set use-coredump-filter
++@anchor{set use-coredump-filter}
++@item set use-coredump-filter on
++@itemx set use-coredump-filter off
++Enable or disable the use of the file
++@file{/proc/@var{pid}/coredump_filter} when generating core dump
++files.  This file is used by the Linux kernel to decide what types of
++memory mappings will be dumped or ignored when generating a core dump
++file.  @var{pid} is the process ID of a currently running process.
++
++To make use of this feature, you have to write in the
++@file{/proc/@var{pid}/coredump_filter} file a value, in hexadecimal,
++which is a bit mask representing the memory mapping types.  If a bit
++is set in the bit mask, then the memory mappings of the corresponding
++types will be dumped; otherwise, they will be ignored.  This
++configuration is inherited by child processes.  For more information
++about the bits that can be set in the
++@file{/proc/@var{pid}/coredump_filter} file, please refer to the
++manpage of @code{core(5)}.
++
++By default, this option is @code{on}.  If this option is turned
++@code{off}, @value{GDBN} does not read the @file{coredump_filter} file
++and instead uses the same default value as the Linux kernel in order
++to decide which pages will be dumped in the core dump file.  This
++value is currently @code{0x33}, which means that bits @code{0}
++(anonymous private mappings), @code{1} (anonymous shared mappings),
++@code{4} (ELF headers) and @code{5} (private huge pages) are active.
++This will cause these memory mappings to be dumped automatically.
+ @end table
+ 
+ @node Character Sets
+Index: gdb-7.2/gdb/linux-nat.c
+===================================================================
+--- gdb-7.2.orig/gdb/linux-nat.c	2015-10-02 23:03:37.297824767 +0200
++++ gdb-7.2/gdb/linux-nat.c	2015-10-03 23:03:27.637423382 +0200
+@@ -57,6 +57,60 @@
+ #include <sys/vfs.h>
+ #include "solib.h"
+ #include "exceptions.h"
++#include "gdbcmd.h"
++#include "gdb_regex.h"
++#include "cli/cli-utils.h"
++#include "cli/cli-dump.h"
++
++/* This enum represents the values that the user can choose when
++   informing the Linux kernel about which memory mappings will be
++   dumped in a corefile.  They are described in the file
++   Documentation/filesystems/proc.txt, inside the Linux kernel
++   tree.  */
++
++enum
++  {
++    COREFILTER_ANON_PRIVATE = 1 << 0,
++    COREFILTER_ANON_SHARED = 1 << 1,
++    COREFILTER_MAPPED_PRIVATE = 1 << 2,
++    COREFILTER_MAPPED_SHARED = 1 << 3,
++    COREFILTER_ELF_HEADERS = 1 << 4,
++    COREFILTER_HUGETLB_PRIVATE = 1 << 5,
++    COREFILTER_HUGETLB_SHARED = 1 << 6,
++  };
++
++/* This struct is used to map flags found in the "VmFlags:" field (in
++   the /proc/<PID>/smaps file).  */
++
++struct smaps_vmflags
++  {
++    /* Zero if this structure has not been initialized yet.  It
++       probably means that the Linux kernel being used does not emit
++       the "VmFlags:" field on "/proc/PID/smaps".  */
++
++    unsigned int initialized_p : 1;
++
++    /* Memory mapped I/O area (VM_IO, "io").  */
++
++    unsigned int io_page : 1;
++
++    /* Area uses huge TLB pages (VM_HUGETLB, "ht").  */
++
++    unsigned int uses_huge_tlb : 1;
++
++    /* Do not include this memory region on the coredump (VM_DONTDUMP, "dd").  */
++
++    unsigned int exclude_coredump : 1;
++
++    /* Is this a MAP_SHARED mapping (VM_SHARED, "sh").  */
++
++    unsigned int shared_mapping : 1;
++  };
++
++/* Whether to take the /proc/PID/coredump_filter into account when
++   generating a corefile.  */
++
++static int use_coredump_filter = 1;
+ 
+ #ifndef SPUFS_MAGIC
+ #define SPUFS_MAGIC 0x23c9b64e
+@@ -4096,6 +4150,271 @@ read_mapping (FILE *mapfile,
+   return (ret != 0 && ret != EOF);
+ }
+ 
++/* Helper function to decode the "VmFlags" field in /proc/PID/smaps.
++
++   This function was based on the documentation found on
++   <Documentation/filesystems/proc.txt>, on the Linux kernel.
++
++   Linux kernels before commit
++   834f82e2aa9a8ede94b17b656329f850c1471514 (3.10) do not have this
++   field on smaps.  */
++
++static void
++decode_vmflags (char *p, struct smaps_vmflags *v)
++{
++  char *saveptr;
++  const char *s;
++
++  v->initialized_p = 1;
++  p = skip_to_space (p);
++  p = skip_spaces (p);
++
++  for (s = strtok_r (p, " ", &saveptr);
++       s != NULL;
++       s = strtok_r (NULL, " ", &saveptr))
++    {
++      if (strcmp (s, "io") == 0)
++	v->io_page = 1;
++      else if (strcmp (s, "ht") == 0)
++	v->uses_huge_tlb = 1;
++      else if (strcmp (s, "dd") == 0)
++	v->exclude_coredump = 1;
++      else if (strcmp (s, "sh") == 0)
++	v->shared_mapping = 1;
++    }
++}
++
++/* Compile a regexp and throw an exception on error.  This returns a
++   cleanup to free the resulting pattern on success.  RX must not be
++   NULL.  */
++
++static struct cleanup *
++compile_rx_or_error (regex_t *pattern, const char *rx, const char *message)
++{
++  int code;
++
++  gdb_assert (rx != NULL);
++
++  code = regcomp (pattern, rx, REG_NOSUB);
++  if (code != 0)
++    {
++      char *err = get_regcomp_error (code, pattern);
++
++      make_cleanup (xfree, err);
++      error (("%s: %s"), message, err);
++    }
++
++  return make_regfree_cleanup (pattern);
++}
++
++/* Return 1 if the memory mapping is anonymous, 0 otherwise.
++
++   FILENAME is the name of the file present in the first line of the
++   memory mapping, in the "/proc/PID/smaps" output.  For example, if
++   the first line is:
++
++   7fd0ca877000-7fd0d0da0000 r--p 00000000 fd:02 2100770   /path/to/file
++
++   Then FILENAME will be "/path/to/file".  */
++
++static int
++mapping_is_anonymous_p (const char *filename)
++{
++  static regex_t dev_zero_regex, shmem_file_regex, file_deleted_regex;
++  static int init_regex_p = 0;
++
++  if (!init_regex_p)
++    {
++      struct cleanup *c = make_cleanup (null_cleanup, NULL);
++
++      /* Let's be pessimistic and assume there will be an error while
++	 compiling the regex'es.  */
++      init_regex_p = -1;
++
++      /* DEV_ZERO_REGEX matches "/dev/zero" filenames (with or
++	 without the "(deleted)" string in the end).  We know for
++	 sure, based on the Linux kernel code, that memory mappings
++	 whose associated filename is "/dev/zero" are guaranteed to be
++	 MAP_ANONYMOUS.  */
++      compile_rx_or_error (&dev_zero_regex, "^/dev/zero\\( (deleted)\\)\\?$",
++			   _("Could not compile regex to match /dev/zero "
++			     "filename"));
++      /* SHMEM_FILE_REGEX matches "/SYSV%08x" filenames (with or
++	 without the "(deleted)" string in the end).  These filenames
++	 refer to shared memory (shmem), and memory mappings
++	 associated with them are MAP_ANONYMOUS as well.  */
++      compile_rx_or_error (&shmem_file_regex,
++			   "^/\\?SYSV[0-9a-fA-F]\\{8\\}\\( (deleted)\\)\\?$",
++			   _("Could not compile regex to match shmem "
++			     "filenames"));
++      /* FILE_DELETED_REGEX is a heuristic we use to try to mimic the
++	 Linux kernel's 'n_link == 0' code, which is responsible to
++	 decide if it is dealing with a 'MAP_SHARED | MAP_ANONYMOUS'
++	 mapping.  In other words, if FILE_DELETED_REGEX matches, it
++	 does not necessarily mean that we are dealing with an
++	 anonymous shared mapping.  However, there is no easy way to
++	 detect this currently, so this is the best approximation we
++	 have.
++
++	 As a result, GDB will dump readonly pages of deleted
++	 executables when using the default value of coredump_filter
++	 (0x33), while the Linux kernel will not dump those pages.
++	 But we can live with that.  */
++      compile_rx_or_error (&file_deleted_regex, " (deleted)$",
++			   _("Could not compile regex to match "
++			     "'<file> (deleted)'"));
++      /* We will never release these regexes, so just discard the
++	 cleanups.  */
++      discard_cleanups (c);
++
++      /* If we reached this point, then everything succeeded.  */
++      init_regex_p = 1;
++    }
++
++  if (init_regex_p == -1)
++    {
++      const char deleted[] = " (deleted)";
++      size_t del_len = sizeof (deleted) - 1;
++      size_t filename_len = strlen (filename);
++
++      /* There was an error while compiling the regex'es above.  In
++	 order to try to give some reliable information to the caller,
++	 we just try to find the string " (deleted)" in the filename.
++	 If we managed to find it, then we assume the mapping is
++	 anonymous.  */
++      return (filename_len >= del_len
++	      && strcmp (filename + filename_len - del_len, deleted) == 0);
++    }
++
++  if (*filename == '\0'
++      || regexec (&dev_zero_regex, filename, 0, NULL, 0) == 0
++      || regexec (&shmem_file_regex, filename, 0, NULL, 0) == 0
++      || regexec (&file_deleted_regex, filename, 0, NULL, 0) == 0)
++    return 1;
++
++  return 0;
++}
++
++/* Return 0 if the memory mapping (which is related to FILTERFLAGS, V,
++   MAYBE_PRIVATE_P, and MAPPING_ANONYMOUS_P) should not be dumped, or
++   greater than 0 if it should.
++
++   In a nutshell, this is the logic that we follow in order to decide
++   if a mapping should be dumped or not.
++
++   - If the mapping is associated to a file whose name ends with
++     " (deleted)", or if the file is "/dev/zero", or if it is
++     "/SYSV%08x" (shared memory), or if there is no file associated
++     with it, or if the AnonHugePages: or the Anonymous: fields in the
++     /proc/PID/smaps have contents, then GDB considers this mapping to
++     be anonymous.  Otherwise, GDB considers this mapping to be a
++     file-backed mapping (because there will be a file associated with
++     it).
++ 
++     It is worth mentioning that, from all those checks described
++     above, the most fragile is the one to see if the file name ends
++     with " (deleted)".  This does not necessarily mean that the
++     mapping is anonymous, because the deleted file associated with
++     the mapping may have been a hard link to another file, for
++     example.  The Linux kernel checks to see if "i_nlink == 0", but
++     GDB cannot easily (and normally) do this check (iff running as
++     root, it could find the mapping in /proc/PID/map_files/ and
++     determine whether there still are other hard links to the
++     inode/file).  Therefore, we made a compromise here, and we assume
++     that if the file name ends with " (deleted)", then the mapping is
++     indeed anonymous.  FWIW, this is something the Linux kernel could
++     do better: expose this information in a more direct way.
++ 
++   - If we see the flag "sh" in the "VmFlags:" field (in
++     /proc/PID/smaps), then certainly the memory mapping is shared
++     (VM_SHARED).  If we have access to the VmFlags, and we don't see
++     the "sh" there, then certainly the mapping is private.  However,
++     Linux kernels before commit
++     834f82e2aa9a8ede94b17b656329f850c1471514 (3.10) do not have the
++     "VmFlags:" field; in that case, we use another heuristic: if we
++     see 'p' in the permission flags, then we assume that the mapping
++     is private, even though the presence of the 's' flag there would
++     mean VM_MAYSHARE, which means the mapping could still be private.
++     This should work OK enough, however.  */
++
++static int
++dump_mapping_p (unsigned int filterflags, const struct smaps_vmflags *v,
++		int maybe_private_p, int mapping_anon_p, int mapping_file_p,
++		const char *filename)
++{
++  /* Initially, we trust in what we received from our caller.  This
++     value may not be very precise (i.e., it was probably gathered
++     from the permission line in the /proc/PID/smaps list, which
++     actually refers to VM_MAYSHARE, and not VM_SHARED), but it is
++     what we have until we take a look at the "VmFlags:" field
++     (assuming that the version of the Linux kernel being used
++     supports it, of course).  */
++  int private_p = maybe_private_p;
++
++  /* We always dump vDSO and vsyscall mappings, because it's likely that
++     there'll be no file to read the contents from at core load time.
++     The kernel does the same.  */
++  if (strcmp ("[vdso]", filename) == 0
++      || strcmp ("[vsyscall]", filename) == 0)
++    return 1;
++
++  if (v->initialized_p)
++    {
++      /* We never dump I/O mappings.  */
++      if (v->io_page)
++	return 0;
++
++      /* Check if we should exclude this mapping.  */
++      if (v->exclude_coredump)
++	return 0;
++
++      /* Update our notion of whether this mapping is shared or
++	 private based on a trustworthy value.  */
++      private_p = !v->shared_mapping;
++
++      /* HugeTLB checking.  */
++      if (v->uses_huge_tlb)
++	{
++	  if ((private_p && (filterflags & COREFILTER_HUGETLB_PRIVATE))
++	      || (!private_p && (filterflags & COREFILTER_HUGETLB_SHARED)))
++	    return 1;
++
++	  return 0;
++	}
++    }
++
++  if (private_p)
++    {
++      if (mapping_anon_p && mapping_file_p)
++	{
++	  /* This is a special situation.  It can happen when we see a
++	     mapping that is file-backed, but that contains anonymous
++	     pages.  */
++	  return ((filterflags & COREFILTER_ANON_PRIVATE) != 0
++		  || (filterflags & COREFILTER_MAPPED_PRIVATE) != 0);
++	}
++      else if (mapping_anon_p)
++	return (filterflags & COREFILTER_ANON_PRIVATE) != 0;
++      else
++	return (filterflags & COREFILTER_MAPPED_PRIVATE) != 0;
++    }
++  else
++    {
++      if (mapping_anon_p && mapping_file_p)
++	{
++	  /* This is a special situation.  It can happen when we see a
++	     mapping that is file-backed, but that contains anonymous
++	     pages.  */
++	  return ((filterflags & COREFILTER_ANON_SHARED) != 0
++		  || (filterflags & COREFILTER_MAPPED_SHARED) != 0);
++	}
++      else if (mapping_anon_p)
++	return (filterflags & COREFILTER_ANON_SHARED) != 0;
++      else
++	return (filterflags & COREFILTER_MAPPED_SHARED) != 0;
++    }
++}
++
+ /* Fills the "to_find_memory_regions" target vector.  Lists the memory
+    regions in the inferior for a corefile.  */
+ 
+@@ -4108,9 +4427,32 @@ linux_nat_find_memory_regions (int (*fun
+   char mapsfilename[MAXPATHLEN];
+   FILE *mapsfile;
+   long long addr, endaddr, size, offset, inode;
+-  char permissions[8], device[8], filename[MAXPATHLEN];
+-  int read, write, exec;
++  char permissions[8], device[8], filenamebuf[MAXPATHLEN];
+   struct cleanup *cleanup;
++  char coredumpfilter_name[100];
++  /* Default dump behavior of coredump_filter (0x33), according to
++     Documentation/filesystems/proc.txt from the Linux kernel
++     tree.  */
++  unsigned int filterflags = (COREFILTER_ANON_PRIVATE
++			      | COREFILTER_ANON_SHARED
++			      | COREFILTER_ELF_HEADERS
++			      | COREFILTER_HUGETLB_PRIVATE);
++
++  if (use_coredump_filter)
++    {
++      FILE *f;
++
++      xsnprintf (coredumpfilter_name, sizeof (coredumpfilter_name),
++		 "/proc/%d/coredump_filter", pid);
++
++      f = fopen (coredumpfilter_name, "r");
++      if (f != NULL)
++	{
++	  if (fscanf (f, "%x", &filterflags) != 1)
++	    {}
++	  fclose (f);
++	}
++    }
+ 
+   /* Compose the filename for the /proc memory map, and open it.  */
+   sprintf (mapsfilename, "/proc/%d/smaps", pid);
+@@ -4129,9 +4471,30 @@ linux_nat_find_memory_regions (int (*fun
+ 
+   /* Now iterate until end-of-file.  */
+   while (read_mapping (mapsfile, &addr, &endaddr, &permissions[0],
+-		       &offset, &device[0], &inode, &filename[0]))
++		       &offset, &device[0], &inode, &filenamebuf[0]))
+     {
+-      int modified = 0, has_anonymous = 0;
++      int modified = 0;
++
++      struct smaps_vmflags v;
++      int read, write, exec, private;
++      int has_anonymous = 0;
++      int should_dump_p = 0;
++      int mapping_anon_p;
++      int mapping_file_p;
++      const char *filename = skip_spaces (filenamebuf);
++
++      memset (&v, 0, sizeof (v));
++      mapping_anon_p = mapping_is_anonymous_p (filename);
++      /* If the mapping is not anonymous, then we can consider it
++	 to be file-backed.  These two states (anonymous or
++	 file-backed) seem to be exclusive, but they can actually
++	 coexist.  For example, if a file-backed mapping has
++	 "Anonymous:" pages (see more below), then the Linux
++	 kernel will dump this mapping when the user specified
++	 that she only wants anonymous mappings in the corefile
++	 (*even* when she explicitly disabled the dumping of
++	 file-backed mappings).  */
++      mapping_file_p = !mapping_anon_p;
+ 
+       size = endaddr - addr;
+ 
+@@ -4140,6 +4503,17 @@ linux_nat_find_memory_regions (int (*fun
+       write = (strchr (permissions, 'w') != 0);
+       exec = (strchr (permissions, 'x') != 0);
+ 
++      /* 'private' here actually means VM_MAYSHARE, and not
++	 VM_SHARED.  In order to know if a mapping is really
++	 private or not, we must check the flag "sh" in the
++	 VmFlags field.  This is done by decode_vmflags.  However,
++	 if we are using a Linux kernel released before the commit
++	 834f82e2aa9a8ede94b17b656329f850c1471514 (3.10), we will
++	 not have the VmFlags there.  In this case, there is
++	 really no way to know if we are dealing with VM_SHARED,
++	 so we just assume that VM_MAYSHARE is enough.  */
++      private = strchr (permissions, 'p') != 0;
++
+       for (;;)
+ 	{
+ 	  int i;
+@@ -4156,12 +4530,24 @@ linux_nat_find_memory_regions (int (*fun
+ 	      warning (_("Error parsing {s,}maps file '%s'"), mapsfilename);
+ 	      break;
+ 	    }
++
+ 	  if (strcmp (keyword, "Anonymous:") == 0)
+-	    has_anonymous = 1;
+-	  if (strcmp (keyword, "Shared_Dirty:") == 0
+-		      || strcmp (keyword, "Private_Dirty:") == 0
+-		      || strcmp (keyword, "Swap:") == 0
+-		      || strcmp (keyword, "Anonymous:") == 0)
++	    {
++	      /* Older Linux kernels did not support the
++		 "Anonymous:" counter.  Check it here.  */
++	      has_anonymous = 1;
++	    }
++	  else if (strcmp (keyword, "VmFlags:") == 0)
++	    {
++	      char line[MAXPATHLEN];
++	      
++	      if (fscanf (mapsfile, "%[^\n]\n", line) == 1)
++		decode_vmflags (line, &v);
++	      continue;
++	    }
++
++	  if (strcmp (keyword, "AnonHugePages:") == 0
++	      || strcmp (keyword, "Anonymous:") == 0)
+ 	    {
+ 	      unsigned long number;
+ 
+@@ -4171,8 +4557,26 @@ linux_nat_find_memory_regions (int (*fun
+ 			   mapsfilename);
+ 		  break;
+ 		}
+-	      if (number != 0)
+-		modified = 1;
++	      if (number > 0)
++		{
++		  /* Even if we are dealing with a file-backed
++		     mapping, if it contains anonymous pages we
++		     consider it to be *also* an anonymous
++		     mapping, because this is what the Linux
++		     kernel does:
++
++		     // Dump segments that have been written to.
++		     if (vma->anon_vma && FILTER(ANON_PRIVATE))
++			    goto whole;
++
++		     Note that if the mapping is already marked as
++		     file-backed (i.e., mapping_file_p is
++		     non-zero), then this is a special case, and
++		     this mapping will be dumped either when the
++		     user wants to dump file-backed *or* anonymous
++		     mappings.  */
++		  mapping_anon_p = 1;
++		}
+ 	    }
+ 	  do
+ 	    {
+@@ -4181,10 +4585,16 @@ linux_nat_find_memory_regions (int (*fun
+ 	  while (i != EOF && i != '\n');
+ 	}
+ 
+-      /* Older Linux kernels did not support the "Anonymous:" counter.
+-	 If it is missing, we can't be sure - dump all the pages.  */
+-      if (!has_anonymous)
+-	modified = 1;
++      if (has_anonymous)
++	should_dump_p = dump_mapping_p (filterflags, &v, private,
++					mapping_anon_p, mapping_file_p,
++					filename);
++      else
++	{
++	  /* Older Linux kernels did not support the "Anonymous:" counter.
++	     If it is missing, we can't be sure - dump all the pages.  */
++	  should_dump_p = 1;
++	}
+ 
+       if (info_verbose)
+ 	{
+@@ -4200,7 +4610,11 @@ linux_nat_find_memory_regions (int (*fun
+ 
+       /* Invoke the callback function to create the corefile
+ 	 segment.  */
+-      func (addr, size, read, write, exec, modified, obfd);
++      if (should_dump_p)
++	func (addr, size,
++	      read, write, exec, 1, /* MODIFIED is true because we
++				       want to dump the mapping.  */
++	      obfd);
+     }
+   do_cleanups (cleanup);
+   return 0;
+@@ -5957,6 +6371,17 @@ linux_nat_get_siginfo (ptid_t ptid)
+   return &siginfo;
+ }
+ 
++/* Display whether the gcore command is using the
++   /proc/PID/coredump_filter file.  */
++
++static void
++show_use_coredump_filter (struct ui_file *file, int from_tty,
++			  struct cmd_list_element *c, const char *value)
++{
++  fprintf_filtered (file, _("Use of /proc/PID/coredump_filter file to generate"
++			    " corefiles is %s.\n"), value);
++}
++
+ /* Provide a prototype to silence -Wmissing-prototypes.  */
+ extern initialize_file_ftype _initialize_linux_nat;
+ 
+@@ -6017,6 +6442,18 @@ enabled by default on some platforms."),
+ 			   &set_disable_randomization,
+ 			   &show_disable_randomization,
+ 			   &setlist, &showlist);
++
++  add_setshow_boolean_cmd ("use-coredump-filter", class_files,
++			   &use_coredump_filter, _("\
++Set whether gcore should consider /proc/PID/coredump_filter."),
++			   _("\
++Show whether gcore should consider /proc/PID/coredump_filter."),
++			   _("\
++Use this command to set whether gcore should consider the contents\n\
++of /proc/PID/coredump_filter when generating the corefile.  For more information\n\
++about this file, refer to the manpage of core(5)."),
++			   NULL, show_use_coredump_filter,
++			   &setlist, &showlist);
+ }
+ 
+ 
+Index: gdb-7.2/gdb/testsuite/gdb.base/coredump-filter.c
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.base/coredump-filter.c	2015-10-02 23:03:37.351825131 +0200
+@@ -0,0 +1,61 @@
++/* Copyright 2015 Free Software Foundation, Inc.
++
++   This file is part of GDB.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#define _GNU_SOURCE
++#include <stdlib.h>
++#include <assert.h>
++#include <unistd.h>
++#include <stdio.h>
++#include <sys/mman.h>
++#include <errno.h>
++#include <string.h>
++
++static void *
++do_mmap (void *addr, size_t size, int prot, int flags, int fd, off_t offset)
++{
++  void *ret = mmap (addr, size, prot, flags, fd, offset);
++
++  assert (ret != NULL);
++  return ret;
++}
++
++int
++main (int argc, char *argv[])
++{
++  const size_t size = 10;
++  const int default_prot = PROT_READ | PROT_WRITE;
++  char *private_anon, *shared_anon;
++  char *dont_dump;
++  int i;
++
++  private_anon = do_mmap (NULL, size, default_prot,
++			  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++  memset (private_anon, 0x11, size);
++
++  shared_anon = do_mmap (NULL, size, default_prot,
++			 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++  memset (shared_anon, 0x22, size);
++
++  dont_dump = do_mmap (NULL, size, default_prot,
++		       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++  memset (dont_dump, 0x55, size);
++  i = madvise (dont_dump, size, MADV_DONTDUMP);
++  assert_perror (errno);
++  assert (i == 0);
++
++  return 0; /* break-here */
++}
+Index: gdb-7.2/gdb/testsuite/gdb.base/coredump-filter.exp
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.base/coredump-filter.exp	2015-10-02 23:09:46.565311404 +0200
+@@ -0,0 +1,267 @@
++# Copyright 2015 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++set testfile coredump-filter
++set binfile $objdir/$subdir/${testfile}
++set srcfile coredump-filter.c
++
++if { [prepare_for_testing "failed to prepare" $testfile $srcfile debug] } {
++    untested "could not compile test program"
++    return -1
++}
++
++if { ![runto_main] } {
++    untested "could not run to main"
++    return -1
++}
++
++gdb_breakpoint [gdb_get_line_number "break-here"]
++gdb_continue_to_breakpoint "break-here" ".* break-here .*"
++
++# Invoke "gcore".  CORE is the name of the core file to write.  TEST
++# is the name of the test case.  This will return 1 if the core file
++# was created, 0 otherwise.  If this fails to make a core file because
++# this configuration of gdb does not support making core files, it
++# will call "unsupported", not "fail".  However, if this fails to make
++# a core file for some other reason, then it will call "fail".
++
++proc gdb_gcore_cmd {core test} {
++    global gdb_prompt
++
++    set result 0
++    gdb_test_multiple "gcore $core" $test {
++	-re "Saved corefile .*\[\r\n\]+$gdb_prompt $" {
++	    pass $test
++	    set result 1
++	}
++	-re "(?:Can't create a corefile|Target does not support core file generation\\.)\[\r\n\]+$gdb_prompt $" {
++	    unsupported $test
++	}
++    }
++
++    return $result
++}
++
++# Load core file CORE.  TEST is the name of the test case.
++# This will record a pass/fail for loading the core file.
++# Returns:
++#  1 - core file is successfully loaded
++#  0 - core file loaded but has a non fatal error
++# -1 - core file failed to load
++
++proc gdb_core_cmd { core test } {
++    global gdb_prompt
++
++    gdb_test_multiple "core $core" "$test" {
++        -re "\\\[Thread debugging using \[^ \r\n\]* enabled\\\]\r\n" {
++            exp_continue
++        }
++        -re " is not a core dump:.*\r\n$gdb_prompt $" {
++            fail "$test (bad file format)"
++            return -1
++        }
++        -re ": No such file or directory.*\r\n$gdb_prompt $" {
++            fail "$test (file not found)"
++            return -1
++        }
++        -re "Couldn't find .* registers in core file.*\r\n$gdb_prompt $" {
++            fail "$test (incomplete note section)"
++            return 0
++        }
++        -re "Core was generated by .*\r\n$gdb_prompt $" {
++            pass "$test"
++            return 1
++        }
++        -re ".*$gdb_prompt $" {
++            fail "$test"
++            return -1
++        }
++        timeout {
++            fail "$test (timeout)"
++            return -1
++        }
++    }
++    fail "unsupported output from 'core' command"
++    return -1
++}
++
++proc do_save_core { filter_flag core ipid } {
++    verbose -log "writing $filter_flag to /proc/$ipid/coredump_filter"
++
++    remote_exec target "sh -c \"echo $filter_flag > /proc/$ipid/coredump_filter\""
++
++    # Generate a corefile.
++    gdb_gcore_cmd "$core" "save corefile"
++}
++
++proc do_load_and_test_core { core var working_var working_value } {
++    global hex decimal addr
++
++    set core_loaded [gdb_core_cmd "$core" "load core"]
++    if { $core_loaded == -1 } {
++	fail "loading $core"
++	return
++    }
++
++    # Access the memory the addresses point to.
++    gdb_test "print/x *(char *) $addr($var)" "\(\\\$$decimal = <error: \)?Cannot access memory at address $hex\(>\)?" \
++	"printing $var when core is loaded (should not work)"
++    gdb_test "print/x *(char *) $addr($working_var)" " = $working_value.*" \
++	"print/x *$working_var ( = $working_value)"
++}
++
++# We do not do file-backed mappings in the test program, but it is
++# important to test this anyway.  One way of performing the test is to
++# load GDB with a corefile but without a binary, and then ask for the
++# disassemble of a function (i.e., the binary's .text section).  GDB
++# should fail in this case.  However, it must succeed if the binary is
++# provided along with the corefile.  This is what we test here.
++
++proc test_disasm { core address should_fail } {
++    global testfile hex
++
++    # Restart GDB without loading the binary.
++    with_test_prefix "no binary" {
++	gdb_exit
++	gdb_start
++
++	set core_loaded [gdb_core_cmd "$core" "load core"]
++	if { $core_loaded == -1 } {
++	    fail "loading $core"
++	    return
++	}
++
++	if { $should_fail == 1 } {
++	    gdb_test "x/i \$pc" "=> $hex:\tCannot access memory at address $hex" \
++		"disassemble function with corefile and without a binary"
++	} else {
++	    gdb_test "x/i \$pc" "=> $hex:\t\[^C\].*" \
++		"disassemble function with corefile and without a binary"
++	}
++    }
++
++    with_test_prefix "with binary" {
++	clean_restart $testfile
++
++	set core_loaded [gdb_core_cmd "$core" "load core"]
++	if { $core_loaded == -1 } {
++	    fail "loading $core"
++	    return
++	}
++
++	gdb_test "disassemble $address" "Dump of assembler code for function.*" \
++	    "disassemble function with corefile and with a binary"
++    }
++}
++
++set non_private_anon_core $objdir/$subdir/non-private-anon.gcore
++set non_shared_anon_core $objdir/$subdir/non-shared-anon.gcore
++# A corefile without {private,shared} {anonymous,file-backed} pages
++set non_private_shared_anon_file_core $objdir/$subdir/non-private-shared-anon-file.gcore
++set dont_dump_core $objdir/$subdir/dont-dump.gcore
++
++# We will generate a few corefiles.
++#
++# This list is composed by sub-lists, and their elements are (in
++# order):
++#
++# - name of the test
++# - hexadecimal value to be put in the /proc/PID/coredump_filter file
++# - name of the variable that contains the name of the corefile to be
++#   generated (including the initial $).
++# - name of the variable in the C source code that points to the
++#   memory mapping that will NOT be present in the corefile.
++# - name of a variable in the C source code that points to a memory
++#   mapping that WILL be present in the corefile
++# - corresponding value expected for the above variable
++#
++# This list refers to the corefiles generated by MAP_ANONYMOUS in the
++# test program.
++
++set all_anon_corefiles { { "non-Private-Anonymous" "0x7e" \
++			       $non_private_anon_core \
++			       "private_anon" \
++			       "shared_anon" "0x22" }
++    { "non-Shared-Anonymous" "0x7d" \
++	  $non_shared_anon_core "shared_anon" \
++	  "private_anon" "0x11" }
++    { "DoNotDump" "0x33" \
++	  $dont_dump_core "dont_dump" \
++	  "shared_anon" "0x22" } }
++
++# If corefile loading is not supported, we do not even try to run the
++# tests.
++set core_supported [gdb_gcore_cmd "$non_private_anon_core" "save a corefile"]
++if { !$core_supported } {
++    untested "corefile generation is not supported"
++    return -1
++}
++
++# Get the inferior's PID.
++set infpid ""
++gdb_test_multiple "info inferiors" "getting inferior pid" {
++    -re "process \($decimal\).*\r\n$gdb_prompt $" {
++	set infpid $expect_out(1,string)
++    }
++}
++
++# Get the main function's address.
++set main_addr ""
++gdb_test_multiple "print/x &main" "getting main's address" {
++    -re "$decimal = \($hex\)\r\n$gdb_prompt $" {
++	set main_addr $expect_out(1,string)
++    }
++}
++
++# Obtain the address of each variable that will be checked on each
++# case.
++foreach item $all_anon_corefiles {
++    foreach name [list [lindex $item 3] [lindex $item 4]] {
++	set test "print/x $name"
++	gdb_test_multiple $test $test {
++	    -re " = \($hex\)\r\n$gdb_prompt $" {
++		set addr($name) $expect_out(1,string)
++	    }
++	}
++    }
++}
++
++# Generate corefiles for the "anon" case.
++foreach item $all_anon_corefiles {
++    with_test_prefix "saving corefile for [lindex $item 0]" {
++	do_save_core [lindex $item 1] [subst [lindex $item 2]] $infpid
++    }
++}
++
++with_test_prefix "saving corefile for non-Private-Shared-Anon-File" {
++    do_save_core "0x60" $non_private_shared_anon_file_core $infpid
++}
++
++clean_restart $testfile
++
++foreach item $all_anon_corefiles {
++    with_test_prefix "loading and testing corefile for [lindex $item 0]" {
++	do_load_and_test_core [subst [lindex $item 2]] [lindex $item 3] \
++	    [lindex $item 4] [lindex $item 5]
++    }
++
++    with_test_prefix "disassembling function main for [lindex $item 0]" {
++	test_disasm [subst [lindex $item 2]] $main_addr 0
++    }
++}
++
++with_test_prefix "loading and testing corefile for non-Private-Shared-Anon-File" {
++    test_disasm $non_private_shared_anon_file_core $main_addr 1
++}

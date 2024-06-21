@@ -1,0 +1,172 @@
+Original patch by Sergio Durigan Junior:
+
+  <https://sourceware.org/ml/gdb-patches/2013-02/msg00164.html>
+  Message-ID: <m338x9npn5.fsf@redhat.com>
+
+	Hi,
+
+	<https://bugzilla.redhat.com/show_bug.cgi?id=903734>
+
+	(The bug is marked as private, I believe you won't be able to see it.)
+
+	This is a very specific bug.  It occurs when one tries to set the value
+	of an internal variable's bitfield which is declared inside an inner
+	structure, i.e., a structure declared inside another.  For example:
+
+	    struct foo
+	      {
+		int a;
+		struct
+		  {
+		    unsigned int b : 1;
+		  } inner;
+	      };
+
+	Now, consider that we create an internal variable out of this structure:
+
+	    (gdb) set $p = (struct foo) {0}
+	    (gdb) print $p
+	    $1 = {a = 0, inner = {b = 0}}
+
+	Now, if we try to set the bitfield `b':
+
+	    (gdb) set $p.inner.b = 1
+	    (gdb) p $p
+	    $2 = {a = 1, inner = {b = 0}}
+
+	This happens because of some miscalculations of offsets inside
+	gdb/valops.c:value_assign: GDB forgets to add the offset of the `inner'
+	struct to the offset of the bitfield, thus setting the wrong field.
+
+	The patch below fixes it, and includes some new tests for this specific
+	scenario.  I ran a regression test on my Fedora 16 box (x86, x86_64 with
+	and without -m32, gdbserver for both), and found no regressions.
+
+Final version of the patch:
+
+  <https://sourceware.org/ml/gdb-patches/2013-02/msg00252.html>
+  Message-ID: <m3y5euhgjd.fsf@redhat.com>
+
+=====
+
+commit d9e983823a937b588efcdca81417eb39ae0c8797
+Author: Sergio Durigan Junior <sergiodj@redhat.com>
+Date:   Mon Feb 11 18:05:35 2013 +0000
+
+    gdb/:
+    2013-02-11  Sergio Durigan Junior  <sergiodj@redhat.com>
+    
+    	* valops.c (value_assign): Handling bitfield offset in
+    	`lval_internalvar_component' case.
+    
+    gdb/testsuite/:
+    2013-02-11  Sergio Durigan Junior  <sergiodj@redhat.com>
+    
+    	* gdb.base/bitfields.c (struct internalvartest): New declaration.
+    	* gdb.base/bitfields.exp (bitfield_internalvar): New function.
+
+Index: gdb-7.2/gdb/testsuite/gdb.base/bitfields.c
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/gdb.base/bitfields.c
++++ gdb-7.2/gdb/testsuite/gdb.base/bitfields.c
+@@ -23,6 +23,22 @@ struct fields
+   signed char	sc    ;
+ } flags;
+ 
++struct internalvartest
++{
++  unsigned int a : 1;
++  struct
++    {
++      unsigned int b : 1;
++      struct
++	{
++	  unsigned int c : 1;
++	  signed int   d : 1;
++	} deep;
++      signed int   e : 1;
++    } inner;
++  signed int   f : 1;
++} dummy_internalvartest;
++
+ void break1 ()
+ {
+ }
+Index: gdb-7.2/gdb/testsuite/gdb.base/bitfields.exp
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/gdb.base/bitfields.exp
++++ gdb-7.2/gdb/testsuite/gdb.base/bitfields.exp
+@@ -250,6 +250,31 @@ proc bitfield_at_offset {} {
+     gdb_test "print container.two.u3" ".* = 3"
+ }
+ 
++proc bitfield_internalvar {} {
++    global gdb_prompt
++
++    # First, we create an internal var holding an instance of
++    # the struct (zeroed out).
++    gdb_test "set \$myvar = (struct internalvartest) \{0\}" "" \
++      "set internal var"
++
++    # Now, we set the proper bits.
++    gdb_test_no_output "set \$myvar.a = 0"
++    gdb_test_no_output "set \$myvar.inner.b = 1"
++    gdb_test_no_output "set \$myvar.inner.deep.c = 0"
++    gdb_test_no_output "set \$myvar.inner.deep.d = -1"
++    gdb_test_no_output "set \$myvar.inner.e = 1"
++    gdb_test_no_output "set \$myvar.f = 1"
++
++    # Here comes the true testing.
++    gdb_test "print \$myvar.a" "\\$\[0-9\]\+ = 0"
++    gdb_test "print \$myvar.inner.b" "\\$\[0-9\]\+ = 1"
++    gdb_test "print \$myvar.inner.deep.c" "\\$\[0-9\]\+ = 0"
++    gdb_test "print \$myvar.inner.deep.d" "\\$\[0-9\]\+ = -1"
++    gdb_test "print \$myvar.inner.e" "\\$\[0-9\]\+ = -1"
++    gdb_test "print \$myvar.f" "\\$\[0-9\]\+ = -1"
++}
++
+ gdb_start
+ gdb_reinitialize_dir $srcdir/$subdir
+ gdb_load ${binfile}
+@@ -283,3 +308,4 @@ if [istarget "mips-idt-*"] then {
+ bitfield_signedness
+ 
+ bitfield_at_offset
++bitfield_internalvar
+Index: gdb-7.2/gdb/valops.c
+===================================================================
+--- gdb-7.2.orig/gdb/valops.c
++++ gdb-7.2/gdb/valops.c
+@@ -1181,11 +1181,27 @@ value_assign (struct value *toval, struc
+       return val;
+ 
+     case lval_internalvar_component:
+-      set_internalvar_component (VALUE_INTERNALVAR (toval),
+-				 value_offset (toval),
+-				 value_bitpos (toval),
+-				 value_bitsize (toval),
+-				 fromval);
++      {
++	int offset = value_offset (toval);
++
++	/* Are we dealing with a bitfield?
++
++	   It is important to mention that `value_parent (toval)' is
++	   non-NULL iff `value_bitsize (toval)' is non-zero.  */
++	if (value_bitsize (toval))
++	  {
++	    /* VALUE_INTERNALVAR below refers to the parent value, while
++	       the offset is relative to this parent value.  */
++	    gdb_assert (value_parent (value_parent (toval)) == NULL);
++	    offset += value_offset (value_parent (toval));
++	  }
++
++	set_internalvar_component (VALUE_INTERNALVAR (toval),
++				   offset,
++				   value_bitpos (toval),
++				   value_bitsize (toval),
++				   fromval);
++      }
+       break;
+ 
+     case lval_memory:

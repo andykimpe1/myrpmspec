@@ -1,0 +1,359 @@
+commit ece7225f44e5eafd7817f19109bfcf740c259f96
+Author: Sergio Durigan Junior <sergiodj@redhat.com>
+Date:   Tue Mar 29 10:25:45 2011 -0300
+
+    patch 2: internal var
+
+Index: gdb-7.2/gdb/ax-gdb.c
+===================================================================
+--- gdb-7.2.orig/gdb/ax-gdb.c	2011-08-11 17:30:39.000000000 +0200
++++ gdb-7.2/gdb/ax-gdb.c	2011-08-11 17:40:02.000000000 +0200
+@@ -1990,7 +1990,8 @@ gen_expr (struct expression *exp, union 
+ 
+     case OP_INTERNALVAR:
+       {
+-	const char *name = internalvar_name ((*pc)[1].internalvar);
++	struct internalvar *var = (*pc)[1].internalvar;
++	const char *name = internalvar_name (var);
+ 	struct trace_state_variable *tsv;
+ 
+ 	(*pc) += 3;
+@@ -2004,7 +2005,7 @@ gen_expr (struct expression *exp, union 
+ 	    value->kind = axs_rvalue;
+ 	    value->type = builtin_type (exp->gdbarch)->builtin_long_long;
+ 	  }
+-	else
++	else if (! compile_internalvar_to_ax (var, ax, value))
+ 	  error (_("$%s is not a trace state variable; GDB agent expressions cannot use convenience variables."), name);
+       }
+       break;
+Index: gdb-7.2/gdb/infrun.c
+===================================================================
+--- gdb-7.2.orig/gdb/infrun.c	2011-08-11 17:30:39.000000000 +0200
++++ gdb-7.2/gdb/infrun.c	2011-08-11 17:40:02.000000000 +0200
+@@ -6188,7 +6188,8 @@ static struct lval_funcs siginfo_value_f
+    if there's no object available.  */
+ 
+ static struct value *
+-siginfo_make_value (struct gdbarch *gdbarch, struct internalvar *var)
++siginfo_make_value (struct gdbarch *gdbarch, struct internalvar *var,
++		    void *ignore)
+ {
+   if (target_has_stack
+       && !ptid_equal (inferior_ptid, null_ptid)
+@@ -6750,6 +6751,15 @@ show_schedule_multiple (struct ui_file *
+ Resuming the execution of threads of all processes is %s.\n"), value);
+ }
+ 
++/* Implementation of `siginfo' variable.  */
++
++static const struct internalvar_funcs siginfo_funcs =
++{
++  siginfo_make_value,
++  NULL,
++  NULL
++};
++
+ void
+ _initialize_infrun (void)
+ {
+@@ -7019,7 +7029,7 @@ Tells gdb whether to detach the child of
+      value with a void typed value, and when we get here, gdbarch
+      isn't initialized yet.  At this point, we're quite sure there
+      isn't another convenience variable of the same name.  */
+-  create_internalvar_type_lazy ("_siginfo", siginfo_make_value);
++  create_internalvar_type_lazy ("_siginfo", &siginfo_funcs, NULL);
+ 
+   add_setshow_boolean_cmd ("observer", no_class,
+ 			   &observer_mode_1, _("\
+Index: gdb-7.2/gdb/thread.c
+===================================================================
+--- gdb-7.2.orig/gdb/thread.c	2011-08-11 17:30:39.000000000 +0200
++++ gdb-7.2/gdb/thread.c	2011-08-11 17:40:02.000000000 +0200
+@@ -1282,7 +1282,8 @@ update_thread_list (void)
+    no thread is selected, or no threads exist.  */
+ 
+ static struct value *
+-thread_id_make_value (struct gdbarch *gdbarch, struct internalvar *var)
++thread_id_make_value (struct gdbarch *gdbarch, struct internalvar *var,
++		      void *ignore)
+ {
+   struct thread_info *tp = find_thread_ptid (inferior_ptid);
+ 
+@@ -1293,6 +1294,15 @@ thread_id_make_value (struct gdbarch *gd
+ /* Commands with a prefix of `thread'.  */
+ struct cmd_list_element *thread_cmd_list = NULL;
+ 
++/* Implementation of `thread' variable.  */
++
++static struct internalvar_funcs thread_funcs =
++{
++  thread_id_make_value,
++  NULL,
++  NULL
++};
++
+ void
+ _initialize_thread (void)
+ {
+@@ -1324,5 +1334,5 @@ Show printing of thread events (such as 
+          show_print_thread_events,
+          &setprintlist, &showprintlist);
+ 
+-  create_internalvar_type_lazy ("_thread", thread_id_make_value);
++  create_internalvar_type_lazy ("_thread", &thread_funcs, NULL);
+ }
+Index: gdb-7.2/gdb/tracepoint.c
+===================================================================
+--- gdb-7.2.orig/gdb/tracepoint.c	2011-08-11 17:33:10.000000000 +0200
++++ gdb-7.2/gdb/tracepoint.c	2011-08-11 17:40:02.000000000 +0200
+@@ -4331,7 +4331,8 @@ info_static_tracepoint_markers_command (
+    available.  */
+ 
+ static struct value *
+-sdata_make_value (struct gdbarch *gdbarch, struct internalvar *var)
++sdata_make_value (struct gdbarch *gdbarch, struct internalvar *var,
++		  void *ignore)
+ {
+   LONGEST size;
+   gdb_byte *buf;
+@@ -4356,6 +4357,15 @@ sdata_make_value (struct gdbarch *gdbarc
+     return allocate_value (builtin_type (gdbarch)->builtin_void);
+ }
+ 
++/* Implementation of `sdata' variable.  */
++
++static const struct internalvar_funcs sdata_funcs =
++{
++  sdata_make_value,
++  NULL,
++  NULL
++};
++
+ /* module initialization */
+ void
+ _initialize_tracepoint (void)
+@@ -4366,7 +4376,7 @@ _initialize_tracepoint (void)
+      value with a void typed value, and when we get here, gdbarch
+      isn't initialized yet.  At this point, we're quite sure there
+      isn't another convenience variable of the same name.  */
+-  create_internalvar_type_lazy ("_sdata", sdata_make_value);
++  create_internalvar_type_lazy ("_sdata", &sdata_funcs, NULL);
+ 
+   traceframe_number = -1;
+   tracepoint_number = -1;
+Index: gdb-7.2/gdb/value.c
+===================================================================
+--- gdb-7.2.orig/gdb/value.c	2011-08-11 17:30:39.000000000 +0200
++++ gdb-7.2/gdb/value.c	2011-08-11 17:41:04.000000000 +0200
+@@ -40,6 +40,7 @@
+ #include "valprint.h"
+ #include "cli/cli-decode.h"
+ #include "observer.h"
++#include "exceptions.h"
+ 
+ #include "python/python.h"
+ 
+@@ -1056,7 +1057,14 @@ struct internalvar
+       struct value *value;
+ 
+       /* The call-back routine used with INTERNALVAR_MAKE_VALUE.  */
+-      internalvar_make_value make_value;
++      struct
++        {
++	  /* The functions to call.  */
++	  const struct internalvar_funcs *functions;
++
++	  /* The function's user-data.  */
++	  void *data;
++        } make_value;
+ 
+       /* The internal function used with INTERNALVAR_FUNCTION.  */
+       struct
+@@ -1161,18 +1169,39 @@ create_internalvar (const char *name)
+ /* Create an internal variable with name NAME and register FUN as the
+    function that value_of_internalvar uses to create a value whenever
+    this variable is referenced.  NAME should not normally include a
+-   dollar sign.  */
++   dollar sign.  DATA is passed uninterpreted to FUN when it is
++   called.  CLEANUP, if not NULL, is called when the internal variable
++   is destroyed.  It is passed DATA as its only argument.  */
+ 
+ struct internalvar *
+-create_internalvar_type_lazy (char *name, internalvar_make_value fun)
++create_internalvar_type_lazy (const char *name,
++			      const struct internalvar_funcs *funcs,
++			      void *data)
+ {
+   struct internalvar *var = create_internalvar (name);
+ 
+   var->kind = INTERNALVAR_MAKE_VALUE;
+-  var->u.make_value = fun;
++  var->u.make_value.functions = funcs;
++  var->u.make_value.data = data;
+   return var;
+ }
+ 
++/* See documentation in value.h.  */
++
++int
++compile_internalvar_to_ax (struct internalvar *var,
++			   struct agent_expr *expr,
++			   struct axs_value *value)
++{
++  if (var->kind != INTERNALVAR_MAKE_VALUE
++      || var->u.make_value.functions->compile_to_ax == NULL)
++    return 0;
++
++  var->u.make_value.functions->compile_to_ax (var, expr, value,
++					      var->u.make_value.data);
++  return 1;
++}
++
+ /* Look up an internal variable with name NAME.  NAME should not
+    normally include a dollar sign.
+ 
+@@ -1233,7 +1262,8 @@ value_of_internalvar (struct gdbarch *gd
+       break;
+ 
+     case INTERNALVAR_MAKE_VALUE:
+-      val = (*var->u.make_value) (gdbarch, var);
++      val = (*var->u.make_value.functions->make_value) (gdbarch, var,
++							var->u.make_value.data);
+       break;
+ 
+     default:
+@@ -1432,6 +1462,11 @@ clear_internalvar (struct internalvar *v
+       xfree (var->u.string);
+       break;
+ 
++    case INTERNALVAR_MAKE_VALUE:
++      if (var->u.make_value.functions->destroy != NULL)
++	var->u.make_value.functions->destroy (var->u.make_value.data);
++      break;
++
+     default:
+       break;
+     }
+@@ -1644,14 +1679,22 @@ show_convenience (char *ignore, int from
+   get_user_print_options (&opts);
+   for (var = internalvars; var; var = var->next)
+     {
++      volatile struct gdb_exception e;
++
+       if (!varseen)
+ 	{
+ 	  varseen = 1;
+ 	}
+       printf_filtered (("$%s = "), var->name);
+-      value_print (value_of_internalvar (gdbarch, var), gdb_stdout,
+-		   &opts);
+-      printf_filtered (("\n"));
++
++      TRY_CATCH (e, RETURN_MASK_ERROR)
++	{
++	  value_print (value_of_internalvar (gdbarch, var), gdb_stdout,
++		       &opts);
++	  printf_filtered (("\n"));
++	}
++      if (e.reason < 0)
++	printf_filtered (_("<error: %s>\n"), e.message);
+     }
+   if (!varseen)
+     printf_unfiltered (_("\
+Index: gdb-7.2/gdb/value.h
+===================================================================
+--- gdb-7.2.orig/gdb/value.h	2011-08-11 17:30:39.000000000 +0200
++++ gdb-7.2/gdb/value.h	2011-08-11 17:40:02.000000000 +0200
+@@ -596,10 +596,52 @@ extern struct internalvar *lookup_only_i
+ 
+ extern struct internalvar *create_internalvar (const char *name);
+ 
+-typedef struct value * (*internalvar_make_value) (struct gdbarch *,
+-						  struct internalvar *);
++/* An internalvar can be dynamically computed by supplying a vector of
++   function pointers to perform various operations.  */
++
++struct internalvar_funcs
++{
++  /* Compute the value of the variable.  The DATA argument passed to
++     the function is the same argument that was passed to
++     `create_internalvar_type_lazy'.  */
++
++  struct value *(*make_value) (struct gdbarch *arch,
++			       struct internalvar *var,
++			       void *data);
++
++  /* Update the agent expression EXPR with bytecode to compute the
++     value.  VALUE is the agent value we are updating.  The DATA
++     argument passed to this function is the same argument that was
++     passed to `create_internalvar_type_lazy'.  If this pointer is
++     NULL, then the internalvar cannot be compiled to an agent
++     expression.  */
++
++  void (*compile_to_ax) (struct internalvar *var,
++			 struct agent_expr *expr,
++			 struct axs_value *value,
++			 void *data);
++
++  /* If non-NULL, this is called to destroy DATA.  The DATA argument
++     passed to this function is the same argument that was passed to
++     `create_internalvar_type_lazy'.  */
++
++  void (*destroy) (void *data);
++};
++
+ extern struct internalvar *
+-  create_internalvar_type_lazy (char *name, internalvar_make_value fun);
++create_internalvar_type_lazy (const char *name,
++			      const struct internalvar_funcs *funcs,
++			      void *data);
++
++/* Compile an internal variable to an agent expression.  VAR is the
++   variable to compile; EXPR and VALUE are the agent expression we are
++   updating.  This will return 0 if there is no known way to compile
++   VAR, and 1 if VAR was successfully compiled.  It may also throw an
++   exception on error.  */
++
++extern int compile_internalvar_to_ax (struct internalvar *var,
++				      struct agent_expr *expr,
++				      struct axs_value *value);
+ 
+ extern struct internalvar *lookup_internalvar (const char *name);
+ 
+Index: gdb-7.2/gdb/windows-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/windows-tdep.c	2011-08-11 17:30:39.000000000 +0200
++++ gdb-7.2/gdb/windows-tdep.c	2011-08-11 17:40:02.000000000 +0200
+@@ -263,7 +263,7 @@ static struct lval_funcs tlb_value_funcs
+    if there's no object available.  */
+ 
+ static struct value *
+-tlb_make_value (struct gdbarch *gdbarch, struct internalvar *var)
++tlb_make_value (struct gdbarch *gdbarch, struct internalvar *var, void *ignore)
+ {
+   if (target_has_stack && !ptid_equal (inferior_ptid, null_ptid))
+     {
+@@ -420,6 +420,15 @@ init_w32_command_list (void)
+     }
+ }
+ 
++/* Implementation of `tlb' variable.  */
++
++static const struct internalvar_funcs tlb_funcs =
++{
++  tlb_make_value,
++  NULL,
++  NULL
++};
++
+ void
+ _initialize_windows_tdep (void)
+ {
+@@ -446,5 +455,5 @@ even if their meaning is unknown."),
+      value with a void typed value, and when we get here, gdbarch
+      isn't initialized yet.  At this point, we're quite sure there
+      isn't another convenience variable of the same name.  */
+-  create_internalvar_type_lazy ("_tlb", tlb_make_value);
++  create_internalvar_type_lazy ("_tlb", &tlb_funcs, NULL);
+ }

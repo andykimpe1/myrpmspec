@@ -1,0 +1,535 @@
+Original message from Pedro Alves:
+
+  <https://sourceware.org/ml/gdb/2010-08/msg00025.html>
+  Message-Id: <201008041535.44552.pedro@codesourcery.com>
+
+  [Mark, patch below]
+
+  On Friday 23 April 2010 16:51:31, Pedro Alves wrote:
+  > On Friday 23 April 2010 16:36:01, Mark Kettenis wrote:
+  > > > From: Pedro Alves <pedro@codesourcery.com>
+  > 
+  > > > > The interpretation of the
+  > > > > pid read from the core file really is OS-specific.  The default
+  > > > > core_pid_to_str should really be the lowest common denominator, i.e,
+  > > > > normal_pid_to_str().  That's really the only thing that makes sense
+  > > > > for non-threaded code on a UNIX-like system.  
+  > > > 
+  > > > Yeah, probably.  What are the targets we support you're thinking
+  > > > where "process" would make more sense and be less confusing
+  > > > than "LWP"?  Pedantic-ness issues aside, seeing multiple
+  > > > "processes" in the list when all the processes share a single
+  > > > address space looks a bit strange to me.
+  > > 
+  > > I was thinking of *any* target running a UNIX-like OS.  For for the
+  > > (typical) user debugging a non-threaded program on a UNIX-like OS,
+  > > seeing "Thread ..." or "LWP ..." is confusing.  Especially the term
+  > > "LWP" will be pretty cryptic to many people not familliar with
+  > > implementation details of the Solaris/SVR4.2 MP/NetBSD threads
+  > > implementations.
+  > >
+  > > One can even argue that it's the wrong thing to use on Linux.  I don't
+  > > think the Linux kernel has the concept of an LWP.  A more appropriate
+  > > term on Linux would be TID, at least that is what the gettid() man
+  > > page uses and what's used in the comments in the kernel sources.
+  > 
+  > Maybe.  That's a fair point.  I've no sensibility whether TID would
+  > be more or less confusing for linux users.
+  > 
+  > > > > The threads stratum then
+  > > > > can override this for threaded code.
+  > > > > 
+  > > > > If like on Linux, the threading stuff is messed up for core files, and
+  > > > > not easily fixable, it is probably more helpful to print LWP's like
+  > > > > you suggest.  
+  > > > 
+  > > > It's not about that, that's a different issue.  In linux, assume
+  > > > we're talking about the core of a program that didn't use any
+  > > > pthreads facilities (used raw `clone'), and you still have
+  > > > multiple processes listed in the core.
+  > > 
+  > > Right.  It would be nice if that produced meaningful output as well.
+  > > 
+  > > > > But in my opinion that really should be done by
+  > > > > overriding the default using set_gdbarch_core_pid_to_str().
+  > > > 
+  > > > That works, of course.  I'm just thinking of the practical
+  > > > aspect.  If we have many targets that want "LWP", and one
+  > > > that wants "process", is it worth the hassle?
+  > > 
+  > > I think decoupling things will help us here in the long run.
+  > 
+  > Completely decoupling would mean no default at all ;-)
+  > 
+  > I'll eventually come up with a patch, though not this
+  > week, probably.
+
+  Here's a patch.  Keeping "LWP" for linux, as that's
+  what linux-nat.c prints (probably since ever), so that
+  we're consistent.  I've added linux_init_abi, for common
+  GNU/Linux osabi stuff, and, added a cygwin callback
+  so that it keeps printing "Thread".
+
+  WDYT?
+
+
+Note from Sergio Durigan Junior:
+
+  This patch has been modified in order to only include the "linux_init_abi"
+  change, which is needed by the following patches of this series.  The other
+  hunk of the patch, touching corelow.c and other corefile parts, has been
+  removed because it is unecessary.  A new hunk has been added to cover
+  gdb/s390-tdep.c, which wasn't covered in the first patch.
+
+====
+
+commit a5ee0f0c4d286ed3437ded51e904016b1e26209d
+Author: Pedro Alves <palves@redhat.com>
+Date:   Wed Aug 4 15:27:57 2010 +0000
+
+    	* corelow.c (core_pid_to_str): Default to using normal_pid_to_str
+    	instead of printing "Thread" here.
+    	* linux-tdep.c: Include inferior.h.
+    	(linux_core_pid_to_str): New.
+    	(linux_init_abi): New.
+    	* linux-tdep.h (linux_init_abi): Declare.
+    	* alpha-linux-tdep.c: Include linux-tdep.h.
+    	(alpha_linux_init_abi): Call linux_init_abi.
+    	* amd64-linux-tdep.c (amd64_linux_init_abi): Call linux_init_abi.
+    	* arm-linux-tdep.c (arm_linux_init_abi): Call linux_init_abi.
+    	* frv-linux-tdep.c: Include linux-tdep.h
+    	(frv_linux_init_abi): Call linux_init_abi.
+    	* hppa-linux-tdep.c: Include linux-tdep.h
+    	(hppa_linux_init_abi): Call linux_init_abi.
+    	* i386-linux-tdep.c (i386_linux_init_abi): Call linux_init_abi.
+    	* ia64-linux-tdep.c: Include linux-tdep.h.
+    	(ia64_linux_init_abi): Call linux_init_abi.
+    	* m32r-linux-tdep.c: Include linux-tdep.h.
+    	(m32r_linux_init_abi): Call linux_init_abi.
+    	* m68klinux-tdep.c: Include linux-tdep.h.
+    	(m68k_linux_init_abi): Call linux_init_abi.
+    	* microblaze-linux-tdep.c: Include linux-tdep.h.
+    	(microblaze_linux_init_abi): Call linux_init_abi.
+    	* mips-linux-tdep.c: Include linux-tdep.h.
+    	(mips_linux_init_abi): Call linux_init_abi.
+    	* mn10300-linux-tdep.c: Include linux-tdep.h.
+    	(am33_linux_init_osabi): Call linux_init_abi.  Rename the
+    	'gdbinfo' parameter to 'info'.
+    	* ppc-linux-tdep.c: Include linux-tdep.h.
+    	(ppc_linux_init_abi): Call linux_init_abi.
+    	* sh-linux-tdep.c: Include linux-tdep.h.
+    	(sh_linux_init_abi): Call linux_init_abi.
+    	* sparc-linux-tdep.c: Include linux-tdep.h.
+    	(sparc32_linux_init_abi): Call linux_init_abi.
+    	* sparc64-linux-tdep.c: Include linux-tdep.h.
+    	(sparc64_linux_init_abi): Call linux_init_abi.
+    	* xtensa-linux-tdep.c: Include linux-tdep.h.
+    	(xtensa_linux_init_abi): Call linux_init_abi.
+    	* i386-cygwin-tdep.c (i386_windows_core_pid_to_str): New.
+    	(i386_cygwin_init_abi): Install it as gdbarch_core_pid_to_str
+    	callback.
+
+Index: gdb-7.2/gdb/alpha-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/alpha-linux-tdep.c
++++ gdb-7.2/gdb/alpha-linux-tdep.c
+@@ -26,7 +26,7 @@
+ #include "symtab.h"
+ #include "regset.h"
+ #include "regcache.h"
+-
++#include "linux-tdep.h"
+ #include "alpha-tdep.h"
+ 
+ /* Under GNU/Linux, signal handler invocations can be identified by
+@@ -212,6 +212,8 @@ alpha_linux_init_abi (struct gdbarch_inf
+ {
+   struct gdbarch_tdep *tdep;
+ 
++  linux_init_abi (info, gdbarch);
++
+   /* Hook into the DWARF CFI frame unwinder.  */
+   alpha_dwarf2_init_abi (info, gdbarch);
+ 
+Index: gdb-7.2/gdb/amd64-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/amd64-linux-tdep.c
++++ gdb-7.2/gdb/amd64-linux-tdep.c
+@@ -1291,6 +1291,8 @@ amd64_linux_init_abi (struct gdbarch_inf
+ 
+   gdb_assert (tdesc_data);
+ 
++  linux_init_abi (info, gdbarch);
++
+   tdep->gregset_reg_offset = amd64_linux_gregset_reg_offset;
+   tdep->gregset_num_regs = ARRAY_SIZE (amd64_linux_gregset_reg_offset);
+   tdep->sizeof_gregset = 27 * 8;
+Index: gdb-7.2/gdb/arm-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/arm-linux-tdep.c
++++ gdb-7.2/gdb/arm-linux-tdep.c
+@@ -937,6 +937,8 @@ arm_linux_init_abi (struct gdbarch_info
+ {
+   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
+ 
++  linux_init_abi (info, gdbarch);
++
+   tdep->lowest_pc = 0x8000;
+   if (info.byte_order == BFD_ENDIAN_BIG)
+     {
+Index: gdb-7.2/gdb/frv-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/frv-linux-tdep.c
++++ gdb-7.2/gdb/frv-linux-tdep.c
+@@ -32,6 +32,7 @@
+ #include "frame-unwind.h"
+ #include "regset.h"
+ #include "gdb_string.h"
++#include "linux-tdep.h"
+ 
+ /* Define the size (in bytes) of an FR-V instruction.  */
+ static const int frv_instr_size = 4;
+@@ -490,8 +491,11 @@ frv_linux_regset_from_core_section (stru
+ static void
+ frv_linux_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
+ {
++  linux_init_abi (info, gdbarch);
++
+   /* Set the sigtramp frame sniffer.  */
+   frame_unwind_append_unwinder (gdbarch, &frv_linux_sigtramp_frame_unwind); 
++
+   set_gdbarch_regset_from_core_section (gdbarch,
+                                         frv_linux_regset_from_core_section);
+ }
+Index: gdb-7.2/gdb/hppa-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/hppa-linux-tdep.c
++++ gdb-7.2/gdb/hppa-linux-tdep.c
+@@ -32,7 +32,7 @@
+ #include "regset.h"
+ #include "regcache.h"
+ #include "hppa-tdep.h"
+-
++#include "linux-tdep.h"
+ #include "elf/common.h"
+ 
+ /* Map DWARF DBX register numbers to GDB register numbers.  */
+@@ -523,6 +523,8 @@ hppa_linux_init_abi (struct gdbarch_info
+ {
+   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
+ 
++  linux_init_abi (info, gdbarch);
++
+   /* GNU/Linux is always ELF.  */
+   tdep->is_elf = 1;
+ 
+Index: gdb-7.2/gdb/i386-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/i386-linux-tdep.c
++++ gdb-7.2/gdb/i386-linux-tdep.c
+@@ -654,6 +654,8 @@ i386_linux_init_abi (struct gdbarch_info
+ 
+   gdb_assert (tdesc_data);
+ 
++  linux_init_abi (info, gdbarch);
++
+   /* GNU/Linux uses ELF.  */
+   i386_elf_init_abi (info, gdbarch);
+ 
+Index: gdb-7.2/gdb/ia64-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/ia64-linux-tdep.c
++++ gdb-7.2/gdb/ia64-linux-tdep.c
+@@ -26,6 +26,7 @@
+ #include "osabi.h"
+ #include "solib-svr4.h"
+ #include "symtab.h"
++#include "linux-tdep.h"
+ 
+ /* The sigtramp code is in a non-readable (executable-only) region
+    of memory called the ``gate page''.  The addresses in question
+@@ -122,6 +123,8 @@ ia64_linux_init_abi (struct gdbarch_info
+ {
+   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
+ 
++  linux_init_abi (info, gdbarch);
++
+   /* Set the method of obtaining the sigcontext addresses at which
+      registers are saved.  */
+   tdep->sigcontext_register_address = ia64_linux_sigcontext_register_address;
+Index: gdb-7.2/gdb/linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/linux-tdep.c
++++ gdb-7.2/gdb/linux-tdep.c
+@@ -187,3 +187,11 @@ _initialize_linux_tdep (void)
+   linux_gdbarch_data_handle =
+     gdbarch_data_register_post_init (init_linux_gdbarch_data);
+ }
++
++/* To be called from the various GDB_OSABI_LINUX handlers for the
++   various GNU/Linux architectures and machine types.  */
++
++void
++linux_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
++{
++}
+Index: gdb-7.2/gdb/linux-tdep.h
+===================================================================
+--- gdb-7.2.orig/gdb/linux-tdep.h
++++ gdb-7.2/gdb/linux-tdep.h
+@@ -22,4 +22,6 @@
+ 
+ struct type *linux_get_siginfo_type (struct gdbarch *);
+ 
++extern void linux_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch);
++
+ #endif /* linux-tdep.h */
+Index: gdb-7.2/gdb/m32r-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/m32r-linux-tdep.c
++++ gdb-7.2/gdb/m32r-linux-tdep.c
+@@ -37,6 +37,8 @@
+ #include "frame-unwind.h"
+ 
+ #include "m32r-tdep.h"
++#include "linux-tdep.h"
++
+ 
+ 
+ /* Recognizing signal handler frames.  */
+@@ -404,6 +406,8 @@ m32r_linux_init_abi (struct gdbarch_info
+ {
+   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
+ 
++  linux_init_abi (info, gdbarch);
++
+   /* Since EVB register is not available for native debug, we reduce
+      the number of registers.  */
+   set_gdbarch_num_regs (gdbarch, M32R_NUM_REGS - 1);
+Index: gdb-7.2/gdb/m68klinux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/m68klinux-tdep.c
++++ gdb-7.2/gdb/m68klinux-tdep.c
+@@ -38,6 +38,7 @@
+ #include "auxv.h"
+ #include "observer.h"
+ #include "elf/common.h"
++#include "linux-tdep.h"
+ 
+ /* Offsets (in target ints) into jmp_buf.  */
+ 
+@@ -338,6 +339,8 @@ m68k_linux_init_abi (struct gdbarch_info
+ {
+   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
+ 
++  linux_init_abi (info, gdbarch);
++
+   tdep->jb_pc = M68K_LINUX_JB_PC;
+   tdep->jb_elt_size = M68K_LINUX_JB_ELEMENT_SIZE;
+ 
+Index: gdb-7.2/gdb/microblaze-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/microblaze-linux-tdep.c
++++ gdb-7.2/gdb/microblaze-linux-tdep.c
+@@ -35,7 +35,7 @@
+ #include "trad-frame.h"
+ #include "frame-unwind.h"
+ #include "tramp-frame.h"
+-
++#include "linux-tdep.h"
+ 
+ static int
+ microblaze_linux_memory_remove_breakpoint (struct gdbarch *gdbarch, 
+@@ -123,6 +123,8 @@ microblaze_linux_init_abi (struct gdbarc
+ {
+   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
+ 
++  linux_init_abi (info, gdbarch);
++
+   set_gdbarch_memory_remove_breakpoint (gdbarch,
+ 					microblaze_linux_memory_remove_breakpoint);
+ 
+Index: gdb-7.2/gdb/mips-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/mips-linux-tdep.c
++++ gdb-7.2/gdb/mips-linux-tdep.c
+@@ -38,6 +38,7 @@
+ #include "target-descriptions.h"
+ #include "mips-linux-tdep.h"
+ #include "glibc-tdep.h"
++#include "linux-tdep.h"
+ 
+ static struct target_so_ops mips_svr4_so_ops;
+ 
+@@ -1140,6 +1141,8 @@ mips_linux_init_abi (struct gdbarch_info
+   enum mips_abi abi = mips_abi (gdbarch);
+   struct tdesc_arch_data *tdesc_data = (void *) info.tdep_info;
+ 
++  linux_init_abi (info, gdbarch);
++
+   switch (abi)
+     {
+       case MIPS_ABI_O32:
+Index: gdb-7.2/gdb/mn10300-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/mn10300-linux-tdep.c
++++ gdb-7.2/gdb/mn10300-linux-tdep.c
+@@ -32,6 +32,7 @@
+ #include "frame.h"
+ #include "trad-frame.h"
+ #include "tramp-frame.h"
++#include "linux-tdep.h"
+ 
+ #include <stdlib.h>
+ 
+@@ -709,8 +710,10 @@ am33_linux_sigframe_cache_init (const st
+    Now's our chance to register our corefile handling.  */
+ 
+ static void
+-am33_linux_init_osabi (struct gdbarch_info gdbinfo, struct gdbarch *gdbarch)
++am33_linux_init_osabi (struct gdbarch_info info, struct gdbarch *gdbarch)
+ {
++  linux_init_abi (info, gdbarch);
++
+   set_gdbarch_regset_from_core_section (gdbarch, 
+ 					am33_regset_from_core_section);
+   set_solib_svr4_fetch_link_map_offsets
+Index: gdb-7.2/gdb/ppc-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/ppc-linux-tdep.c
++++ gdb-7.2/gdb/ppc-linux-tdep.c
+@@ -48,6 +48,7 @@
+ #include "arch-utils.h"
+ #include "spu-tdep.h"
+ #include "xml-syscall.h"
++#include "linux-tdep.h"
+ 
+ #include "features/rs6000/powerpc-32l.c"
+ #include "features/rs6000/powerpc-altivec32l.c"
+@@ -1486,6 +1487,8 @@ ppc_linux_init_abi (struct gdbarch_info
+   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
+   struct tdesc_arch_data *tdesc_data = (void *) info.tdep_info;
+ 
++  linux_init_abi (info, gdbarch);
++
+   /* PPC GNU/Linux uses either 64-bit or 128-bit long doubles; where
+      128-bit, they are IBM long double, not IEEE quad long double as
+      in the System V ABI PowerPC Processor Supplement.  We can safely
+Index: gdb-7.2/gdb/sh-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/sh-linux-tdep.c
++++ gdb-7.2/gdb/sh-linux-tdep.c
+@@ -25,6 +25,7 @@
+ 
+ #include "glibc-tdep.h"
+ #include "sh-tdep.h"
++#include "linux-tdep.h"
+ 
+ #define REGSx16(base) \
+   {(base),      0}, \
+@@ -72,6 +73,8 @@ static const struct sh_corefile_regmap f
+ static void
+ sh_linux_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
+ {
++  linux_init_abi (info, gdbarch);
++
+   /* GNU/Linux uses SVR4-style shared libraries.  */
+   set_gdbarch_skip_trampoline_code (gdbarch, find_solib_trampoline_target);
+   set_solib_svr4_fetch_link_map_offsets
+Index: gdb-7.2/gdb/sparc-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/sparc-linux-tdep.c
++++ gdb-7.2/gdb/sparc-linux-tdep.c
+@@ -33,6 +33,7 @@
+ #include "trad-frame.h"
+ #include "tramp-frame.h"
+ #include "xml-syscall.h"
++#include "linux-tdep.h"
+ 
+ /* The syscall's XML filename for sparc 32-bit.  */
+ #define XML_SYSCALL_FILENAME_SPARC32 "syscalls/sparc-linux.xml"
+@@ -273,6 +274,8 @@ sparc32_linux_init_abi (struct gdbarch_i
+ {
+   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
+ 
++  linux_init_abi (info, gdbarch);
++
+   tdep->gregset = regset_alloc (gdbarch, sparc32_linux_supply_core_gregset,
+ 				sparc32_linux_collect_core_gregset);
+   tdep->sizeof_gregset = 152;
+Index: gdb-7.2/gdb/sparc64-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/sparc64-linux-tdep.c
++++ gdb-7.2/gdb/sparc64-linux-tdep.c
+@@ -32,6 +32,7 @@
+ #include "trad-frame.h"
+ #include "tramp-frame.h"
+ #include "xml-syscall.h"
++#include "linux-tdep.h"
+ 
+ /* The syscall's XML filename for sparc 64-bit.  */
+ #define XML_SYSCALL_FILENAME_SPARC64 "syscalls/sparc64-linux.xml"
+@@ -237,6 +238,8 @@ sparc64_linux_init_abi (struct gdbarch_i
+ {
+   struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);
+ 
++  linux_init_abi (info, gdbarch);
++
+   tdep->gregset = regset_alloc (gdbarch, sparc64_linux_supply_core_gregset,
+ 				sparc64_linux_collect_core_gregset);
+   tdep->sizeof_gregset = 288;
+Index: gdb-7.2/gdb/xtensa-linux-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/xtensa-linux-tdep.c
++++ gdb-7.2/gdb/xtensa-linux-tdep.c
+@@ -19,7 +19,7 @@
+ 
+ #include "defs.h"
+ #include "osabi.h"
+-
++#include "linux-tdep.h"
+ #include "solib-svr4.h"
+ #include "symtab.h"
+ 
+@@ -28,6 +28,8 @@
+ static void
+ xtensa_linux_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)
+ {
++  linux_init_abi (info, gdbarch);
++
+   set_solib_svr4_fetch_link_map_offsets
+     (gdbarch, svr4_ilp32_fetch_link_map_offsets);
+ }
+Index: gdb-7.2/gdb/s390-tdep.c
+===================================================================
+--- gdb-7.2.orig/gdb/s390-tdep.c
++++ gdb-7.2/gdb/s390-tdep.c
+@@ -50,6 +50,10 @@
+ #include "features/s390-linux64.c"
+ #include "features/s390x-linux64.c"
+ 
++/* This is needed for "linux_init_abi", which is needed by the
++   gdbarch_gdb_signal_{to,from}_target functions.  */
++
++#include "linux-tdep.h"
+ 
+ /* The tdep structure.  */
+ 
+@@ -2908,6 +2912,8 @@ s390_gdbarch_init (struct gdbarch_info i
+   switch (tdep->abi)
+     {
+     case ABI_LINUX_S390:
++      /* linux_init_abi needed by gdbarch_gdb_signal_{to,from}_target.  */
++      linux_init_abi (info, gdbarch);
+       tdep->gregset = &s390_gregset;
+       tdep->sizeof_gregset = s390_sizeof_gregset;
+       tdep->fpregset = &s390_fpregset;
+@@ -2919,6 +2925,8 @@ s390_gdbarch_init (struct gdbarch_info i
+       break;
+ 
+     case ABI_LINUX_ZSERIES:
++      /* linux_init_abi needed by gdbarch_gdb_signal_{to,from}_target.  */
++      linux_init_abi (info, gdbarch);
+       tdep->gregset = &s390x_gregset;
+       tdep->sizeof_gregset = s390x_sizeof_gregset;
+       tdep->fpregset = &s390_fpregset;

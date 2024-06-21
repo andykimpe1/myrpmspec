@@ -1,0 +1,241 @@
+--- ./gdb/defs.h	2011-01-15 20:02:32.000000000 +0100
++++ ./gdb/defs.h	2011-01-15 20:10:17.000000000 +0100
+@@ -396,6 +396,8 @@ extern struct cleanup *make_cleanup_rest
+ extern struct cleanup *
+   set_batch_flag_and_make_cleanup_restore_page_info (void);
+ 
++extern struct cleanup *make_cleanup_restore_selected_frame (void);
++
+ extern char *gdb_realpath (const char *);
+ extern char *xfullpath (const char *);
+ 
+--- ./gdb/dwarf2loc.c	2011-01-15 20:02:32.000000000 +0100
++++ ./gdb/dwarf2loc.c	2011-01-15 20:10:17.000000000 +0100
+@@ -1059,7 +1059,7 @@ dwarf2_evaluate_loc_desc (struct type *t
+ {
+   struct value *retval;
+   struct dwarf_expr_context *ctx;
+-  struct cleanup *old_chain = make_cleanup (null_cleanup, 0);
++  struct cleanup *old_chain;
+ 
+   if (size == 0)
+     {
+@@ -1069,6 +1069,8 @@ dwarf2_evaluate_loc_desc (struct type *t
+       return retval;
+     }
+ 
++  old_chain = make_cleanup (null_cleanup, 0);
++
+   ctx = dwarf_expr_prep_ctx (frame, data, size, per_cu);
+ 
+   if (ctx->num_pieces > 0)
+@@ -1104,6 +1106,10 @@ dwarf2_evaluate_loc_desc (struct type *t
+ 	    CORE_ADDR address = dwarf_expr_fetch_address (ctx, 0);
+ 	    int in_stack_memory = dwarf_expr_fetch_in_stack_memory (ctx, 0);
+ 
++	    /* Frame may be needed for check_typedef of TYPE_DYNAMIC.  */
++	    make_cleanup_restore_selected_frame ();
++	    select_frame (frame);
++
+ 	    /* object_address_set called here is required in ALLOCATE_VALUE's
+ 	       CHECK_TYPEDEF for the object's possible
+ 	       DW_OP_push_object_address.  */
+--- ./gdb/dwarf2read.c	2011-01-15 20:02:38.000000000 +0100
++++ ./gdb/dwarf2read.c	2011-01-15 20:10:17.000000000 +0100
+@@ -7933,7 +7933,9 @@ read_subrange_type (struct die_info *die
+ 	high = dwarf2_get_attr_constant_value (attr, 0);
+       else
+ 	{
+-	  TYPE_HIGH_BOUND_UNDEFINED (range_type) = 1;
++	  /* Ada expects an empty array on no boundary attributes.  */
++	  if (cu->language != language_ada)
++	    TYPE_HIGH_BOUND_UNDEFINED (range_type) = 1;
+ 	  high = low - 1;
+ 	}
+       if (!TYPE_UNSIGNED (base_type) && (high & negative_mask))
+--- ./gdb/stack.c	2011-01-15 20:02:32.000000000 +0100
++++ ./gdb/stack.c	2011-01-15 20:10:17.000000000 +0100
+@@ -366,6 +366,7 @@ print_frame_args (struct symbol *func, s
+ 	        {
+                   const struct language_defn *language;
+ 		  struct value_print_options opts;
++		  struct cleanup *old_chain;
+ 
+                   /* Use the appropriate language to display our symbol,
+                      unless the user forced the language to a specific
+@@ -378,7 +379,13 @@ print_frame_args (struct symbol *func, s
+ 		  get_raw_print_options (&opts);
+ 		  opts.deref_ref = 0;
+ 		  opts.summary = summary;
++
++		  /* Frame may be needed for check_typedef of TYPE_DYNAMIC.  */
++		  old_chain = make_cleanup_restore_selected_frame ();
++		  select_frame (frame);
+ 		  common_val_print (val, stb->stream, 2, &opts, language);
++		  do_cleanups (old_chain);
++
+ 		  ui_out_field_stream (uiout, "value", stb);
+ 	        }
+ 	      else
+--- ./gdb/testsuite/gdb.fortran/dynamic-other-frame-stub.f90	1970-01-01 01:00:00.000000000 +0100
++++ ./gdb/testsuite/gdb.fortran/dynamic-other-frame-stub.f90	2011-01-15 20:03:20.000000000 +0100
+@@ -0,0 +1,24 @@
++! Copyright 2010 Free Software Foundation, Inc.
++!
++! This program is free software; you can redistribute it and/or modify
++! it under the terms of the GNU General Public License as published by
++! the Free Software Foundation; either version 2 of the License, or
++! (at your option) any later version.
++!
++! This program is distributed in the hope that it will be useful,
++! but WITHOUT ANY WARRANTY; without even the implied warranty of
++! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++! GNU General Public License for more details.
++!
++! You should have received a copy of the GNU General Public License
++! along with this program; if not, write to the Free Software
++! Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++!
++! Ihis file is the Fortran source file for dynamic.exp.
++! Original file written by Jakub Jelinek <jakub@redhat.com>.
++! Modified for the GDB testcase by Jan Kratochvil <jan.kratochvil@redhat.com>.
++
++subroutine bar
++  real :: dummy
++  dummy = 1
++end subroutine bar
+--- ./gdb/testsuite/gdb.fortran/dynamic-other-frame.exp	1970-01-01 01:00:00.000000000 +0100
++++ ./gdb/testsuite/gdb.fortran/dynamic-other-frame.exp	2011-01-15 20:03:20.000000000 +0100
+@@ -0,0 +1,37 @@
++# Copyright 2010 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++# 
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++# 
++# You should have received a copy of the GNU General Public License
++# along with this program; if not, write to the Free Software
++# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.  
++
++set testfile "dynamic-other-frame"
++set srcfile1 ${testfile}.f90
++set srcfile2 ${testfile}-stub.f90
++set objfile2 ${objdir}/${subdir}/${testfile}-stub.o
++set executable ${testfile}
++set binfile ${objdir}/${subdir}/${executable}
++
++if { [gdb_compile "${srcdir}/${subdir}/${srcfile2}" "${objfile2}" object {f77}] != ""
++     || [gdb_compile "${srcdir}/${subdir}/${srcfile1} ${objfile2}" "${binfile}" executable {debug f77}] != "" } {
++    untested "Couldn't compile ${srcfile1} or ${srcfile2}"
++    return -1
++}
++
++clean_restart ${executable}
++
++if ![runto bar_] then {
++    perror "couldn't run to bar_"
++    continue
++}
++
++gdb_test "bt" {foo \(string='hello'.*}
+--- ./gdb/testsuite/gdb.fortran/dynamic-other-frame.f90	1970-01-01 01:00:00.000000000 +0100
++++ ./gdb/testsuite/gdb.fortran/dynamic-other-frame.f90	2011-01-15 20:03:20.000000000 +0100
+@@ -0,0 +1,36 @@
++! Copyright 2010 Free Software Foundation, Inc.
++!
++! This program is free software; you can redistribute it and/or modify
++! it under the terms of the GNU General Public License as published by
++! the Free Software Foundation; either version 2 of the License, or
++! (at your option) any later version.
++!
++! This program is distributed in the hope that it will be useful,
++! but WITHOUT ANY WARRANTY; without even the implied warranty of
++! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++! GNU General Public License for more details.
++!
++! You should have received a copy of the GNU General Public License
++! along with this program; if not, write to the Free Software
++! Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++!
++! Ihis file is the Fortran source file for dynamic.exp.
++! Original file written by Jakub Jelinek <jakub@redhat.com>.
++! Modified for the GDB testcase by Jan Kratochvil <jan.kratochvil@redhat.com>.
++
++subroutine foo (string)
++  interface
++    subroutine bar
++    end subroutine
++  end interface
++  character string*(*)
++  call bar                                ! stop-here
++end subroutine foo
++program test
++  interface
++    subroutine foo (string)
++    character string*(*)
++    end subroutine
++  end interface
++  call foo ('hello')
++end
+--- ./gdb/testsuite/gdb.opt/fortran-string.exp	2011-01-15 20:02:32.000000000 +0100
++++ ./gdb/testsuite/gdb.opt/fortran-string.exp	2011-01-15 20:10:17.000000000 +0100
+@@ -29,13 +29,11 @@ if { [prepare_for_testing ${test}.exp ${
+     return -1
+ }
+ 
+-if ![runto MAIN__] then {
++if ![runto $srcfile:[gdb_get_line_number "s = s"]] then {
+     perror "couldn't run to breakpoint MAIN__"
+     continue
+ }
+ 
+-gdb_breakpoint [gdb_get_line_number "s = s"]
+-gdb_continue_to_breakpoint "s = s"
+ gdb_test "frame" ".*s='foo'.*"
+ gdb_test "ptype s" "type = character\\*3"
+ gdb_test "p s" "\\$\[0-9\]* = 'foo'"
+--- ./gdb/utils.c	2011-01-15 20:02:38.000000000 +0100
++++ ./gdb/utils.c	2011-01-15 20:10:17.000000000 +0100
+@@ -2179,6 +2179,36 @@ set_batch_flag_and_make_cleanup_restore_
+   return back_to;
+ }
+ 
++/* Helper for make_cleanup_restore_page_info.  */
++
++static void
++do_restore_selected_frame_cleanup (void *arg)
++{
++  struct frame_id *frame_idp = arg;
++
++  select_frame (frame_find_by_id (*frame_idp));
++
++  xfree (frame_idp);
++}
++
++/* Provide cleanup for restoring currently selected frame.  Use frame_id for
++   the case the current frame becomes stale in the meantime.  */
++
++struct cleanup *
++make_cleanup_restore_selected_frame (void)
++{
++  struct frame_id *frame_idp;
++
++  /* get_selected_frame->get_current_frame would error otherwise.  */
++  if (!has_stack_frames ())
++    return make_cleanup (null_cleanup, NULL);
++
++  frame_idp = xmalloc (sizeof (*frame_idp));
++  *frame_idp = get_frame_id (get_selected_frame (NULL));
++
++  return make_cleanup (do_restore_selected_frame_cleanup, frame_idp);
++}
++
+ /* Set the screen size based on LINES_PER_PAGE and CHARS_PER_LINE.  */
+ 
+ static void

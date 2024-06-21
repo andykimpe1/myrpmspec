@@ -1,0 +1,83 @@
+http://sourceware.org/ml/gdb-cvs/2011-10/msg00012.html
+
+### src/gdb/ChangeLog	2011/10/03 16:14:39	1.13370
+### src/gdb/ChangeLog	2011/10/03 20:46:18	1.13371
+## -1,3 +1,10 @@
++2011-10-03  Joel Brobecker  <brobecker@adacore.com>
++
++	* python/python.c (python_run_simple_file): New function.
++	(source_python_script, source_python_script_for_objfile):
++	Replace call to PyRun_SimpleFile by call to
++	python_run_simple_file.
++
+ 2011-10-03  Paul Koning  <paul_koning@dell.com>
+ 
+ 	* python/py-value.c (valpy_get_address): Use Py_XINCREF.
+Index: gdb-7.2/gdb/python/python.c
+===================================================================
+--- gdb-7.2.orig/gdb/python/python.c
++++ gdb-7.2/gdb/python/python.c
+@@ -128,6 +128,45 @@ ensure_python_env (struct gdbarch *gdbar
+   return make_cleanup (restore_python_env, env);
+ }
+ 
++/* A wrapper around PyRun_SimpleFile.  FILENAME is the name of
++   the Python script to run.
++
++   One of the parameters of PyRun_SimpleFile is a FILE *.
++   The problem is that type FILE is extremely system and compiler
++   dependent.  So, unless the Python library has been compiled using
++   the same build environment as GDB, we run the risk of getting
++   a crash due to inconsistencies between the definition used by GDB,
++   and the definition used by Python.  A mismatch can very likely
++   lead to a crash.
++
++   There is also the situation where the Python library and GDB
++   are using two different versions of the C runtime library.
++   This is particularly visible on Windows, where few users would
++   build Python themselves (this is no trivial task on this platform),
++   and thus use binaries built by someone else instead. Python,
++   being built with VC, would use one version of the msvcr DLL
++   (Eg. msvcr100.dll), while MinGW uses msvcrt.dll.  A FILE *
++   from one runtime does not necessarily operate correctly in
++   the other runtime.
++
++   To work around this potential issue, we create the FILE object
++   using Python routines, thus making sure that it is compatible
++   with the Python library.  */
++
++static void
++python_run_simple_file (const char *filename)
++{
++  char *filename_copy;
++  PyObject *python_file;
++  struct cleanup *cleanup;
++
++  filename_copy = xstrdup (filename);
++  cleanup = make_cleanup (xfree, filename_copy);
++  python_file = PyFile_FromString (filename_copy, "r");
++  make_cleanup_py_decref (python_file);
++  PyRun_SimpleFile (PyFile_AsFile (python_file), filename);
++  do_cleanups (cleanup);
++}
+ 
+ /* Given a command_line, return a command string suitable for passing
+    to Python.  Lines in the string are separated by newlines.  The
+@@ -528,7 +567,7 @@ source_python_script (FILE *stream, cons
+ 
+   /* Note: If an exception occurs python will print the traceback and
+      clear the error indicator.  */
+-  PyRun_SimpleFile (stream, file);
++  python_run_simple_file (file);
+ 
+   do_cleanups (cleanup);
+ }
+@@ -795,7 +834,7 @@ source_python_script_for_objfile (struct
+   cleanups = ensure_python_env (get_objfile_arch (objfile), current_language);
+   gdbpy_current_objfile = objfile;
+ 
+-  PyRun_SimpleFile (stream, file);
++  python_run_simple_file (file);
+ 
+   do_cleanups (cleanups);
+   gdbpy_current_objfile = NULL;

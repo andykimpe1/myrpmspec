@@ -1,0 +1,618 @@
+http://sourceware.org/ml/gdb-patches/2010-12/msg00263.html
+
+Index: gdb-7.2/gdb/cp-support.c
+===================================================================
+--- gdb-7.2.orig/gdb/cp-support.c	2010-06-25 18:16:44.000000000 +0200
++++ gdb-7.2/gdb/cp-support.c	2011-02-03 22:28:01.000000000 +0100
+@@ -35,6 +35,7 @@
+ #include "exceptions.h"
+ #include "expression.h"
+ #include "value.h"
++#include "language.h"
+ 
+ #include "safe-ctype.h"
+ 
+@@ -917,7 +918,8 @@ make_symbol_overload_list_qualified (con
+   ALL_OBJFILES (objfile)
+   {
+     if (objfile->sf)
+-      objfile->sf->qf->expand_symtabs_for_function (objfile, func_name);
++      objfile->sf->qf->expand_symtabs_for_function (objfile, func_name,
++						    language_cplus);
+   }
+ 
+   /* Search upwards from currently selected frame (so that we can
+Index: gdb-7.2/gdb/dwarf2read.c
+===================================================================
+--- gdb-7.2.orig/gdb/dwarf2read.c	2011-02-03 22:27:54.000000000 +0100
++++ gdb-7.2/gdb/dwarf2read.c	2011-02-03 22:28:21.000000000 +0100
+@@ -2185,7 +2185,8 @@ dw2_lookup_symtab (struct objfile *objfi
+ 
+ static struct symtab *
+ dw2_lookup_symbol (struct objfile *objfile, int block_index,
+-		   const char *name, domain_enum domain)
++		   const char *name, domain_enum domain,
++		   enum language language)
+ {
+   /* We do all the work in the pre_expand_symtabs_matching hook
+      instead.  */
+@@ -2259,7 +2260,8 @@ dw2_relocate (struct objfile *objfile, s
+ 
+ static void
+ dw2_expand_symtabs_for_function (struct objfile *objfile,
+-				 const char *func_name)
++				 const char *func_name,
++				 enum language language)
+ {
+   dw2_do_expand_symtabs_matching (objfile, func_name);
+ }
+@@ -2313,7 +2315,8 @@ dw2_expand_symtabs_with_filename (struct
+ }
+ 
+ static const char *
+-dw2_find_symbol_file (struct objfile *objfile, const char *name)
++dw2_find_symbol_file (struct objfile *objfile, const char *name,
++		      enum language language)
+ {
+   struct dwarf2_per_cu_data *cu;
+   offset_type *vec;
+Index: gdb-7.2/gdb/linespec.c
+===================================================================
+--- gdb-7.2.orig/gdb/linespec.c	2010-05-15 01:41:04.000000000 +0200
++++ gdb-7.2/gdb/linespec.c	2011-02-03 22:28:01.000000000 +0100
+@@ -1205,7 +1205,7 @@ decode_objc (char **argptr, int funfirst
+ 
+ static struct symtabs_and_lines
+ decode_compound (char **argptr, int funfirstline, char ***canonical,
+-		 char *saved_arg, char *p, int *not_found_ptr)
++		 char *the_real_saved_arg, char *p, int *not_found_ptr)
+ {
+   struct symtabs_and_lines values;
+   char *p2;
+@@ -1216,7 +1216,23 @@ decode_compound (char **argptr, int funf
+   struct symbol *sym_class;
+   struct type *t;
+   char *saved_java_argptr = NULL;
++  char *saved_arg;
+ 
++  /* THE_REAL_SAVED_ARG cannot be altered, so make a copy that can be.  */
++  saved_arg = alloca (strlen (the_real_saved_arg) + 1);
++  strcpy (saved_arg, the_real_saved_arg);
++
++  /* If the user specified "'foo::bar(baz)'" (note the quotes -- often
++     added to workaround completer issues) -- saved_arg will be
++     encapsulated in single-quotes.  They are superfluous, so just strip
++     them off.  */
++  if (*saved_arg == '\'')
++    {
++      char *end = skip_quoted (saved_arg);
++      memmove (saved_arg, saved_arg + 1, end - saved_arg);
++      memmove (end - 2, end, strlen (saved_arg) + 1);
++    }
++      
+   /* First check for "global" namespace specification, of the form
+      "::foo".  If found, skip over the colons and jump to normal
+      symbol processing.  I.e. the whole line specification starts with
+@@ -1467,7 +1483,7 @@ decode_compound (char **argptr, int funf
+      up.  The quotes are important if copy is empty.  */
+   if (not_found_ptr)
+     *not_found_ptr = 1;
+-  cplusplus_error (saved_arg,
++  cplusplus_error (the_real_saved_arg,
+ 		   "Can't find member of namespace, class, struct, or union named \"%s\"\n",
+ 		   copy);
+ }
+Index: gdb-7.2/gdb/psymtab.c
+===================================================================
+--- gdb-7.2.orig/gdb/psymtab.c	2011-02-03 22:27:50.000000000 +0100
++++ gdb-7.2/gdb/psymtab.c	2011-02-03 22:30:43.000000000 +0100
+@@ -32,6 +32,8 @@
+ #include "command.h"
+ #include "readline/readline.h"
+ #include "gdb_regex.h"
++#include "language.h"
++#include "cp-support.h"
+ 
+ #ifndef DEV_TTY
+ #define DEV_TTY "/dev/tty"
+@@ -44,7 +46,8 @@
+ /* Lookup a partial symbol.  */
+ static struct partial_symbol *lookup_partial_symbol (struct partial_symtab *,
+ 						     const char *, int,
+-						     domain_enum);
++						     domain_enum,
++						     enum language);
+ 
+ static char *psymtab_to_fullname (struct partial_symtab *ps);
+ 
+@@ -407,15 +410,35 @@ fixup_psymbol_section (struct partial_sy
+ static struct symtab *
+ lookup_symbol_aux_psymtabs (struct objfile *objfile,
+ 			    int block_index, const char *name,
+-			    const domain_enum domain)
++			    const domain_enum domain, enum language language)
+ {
+   struct partial_symtab *ps;
+   const int psymtab_index = (block_index == GLOBAL_BLOCK ? 1 : 0);
+ 
+   ALL_OBJFILE_PSYMTABS (objfile, ps)
+   {
+-    if (!ps->readin && lookup_partial_symbol (ps, name, psymtab_index, domain))
+-      return PSYMTAB_TO_SYMTAB (ps);
++    if (!ps->readin
++	&& lookup_partial_symbol (ps, name, psymtab_index, domain, language))
++      {
++	struct symbol *sym;
++	struct symtab *stab = PSYMTAB_TO_SYMTAB (ps);
++	sym = NULL;
++
++	/* Some caution must be observed with overloaded functions
++	   and methods, since the psymtab will not contain any overload
++	   information (but NAME might contain it).  */
++	if (stab->primary)
++	  {
++	    struct blockvector *bv = BLOCKVECTOR (stab);
++	    struct block *block = BLOCKVECTOR_BLOCK (bv, block_index);
++	    sym = lookup_block_symbol (block, name, domain);
++	  }
++
++	if (sym && strcmp_iw (SYMBOL_SEARCH_NAME (sym), name) == 0)
++	  return stab;
++
++	/* Keep looking through other psymtabs.  */
++      }
+   }
+ 
+   return NULL;
+@@ -429,22 +452,59 @@ pre_expand_symtabs_matching_psymtabs (st
+   /* Nothing.  */
+ }
+ 
++/* Returns the name used to search psymtabs.  Unlike symtabs, psymtabs do
++   not contain any method/function instance information (since this would
++   force reading type information while reading psymtabs).  Therefore,
++   if NAME contains overload information, it must be stripped before searching
++   psymtabs.
++
++   The caller is responsible for freeing the return result.  */
++
++static const char *
++psymtab_search_name (const char *name, enum language language)
++{
++  switch (language)
++    {
++    case language_cplus:
++    case language_java:
++      {
++       if (strchr (name, '('))
++         {
++           char *ret = cp_remove_params (name);
++           if (ret)
++             return ret;
++         }
++      }
++
++    default:
++      break;
++    }
++
++  return xstrdup (name);
++}
++
+ /* Look, in partial_symtab PST, for symbol whose natural name is NAME.
+    Check the global symbols if GLOBAL, the static symbols if not. */
+ 
+ static struct partial_symbol *
+ lookup_partial_symbol (struct partial_symtab *pst, const char *name,
+-		       int global, domain_enum domain)
++		       int global, domain_enum domain, enum language language)
+ {
+   struct partial_symbol **start, **psym;
+   struct partial_symbol **top, **real_top, **bottom, **center;
+   int length = (global ? pst->n_global_syms : pst->n_static_syms);
+   int do_linear_search = 1;
++  const char *search_name;
++  struct cleanup *cleanup;
+ 
+   if (length == 0)
+     {
+       return (NULL);
+     }
++
++  search_name = psymtab_search_name (name, language);
++  cleanup = make_cleanup (xfree, (void *) search_name);
++
+   start = (global ?
+ 	   pst->objfile->global_psymbols.list + pst->globals_offset :
+ 	   pst->objfile->static_psymbols.list + pst->statics_offset);
+@@ -472,7 +532,8 @@ lookup_partial_symbol (struct partial_sy
+ 	    {
+ 	      do_linear_search = 1;
+ 	    }
+-	  if (strcmp_iw_ordered (SYMBOL_SEARCH_NAME (*center), name) >= 0)
++	  if (strcmp_iw_ordered (SYMBOL_SEARCH_NAME (*center),
++				 search_name) >= 0)
+ 	    {
+ 	      top = center;
+ 	    }
+@@ -485,11 +546,14 @@ lookup_partial_symbol (struct partial_sy
+ 	internal_error (__FILE__, __LINE__, _("failed internal consistency check"));
+ 
+       while (top <= real_top
+-	     && SYMBOL_MATCHES_SEARCH_NAME (*top, name))
++	     && SYMBOL_MATCHES_SEARCH_NAME (*top, search_name))
+ 	{
+ 	  if (symbol_matches_domain (SYMBOL_LANGUAGE (*top),
+ 				     SYMBOL_DOMAIN (*top), domain))
+-	    return (*top);
++	    {
++	      do_cleanups (cleanup);
++	      return (*top);
++	    }
+ 	  top++;
+ 	}
+     }
+@@ -504,10 +568,14 @@ lookup_partial_symbol (struct partial_sy
+ 	  if (symbol_matches_domain (SYMBOL_LANGUAGE (*psym),
+ 				     SYMBOL_DOMAIN (*psym), domain)
+ 	      && SYMBOL_MATCHES_SEARCH_NAME (*psym, name))
+-	    return (*psym);
++	    {
++	      do_cleanups (cleanup);
++	      return (*psym);
++	    }
+ 	}
+     }
+ 
++  do_cleanups (cleanup);
+   return (NULL);
+ }
+ 
+@@ -819,7 +887,8 @@ dump_psymtabs_for_objfile (struct objfil
+    by matching FUNC_NAME.  Make sure we read that symbol table in. */
+ 
+ static void
+-read_symtabs_for_function (struct objfile *objfile, const char *func_name)
++read_symtabs_for_function (struct objfile *objfile, const char *func_name,
++			   enum language language)
+ {
+   struct partial_symtab *ps;
+ 
+@@ -828,9 +897,9 @@ read_symtabs_for_function (struct objfil
+     if (ps->readin)
+       continue;
+ 
+-    if ((lookup_partial_symbol (ps, func_name, 1, VAR_DOMAIN)
++    if ((lookup_partial_symbol (ps, func_name, 1, VAR_DOMAIN, language)
+ 	 != NULL)
+-	|| (lookup_partial_symbol (ps, func_name, 0, VAR_DOMAIN)
++	|| (lookup_partial_symbol (ps, func_name, 0, VAR_DOMAIN, language)
+ 	    != NULL))
+       psymtab_to_symtab (ps);
+   }
+@@ -950,13 +1019,14 @@ psymtab_to_fullname (struct partial_symt
+ }
+ 
+ static const char *
+-find_symbol_file_from_partial (struct objfile *objfile, const char *name)
++find_symbol_file_from_partial (struct objfile *objfile, const char *name,
++			       enum language language)
+ {
+   struct partial_symtab *pst;
+ 
+   ALL_OBJFILE_PSYMTABS (objfile, pst)
+     {
+-      if (lookup_partial_symbol (pst, name, 1, VAR_DOMAIN))
++      if (lookup_partial_symbol (pst, name, 1, VAR_DOMAIN, language))
+ 	return pst->filename;
+     }
+   return NULL;
+Index: gdb-7.2/gdb/symfile.h
+===================================================================
+--- gdb-7.2.orig/gdb/symfile.h	2011-02-03 22:27:52.000000000 +0100
++++ gdb-7.2/gdb/symfile.h	2011-02-03 22:29:05.000000000 +0100
+@@ -162,14 +162,15 @@ struct quick_symbol_functions
+   /* Check to see if the symbol is defined in a "partial" symbol table
+      of OBJFILE.  KIND should be either GLOBAL_BLOCK or STATIC_BLOCK,
+      depending on whether we want to search global symbols or static
+-     symbols.  NAME is the name of the symbol to look for.  DOMAIN
+-     indicates what sort of symbol to search for.
++     symbols.  NAME (valid in LANGUAGE) is the name of the symbol to look for.
++     DOMAIN indicates what sort of symbol to search for.
+ 
+      Returns the newly-expanded symbol table in which the symbol is
+      defined, or NULL if no such symbol table exists.  */
+   struct symtab *(*lookup_symbol) (struct objfile *objfile,
+ 				   int kind, const char *name,
+-				   domain_enum domain);
++				   domain_enum domain,
++				   enum language language);
+ 
+   /* This is called to expand symbol tables before looking up a
+      symbol.  A backend can choose to implement this and then have its
+@@ -195,10 +196,11 @@ struct quick_symbol_functions
+ 		    struct section_offsets *new_offsets,
+ 		    struct section_offsets *delta);
+ 
+-  /* Find all the symbols in OBJFILE named FUNC_NAME, and ensure that
+-     the corresponding symbol tables are loaded.  */
++  /* Find all the symbols in OBJFILE named FUNC_NAME (valid in LANGUAGE),
++     and ensure that the corresponding symbol tables are loaded.  */
+   void (*expand_symtabs_for_function) (struct objfile *objfile,
+-				       const char *func_name);
++				       const char *func_name,
++				       enum language language);
+ 
+   /* Read all symbol tables associated with OBJFILE.  */
+   void (*expand_all_symtabs) (struct objfile *objfile);
+@@ -209,8 +211,10 @@ struct quick_symbol_functions
+ 					const char *filename);
+ 
+   /* Return the file name of the file holding the symbol in OBJFILE
+-     named NAME.  If no such symbol exists in OBJFILE, return NULL.  */
+-  const char *(*find_symbol_file) (struct objfile *objfile, const char *name);
++     named NAME (valid in LANGUAGE).  If no such symbol exists in OBJFILE,
++     return NULL.  */
++  const char *(*find_symbol_file) (struct objfile *objfile, const char *name,
++				   enum language language);
+ 
+   /* This method is specific to Ada.  It walks the partial symbol
+      tables of OBJFILE looking for a name match.  WILD_MATCH and
+Index: gdb-7.2/gdb/symtab.c
+===================================================================
+--- gdb-7.2.orig/gdb/symtab.c	2011-02-03 22:27:54.000000000 +0100
++++ gdb-7.2/gdb/symtab.c	2011-02-03 22:28:01.000000000 +0100
+@@ -1329,7 +1329,8 @@ lookup_symbol_aux_quick (struct objfile 
+ 
+   if (!objfile->sf)
+     return NULL;
+-  symtab = objfile->sf->qf->lookup_symbol (objfile, kind, name, domain);
++  symtab = objfile->sf->qf->lookup_symbol (objfile, kind, name, domain,
++					   current_language->la_language);
+   if (!symtab)
+     return NULL;
+ 
+@@ -1500,7 +1501,8 @@ basic_lookup_transparent_type_quick (str
+ 
+   if (!objfile->sf)
+     return NULL;
+-  symtab = objfile->sf->qf->lookup_symbol (objfile, kind, name, STRUCT_DOMAIN);
++  symtab = objfile->sf->qf->lookup_symbol (objfile, kind, name, STRUCT_DOMAIN,
++					   current_language->la_language);
+   if (!symtab)
+     return NULL;
+ 
+@@ -1625,7 +1627,8 @@ find_main_filename (void)
+ 
+     if (!objfile->sf)
+       continue;
+-    result = objfile->sf->qf->find_symbol_file (objfile, name);
++    result = objfile->sf->qf->find_symbol_file (objfile, name,
++						current_language->la_language);
+     if (result)
+       return result;
+   }
+Index: gdb-7.2/gdb/testsuite/gdb.cp/pr11734-1.cc
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.cp/pr11734-1.cc	2011-02-03 22:28:01.000000000 +0100
+@@ -0,0 +1,30 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2010 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++   Please email any bugs, comments, and/or additions to this file to:
++   bug-gdb@gnu.org  */
++
++#include "pr11734.h"
++
++int
++main ()
++{
++  pr11734 *p = new pr11734;
++  p->foo ();
++  return 0;
++}
++
+Index: gdb-7.2/gdb/testsuite/gdb.cp/pr11734-2.cc
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.cp/pr11734-2.cc	2011-02-03 22:28:01.000000000 +0100
+@@ -0,0 +1,27 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2010 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++   Please email any bugs, comments, and/or additions to this file to:
++   bug-gdb@gnu.org  */
++
++#include "pr11734.h"
++
++void
++pr11734::foo(void)
++{
++}
++
+Index: gdb-7.2/gdb/testsuite/gdb.cp/pr11734-3.cc
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.cp/pr11734-3.cc	2011-02-03 22:28:01.000000000 +0100
+@@ -0,0 +1,27 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2010 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++   Please email any bugs, comments, and/or additions to this file to:
++   bug-gdb@gnu.org  */
++
++#include "pr11734.h"
++
++void
++pr11734::foo (int a)
++{
++}
++
+Index: gdb-7.2/gdb/testsuite/gdb.cp/pr11734-4.cc
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.cp/pr11734-4.cc	2011-02-03 22:28:01.000000000 +0100
+@@ -0,0 +1,27 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2010 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++   Please email any bugs, comments, and/or additions to this file to:
++   bug-gdb@gnu.org  */
++
++#include "pr11734.h"
++
++void
++pr11734::foo (char *a)
++{
++}
++
+Index: gdb-7.2/gdb/testsuite/gdb.cp/pr11734.exp
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.cp/pr11734.exp	2011-02-03 22:28:01.000000000 +0100
+@@ -0,0 +1,55 @@
++# Copyright 2010 Free Software Foundation, Inc.
++#
++# Contributed by Red Hat, originally written by Keith Seitz.
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# This file is part of the gdb testsuite.
++
++if { [skip_cplus_tests] } { continue }
++
++set testfile "pr11734"
++set class $testfile
++
++set srcfiles {}
++for {set i 1} {$i < 5} {incr i} {
++    lappend srcfiles $testfile-$i.cc
++}
++
++prepare_for_testing pr11734 $testfile $srcfiles {c++ debug}
++
++if {![runto_main]} {
++    perror "couldn't run to breakpoint"
++    continue
++}
++
++# An array holding the overload types for the method pr11734::foo.  The
++# first element is the overloaded method parameter.  The second element
++# is the expected source file number, e.g. "pr11734-?.cc".
++array set tests {
++    "char*"  4
++    "int"    3
++    ""       2
++}
++
++# Test each overload instance twice: once quoted, once unquoted
++foreach ovld [array names tests] {
++    set method "${class}::foo\($ovld\)"
++    set result "Breakpoint (\[0-9\]).*file .*/$class-$tests($ovld).*"
++    gdb_test "break $method" $result
++    gdb_test "break '$method'" $result
++}
++
++gdb_exit
++return 0
+Index: gdb-7.2/gdb/testsuite/gdb.cp/pr11734.h
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.cp/pr11734.h	2011-02-03 22:28:01.000000000 +0100
+@@ -0,0 +1,28 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2010 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++   Please email any bugs, comments, and/or additions to this file to:
++   bug-gdb@gnu.org  */
++
++class pr11734
++{
++ public:
++  void foo ();
++  void foo (int);
++  void foo (char *);
++};
++

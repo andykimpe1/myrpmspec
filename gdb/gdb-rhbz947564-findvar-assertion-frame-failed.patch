@@ -1,0 +1,269 @@
+http://sourceware.org/ml/gdb-cvs/2010-09/msg00101.html
+
+2010-09-14  Tom Tromey  <tromey@redhat.com>
+
+	PR exp/11803:
+	* value.c (value_static_field): Use value_of_variable.
+
+Index: gdb-7.2/gdb/value.c
+===================================================================
+--- gdb-7.2.orig/gdb/value.c
++++ gdb-7.2/gdb/value.c
+@@ -2017,18 +2017,7 @@ value_static_field (struct type *type, i
+ 	    }
+ 	}
+       else
+-	{
+-	  /* SYM should never have a SYMBOL_CLASS which will require
+-	     read_var_value to use the FRAME parameter.  */
+-	  if (symbol_read_needs_frame (sym))
+-	    warning (_("static field's value depends on the current "
+-		     "frame - bad debug info?"));
+-	  retval = read_var_value (sym, NULL);
+- 	}
+-      if (retval && VALUE_LVAL (retval) == lval_memory)
+-	SET_FIELD_PHYSADDR (TYPE_FIELD (type, fieldno),
+-			    value_address (retval)
+-			    - (TYPE_OBJFILE (type) == NULL ? 0 : ANOFFSET (TYPE_OBJFILE (type)->section_offsets, SECT_OFF_TEXT (TYPE_OBJFILE (type)))));
++	retval = value_of_variable (sym, NULL);
+       break;
+     }
+     default:
+Index: gdb-7.2/gdb/testsuite/gdb.threads/tls.c
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/gdb.threads/tls.c
++++ gdb-7.2/gdb/testsuite/gdb.threads/tls.c
+@@ -18,7 +18,13 @@
+ 
+ /* Thread-local storage.  */
+ __thread int a_thread_local;
+-__thread int another_thread_local;
++
++class K {
++ public:
++  static __thread int another_thread_local;
++};
++
++__thread int K::another_thread_local;
+ 
+ /* psymtabs->symtabs resolving check.  */
+ extern __thread int file2_thread_local;
+@@ -64,8 +70,7 @@ void print_error ()
+ }
+ 
+ /* Routine for each thread to run, does nothing.  */
+-void *spin( vp )
+-    void * vp;
++void *spin( void *vp )
+ {
+     int me = (long) vp;
+     int i;
+@@ -74,19 +79,19 @@ void *spin( vp )
+     a_global++;
+ 
+     a_thread_local = 0;
+-    another_thread_local = me;
++    K::another_thread_local = me;
+     for( i = 0; i <= me; i++ ) {
+         a_thread_local += i;
+     }
+ 
+-    another_thread_local_val[me] = another_thread_local;
++    another_thread_local_val[me] = K::another_thread_local;
+     thread_local_val[ me ] = a_thread_local; /* here we know tls value */
+ 
+     if (sem_post (&tell_main) == -1)
+      {
+         fprintf (stderr, "th %d post on sem tell_main failed\n", me);
+         print_error ();
+-        return;
++        return NULL;
+      }
+ #ifdef START_DEBUG
+     fprintf (stderr, "th %d post on tell main\n", me);
+@@ -111,7 +116,7 @@ void *spin( vp )
+           {  
+             fprintf (stderr, "th %d wait on sem tell_thread failed\n", me);
+             print_error ();
+-            return;
++            return NULL;
+          }
+       }
+ 
+@@ -119,6 +124,7 @@ void *spin( vp )
+       fprintf (stderr, "th %d Wait on tell_thread\n", me);
+ #endif
+ 
++      return NULL;
+ }
+ 
+ void
+Index: gdb-7.2/gdb/testsuite/gdb.threads/tls.exp
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/gdb.threads/tls.exp
++++ gdb-7.2/gdb/testsuite/gdb.threads/tls.exp
+@@ -27,7 +27,7 @@ if [istarget "*-*-linux"] then {
+     set target_cflags ""
+ }
+ 
+-if {[gdb_compile_pthreads "${srcdir}/${subdir}/${srcfile} ${srcdir}/${subdir}/${srcfile2}" "${binfile}" executable [list debug "incdir=${objdir}"]] != "" } {
++if {[gdb_compile_pthreads "${srcdir}/${subdir}/${srcfile} ${srcdir}/${subdir}/${srcfile2}" "${binfile}" executable [list c++ debug "incdir=${objdir}"]] != "" } {
+     return -1
+ }
+ 
+@@ -75,7 +75,7 @@ proc check_thread_local {number} {
+ 	    "= $expected_value" \
+ 	    "${number} thread local storage"
+ 
+-    gdb_test "p another_thread_local" \
++    gdb_test "p K::another_thread_local" \
+ 	    "= $me_variable" \
+ 	    "${number} another thread local storage"
+ 
+@@ -83,7 +83,7 @@ proc check_thread_local {number} {
+ 	    ".*a_thread_local.*a thread-local variable at offset.*" \
+ 	    "${number} info address a_thread_local"
+ 
+-    gdb_test "info address another_thread_local" \
++    gdb_test "info address K::another_thread_local" \
+     	    ".*another_thread_local.*a thread-local variable at offset.*" \
+ 	    "${number} info address another_thread_local"
+ }
+Index: gdb-7.2/gdb/testsuite/gdb.threads/tls-rhbz947564.cc
+===================================================================
+--- /dev/null
++++ gdb-7.2/gdb/testsuite/gdb.threads/tls-rhbz947564.cc
+@@ -0,0 +1,53 @@
++#include <iostream>
++#include <pthread.h>
++
++class x
++  {
++  public:
++    int n;
++
++    x() : n(0) {}
++  };
++
++class y
++  {
++  public:
++    int v;
++
++    y() : v(0) {}
++    static __thread x *xp;
++  };
++
++__thread x *y::xp;
++
++static void
++foo (y *yp)
++{
++  yp->v = 1;   /* foo_marker */
++}
++
++static void *
++bar (void *unused)
++{
++  x xinst;
++  y::xp= &xinst;
++
++  y yy;
++  foo(&yy);
++
++  return NULL;
++}
++
++int
++main(int argc, char *argv[])
++{
++  pthread_t t[2];
++
++  pthread_create (&t[0], NULL, bar, NULL);
++  pthread_create (&t[1], NULL, bar, NULL);
++
++  pthread_join (t[0], NULL);
++  pthread_join (t[1], NULL);
++
++  return 0;
++}
+Index: gdb-7.2/gdb/testsuite/gdb.threads/tls-rhbz947564.exp
+===================================================================
+--- /dev/null
++++ gdb-7.2/gdb/testsuite/gdb.threads/tls-rhbz947564.exp
+@@ -0,0 +1,75 @@
++# Copyright (C) 2013 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++set testfile tls-rhbz947564
++set srcfile ${testfile}.cc
++set binfile ${objdir}/${subdir}/${testfile}
++
++if [istarget "*-*-linux"] then {
++    set target_cflags "-D_MIT_POSIX_THREADS"
++} else {
++    set target_cflags ""
++}
++
++if {[gdb_compile_pthreads "${srcdir}/${subdir}/${srcfile}" "${binfile}" executable [list c++ debug]] != "" } {
++    return -1
++}
++
++gdb_exit
++gdb_start
++gdb_reinitialize_dir $srcdir/$subdir
++
++gdb_load ${binfile}
++
++if { ![runto_main] } {
++    fail "Can't run to function main"
++    return 0
++}
++
++gdb_breakpoint "foo"
++gdb_continue_to_breakpoint "foo" ".* foo_marker .*"
++
++proc get_xp_val {try} {
++    global expect_out
++    global gdb_prompt
++    global hex
++
++    set xp_val ""
++    gdb_test_multiple "print *yp" "print yp value" {
++	-re { = \{v = 0, static xp = (0x[0-9a-f]+)\}.* } {
++	    pass "print $try value of *yp"
++	    set xp_val $expect_out(1,string)
++	}
++	-re "$gdb_prompt $" {
++	    fail "print $try value of *yp"
++	}
++	timeout {
++	    fail "print $try value of *yp (timeout)"
++	}
++    }
++    return $xp_val
++}
++
++set first_run [get_xp_val "first"]
++
++gdb_test "continue" "Breakpoint \[0-9\]+, foo \\\(yp=$hex\\\) at.*"
++
++set second_run [get_xp_val "second"]
++
++if { $first_run != $second_run } {
++    pass "different values for TLS variable"
++} else {
++    fail "different values for TLS variable"
++}

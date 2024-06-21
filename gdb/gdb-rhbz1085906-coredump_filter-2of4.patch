@@ -1,0 +1,62 @@
+commit 9ead1b844cdb9577b65dec7beb61fda3bf99a12e
+Author: Jan Kratochvil <jan.kratochvil@redhat.com>
+Date:   Fri Apr 5 19:17:15 2013 +0000
+
+    gdb/
+    	Fix compatibility with Linux kernel 3.8.3.
+    	* linux-tdep.c (linux_find_memory_regions_full): Move variable number
+    	to more inner block.  Remove parsing of NUMBER from outer block.
+    	Parse NUMBER only if KEYWORD has been identified.
+
+diff -dup -rup gdb-7.2-backport1/gdb/linux-nat.c gdb-7.2/gdb/linux-nat.c
+--- gdb-7.2-backport1/gdb/linux-nat.c	2015-09-29 23:39:02.242775907 +0200
++++ gdb-7.2/gdb/linux-nat.c	2015-09-30 00:26:22.278467618 +0200
+@@ -4144,7 +4144,6 @@ linux_nat_find_memory_regions (int (*fun
+ 	{
+ 	  int i;
+ 	  char keyword[64 + 1];
+-	  unsigned long number;
+ 
+ 	  i = fgetc (mapsfile);
+ 	  if (i != EOF)
+@@ -4152,18 +4151,34 @@ linux_nat_find_memory_regions (int (*fun
+ 	  if (i < 'A' || i > 'Z')
+ 	    break;
+ 
+-	  if (fscanf (mapsfile, "%64s%lu kB\n", keyword, &number) != 2)
++	  if (fscanf (mapsfile, "%64s", keyword) != 1)
+ 	    {
+ 	      warning (_("Error parsing {s,}maps file '%s'"), mapsfilename);
+ 	      break;
+ 	    }
+ 	  if (strcmp (keyword, "Anonymous:") == 0)
+ 	    has_anonymous = 1;
+-	  if (number != 0 && (strcmp (keyword, "Shared_Dirty:") == 0
+-			      || strcmp (keyword, "Private_Dirty:") == 0
+-			      || strcmp (keyword, "Swap:") == 0
+-			      || strcmp (keyword, "Anonymous:") == 0))
+-	    modified = 1;
++	  if (strcmp (keyword, "Shared_Dirty:") == 0
++		      || strcmp (keyword, "Private_Dirty:") == 0
++		      || strcmp (keyword, "Swap:") == 0
++		      || strcmp (keyword, "Anonymous:") == 0)
++	    {
++	      unsigned long number;
++
++	      if (fscanf (mapsfile, "%lu", &number) != 1)
++		{
++		  warning (_("Error parsing {s,}maps file '%s' number"),
++			   mapsfilename);
++		  break;
++		}
++	      if (number != 0)
++		modified = 1;
++	    }
++	  do
++	    {
++	      i = fgetc (mapsfile);
++	    }
++	  while (i != EOF && i != '\n');
+ 	}
+ 
+       /* Older Linux kernels did not support the "Anonymous:" counter.

@@ -1,0 +1,209 @@
+http://sourceware.org/ml/gdb-patches/2010-12/msg00264.html
+
+Index: gdb-7.2/gdb/linespec.c
+===================================================================
+--- gdb-7.2.orig/gdb/linespec.c	2011-02-03 22:28:01.000000000 +0100
++++ gdb-7.2/gdb/linespec.c	2011-02-03 22:31:29.000000000 +0100
+@@ -1042,6 +1042,10 @@ locate_first_half (char **argptr, int *i
+ 	    error (_("malformed template specification in command"));
+ 	  p = temp_end;
+ 	}
++
++      if (p[0] == '(')
++	p = find_method_overload_end (p);
++
+       /* Check for a colon and a plus or minus and a [ (which
+          indicates an Objective-C method) */
+       if (is_objc_method_format (p))
+@@ -1248,8 +1252,10 @@ decode_compound (char **argptr, int funf
+         find_method.
+ 
+      2) AAA::inA isn't the name of a class.  In that case, either the
+-        user made a typo or AAA::inA is the name of a namespace.
+-        Either way, we just look up AAA::inA::fun with lookup_symbol.
++        user made a typo, AAA::inA is the name of a namespace, or it is
++        the name of a minimal symbol.
++        We just look up AAA::inA::fun with lookup_symbol.  If that fails,
++        try lookup_minimal_symbol.
+ 
+      Thus, our first task is to find everything before the last set of
+      double-colons and figure out if it's the name of a class.  So we
+@@ -1270,6 +1276,8 @@ decode_compound (char **argptr, int funf
+ 
+   while (1)
+     {
++      static char *break_characters = " \t\'(";
++
+       /* Move pointer up to next possible class/namespace token.  */
+ 
+       p = p2 + 1;	/* Restart with old value +1.  */
+@@ -1280,8 +1288,7 @@ decode_compound (char **argptr, int funf
+       /* PASS2: p2->"::fun", p->":fun" */
+ 
+       /* Move pointer ahead to next double-colon.  */
+-      while (*p && (p[0] != ' ') && (p[0] != '\t') && (p[0] != '\'')
+-	     && (*p != '('))
++      while (*p && strchr (break_characters, *p) == NULL)
+ 	{
+ 	  if (current_language->la_language == language_cplus)
+ 	    p += cp_validate_operator (p);
+@@ -1305,9 +1312,12 @@ decode_compound (char **argptr, int funf
+ 	  else if ((p[0] == ':') && (p[1] == ':'))
+ 	    break;	/* Found double-colon.  */
+ 	  else
+-	    /* PASS2: We'll keep getting here, until p->"", at which point
+-	       we exit this loop.  */
+-	    p++;
++	    {
++	      /* PASS2: We'll keep getting here, until P points to one of the
++		 break characters, at which point we exit this loop.  */
++	      if (strchr (break_characters, *p) == NULL)
++		p++;
++	    }
+ 	}
+ 
+       if (*p != ':')
+@@ -1316,8 +1326,8 @@ decode_compound (char **argptr, int funf
+ 			   unsuccessfully all the components of the
+ 			   string, and p->""(PASS2)  */
+ 
+-      /* We get here if p points to ' ', '\t', '\'', "::" or ""(i.e
+-	 string ended). */
++      /* We get here if p points to one of the break characters or ""(i.e
++	 string ended).  */
+       /* Save restart for next time around.  */
+       p2 = p;
+       /* Restore argptr as it was on entry to this function.  */
+@@ -1466,6 +1476,18 @@ decode_compound (char **argptr, int funf
+   /* We couldn't find a class, so we're in case 2 above.  We check the
+      entire name as a symbol instead.  */
+ 
++  if (current_language->la_language == language_cplus
++      || current_language->la_language == language_java)
++    {
++      char *paren = strchr (p, '(');
++      if (paren != NULL)
++	p = find_method_overload_end (paren);
++
++      /* Make sure we keep important kewords like "const" */
++      if (strncmp (p, " const", 6) == 0)
++	p += 6;
++    }
++
+   copy = (char *) alloca (p - saved_arg2 + 1);
+   memcpy (copy, saved_arg2, p - saved_arg2);
+   /* Note: if is_quoted should be true, we snuff out quote here
+@@ -1478,9 +1500,18 @@ decode_compound (char **argptr, int funf
+   sym = lookup_symbol (copy, 0, VAR_DOMAIN, 0);
+   if (sym)
+     return symbol_found (funfirstline, canonical, copy, sym, NULL);
++  else
++    {
++      struct minimal_symbol *msym;
++
++      /* Couldn't find any interpretation as classes/namespaces.  As a last
++	 resort, try the minimal symbol tables.  */
++      msym = lookup_minimal_symbol (copy, NULL, NULL);
++      if (msym != NULL)
++	return minsym_found (funfirstline, msym);
++    }    
+ 
+-  /* Couldn't find any interpretation as classes/namespaces, so give
+-     up.  The quotes are important if copy is empty.  */
++  /* Couldn't find a minimal symbol, either, so give up.  */
+   if (not_found_ptr)
+     *not_found_ptr = 1;
+   cplusplus_error (the_real_saved_arg,
+Index: gdb-7.2/gdb/testsuite/gdb.cp/pr12273.cc
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.cp/pr12273.cc	2011-02-03 22:31:01.000000000 +0100
+@@ -0,0 +1,37 @@
++/* This test case is part of GDB, the GNU debugger.
++
++   Copyright 2010 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++template <typename T>
++class GDB
++{
++ public:
++   static int simple (void) { return 0; }
++   static int harder (T a) { return 1; }
++   template <typename X>
++   static X even_harder (T a) { return static_cast<X> (a); }
++   int operator == (GDB const& other)
++   { return 1; }
++};
++
++int main(int argc, char **argv)
++{
++   GDB<int> a, b;
++   if (a == b)
++     return GDB<char>::harder('a') + GDB<int>::harder(3)
++	+ GDB<char>::even_harder<int> ('a');
++   return GDB<int>::simple ();
++}
+Index: gdb-7.2/gdb/testsuite/gdb.cp/pr12273.exp
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.cp/pr12273.exp	2011-02-03 22:31:01.000000000 +0100
+@@ -0,0 +1,46 @@
++# Copyright 2010 Free Software Foundation, Inc.
++#
++# Contributed by Red Hat, originally written by Keith Seitz.
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# This file is part of the gdb testsuite.
++
++if {[skip_cplus_tests]} { continue }
++
++set testfile "pr12273"
++# Do NOT compile with debug flag.
++prepare_for_testing pr12273 $testfile $testfile.cc {c++}
++
++gdb_test_no_output "set language c++"
++
++# A list of minimal symbol names to check.
++# Note that GDB<char>::even_harder<int>(char) is quoted and includes
++# the return type.  This is necessary because this is the demangled name
++# of the minimal symbol.
++set min_syms [list \
++		  "GDB<int>::operator ==" \
++		  "GDB<int>::operator==(GDB<int> const&)" \
++		  "GDB<char>::harder(char)" \
++		  "GDB<int>::harder(int)" \
++		  {"int GDB<char>::even_harder<int>(char)"} \
++		  "GDB<int>::simple()"]
++
++foreach sym $min_syms {
++    if {[gdb_breakpoint $sym]} {
++	pass "setting breakpoint at $sym"
++    }
++}
++
++gdb_exit

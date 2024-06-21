@@ -1,0 +1,259 @@
+Original message by Sergio Durigan Junior:
+
+  <https://sourceware.org/ml/gdb-patches/2013-09/msg00385.html>
+  Message-ID: <m3a9jh6bs0.fsf@redhat.com>
+
+====
+
+commit a280dbd16004e14560b76141a1aaf1e4659dd33f
+Author: Sergio Durigan Junior <sergiodj@redhat.com>
+Date:   Mon Sep 16 17:47:30 2013 +0000
+
+    Based on the discussion at:
+    
+    <https://sourceware.org/ml/gdb-patches/2013-09/msg00301.html>
+    <https://sourceware.org/ml/gdb-patches/2013-09/msg00383.html>
+    
+    This patch adds a new convenience function called $_isvoid, whose
+    only purpose is to check whether an expression is void or not.
+    This became necessary because the new convenience variable
+    $_exitsignal (not yet approved) has a mutual exclusive behavior
+    with $_exitcode, i.e., when one is "defined" (i.e., non-void),
+    the other is cleared (i.e., becomes void).  Doug wanted a way to
+    identify which variable to use, and checking for voidness is the
+    obvious solution.
+    
+    It is worth mentioning that my first attempt, after a conversation with
+    Doug, was to actually implement a new $_isdefined() convenience
+    function.  I would do that (for convenience variables) by calling
+    lookup_only_internalvar.  However, I found a few problems:
+    
+    - Whenever I called $_isdefined ($variable), $variable became defined
+      (with a void value), and $_isdefined always returned true.
+    
+    - Then, I tried to implement $_isdefined ("variable"), and do the "$" +
+      "variable" inside GDB, thus making it impossible for GDB to create the
+      convenience variable.  However, it was hard to extract the string
+      without having to mess with values and their idiossincrasies.
+      Therefore, I decided to abandon this attempt (specially because I
+      didn't want to spend too much time struggling with it).
+    
+    Anyway, after talking to Doug again we decided that it would be easier
+    to implement $_isvoid, and this will probably help in cases like
+    <http://stackoverflow.com/questions/3744554/testing-if-a-gdb-convenience-variable-is-defined>.
+    
+    I wrote a NEWS entry for it, and some new lines on the documentation.
+    
+    gdb/
+    2013-09-16  Sergio Durigan Junior  <sergiodj@redhat.com>
+    
+    	* NEWS: Mention new convenience function $_isvoid.
+    	* value.c (isvoid_internal_fn): New function.
+    	(_initialize_values): Add new convenience function $_isvoid.
+    
+    gdb/doc/
+    2013-09-16  Sergio Durigan Junior  <sergiodj@redhat.com>
+    
+    	* gdb.texinfo (Convenience Functions): Mention new convenience
+    	function $_isvoid.
+    
+    gdb/testsuite/
+    2013-09-16  Sergio Durigan Junior  <sergiodj@redhat.com>
+    
+    	* gdb.base/gdbvars.c (foo_void): New function.
+    	(foo_int): Likewise.
+    	* gdb.base/gdbvars.exp (test_convenience_functions): New
+    	function.  Call it.
+
+Index: gdb-7.2/gdb/doc/gdb.texinfo
+===================================================================
+--- gdb-7.2.orig/gdb/doc/gdb.texinfo
++++ gdb-7.2/gdb/doc/gdb.texinfo
+@@ -7057,6 +7057,7 @@ Table}.
+ * Pretty Printing::             Python pretty printing
+ * Value History::               Value history
+ * Convenience Vars::            Convenience variables
++* Convenience Funs::            Convenience Functions
+ * Registers::                   Registers
+ * Floating Point Hardware::     Floating point hardware
+ * Vector Unit::                 Vector Unit
+@@ -8474,6 +8475,8 @@ On HP-UX systems, if you refer to a func
+ begins with a dollar sign, @value{GDBN} searches for a user or system
+ name first, before it searches for a convenience variable.
+ 
++@node Convenience Funs
++@section Convenience Functions
+ @cindex convenience functions
+ @value{GDBN} also supplies some @dfn{convenience functions}.  These
+ have a syntax similar to convenience variables.  A convenience
+@@ -8482,6 +8485,62 @@ however, a convenience function is imple
+ @value{GDBN}.
+ 
+ @table @code
++@item $_isvoid (@var{expr})
++@findex $_isvoid@r{, convenience function}
++Return one if the expression @var{expr} is @code{void}.  Otherwise it
++returns zero.
++
++A @code{void} expression is an expression where the type of the result
++is @code{void}.  For example, you can examine a convenience variable
++(see @ref{Convenience Vars,, Convenience Variables}) to check whether
++it is @code{void}:
++
++@smallexample
++(@value{GDBP}) print $_exitcode
++$1 = void
++(@value{GDBP}) print $_isvoid ($_exitcode)
++$2 = 1
++(@value{GDBP}) run
++Starting program: ./a.out
++[Inferior 1 (process 29572) exited normally]
++(@value{GDBP}) print $_exitcode
++$3 = 0
++(@value{GDBP}) print $_isvoid ($_exitcode)
++$4 = 0
++@end smallexample
++
++In the example above, we used @code{$_isvoid} to check whether
++@code{$_exitcode} is @code{void} before and after the execution of the
++program being debugged.  Before the execution there is no exit code to
++be examined, therefore @code{$_exitcode} is @code{void}.  After the
++execution the program being debugged returned zero, therefore
++@code{$_exitcode} is zero, which means that it is not @code{void}
++anymore.
++
++The @code{void} expression can also be a call of a function from the
++program being debugged.  For example, given the following function:
++
++@smallexample
++void
++foo (void)
++@{
++@}
++@end smallexample
++
++The result of calling it inside @value{GDBN} is @code{void}:
++
++@smallexample
++(@value{GDBP}) print foo ()
++$1 = void
++(@value{GDBP}) print $_isvoid (foo ())
++$2 = 1
++(@value{GDBP}) set $v = foo ()
++(@value{GDBP}) print $v
++$3 = void
++(@value{GDBP}) print $_isvoid ($v)
++$4 = 1
++@end smallexample
++
+ @item help function
+ @kindex help function
+ @cindex show all convenience functions
+Index: gdb-7.2/gdb/testsuite/gdb.base/gdbvars.c
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/gdb.base/gdbvars.c
++++ gdb-7.2/gdb/testsuite/gdb.base/gdbvars.c
+@@ -4,6 +4,17 @@ typedef void *ptr;
+ 
+ ptr p = &p;
+ 
++static void
++foo_void (void)
++{
++}
++
++static int
++foo_int (void)
++{
++  return 0;
++}
++
+ int
+ main ()
+ {
+Index: gdb-7.2/gdb/testsuite/gdb.base/gdbvars.exp
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/gdb.base/gdbvars.exp
++++ gdb-7.2/gdb/testsuite/gdb.base/gdbvars.exp
+@@ -61,6 +61,34 @@ proc test_convenience_variables {} {
+ 	"Print contents of uninitialized convenience variable"
+ }
+ 
++proc test_convenience_functions {} {
++    gdb_test "print \$_isvoid" " = <internal function _isvoid>" \
++	"Print internal function \$_isvoid"
++
++    gdb_test "print \$isvoid_foo" " = void" \
++	"Print void convenience variable"
++
++    gdb_test "print \$_isvoid (\$isvoid_foo)" " = 1" \
++	"Check whether void convenience variable is void"
++
++    gdb_test_no_output "set \$isvoid_foo = 1" \
++	"Set void convenience variable to 1"
++
++    gdb_test "print \$_isvoid (\$isvoid_foo)" " = 0" \
++	"Check whether non-void convenience variable is void"
++
++    # For the next test, we need the inferior to be running.
++    if { ![runto_main] } {
++	return -1
++    }
++
++    gdb_test "print \$_isvoid (foo_void ())" " = 1" \
++	"Check whether void function is void"
++
++    gdb_test "print \$_isvoid (foo_int ())" " = 0" \
++	"Check whether non-void function is void"
++}
++
+ proc test_value_history {} {
+     global gdb_prompt
+ 
+@@ -128,4 +156,5 @@ gdb_test_no_output "set print sevenbit-s
+ 
+ test_value_history
+ test_convenience_variables
++test_convenience_functions
+ test_with_program
+Index: gdb-7.2/gdb/value.c
+===================================================================
+--- gdb-7.2.orig/gdb/value.c
++++ gdb-7.2/gdb/value.c
+@@ -2585,6 +2585,23 @@ value_initialized (struct value *val)
+   return val->initialized;
+ }
+ 
++/* Implementation of the convenience function $_isvoid.  */
++
++static struct value *
++isvoid_internal_fn (struct gdbarch *gdbarch,
++		    const struct language_defn *language,
++		    void *cookie, int argc, struct value **argv)
++{
++  int ret;
++
++  if (argc != 1)
++    error (_("You must provide one parameter for $_isvoid."));
++
++  ret = TYPE_CODE (value_type (argv[0])) == TYPE_CODE_VOID;
++
++  return value_from_longest (builtin_type (gdbarch)->builtin_int, ret);
++}
++
+ void
+ _initialize_values (void)
+ {
+@@ -2613,6 +2630,12 @@ VARIABLE is already initialized."));
+ Placeholder command for showing help on convenience functions."),
+ 		  &functionlist, "function ", 0, &cmdlist);
+ 
++  add_internal_function ("_isvoid", _("\
++Check whether an expression is void.\n\
++Usage: $_isvoid (expression)\n\
++Return 1 if the expression is void, zero otherwise."),
++			 isvoid_internal_fn, NULL);
++
+   make_final_cleanup (value_history_cleanup, NULL);
+ 
+ #if 0

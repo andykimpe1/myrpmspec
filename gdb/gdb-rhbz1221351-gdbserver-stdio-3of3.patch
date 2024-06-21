@@ -1,0 +1,127 @@
+commit 1a3d890bcc0e6f9fe0116b3274023ae0af847593
+Author: Pedro Alves <palves@redhat.com>
+Date:   Wed Oct 2 11:42:35 2013 +0000
+
+    [GDBserver]: Silence exits if GDB is connected through stdio.
+    
+    If we make gdbserver gdb_continue_to_end actually expect a process
+    exit with GDBserver, we get many testsuite failures with the remote
+    stdio board:
+    
+    -PASS: gdb.arch/amd64-disp-step.exp: continue until exit at amd64-disp-step
+    +FAIL: gdb.arch/amd64-disp-step.exp: continue until exit at amd64-disp-step (the program exited)
+    -PASS: gdb.base/break.exp: continue until exit at recursive next test
+    +FAIL: gdb.base/break.exp: continue until exit at recursive next test (the program exited)
+    -PASS: gdb.base/chng-syms.exp: continue until exit at breakpoint first time through
+    +FAIL: gdb.base/chng-syms.exp: continue until exit at breakpoint first time through (the program exited)
+    ... etc. ...
+    
+    This is what the log shows for all of them:
+    
+     (gdb) continue
+     Continuing.
+    
+     Child exited with status 0
+     GDBserver exiting
+     [Inferior 1 (process 22721) exited normally]
+     (gdb) FAIL: gdb.arch/amd64-disp-step.exp: continue until exit (the program exited)
+    
+    The problem is the whole "Child exited ... GDBserver exiting" output,
+    that comes out of GDBserver, and that the testsuite is not expecting.
+    
+    I pondered somehow making the testsuite adjust to this.  But,
+    testsuite aside, I think GDBserver should not be outputting this at
+    all when GDB is connected through stdio.  GDBserver will be printing
+    this in GDB's console, but the user can already tell from the regular
+    output that the inferior is gone.
+    
+    Again, manually:
+    
+     (gdb) tar remote | ./gdbserver/gdbserver - program
+     Remote debugging using | ./gdbserver/gdbserver - program
+     Process program created; pid = 22486
+     stdin/stdout redirected
+     Remote debugging using stdio
+     done.
+     Loaded symbols for /lib64/ld-linux-x86-64.so.2
+     0x000000323d001530 in _start () from /lib64/ld-linux-x86-64.so.2
+     (gdb) c
+     Continuing.
+     Child exited with status 1
+     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     GDBserver exiting
+     ^^^^^^^^^^^^^^^^^
+     [Inferior 1 (process 22486) exited with code 01]
+     (gdb)
+    
+    Suppressing those two lines makes the output be exactly like when
+    debugging against a remote tcp gdbserver:
+    
+     (gdb) c
+     Continuing.
+     [Inferior 1 (process 22914) exited with code 01]
+     (gdb)
+    
+    2013-10-02  Pedro Alves  <palves@redhat.com>
+    
+    	* server.c (process_serial_event): Don't output "GDBserver
+    	exiting" if GDB is connected through stdio.
+    	* target.c (mywait): Likewise, be silent if GDB is connected
+    	through stdio.
+
+### a/gdb/gdbserver/ChangeLog
+### b/gdb/gdbserver/ChangeLog
+## -1,3 +1,10 @@
++2013-10-02  Pedro Alves  <palves@redhat.com>
++
++	* server.c (process_serial_event): Don't output "GDBserver
++	exiting" if GDB is connected through stdio.
++	* target.c (mywait): Likewise, be silent if GDB is connected
++	through stdio.
++
+ 2013-10-01  Joel Brobecker  <brobecker@adacore.com>
+ 
+ 	* lynx-low.c (lynx_add_threads_after_attach): New function.
+Index: gdb-7.2/gdb/gdbserver/server.c
+===================================================================
+--- gdb-7.2.orig/gdb/gdbserver/server.c	2015-10-05 22:21:36.000000000 +0200
++++ gdb-7.2/gdb/gdbserver/server.c	2015-10-05 22:24:56.031040049 +0200
+@@ -3082,7 +3082,10 @@ process_serial_event (void)
+ 	 the whole vStopped list (until it gets an OK).  */
+       if (!notif_queue)
+ 	{
+-	  fprintf (stderr, "GDBserver exiting\n");
++	  /* Be transparent when GDB is connected through stdio -- no
++	     need to spam GDB's console.  */
++	  if (!remote_connection_is_stdio ())
++	    fprintf (stderr, "GDBserver exiting\n");
+ 	  remote_close ();
+ 	  exit (0);
+ 	}
+Index: gdb-7.2/gdb/gdbserver/target.c
+===================================================================
+--- gdb-7.2.orig/gdb/gdbserver/target.c	2010-04-11 18:33:56.000000000 +0200
++++ gdb-7.2/gdb/gdbserver/target.c	2015-10-05 22:25:33.557293505 +0200
+@@ -96,6 +96,14 @@ mywait (ptid_t ptid, struct target_waits
+ 
+   ret = (*the_target->wait) (ptid, ourstatus, options);
+ 
++  /* If GDB is connected through TCP/serial, then GDBserver will most
++     probably be running on its own terminal/console, so it's nice to
++     print there why is GDBserver exiting.  If however, GDB is
++     connected through stdio, then there's no need to spam the GDB
++     console with this -- the user will already see the exit through
++     regular GDB output, in that same terminal.  */
++  if (!remote_connection_is_stdio ())
++{
+   if (ourstatus->kind == TARGET_WAITKIND_EXITED)
+     fprintf (stderr,
+ 	     "\nChild exited with status %d\n", ourstatus->value.sig);
+@@ -103,6 +111,7 @@ mywait (ptid_t ptid, struct target_waits
+     fprintf (stderr, "\nChild terminated with signal = 0x%x (%s)\n",
+ 	     target_signal_to_host (ourstatus->value.sig),
+ 	     target_signal_to_name (ourstatus->value.sig));
++}
+ 
+   if (connected_wait)
+     server_waiting = 0;

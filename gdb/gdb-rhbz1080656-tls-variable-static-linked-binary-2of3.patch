@@ -1,0 +1,330 @@
+commit 5876f5032f60c45c4bd19e7ea7d0c14d0346b93e
+Author: Jan Kratochvil <jan.kratochvil@redhat.com>
+Date:   Wed May 21 16:25:53 2014 +0200
+
+    Fix TLS access for -static -pthread
+    
+    I have posted:
+    	TLS variables access for -static -lpthread executables
+    	https://sourceware.org/ml/libc-help/2014-03/msg00024.html
+    and the GDB patch below has been confirmed as OK for current glibcs.
+    
+    Further work should be done for newer glibcs:
+    	Improve TLS variables glibc compatibility
+    	https://sourceware.org/bugzilla/show_bug.cgi?id=16954
+    
+    Still the patch below implements the feature in a fully functional way backward
+    compatible with current glibcs, it depends on the following glibc source line:
+    	csu/libc-tls.c
+    	main_map->l_tls_modid = 1;
+    
+    gdb/
+    2014-05-21  Jan Kratochvil  <jan.kratochvil@redhat.com>
+    
+    	Fix TLS access for -static -pthread.
+    	* linux-thread-db.c (struct thread_db_info): Add td_thr_tlsbase_p.
+    	(try_thread_db_load_1): Initialize it.
+    	(thread_db_get_thread_local_address): Call it if LM is zero.
+    	* target.c (target_translate_tls_address): Remove LM_ADDR zero check.
+    	* target.h (struct target_ops) (to_get_thread_local_address): Add
+    	load_module_addr comment.
+    
+    gdb/gdbserver/
+    2014-05-21  Jan Kratochvil  <jan.kratochvil@redhat.com>
+    
+    	Fix TLS access for -static -pthread.
+    	* gdbserver/thread-db.c (struct thread_db): Add td_thr_tlsbase_p.
+    	(thread_db_get_tls_address): Call it if LOAD_MODULE is zero.
+    	(thread_db_load_search, try_thread_db_load_1): Initialize it.
+    
+    gdb/testsuite/
+    2014-05-21  Jan Kratochvil  <jan.kratochvil@redhat.com>
+    
+    	Fix TLS access for -static -pthread.
+    	* gdb.threads/staticthreads.c <HAVE_TLS> (tlsvar): New.
+    	<HAVE_TLS> (thread_function, main): Initialize it.
+    	* gdb.threads/staticthreads.exp: Try gdb_compile_pthreads for $have_tls.
+    	Add clean_restart.
+    	<$have_tls != "">: Check TLSVAR.
+    
+    Message-ID: <20140410115204.GB16411@host2.jankratochvil.net>
+
+Index: gdb-7.2/gdb/gdbserver/thread-db.c
+===================================================================
+--- gdb-7.2.orig/gdb/gdbserver/thread-db.c
++++ gdb-7.2/gdb/gdbserver/thread-db.c
+@@ -88,6 +88,9 @@ struct thread_db
+   td_err_e (*td_thr_tls_get_addr_p) (const td_thrhandle_t *th,
+ 				     psaddr_t map_address,
+ 				     size_t offset, psaddr_t *address);
++  td_err_e (*td_thr_tlsbase_p) (const td_thrhandle_t *th,
++				unsigned long int modid,
++				psaddr_t *base);
+   const char ** (*td_symbol_list_p) (void);
+ };
+ 
+@@ -496,7 +499,10 @@ thread_db_get_tls_address (struct thread
+   if (!thread_db->all_symbols_looked_up)
+     return TD_ERR;
+ 
+-  if (thread_db->td_thr_tls_get_addr_p == NULL)
++  /* If td_thr_tls_get_addr is missing rather do not expect td_thr_tlsbase
++     could work.  */
++  if (thread_db->td_thr_tls_get_addr_p == NULL
++      || (load_module == 0 && thread_db->td_thr_tlsbase_p == NULL))
+     return -1;
+ 
+   lwp = get_thread_lwp (thread);
+@@ -507,12 +513,28 @@ thread_db_get_tls_address (struct thread
+ 
+   saved_inferior = current_inferior;
+   current_inferior = thread;
+-  /* Note the cast through uintptr_t: this interface only works if
+-     a target address fits in a psaddr_t, which is a host pointer.
+-     So a 32-bit debugger can not access 64-bit TLS through this.  */
+-  err = thread_db->td_thr_tls_get_addr_p (&lwp->th,
+-					  (psaddr_t) (uintptr_t) load_module,
+-					  offset, &addr);
++
++  if (load_module != 0)
++    {
++      /* Note the cast through uintptr_t: this interface only works if
++	 a target address fits in a psaddr_t, which is a host pointer.
++	 So a 32-bit debugger can not access 64-bit TLS through this.  */
++      err = thread_db->td_thr_tls_get_addr_p (&lwp->th,
++					     (psaddr_t) (uintptr_t) load_module,
++					      offset, &addr);
++    }
++  else
++    {
++      /* This code path handles the case of -static -pthread executables:
++	 https://sourceware.org/ml/libc-help/2014-03/msg00024.html
++	 For older GNU libc r_debug.r_map is NULL.  For GNU libc after
++	 PR libc/16831 due to GDB PR threads/16954 LOAD_MODULE is also NULL.
++	 The constant number 1 depends on GNU __libc_setup_tls
++	 initialization of l_tls_modid to 1.  */
++      err = thread_db->td_thr_tlsbase_p (&lwp->th, 1, &addr);
++      addr = (char *) addr + offset;
++    }
++
+   current_inferior = saved_inferior;
+   if (err == TD_OK)
+     {
+@@ -564,6 +586,7 @@ thread_db_load_search (void)
+   tdb->td_ta_set_event_p = &td_ta_set_event;
+   tdb->td_ta_event_getmsg_p = &td_ta_event_getmsg;
+   tdb->td_thr_tls_get_addr_p = &td_thr_tls_get_addr;
++  tdb->td_thr_tlsbase_p = &td_thr_tlsbase;
+ 
+   return 1;
+ }
+@@ -632,6 +655,7 @@ try_thread_db_load_1 (void *handle)
+   CHK (0, tdb->td_ta_set_event_p = dlsym (handle, "td_ta_set_event"));
+   CHK (0, tdb->td_ta_event_getmsg_p = dlsym (handle, "td_ta_event_getmsg"));
+   CHK (0, tdb->td_thr_tls_get_addr_p = dlsym (handle, "td_thr_tls_get_addr"));
++  CHK (0, tdb->td_thr_tlsbase_p = dlsym (handle, "td_thr_tlsbase"));
+ 
+ #undef CHK
+ 
+Index: gdb-7.2/gdb/linux-thread-db.c
+===================================================================
+--- gdb-7.2.orig/gdb/linux-thread-db.c
++++ gdb-7.2/gdb/linux-thread-db.c
+@@ -161,6 +161,9 @@ struct thread_db_info
+   td_err_e (*td_thr_tls_get_addr_p) (const td_thrhandle_t *th,
+ 				     psaddr_t map_address,
+ 				     size_t offset, psaddr_t *address);
++  td_err_e (*td_thr_tlsbase_p) (const td_thrhandle_t *th,
++				unsigned long int modid,
++				psaddr_t *base);
+ };
+ 
+ /* List of known processes using thread_db, and the required
+@@ -792,6 +795,7 @@ try_thread_db_load_1 (struct thread_db_i
+   info->td_ta_event_getmsg_p = dlsym (info->handle, "td_ta_event_getmsg");
+   info->td_thr_event_enable_p = dlsym (info->handle, "td_thr_event_enable");
+   info->td_thr_tls_get_addr_p = dlsym (info->handle, "td_thr_tls_get_addr");
++  info->td_thr_tlsbase_p = dlsym (info->handle, "td_thr_tlsbase");
+ 
+   if (thread_db_find_new_threads_silently (inferior_ptid) != 0)
+     {
+@@ -1660,21 +1664,39 @@ thread_db_get_thread_local_address (stru
+ 
+       info = get_thread_db_info (GET_PID (ptid));
+ 
+-      /* glibc doesn't provide the needed interface.  */
+-      if (!info->td_thr_tls_get_addr_p)
+-	throw_error (TLS_NO_LIBRARY_SUPPORT_ERROR,
+-		     _("No TLS library support"));
+-
+-      /* Caller should have verified that lm != 0.  */
+-      gdb_assert (lm != 0);
+-
+       /* Finally, get the address of the variable.  */
+-      /* Note the cast through uintptr_t: this interface only works if
+-	 a target address fits in a psaddr_t, which is a host pointer.
+-	 So a 32-bit debugger can not access 64-bit TLS through this.  */
+-      err = info->td_thr_tls_get_addr_p (&thread_info->private->th,
+-					 (psaddr_t)(uintptr_t) lm,
+-					 offset, &address);
++      if (lm != 0)
++	{
++	  /* glibc doesn't provide the needed interface.  */
++	  if (!info->td_thr_tls_get_addr_p)
++	    throw_error (TLS_NO_LIBRARY_SUPPORT_ERROR,
++			 _("No TLS library support"));
++
++	  /* Note the cast through uintptr_t: this interface only works if
++	     a target address fits in a psaddr_t, which is a host pointer.
++	     So a 32-bit debugger can not access 64-bit TLS through this.  */
++	  err = info->td_thr_tls_get_addr_p (&thread_info->private->th,
++					     (psaddr_t)(uintptr_t) lm,
++					     offset, &address);
++	}
++      else
++	{
++	  /* If glibc doesn't provide the needed interface throw an error
++	     that LM is zero - normally cases it should not be.  */
++	  if (!info->td_thr_tlsbase_p)
++	    throw_error (TLS_LOAD_MODULE_NOT_FOUND_ERROR,
++			 _("TLS load module not found"));
++
++	  /* This code path handles the case of -static -pthread executables:
++	     https://sourceware.org/ml/libc-help/2014-03/msg00024.html
++	     For older GNU libc r_debug.r_map is NULL.  For GNU libc after
++	     PR libc/16831 due to GDB PR threads/16954 LOAD_MODULE is also NULL.
++	     The constant number 1 depends on GNU __libc_setup_tls
++	     initialization of l_tls_modid to 1.  */
++	  err = info->td_thr_tlsbase_p (&thread_info->private->th,
++					1, &address);
++	  address = (char *) address + offset;
++	}
+ 
+ #ifdef THREAD_DB_HAS_TD_NOTALLOC
+       /* The memory hasn't been allocated, yet.  */
+Index: gdb-7.2/gdb/target.c
+===================================================================
+--- gdb-7.2.orig/gdb/target.c
++++ gdb-7.2/gdb/target.c
+@@ -1093,10 +1093,6 @@ target_translate_tls_address (struct obj
+ 	  /* Fetch the load module address for this objfile.  */
+ 	  lm_addr = gdbarch_fetch_tls_load_module_address (target_gdbarch,
+ 	                                                   objfile);
+-	  /* If it's 0, throw the appropriate exception.  */
+-	  if (lm_addr == 0)
+-	    throw_error (TLS_LOAD_MODULE_NOT_FOUND_ERROR,
+-			 _("TLS load module not found"));
+ 
+ 	  addr = target->to_get_thread_local_address (target, ptid, lm_addr, offset);
+ 	}
+Index: gdb-7.2/gdb/target.h
+===================================================================
+--- gdb-7.2.orig/gdb/target.h
++++ gdb-7.2/gdb/target.h
+@@ -508,7 +508,8 @@ struct target_ops
+        thread-local storage for the thread PTID and the shared library
+        or executable file given by OBJFILE.  If that block of
+        thread-local storage hasn't been allocated yet, this function
+-       may return an error.  */
++       may return an error.  LOAD_MODULE_ADDR may be zero for statically
++       linked multithreaded inferiors.  */
+     CORE_ADDR (*to_get_thread_local_address) (struct target_ops *ops,
+ 					      ptid_t ptid,
+ 					      CORE_ADDR load_module_addr,
+Index: gdb-7.2/gdb/testsuite/gdb.threads/staticthreads.c
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/gdb.threads/staticthreads.c
++++ gdb-7.2/gdb/testsuite/gdb.threads/staticthreads.c
+@@ -28,10 +28,17 @@
+ 
+ sem_t semaphore;
+ 
++#ifdef HAVE_TLS
++__thread int tlsvar;
++#endif
++
+ void *
+ thread_function (void *arg)
+ {
+-  printf ("Thread executing\n");
++#ifdef HAVE_TLS
++  tlsvar = 2;
++#endif
++  printf ("Thread executing\n"); /* tlsvar-is-set */
+   while (sem_wait (&semaphore) != 0)
+     {
+       if (errno != EINTR)
+@@ -57,6 +64,9 @@ main (int argc, char **argv)
+       return -1;
+     }
+ 
++#ifdef HAVE_TLS
++  tlsvar = 1;
++#endif
+ 
+   /* Create a thread, wait for it to complete.  */
+   {
+Index: gdb-7.2/gdb/testsuite/gdb.threads/staticthreads.exp
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/gdb.threads/staticthreads.exp
++++ gdb-7.2/gdb/testsuite/gdb.threads/staticthreads.exp
+@@ -28,11 +28,16 @@ set srcfile ${testfile}.c
+ set binfile ${objdir}/${subdir}/${testfile}
+ set static_flag "-static"
+ 
+-if {[gdb_compile_pthreads "${srcdir}/${subdir}/${srcfile}" "${binfile}" \
+-	 executable \
+-	 [list debug "incdir=${objdir}" "additional_flags=${static_flag}" \
+-	     ]] != "" } {
+-    return -1
++foreach have_tls { "-DHAVE_TLS" "" } {
++    if {[gdb_compile_pthreads "${srcdir}/${subdir}/${srcfile}" "${binfile}" \
++	     executable \
++	     [list debug "additional_flags=${static_flag} ${have_tls}" \
++		 ]] == "" } {
++	break
++    }
++    if { $have_tls == "" } {
++	return -1
++    }
+ }
+ 
+ gdb_start
+@@ -109,3 +114,18 @@ gdb_test_multiple "quit" "$test" {
+         pass "$test"
+     }
+ }
++
++clean_restart ${testfile}
++
++if { "$have_tls" != "" } {
++    if ![runto_main] {
++	return -1
++    }
++    gdb_breakpoint [gdb_get_line_number "tlsvar-is-set"]
++    gdb_continue_to_breakpoint "tlsvar-is-set" ".* tlsvar-is-set .*"
++    gdb_test "p tlsvar" " = 2" "tlsvar in thread"
++    gdb_test "thread 1" ".*"
++    # Unwind from pthread_join.
++    gdb_test "up 10" " in main .*"
++    gdb_test "p tlsvar" " = 1" "tlsvar in main"
++}
+Index: gdb-7.2/gdb/testsuite/lib/gdb.exp
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/lib/gdb.exp
++++ gdb-7.2/gdb/testsuite/lib/gdb.exp
+@@ -2258,6 +2258,14 @@ proc gdb_compile_pthreads {source dest t
+             ".*Can't find library for -lpthread.*" {
+                 set why_msg "missing runtime threads library"
+             }
++	    ".*warning: the use of `mktemp' is dangerous, better use `mkstemp'.*" {
++	        # This case is actually a hack, needed because on some
++	        # libpthread's a warning is issued to inform about the
++	        # use of mktemp.
++                pass "successfully compiled posix threads test case"
++                set built_binfile 1
++                break
++            }
+             {^$} {
+                 pass "successfully compiled posix threads test case"
+                 set built_binfile 1

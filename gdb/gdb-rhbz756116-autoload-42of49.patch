@@ -1,0 +1,372 @@
+From 1a028ae103d259a731240806ea65481f1a808211 Mon Sep 17 00:00:00 2001
+From: Jan Kratochvil <jan.kratochvil@redhat.com>
+Date: Sun, 20 May 2012 20:35:16 +0000
+Subject: [PATCH] gdb/
+ 	* NEWS (--with-auto-load-dir): Prepend $debugdir to the default path.
+ 	Describe it.
+ 	* auto-load.c (auto_load_expand_dir_vars): New function.
+ 	(auto_load_safe_path_vec_update): Use it, remove the
+ 	substitute_path_component call thanks to it.
+ 	(auto_load_objfile_script): Remove the debug_file_directory processing.
+ 	Use auto_load_expand_dir_vars, remove the substitute_path_component
+ 	call thanks to it.
+ 	* configure: Regenerate.
+ 	* configure.ac (--with-auto-load-dir): Prepend $debugdir to the default
+ 	path.  Escape $ also for $debugdir.
+ 	(--with_auto_load_safe_path): Escape $ also for $debugdir.
+ 	* utils.c (substitute_path_component): Accept also DIRNAME_SEPARATOR.
+
+gdb/doc/
+	* gdb.texinfo (Separate Debug Files): New anchor debug-file-directory.
+	Mention also --with-separate-debug-dir.
+	(Auto-loading): Prepend $debugdir in the sample output.
+	(Auto-loading safe path): Likewise.  Mention also $debugdir for the
+	auto-load safe-path variable.
+	(objfile-gdb.py file): Remove the extra debug-file-directory paragraph.
+	Mention also $debugdir for 'set auto-load scripts-directory'.
+---
+ gdb/ChangeLog       |   16 ++++++++++
+ gdb/NEWS            |    6 ++-
+ gdb/auto-load.c     |   82 +++++++++++++++++++-------------------------------
+ gdb/configure       |    8 ++--
+ gdb/configure.ac    |    8 ++--
+ gdb/doc/ChangeLog   |   10 ++++++
+ gdb/doc/gdb.texinfo |   52 +++++++++++++++++---------------
+ gdb/utils.c         |   10 ++++--
+ 8 files changed, 102 insertions(+), 90 deletions(-)
+
+Index: gdb-7.2/gdb/NEWS
+===================================================================
+--- gdb-7.2.orig/gdb/NEWS
++++ gdb-7.2/gdb/NEWS
+@@ -197,8 +197,10 @@ show debug auto-load
+ 
+ --with-auto-load-dir
+   Configure default value for the 'set auto-load scripts-directory'
+-  setting above.  It defaults to '$datadir/auto-load', $datadir
+-  representing GDB's data directory (available via show data-directory).
++  setting above.  It defaults to '$debugdir:$datadir/auto-load',
++  $debugdir representing global debugging info directories (available
++  via 'show debug-file-directory') and $datadir representing GDB's data
++  directory (available via 'show data-directory').
+ 
+ --with-auto-load-safe-path
+   Configure default value for the 'set auto-load safe-path' setting
+Index: gdb-7.2/gdb/auto-load.c
+===================================================================
+--- gdb-7.2.orig/gdb/auto-load.c
++++ gdb-7.2/gdb/auto-load.c
+@@ -147,6 +147,30 @@ static char *auto_load_safe_path;
+    counterpart.  */
+ static VEC (char_ptr) *auto_load_safe_path_vec;
+ 
++/* Expand $datadir and $debugdir in STRING according to the rules of
++   substitute_path_component.  Return vector from dirnames_to_char_ptr_vec,
++   this vector must be freed by free_char_ptr_vec by the caller.  */
++
++static VEC (char_ptr) *
++auto_load_expand_dir_vars (const char *string)
++{
++  VEC (char_ptr) *dir_vec;
++  char *s;
++
++  s = xstrdup (string);
++  substitute_path_component (&s, "$datadir", gdb_datadir);
++  substitute_path_component (&s, "$debugdir", debug_file_directory);
++
++  if (debug_auto_load && strcmp (s, string) != 0)
++    fprintf_unfiltered (gdb_stdlog,
++			_("auto-load: Expanded $-variables to \"%s\".\n"), s);
++
++  dir_vec = dirnames_to_char_ptr_vec (s);
++  xfree(s);
++
++  return dir_vec;
++}
++
+ /* Update auto_load_safe_path_vec from current AUTO_LOAD_SAFE_PATH.  */
+ 
+ static void
+@@ -163,7 +187,7 @@ auto_load_safe_path_vec_update (void)
+ 
+   free_char_ptr_vec (auto_load_safe_path_vec);
+ 
+-  auto_load_safe_path_vec = dirnames_to_char_ptr_vec (auto_load_safe_path);
++  auto_load_safe_path_vec = auto_load_expand_dir_vars (auto_load_safe_path);
+   len = VEC_length (char_ptr, auto_load_safe_path_vec);
+ 
+   /* Apply tilde_expand and gdb_realpath to each AUTO_LOAD_SAFE_PATH_VEC
+@@ -171,16 +195,10 @@ auto_load_safe_path_vec_update (void)
+   for (ix = 0; ix < len; ix++)
+     {
+       char *dir = VEC_index (char_ptr, auto_load_safe_path_vec, ix);
+-      char *ddir_subst, *expanded, *real_path;
+-
+-      ddir_subst = xstrdup (dir);
+-      substitute_path_component (&ddir_subst, "$datadir", gdb_datadir);
+-      expanded = tilde_expand (ddir_subst);
+-      xfree (ddir_subst);
+-      real_path = gdb_realpath (expanded);
++      char *expanded = tilde_expand (dir);
++      char *real_path = gdb_realpath (expanded);
+ 
+-      /* Ensure the current entry is at least a valid path (therefore
+-	 $datadir-expanded and tilde-expanded).  */
++      /* Ensure the current entry is at least tilde_expand-ed.  */
+       VEC_replace (char_ptr, auto_load_safe_path_vec, ix, expanded);
+ 
+       if (debug_auto_load)
+@@ -645,42 +663,6 @@ auto_load_objfile_script (struct objfile
+ 
+   if (!input)
+     {
+-      char *debugdir;
+-      VEC (char_ptr) *debugdir_vec;
+-      int ix;
+-
+-      debugdir_vec = dirnames_to_char_ptr_vec (debug_file_directory);
+-      make_cleanup_free_char_ptr_vec (debugdir_vec);
+-
+-      if (debug_auto_load)
+-	fprintf_unfiltered (gdb_stdlog,
+-			    _("auto-load: Searching 'set debug-file-directory' "
+-			      "path \"%s\".\n"),
+-			    debug_file_directory);
+-
+-      for (ix = 0; VEC_iterate (char_ptr, debugdir_vec, ix, debugdir); ++ix)
+-	{
+-	  /* Also try the same file in the separate debug info directory.  */
+-	  debugfile = xmalloc (strlen (debugdir) + strlen (filename) + 1);
+-	  strcpy (debugfile, debugdir);
+-
+-	  /* FILENAME is absolute, so we don't need a "/" here.  */
+-	  strcat (debugfile, filename);
+-
+-	  make_cleanup (xfree, debugfile);
+-	  input = fopen (debugfile, "r");
+-	  if (debug_auto_load)
+-	    fprintf_unfiltered (gdb_stdlog, _("auto-load: Attempted file "
+-					      "\"%s\" %s.\n"),
+-				debugfile,
+-				input ? _("exists") : _("does not exist"));
+-	  if (input != NULL)
+-	    break;
+-	}
+-    }
+-
+-  if (!input)
+-    {
+       VEC (char_ptr) *vec;
+       int ix;
+       char *dir;
+@@ -688,7 +670,7 @@ auto_load_objfile_script (struct objfile
+       /* Also try the same file in a subdirectory of gdb's data
+ 	 directory.  */
+ 
+-      vec = dirnames_to_char_ptr_vec (auto_load_dir);
++      vec = auto_load_expand_dir_vars (auto_load_dir);
+       make_cleanup_free_char_ptr_vec (vec);
+ 
+       if (debug_auto_load)
+@@ -698,10 +680,8 @@ auto_load_objfile_script (struct objfile
+ 
+       for (ix = 0; VEC_iterate (char_ptr, vec, ix, dir); ++ix)
+ 	{
+-	  debugfile = xstrdup (dir);
+-	  substitute_path_component (&debugfile, "$datadir", gdb_datadir);
+-	  debugfile = xrealloc (debugfile, (strlen (debugfile)
+-					    + strlen (filename) + 1));
++	  debugfile = xmalloc (strlen (dir) + strlen (filename) + 1);
++	  strcpy (debugfile, dir);
+ 
+ 	  /* FILENAME is absolute, so we don't need a "/" here.  */
+ 	  strcat (debugfile, filename);
+Index: gdb-7.2/gdb/configure
+===================================================================
+--- gdb-7.2.orig/gdb/configure
++++ gdb-7.2/gdb/configure
+@@ -1660,7 +1660,7 @@ Optional Packages:
+                           automatically relocate this path for source files
+   --with-auto-load-dir=PATH
+                           directories from which to load auto-loaded scripts
+-                          [$datadir/auto-load]
++                          [$debugdir:$datadir/auto-load]
+   --with-auto-load-safe-path=PATH
+                           directories safe to hold auto-loaded files
+                           [--with-auto-load-dir]
+@@ -8460,10 +8460,10 @@ $as_echo_n "checking for default auto-lo
+ if test "${with_auto_load_dir+set}" = set; then :
+   withval=$with_auto_load_dir;
+ else
+-  with_auto_load_dir='$datadir/auto-load'
++  with_auto_load_dir='$debugdir:$datadir/auto-load'
+ fi
+ 
+-escape_dir=`echo $with_auto_load_dir | sed 's/[$]datadir\>/\\\\\\\\\\\\&/g'`
++escape_dir=`echo $with_auto_load_dir | sed 's/[$]\(datadir\|debugdir\)\>/\\\\\\\\\\\\&/g'`
+ 
+   test "x$prefix" = xNONE && prefix="$ac_default_prefix"
+   test "x$exec_prefix" = xNONE && exec_prefix='${prefix}'
+@@ -8490,7 +8490,7 @@ else
+   with_auto_load_safe_path="$with_auto_load_dir"
+ fi
+ 
+-escape_dir=`echo $with_auto_load_safe_path | sed 's/[$]datadir\>/\\\\\\\\\\\\&/g'`
++escape_dir=`echo $with_auto_load_safe_path | sed 's/[$]\(datadir\|debugdir\)\>/\\\\\\\\\\\\&/g'`
+ 
+   test "x$prefix" = xNONE && prefix="$ac_default_prefix"
+   test "x$exec_prefix" = xNONE && exec_prefix='${prefix}'
+Index: gdb-7.2/gdb/configure.ac
+===================================================================
+--- gdb-7.2.orig/gdb/configure.ac
++++ gdb-7.2/gdb/configure.ac
+@@ -348,9 +348,9 @@ fi
+ AC_MSG_CHECKING([for default auto-load directory])
+ AC_ARG_WITH(auto-load-dir,
+ AS_HELP_STRING([--with-auto-load-dir=PATH],
+-  [directories from which to load auto-loaded scripts @<:@$datadir/auto-load@:>@]),,
+-  [with_auto_load_dir='$datadir/auto-load'])
+-escape_dir=`echo $with_auto_load_dir | sed 's/[[$]]datadir\>/\\\\\\\\\\\\&/g'`
++  [directories from which to load auto-loaded scripts @<:@$debugdir:$datadir/auto-load@:>@]),,
++  [with_auto_load_dir='$debugdir:$datadir/auto-load'])
++escape_dir=`echo $with_auto_load_dir | sed 's/[[$]]\(datadir\|debugdir\)\>/\\\\\\\\\\\\&/g'`
+ AC_DEFINE_DIR(AUTO_LOAD_DIR, escape_dir,
+ 	      [Directories from which to load auto-loaded scripts.])
+ AC_MSG_RESULT([$with_auto_load_dir])
+@@ -365,7 +365,7 @@ AS_HELP_STRING([--without-auto-load-safe
+      with_auto_load_safe_path="/"
+      fi],
+ [with_auto_load_safe_path="$with_auto_load_dir"])
+-escape_dir=`echo $with_auto_load_safe_path | sed 's/[[$]]datadir\>/\\\\\\\\\\\\&/g'`
++escape_dir=`echo $with_auto_load_safe_path | sed 's/[[$]]\(datadir\|debugdir\)\>/\\\\\\\\\\\\&/g'`
+ AC_DEFINE_DIR(AUTO_LOAD_SAFE_PATH, escape_dir,
+ 	      [Directories safe to hold auto-loaded files.])
+ AC_MSG_RESULT([$with_auto_load_safe_path])
+Index: gdb-7.2/gdb/doc/gdb.texinfo
+===================================================================
+--- gdb-7.2.orig/gdb/doc/gdb.texinfo
++++ gdb-7.2/gdb/doc/gdb.texinfo
+@@ -15178,8 +15178,11 @@ debug information files, in the indicate
+ @file{/usr/lib/debug/usr/bin/ls.debug}.
+ @end itemize
+ 
+-You can set the global debugging info directories, and view the
+-list @value{GDBN} is currently using.
++@anchor{debug-file-directory}
++Global debugging info directories default to what is set by @value{GDBN}
++configure option @option{--with-separate-debug-dir}.  During @value{GDBN} run
++you can also set the global debugging info directories, and view the list
++@value{GDBN} is currently using.
+ 
+ @table @code
+ 
+@@ -19773,9 +19776,9 @@ local-gdbinit:  Auto-loading of .gdbinit
+                 is on.
+ python-scripts:  Auto-loading of Python scripts is on.
+ safe-path:  List of directories from which it is safe to auto-load files
+-            is $datadir/auto-load.
++            is $debugdir:$datadir/auto-load.
+ scripts-directory:  List of directories from which to load auto-loaded scripts
+-                    is $datadir/auto-load.
++                    is $debugdir:$datadir/auto-load.
+ @end smallexample
+ 
+ @anchor{info auto-load}
+@@ -19991,9 +19994,11 @@ get loaded:
+ $ ./gdb -q ./gdb
+ Reading symbols from /home/user/gdb/gdb...done.
+ warning: File "/home/user/gdb/gdb-gdb.gdb" auto-loading has been
+-         declined by your `auto-load safe-path' set to "$datadir/auto-load".
++         declined by your `auto-load safe-path' set
++         to "$debugdir:$datadir/auto-load".
+ warning: File "/home/user/gdb/gdb-gdb.py" auto-loading has been
+-         declined by your `auto-load safe-path' set to "$datadir/auto-load".
++         declined by your `auto-load safe-path' set
++         to "$debugdir:$datadir/auto-load".
+ @end smallexample
+ 
+ The list of trusted directories is controlled by the following commands:
+@@ -20026,11 +20031,10 @@ host platform path separator in use.
+ @end table
+ 
+ This variable defaults to what @code{--with-auto-load-dir} has been configured
+-to (@pxref{with-auto-load-dir}).  @file{$datadir} substituation applies the same
+-as for @xref{set auto-load scripts-directory}.
+-The default @code{set
+-auto-load safe-path} value can be also overriden by @value{GDBN} configuration
+-option @option{--with-auto-load-safe-path}.
++to (@pxref{with-auto-load-dir}).  @file{$debugdir} and @file{$datadir}
++substitution applies the same as for @ref{set auto-load scripts-directory}.
++The default @code{set auto-load safe-path} value can be also overriden by
++@value{GDBN} configuration option @option{--with-auto-load-safe-path}.
+ 
+ Setting this variable to @file{/} disables this security protection,
+ corresponding @value{GDBN} configuration option is
+@@ -23293,12 +23297,7 @@ that the file name is absolute, followin
+ @code{.} and @code{..} components.  If this file exists and is
+ readable, @value{GDBN} will evaluate it as a Python script.
+ 
+-If this file does not exist, and if the parameter
+-@code{debug-file-directory} is set (@pxref{Separate Debug Files}),
+-then @value{GDBN} will look for @var{script-name} in all of the
+-directories mentioned in the value of @code{debug-file-directory}.
+-
+-Finally, if this file does not exist, then @value{GDBN} will look for
++If this file does not exist, then @value{GDBN} will look for
+ @var{script-name} file in all of the directories as specified below.
+ 
+ Note that loading of this script file also requires accordingly configured
+@@ -23316,14 +23315,17 @@ Each entry here needs to be covered also
+ @code{set auto-load safe-path} (@pxref{set auto-load safe-path}).
+ 
+ @anchor{with-auto-load-dir}
+-This variable defaults to @file{$datadir/auto-load}.  The default @code{set
+-auto-load safe-path} value can be also overriden by @value{GDBN} configuration
+-option @option{--with-auto-load-dir}.
+-
+-Any used string @file{$datadir} will get replaced by @var{data-directory} which
+-is determined at @value{GDBN} startup (@pxref{Data Files}).  @file{$datadir}
+-must be placed as a directory component --- either alone or delimited by
+-@file{/} or @file{\} directory separators, depending on the host platform.
++This variable defaults to @file{$debugdir:$datadir/auto-load}.  The default
++@code{set auto-load safe-path} value can be also overriden by @value{GDBN}
++configuration option @option{--with-auto-load-dir}.
++
++Any reference to @file{$debugdir} will get replaced by
++@var{debug-file-directory} value (@pxref{Separate Debug Files}) and any
++reference to @file{$datadir} will get replaced by @var{data-directory} which is
++determined at @value{GDBN} startup (@pxref{Data Files}).  @file{$debugdir} and
++@file{$datadir} must be placed as a directory component --- either alone or
++delimited by @file{/} or @file{\} directory separators, depending on the host
++platform.
+ 
+ The list of directories uses path separator (@samp{:} on GNU and Unix
+ systems, @samp{;} on MS-Windows and MS-DOS) to separate directories, similarly
+Index: gdb-7.2/gdb/utils.c
+===================================================================
+--- gdb-7.2.orig/gdb/utils.c
++++ gdb-7.2/gdb/utils.c
+@@ -3700,8 +3700,8 @@ xfullpath (const char *filename)
+ 
+ /* Substitute all occurences of string FROM by string TO in *STRINGP.  *STRINGP
+    must come from xrealloc-compatible allocator and it may be updated.  FROM
+-   needs to be delimited by IS_DIR_SEPARATOR (or be located at the start or
+-   end of *STRINGP.  */
++   needs to be delimited by IS_DIR_SEPARATOR or DIRNAME_SEPARATOR (or be
++   located at the start or end of *STRINGP.  */
+ 
+ void
+ substitute_path_component (char **stringp, const char *from, const char *to)
+@@ -3716,8 +3716,10 @@ substitute_path_component (char **string
+       if (s == NULL)
+ 	break;
+ 
+-      if ((s == string || IS_DIR_SEPARATOR (s[-1]))
+-          && (s[from_len] == '\0' || IS_DIR_SEPARATOR (s[from_len])))
++      if ((s == string || IS_DIR_SEPARATOR (s[-1])
++	   || s[-1] == DIRNAME_SEPARATOR)
++          && (s[from_len] == '\0' || IS_DIR_SEPARATOR (s[from_len])
++	      || s[from_len] == DIRNAME_SEPARATOR))
+ 	{
+ 	  char *string_new;
+ 

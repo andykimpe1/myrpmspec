@@ -1,0 +1,544 @@
+commit 83751839f11bd491cc8ba9e1037637e435750a62
+Author: Tom Tromey <tromey@redhat.com>
+Date:   Thu Mar 24 19:39:46 2011 +0000
+
+    	* symtab.c (decode_line_spec): Update.
+    	* linespec.c (build_canonical_line_spec): Change type of
+    	'canonical'.
+    	(decode_line_2, decode_line_1, decode_objc, decode_compound)
+    	(find_method, decode_all_digits, decode_dollar, decode_label)
+    	(symbol_found): Likewise.
+    	(init_linespec_result): New function.
+    	* breakpoint.c (struct captured_parse_breakpoint_args)
+    	<canonical_p>: New field, replaces addr_string_p.
+    	(create_breakpoints_sal): Add 'canonical' parameter, replacing
+    	'addr_string'.
+    	(parse_breakpoint_sals): Likewise.
+    	(do_captured_parse_breakpoint): Update.
+    	(create_breakpoint): Use struct linespec_result.
+    	(until_break_command): Update.
+    	(breakpoint_re_set_one): Update.
+    	(decode_line_spec_1): Update.
+    	* linespec.h (struct linespec_result): New.
+    	(init_linespec_result): Declare.
+
+### a/gdb/ChangeLog
+### b/gdb/ChangeLog
+## -1,3 +1,25 @@
++2011-03-24  Tom Tromey  <tromey@redhat.com>
++
++	* symtab.c (decode_line_spec): Update.
++	* linespec.c (build_canonical_line_spec): Change type of
++	'canonical'.
++	(decode_line_2, decode_line_1, decode_objc, decode_compound)
++	(find_method, decode_all_digits, decode_dollar, decode_label)
++	(symbol_found): Likewise.
++	(init_linespec_result): New function.
++	* breakpoint.c (struct captured_parse_breakpoint_args)
++	<canonical_p>: New field, replaces addr_string_p.
++	(create_breakpoints_sal): Add 'canonical' parameter, replacing
++	'addr_string'.
++	(parse_breakpoint_sals): Likewise.
++	(do_captured_parse_breakpoint): Update.
++	(create_breakpoint): Use struct linespec_result.
++	(until_break_command): Update.
++	(breakpoint_re_set_one): Update.
++	(decode_line_spec_1): Update.
++	* linespec.h (struct linespec_result): New.
++	(init_linespec_result): Declare.
++
+ 2011-03-23  Pedro Alves  <pedro@codesourcery.com>
+ 
+ 	* regcache.c (regcache_raw_read): If the target didn't supply a
+Index: gdb-7.2/gdb/breakpoint.c
+===================================================================
+--- gdb-7.2.orig/gdb/breakpoint.c	2011-08-11 17:31:20.000000000 +0200
++++ gdb-7.2/gdb/breakpoint.c	2011-08-11 17:31:28.000000000 +0200
+@@ -5858,7 +5858,7 @@ struct captured_parse_breakpoint_args
+   {
+     char **arg_p;
+     struct symtabs_and_lines *sals_p;
+-    char ***addr_string_p;
++    struct linespec_result *canonical_p;
+     int *not_found_ptr;
+   };
+ 
+@@ -7343,7 +7343,8 @@ expand_line_sal_maybe (struct symtab_and
+ 
+ static void
+ create_breakpoints_sal (struct gdbarch *gdbarch,
+-			struct symtabs_and_lines sals, char **addr_string,
++			struct symtabs_and_lines sals,
++			struct linespec_result *canonical,
+ 			char *cond_string,
+ 			enum bptype type, enum bpdisp disposition,
+ 			int thread, int task, int ignore_count,
+@@ -7357,7 +7358,7 @@ create_breakpoints_sal (struct gdbarch *
+       struct symtabs_and_lines expanded = 
+ 	expand_line_sal_maybe (sals.sals[i]);
+ 
+-      create_breakpoint_sal (gdbarch, expanded, addr_string[i],
++      create_breakpoint_sal (gdbarch, expanded, canonical->canonical[i],
+ 			     cond_string, type, disposition,
+ 			     thread, task, ignore_count, ops, from_tty, enabled);
+     }
+@@ -7371,12 +7372,11 @@ create_breakpoints_sal (struct gdbarch *
+ static void
+ parse_breakpoint_sals (char **address,
+ 		       struct symtabs_and_lines *sals,
+-		       char ***addr_string,
++		       struct linespec_result *canonical,
+ 		       int *not_found_ptr)
+ {
+   char *addr_start = *address;
+ 
+-  *addr_string = NULL;
+   /* If no arg given, or if first arg is 'if ', use the default
+      breakpoint. */
+   if ((*address) == NULL
+@@ -7424,15 +7424,15 @@ parse_breakpoint_sals (char **address,
+  	      || ((strchr ("+-", (*address)[0]) != NULL)
+  		  && ((*address)[1] != '['))))
+ 	*sals = decode_line_1 (address, 1, default_breakpoint_symtab,
+-			       default_breakpoint_line, addr_string, 
++			       default_breakpoint_line, canonical, 
+ 			       not_found_ptr);
+       else
+ 	*sals = decode_line_1 (address, 1, (struct symtab *) NULL, 0,
+-		               addr_string, not_found_ptr);
++		               canonical, not_found_ptr);
+     }
+   /* For any SAL that didn't have a canonical string, fill one in. */
+-  if (sals->nelts > 0 && *addr_string == NULL)
+-    *addr_string = xcalloc (sals->nelts, sizeof (char **));
++  if (sals->nelts > 0 && canonical->canonical == NULL)
++    canonical->canonical = xcalloc (sals->nelts, sizeof (char **));
+   if (addr_start != (*address))
+     {
+       int i;
+@@ -7440,9 +7440,9 @@ parse_breakpoint_sals (char **address,
+       for (i = 0; i < sals->nelts; i++)
+ 	{
+ 	  /* Add the string if not present. */
+-	  if ((*addr_string)[i] == NULL)
+-	    (*addr_string)[i] = savestring (addr_start, 
+-					    (*address) - addr_start);
++	  if (canonical->canonical[i] == NULL)
++	    canonical->canonical[i] = savestring (addr_start, 
++						  (*address) - addr_start);
+ 	}
+     }
+ }
+@@ -7497,7 +7497,7 @@ do_captured_parse_breakpoint (struct ui_
+ {
+   struct captured_parse_breakpoint_args *args = data;
+   
+-  parse_breakpoint_sals (args->arg_p, args->sals_p, args->addr_string_p, 
++  parse_breakpoint_sals (args->arg_p, args->sals_p, args->canonical_p, 
+ 		         args->not_found_ptr);
+ }
+ 
+@@ -7647,7 +7647,7 @@ create_breakpoint (struct gdbarch *gdbar
+   struct symtab_and_line pending_sal;
+   char *copy_arg;
+   char *addr_start = arg;
+-  char **addr_string;
++  struct linespec_result canonical;
+   struct cleanup *old_chain;
+   struct cleanup *bkpt_chain = NULL;
+   struct captured_parse_breakpoint_args parse_args;
+@@ -7659,11 +7659,11 @@ create_breakpoint (struct gdbarch *gdbar
+ 
+   sals.sals = NULL;
+   sals.nelts = 0;
+-  addr_string = NULL;
++  init_linespec_result (&canonical);
+ 
+   parse_args.arg_p = &arg;
+   parse_args.sals_p = &sals;
+-  parse_args.addr_string_p = &addr_string;
++  parse_args.canonical_p = &canonical;
+   parse_args.not_found_ptr = &not_found;
+ 
+   if (type_wanted == bp_static_tracepoint && is_marker_spec (arg))
+@@ -7673,9 +7673,9 @@ create_breakpoint (struct gdbarch *gdbar
+       sals = decode_static_tracepoint_spec (&arg);
+ 
+       copy_arg = savestring (addr_start, arg - addr_start);
+-      addr_string = xcalloc (sals.nelts, sizeof (char **));
++      canonical.canonical = xcalloc (sals.nelts, sizeof (char **));
+       for (i = 0; i < sals.nelts; i++)
+-	addr_string[i] = xstrdup (copy_arg);
++	canonical.canonical[i] = xstrdup (copy_arg);
+       goto done;
+     }
+ 
+@@ -7711,7 +7711,7 @@ create_breakpoint (struct gdbarch *gdbar
+ 	     breakpoint behavior is on and thus a pending breakpoint
+ 	     is defaulted on behalf of the user.  */
+ 	  copy_arg = xstrdup (addr_start);
+-	  addr_string = &copy_arg;
++	  canonical.canonical = &copy_arg;
+ 	  sals.nelts = 1;
+ 	  sals.sals = &pending_sal;
+ 	  pending_sal.pc = 0;
+@@ -7735,8 +7735,8 @@ create_breakpoint (struct gdbarch *gdbar
+       /* Make sure that all storage allocated to SALS gets freed.  */
+       make_cleanup (xfree, sals.sals);
+       
+-      /* Cleanup the addr_string array but not its contents. */
+-      make_cleanup (xfree, addr_string);
++      /* Cleanup the canonical array but not its contents.  */
++      make_cleanup (xfree, canonical.canonical);
+     }
+ 
+   /* ----------------------------- SNIP -----------------------------
+@@ -7745,12 +7745,12 @@ create_breakpoint (struct gdbarch *gdbar
+      then the memory is not reclaimed.  */
+   bkpt_chain = make_cleanup (null_cleanup, 0);
+ 
+-  /* Mark the contents of the addr_string for cleanup.  These go on
++  /* Mark the contents of the canonical for cleanup.  These go on
+      the bkpt_chain and only occur if the breakpoint create fails.  */
+   for (i = 0; i < sals.nelts; i++)
+     {
+-      if (addr_string[i] != NULL)
+-	make_cleanup (xfree, addr_string[i]);
++      if (canonical.canonical[i] != NULL)
++	make_cleanup (xfree, canonical.canonical[i]);
+     }
+ 
+   /* Resolve all line numbers to PC's and verify that the addresses
+@@ -7797,7 +7797,7 @@ create_breakpoint (struct gdbarch *gdbar
+ 	 expand multiple locations for each sal, given than SALS
+ 	 already should contain all sals for MARKER_ID.  */
+       if (type_wanted == bp_static_tracepoint
+-	  && is_marker_spec (addr_string[0]))
++	  && is_marker_spec (canonical.canonical[0]))
+ 	{
+ 	  int i;
+ 
+@@ -7812,7 +7812,7 @@ create_breakpoint (struct gdbarch *gdbar
+ 	      expanded.sals[0] = sals.sals[i];
+ 	      old_chain = make_cleanup (xfree, expanded.sals);
+ 
+-	      create_breakpoint_sal (gdbarch, expanded, addr_string[i],
++	      create_breakpoint_sal (gdbarch, expanded, canonical.canonical[i],
+ 				     cond_string, type_wanted,
+ 				     tempflag ? disp_del : disp_donttouch,
+ 				     thread, task, ignore_count, ops,
+@@ -7834,7 +7834,7 @@ create_breakpoint (struct gdbarch *gdbar
+ 	    }
+ 	}
+       else
+-	create_breakpoints_sal (gdbarch, sals, addr_string, cond_string,
++	create_breakpoints_sal (gdbarch, sals, &canonical, cond_string,
+ 				type_wanted, tempflag ? disp_del : disp_donttouch,
+ 				thread, task, ignore_count, ops, from_tty,
+ 				enabled);
+@@ -7849,7 +7849,7 @@ create_breakpoint (struct gdbarch *gdbar
+       set_breakpoint_count (breakpoint_count + 1);
+       b->number = breakpoint_count;
+       b->thread = -1;
+-      b->addr_string = addr_string[0];
++      b->addr_string = canonical.canonical[0];
+       b->cond_string = NULL;
+       b->ignore_count = ignore_count;
+       b->disposition = tempflag ? disp_del : disp_donttouch;
+@@ -8577,10 +8577,9 @@ until_break_command (char *arg, int from
+ 
+   if (default_breakpoint_valid)
+     sals = decode_line_1 (&arg, 1, default_breakpoint_symtab,
+-			  default_breakpoint_line, (char ***) NULL, NULL);
++			  default_breakpoint_line, NULL, NULL);
+   else
+-    sals = decode_line_1 (&arg, 1, (struct symtab *) NULL, 
+-			  0, (char ***) NULL, NULL);
++    sals = decode_line_1 (&arg, 1, (struct symtab *) NULL, 0, NULL, NULL);
+ 
+   if (sals.nelts != 1)
+     error (_("Couldn't get information on specified line."));
+@@ -10967,10 +10966,10 @@ decode_line_spec_1 (char *string, int fu
+     sals = decode_line_1 (&string, funfirstline,
+ 			  default_breakpoint_symtab,
+ 			  default_breakpoint_line,
+-			  (char ***) NULL, NULL);
++			  NULL, NULL);
+   else
+     sals = decode_line_1 (&string, funfirstline,
+-			  (struct symtab *) NULL, 0, (char ***) NULL, NULL);
++			  (struct symtab *) NULL, 0, NULL, NULL);
+   if (*string)
+     error (_("Junk at end of line specification: %s"), string);
+   return sals;
+Index: gdb-7.2/gdb/linespec.c
+===================================================================
+--- gdb-7.2.orig/gdb/linespec.c	2011-08-11 17:31:20.000000000 +0200
++++ gdb-7.2/gdb/linespec.c	2011-08-11 17:31:28.000000000 +0200
+@@ -58,12 +58,12 @@ static char *locate_first_half (char **a
+ static struct symtabs_and_lines decode_objc (char **argptr,
+ 					     int funfirstline,
+ 					     struct symtab *file_symtab,
+-					     char ***canonical,
++					     struct linespec_result *canonical,
+ 					     char *saved_arg);
+ 
+ static struct symtabs_and_lines decode_compound (char **argptr,
+ 						 int funfirstline,
+-						 char ***canonical,
++						 struct linespec_result *canonical,
+ 						 char *saved_arg,
+ 						 char *p,
+ 						 int *not_found_ptr);
+@@ -71,7 +71,7 @@ static struct symtabs_and_lines decode_c
+ static struct symbol *lookup_prefix_sym (char **argptr, char *p);
+ 
+ static struct symtabs_and_lines find_method (int funfirstline,
+-					     char ***canonical,
++					     struct linespec_result *canonical,
+ 					     char *saved_arg,
+ 					     char *copy,
+ 					     struct type *t,
+@@ -95,14 +95,15 @@ static int add_constructors (int method_
+ 			     struct symbol **sym_arr);
+ 
+ static void build_canonical_line_spec (struct symtab_and_line *,
+-				       char *, char ***);
++				       char *, struct linespec_result *);
+ 
+ static char *find_toplevel_char (char *s, char c);
+ 
+ static int is_objc_method_format (const char *s);
+ 
+ static struct symtabs_and_lines decode_line_2 (struct symbol *[],
+-					       int, int, char ***);
++					       int, int,
++					       struct linespec_result *);
+ 
+ static struct symtab *symtab_from_filename (char **argptr,
+ 					    char *p, int is_quote_enclosed,
+@@ -112,25 +113,25 @@ static struct
+ symtabs_and_lines decode_all_digits (char **argptr,
+ 				     struct symtab *default_symtab,
+ 				     int default_line,
+-				     char ***canonical,
++				     struct linespec_result *canonical,
+ 				     struct symtab *file_symtab,
+ 				     char *q);
+ 
+ static struct symtabs_and_lines decode_dollar (char *copy,
+ 					       int funfirstline,
+ 					       struct symtab *default_symtab,
+-					       char ***canonical,
++					       struct linespec_result *canonical,
+ 					       struct symtab *file_symtab);
+ 
+ static struct symtabs_and_lines decode_variable (char *copy,
+ 						 int funfirstline,
+-						 char ***canonical,
++						 struct linespec_result *canonical,
+ 						 struct symtab *file_symtab,
+ 						 int *not_found_ptr);
+ 
+ static struct
+ symtabs_and_lines symbol_found (int funfirstline,
+-				char ***canonical,
++				struct linespec_result *canonical,
+ 				char *copy,
+ 				struct symbol *sym,
+ 				struct symtab *file_symtab);
+@@ -386,7 +387,7 @@ add_constructors (int method_counter, st
+ 
+ static void
+ build_canonical_line_spec (struct symtab_and_line *sal, char *symname,
+-			   char ***canonical)
++			   struct linespec_result *canonical)
+ {
+   char **canonical_arr;
+   char *canonical_name;
+@@ -395,11 +396,11 @@ build_canonical_line_spec (struct symtab
+ 
+   if (s == (struct symtab *) NULL
+       || s->filename == (char *) NULL
+-      || canonical == (char ***) NULL)
++      || canonical == NULL)
+     return;
+ 
+   canonical_arr = (char **) xmalloc (sizeof (char *));
+-  *canonical = canonical_arr;
++  canonical->canonical = canonical_arr;
+ 
+   filename = s->filename;
+   if (symname != NULL)
+@@ -479,7 +480,7 @@ is_objc_method_format (const char *s)
+ 
+ static struct symtabs_and_lines
+ decode_line_2 (struct symbol *sym_arr[], int nelts, int funfirstline,
+-	       char ***canonical)
++	       struct linespec_result *canonical)
+ {
+   struct symtabs_and_lines values, return_values;
+   char *args, *arg1;
+@@ -506,7 +507,7 @@ See set/show multiple-symbol."));
+       canonical_arr = (char **) xmalloc (nelts * sizeof (char *));
+       make_cleanup (xfree, canonical_arr);
+       memset (canonical_arr, 0, nelts * sizeof (char *));
+-      *canonical = canonical_arr;
++      canonical->canonical = canonical_arr;
+     }
+ 
+   i = 0;
+@@ -711,7 +712,8 @@ find_method_overload_end (char *p)
+ 
+ struct symtabs_and_lines
+ decode_line_1 (char **argptr, int funfirstline, struct symtab *default_symtab,
+-	       int default_line, char ***canonical, int *not_found_ptr)
++	       int default_line, struct linespec_result *canonical,
++	       int *not_found_ptr)
+ {
+   char *p;
+   char *q;
+@@ -1106,7 +1108,7 @@ locate_first_half (char **argptr, int *i
+ 
+ struct symtabs_and_lines
+ decode_objc (char **argptr, int funfirstline, struct symtab *file_symtab,
+-	     char ***canonical, char *saved_arg)
++	     struct linespec_result *canonical, char *saved_arg)
+ {
+   struct symtabs_and_lines values;
+   struct symbol **sym_arr = NULL;
+@@ -1208,7 +1210,8 @@ decode_objc (char **argptr, int funfirst
+    pointing to "AAA::inA::fun" and P pointing to "::inA::fun".  */
+ 
+ static struct symtabs_and_lines
+-decode_compound (char **argptr, int funfirstline, char ***canonical,
++decode_compound (char **argptr, int funfirstline,
++		 struct linespec_result *canonical,
+ 		 char *the_real_saved_arg, char *p, int *not_found_ptr)
+ {
+   struct symtabs_and_lines values;
+@@ -1583,7 +1586,8 @@ lookup_prefix_sym (char **argptr, char *
+    symbol is SYM_CLASS.  */
+ 
+ static struct symtabs_and_lines
+-find_method (int funfirstline, char ***canonical, char *saved_arg,
++find_method (int funfirstline, struct linespec_result *canonical,
++	     char *saved_arg,
+ 	     char *copy, struct type *t, struct symbol *sym_class, int *not_found_ptr)
+ {
+   struct symtabs_and_lines values;
+@@ -1730,7 +1734,7 @@ symtab_from_filename (char **argptr, cha
+ 
+ static struct symtabs_and_lines
+ decode_all_digits (char **argptr, struct symtab *default_symtab,
+-		   int default_line, char ***canonical,
++		   int default_line, struct linespec_result *canonical,
+ 		   struct symtab *file_symtab, char *q)
+ 
+ {
+@@ -1819,7 +1823,7 @@ decode_all_digits (char **argptr, struct
+ 
+ static struct symtabs_and_lines
+ decode_dollar (char *copy, int funfirstline, struct symtab *default_symtab,
+-	       char ***canonical, struct symtab *file_symtab)
++	       struct linespec_result *canonical, struct symtab *file_symtab)
+ {
+   LONGEST valx;
+   int index = 0;
+@@ -1894,7 +1898,8 @@ decode_dollar (char *copy, int funfirstl
+    and do not issue an error message.  */ 
+ 
+ static struct symtabs_and_lines
+-decode_variable (char *copy, int funfirstline, char ***canonical,
++decode_variable (char *copy, int funfirstline,
++		 struct linespec_result *canonical,
+ 		 struct symtab *file_symtab, int *not_found_ptr)
+ {
+   struct symbol *sym;
+@@ -1936,7 +1941,7 @@ decode_variable (char *copy, int funfirs
+    corresponding struct symtabs_and_lines.  */
+ 
+ static struct symtabs_and_lines
+-symbol_found (int funfirstline, char ***canonical, char *copy,
++symbol_found (int funfirstline, struct linespec_result *canonical, char *copy,
+ 	      struct symbol *sym, struct symtab *file_symtab)
+ {
+   struct symtabs_and_lines values;
+@@ -2021,3 +2026,9 @@ minsym_found (int funfirstline, struct m
+   values.nelts = 1;
+   return values;
+ }
++
++void
++init_linespec_result (struct linespec_result *lr)
++{
++  memset (lr, 0, sizeof (*lr));
++}
+Index: gdb-7.2/gdb/linespec.h
+===================================================================
+--- gdb-7.2.orig/gdb/linespec.h	2011-08-11 17:31:20.000000000 +0200
++++ gdb-7.2/gdb/linespec.h	2011-08-11 17:31:28.000000000 +0200
+@@ -19,9 +19,27 @@
+ 
+ struct symtab;
+ 
++/* An instance of this may be filled in by decode_line_1.  The caller
++   must call init_linespec_result to initialize it.  */
++
++struct linespec_result
++{
++  /* If non-NULL, an array of canonical names for returned
++     symtab_and_line objects.  The array has as many elements as the
++     `nelts' field in the symtabs_and_line returned by decode_line_1.
++     An element in the array may be NULL.  The array and each non-NULL
++     element in it are allocated with xmalloc and must be freed by the
++     caller.  */
++  char **canonical;
++};
++
++/* Initialize a linespec_result.  */
++
++extern void init_linespec_result (struct linespec_result *);
++
+ extern struct symtabs_and_lines
+ 	decode_line_1 (char **argptr, int funfirstline,
+ 		       struct symtab *default_symtab, int default_line,
+-		       char ***canonical, int *not_found_ptr);
++		       struct linespec_result *canonical, int *not_found_ptr);
+ 
+ #endif /* defined (LINESPEC_H) */
+Index: gdb-7.2/gdb/symtab.c
+===================================================================
+--- gdb-7.2.orig/gdb/symtab.c	2011-08-11 17:31:20.000000000 +0200
++++ gdb-7.2/gdb/symtab.c	2011-08-11 17:31:28.000000000 +0200
+@@ -4349,7 +4349,7 @@ decode_line_spec (char *string, int funf
+ 
+   sals = decode_line_1 (&string, funfirstline,
+ 			cursal.symtab, cursal.line,
+-			(char ***) NULL, NULL);
++			NULL, NULL);
+ 
+   if (*string)
+     error (_("Junk at end of line specification: %s"), string);
+Index: gdb-7.2/gdb/tracepoint.c
+===================================================================
+--- gdb-7.2.orig/gdb/tracepoint.c	2011-08-11 17:30:39.000000000 +0200
++++ gdb-7.2/gdb/tracepoint.c	2011-08-11 17:33:10.000000000 +0200
+@@ -2277,7 +2277,7 @@ scope_info (char *args, int from_tty)
+   struct symbol *sym;
+   struct minimal_symbol *msym;
+   struct block *block;
+-  char **canonical, *symname, *save_args = args;
++  char *symname, *save_args = args;
+   struct dict_iterator iter;
+   int j, count = 0;
+   struct gdbarch *gdbarch;
+@@ -2286,7 +2286,7 @@ scope_info (char *args, int from_tty)
+   if (args == 0 || *args == 0)
+     error (_("requires an argument (function, line or *addr) to define a scope"));
+ 
+-  sals = decode_line_1 (&args, 1, NULL, 0, &canonical, NULL);
++  sals = decode_line_1 (&args, 1, NULL, 0, NULL, NULL);
+   if (sals.nelts == 0)
+     return;		/* presumably decode_line_1 has already warned */
+ 

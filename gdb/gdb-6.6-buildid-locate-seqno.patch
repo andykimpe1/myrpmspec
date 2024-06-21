@@ -1,0 +1,137 @@
+Index: gdb-7.2/gdb/elfread.c
+===================================================================
+--- gdb-7.2.orig/gdb/elfread.c
++++ gdb-7.2/gdb/elfread.c
+@@ -45,6 +45,7 @@
+ #include "elf/external.h"
+ #include "stap-probe.h"
+ #include "arch-utils.h"
++#include <sys/stat.h>
+ 
+ extern void _initialize_elfread (void);
+ 
+@@ -1306,8 +1307,7 @@ build_id_to_filename (struct build_id *b
+   char *link_all = NULL;
+ 
+   /* DEBUG_FILE_DIRECTORY/.build-id/ab/cdef */
+-  link = xmalloc (strlen (debug_file_directory) + (sizeof "/.build-id/" - 1) + 1
+-		  + 2 * build_id->size + (sizeof ".debug" - 1) + 1);
++  link = xmalloc (strlen (debug_file_directory) + 2 * build_id->size + 50);
+ 
+   /* Keep backward compatibility so that DEBUG_FILE_DIRECTORY being "" will
+      cause "/.build-id/..." lookups.  */
+@@ -1318,6 +1318,8 @@ build_id_to_filename (struct build_id *b
+       char *s, *debugdir_end;
+       gdb_byte *data = build_id->data;
+       size_t size = build_id->size;
++      unsigned seqno;
++      struct stat statbuf_trash;
+ 
+       while (*debugdir == DIRNAME_SEPARATOR)
+ 	debugdir++;
+@@ -1338,19 +1340,44 @@ build_id_to_filename (struct build_id *b
+ 	*s++ = '/';
+       while (size-- > 0)
+ 	s += sprintf (s, "%02x", (unsigned) *data++);
+-      if (add_debug_suffix)
+-	strcpy (s, ".debug");
+-      else
+-	*s = 0;
+-
+-      /* lrealpath() is expensive even for the usually non-existent files.  */
+-      if (access (link, F_OK) == 0)
+-	retval = lrealpath (link);
+ 
+-      if (retval != NULL && !build_id_verify (retval, build_id))
++      for (seqno = 0;; seqno++)
+ 	{
+-	  xfree (retval);
+-	  retval = NULL;
++	  char *s2;
++
++	  if (seqno)
++	    {
++	      /* There can be multiple build-id symlinks pointing to real files
++		 with the same build-id (such as hard links).  Some of the real
++		 files may not be installed.  */
++
++	      s2 = s + sprintf (s, ".%u", seqno);
++	    }
++	  else
++	    s2 = s;
++
++	  if (add_debug_suffix)
++	    strcpy (s2, ".debug");
++	  else
++	    *s2 = 0;
++
++	  /* `access' automatically dereferences LINK.  */
++	  if (lstat (link, &statbuf_trash) != 0)
++	    {
++	      /* Stop increasing SEQNO.  */
++	      break;
++	    }
++
++	  retval = lrealpath (link);
++
++	  if (retval != NULL && !build_id_verify (retval, build_id))
++	    {
++	      xfree (retval);
++	      retval = NULL;
++	    }
++
++	  if (retval)
++	    break;
+ 	}
+ 
+       if (retval != NULL)
+Index: gdb-7.2/gdb/testsuite/gdb.base/corefile.exp
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/gdb.base/corefile.exp
++++ gdb-7.2/gdb/testsuite/gdb.base/corefile.exp
+@@ -236,3 +236,45 @@ if ![is_remote target] {
+ 
+     gdb_exit
+ }
++
++# Test auto-loading of binary files through build-id from corefile, given that
++# the build-id's have sequence numbers and the first one points to an invalid
++# binary.
++
++set buildid [build_id_debug_filename_get $binfile]
++set wholetest "binfile found by build-id with seqno"
++
++if { $buildid == "" } {
++    untested "$wholetest (binary has no build-id)"
++} else {
++    gdb_exit
++    gdb_start
++
++    regsub {\.debug$} $buildid {} buildid
++
++    set debugdir ${objdir}/${subdir}/${testfile}-debugdir
++    file delete -force -- $debugdir
++    file mkdir $debugdir/[file dirname $buildid]
++
++    # The following operations are needed because we want to have an invalid
++    # link as the first build-id option.  Since TCL does not accept the
++    # creation of an invalid link with `file link', we first create a dummy
++    # directory, then create a link to it, and then remove the directory.
++    file mkdir $debugdir/INVALIDPATH
++    file link -symbolic $debugdir/$buildid $debugdir/INVALIDPATH
++    file delete -force -- $debugdir/INVALIDPATH
++
++    # Now we can copy the right file to the proper place.
++    file copy $binfile $debugdir/${buildid}.1
++
++    set test "show debug-file-directory"
++    gdb_test_multiple $test $test {
++	-re "The directory where separate debug symbols are searched for is \"(.*)\"\\.\r\n$gdb_prompt $" {
++	    set debugdir_orig $expect_out(1,string)
++	    pass $test
++	}
++    }
++
++    gdb_test_no_output "set debug-file-directory $debugdir:$debugdir_orig" "set debug-file-directory"
++    gdb_test "core-file $corefile" "Reading symbols from ${debugdir}/${buildid}\\.1\\.\\.\\.done.*" "core-file without executable $debugdir/$buildid.1"
++}

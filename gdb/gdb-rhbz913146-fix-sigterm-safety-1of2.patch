@@ -1,0 +1,286 @@
+  Original message (v2) by Jan Kratochvil:
+
+  <https://sourceware.org/ml/gdb-patches/2014-03/msg00337.html>
+
+  This patch has been posted many times and discussed at length in the
+  mailing list.  Refer to the message above (and the related
+  Message-ID in the commit message below) in order to obtain a full
+  picture.
+
+commit 06c868a8dc5ef46ab7dd6601c8bc2f417e415af9
+Author: Jan Kratochvil <jan.kratochvil@redhat.com>
+Date:   Tue Mar 18 22:48:06 2014 +0100
+
+    Fix SIGTERM signal safety (PR gdb/15358).
+    
+    gdb/
+    2014-03-18  Jan Kratochvil  <jan.kratochvil@redhat.com>
+    
+    	PR gdb/15358
+    	* defs.h (sync_quit_force_run): New declaration.
+    	(QUIT): Check also SYNC_QUIT_FORCE_RUN.
+    	* event-top.c (async_sigterm_handler): New declaration.
+    	(async_sigterm_token): New variable.
+    	(async_init_signals): Create also async_sigterm_token.
+    	(async_sigterm_handler): New function.
+    	(sync_quit_force_run): New variable.
+    	(handle_sigterm): Replace quit_force call by other calls.
+    	* utils.c (quit): Call quit_force if SYNC_QUIT_FORCE_RUN.
+    
+    gdb/testsuite/
+    2014-03-18  Jan Kratochvil  <jan.kratochvil@redhat.com>
+    
+    	PR gdb/15358
+    	* gdb.base/gdb-sigterm.c: New file.
+    	* gdb.base/gdb-sigterm.exp: New file.
+    
+    Message-ID: <20140316135334.GA30698@host2.jankratochvil.net>
+
+Index: gdb-7.2/gdb/defs.h
+===================================================================
+--- gdb-7.2.orig/gdb/defs.h
++++ gdb-7.2/gdb/defs.h
+@@ -169,6 +169,9 @@ extern int quit_flag_cleanup;
+ extern int immediate_quit;
+ extern int sevenbit_strings;
+ 
++/* Flag that function quit should call quit_force.  */
++extern volatile int sync_quit_force_run;
++
+ extern void quit (void);
+ 
+ /* FIXME: cagney/2000-03-13: It has been suggested that the peformance
+@@ -179,7 +182,7 @@ extern void quit (void);
+    needed. */
+ 
+ #define QUIT { \
+-  if (quit_flag && !quit_flag_cleanup) quit (); \
++  if ((quit_flag || sync_quit_force_run) && !quit_flag_cleanup) quit (); \
+   if (deprecated_interactive_hook) deprecated_interactive_hook (); \
+ }
+ 
+Index: gdb-7.2/gdb/event-top.c
+===================================================================
+--- gdb-7.2.orig/gdb/event-top.c
++++ gdb-7.2/gdb/event-top.c
+@@ -75,6 +75,7 @@ static void async_float_handler (gdb_cli
+ #ifdef STOP_SIGNAL
+ static void async_stop_sig (gdb_client_data);
+ #endif
++static void async_sigterm_handler (gdb_client_data arg);
+ 
+ /* Readline offers an alternate interface, via callback
+    functions. These are all included in the file callback.c in the
+@@ -150,6 +151,7 @@ void *sigwinch_token;
+ #ifdef STOP_SIGNAL
+ void *sigtstp_token;
+ #endif
++static struct async_signal_handler *async_sigterm_token;
+ 
+ /* Structure to save a partially entered command.  This is used when
+    the user types '\' at the end of a command line. This is necessary
+@@ -808,6 +810,8 @@ async_init_signals (void)
+   sigint_token =
+     create_async_signal_handler (async_request_quit, NULL);
+   signal (SIGTERM, handle_sigterm);
++  async_sigterm_token
++    = create_async_signal_handler (async_sigterm_handler, NULL);
+ 
+   /* If SIGTRAP was set to SIG_IGN, then the SIG_IGN will get passed
+      to the inferior and breakpoints will be ignored.  */
+@@ -849,7 +853,6 @@ async_init_signals (void)
+   sigtstp_token =
+     create_async_signal_handler (async_stop_sig, NULL);
+ #endif
+-
+ }
+ 
+ void
+@@ -883,13 +886,33 @@ handle_sigint (int sig)
+   gdb_call_async_signal_handler (sigint_token, immediate_quit);
+ }
+ 
++/* Handle GDB exit upon receiving SIGTERM if target_can_async_p ().  */
++
++static void
++async_sigterm_handler (gdb_client_data arg)
++{
++  quit_force (NULL, stdin == instream);
++}
++
++/* See defs.h.  */
++volatile int sync_quit_force_run;
++
+ /* Quit GDB if SIGTERM is received.
+    GDB would quit anyway, but this way it will clean up properly.  */
+ void
+ handle_sigterm (int sig)
+ {
+   signal (sig, handle_sigterm);
+-  quit_force ((char *) 0, stdin == instream);
++
++  /* Call quit_force in a signal safe way.
++     quit_force itself is not signal safe.  */
++  if (target_can_async_p ())
++    mark_async_signal_handler (async_sigterm_token);
++  else
++    {
++      sync_quit_force_run = 1;
++      quit_flag = 1;
++    }
+ }
+ 
+ /* Do the quit. All the checks have been done by the caller. */
+Index: gdb-7.2/gdb/testsuite/gdb.base/gdb-sigterm.c
+===================================================================
+--- /dev/null
++++ gdb-7.2/gdb/testsuite/gdb.base/gdb-sigterm.c
+@@ -0,0 +1,26 @@
++/* This testcase is part of GDB, the GNU debugger.
++
++   Copyright 2013 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
++
++#include <unistd.h>
++
++int
++main (void)
++{
++  alarm (60);
++
++  for (;;); /* loop-line */
++}
+Index: gdb-7.2/gdb/testsuite/gdb.base/gdb-sigterm.exp
+===================================================================
+--- /dev/null
++++ gdb-7.2/gdb/testsuite/gdb.base/gdb-sigterm.exp
+@@ -0,0 +1,100 @@
++# This testcase is part of GDB, the GNU debugger.
++#
++# Copyright 2013 Free Software Foundation, Inc.
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++set testfile "gdb-sigterm"
++set srcfile ${testfile}.c
++set binfile ${objdir}/${subdir}/${testfile}
++
++if { [build_executable ${testfile}.exp ${testfile}] == -1 } {
++    return -1
++}
++
++proc do_test { pass } {
++    global testfile gdb_prompt binfile pf_prefix
++
++    if ![runto_main] {
++	return -1
++    }
++
++    gdb_breakpoint "${testfile}.c:[gdb_get_line_number "loop-line" ${testfile}.c]" \
++		   temporary
++
++    # gdb_continue_to_breakpoint would print a pass message.
++    gdb_test "continue" "Temporary breakpoint .* loop-line .*" ""
++
++    # RHEL-6.6 GDB does not have "set range-stepping", but it does not affect
++    # the test.
++#    gdb_test_no_output "set range-stepping off" ""
++    gdb_test_no_output "set debug infrun 1" ""
++    gdb_test_no_output "set debug lin-lwp 1" ""
++
++    set test "run a bit #$pass"
++    set abort 1
++    gdb_test_multiple "step" $test {
++	-re "infrun: stepping inside range" {
++	    # Suppress pass $test
++	    verbose -log "$pf_prefix $test"
++	    set abort 0
++	}
++    }
++    if $abort {
++	return
++    }
++
++    set gdb_pid [exp_pid -i [board_info host fileid]]
++    remote_exec host "kill -TERM ${gdb_pid}"
++
++    set test "expect eof #$pass"
++    set abort 1
++    set stepping 0
++    gdb_test_multiple "" $test {
++	eof {
++	    verbose -log "$pf_prefix $test"
++	    set abort 0
++	}
++	-re "infrun: stepping inside range" {
++	    incr stepping
++	    if { $stepping > 200 } {
++		fail "$test (stepping inside range $stepping times)"
++	    } else {
++		exp_continue
++	    }
++	}
++    }
++    if $abort {
++	return
++    }
++}
++
++# Testcase was FAILing approx. on 10th pass with unpatched GDB.
++# 50 runs should be approx. a safe number to be sure it is fixed now.
++
++for {set pass 0} {$pass < 50} {incr pass} {
++
++    clean_restart ${testfile}
++    gdb_test_no_output "set target-async off" ""
++    with_test_prefix "sync" {
++        do_test $pass
++    }
++
++    clean_restart ${testfile}
++    gdb_test_no_output "set target-async on" ""
++    with_test_prefix "async" {
++        do_test $pass
++    }
++}
++pass "$pass SIGTERM passes"
+Index: gdb-7.2/gdb/utils.c
+===================================================================
+--- gdb-7.2.orig/gdb/utils.c
++++ gdb-7.2/gdb/utils.c
+@@ -1402,6 +1402,12 @@ print_sys_errmsg (const char *string, in
+ void
+ quit (void)
+ {
++  if (sync_quit_force_run)
++    {
++      sync_quit_force_run = 0;
++      quit_force (NULL, stdin == instream);
++    }
++
+ #ifdef __MSDOS__
+   /* No steenking SIGINT will ever be coming our way when the
+      program is resumed.  Don't lie.  */

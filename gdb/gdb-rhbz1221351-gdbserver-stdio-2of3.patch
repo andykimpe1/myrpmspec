@@ -1,0 +1,420 @@
+commit e0f9f062204827dd5f8a01ab9252ec29273cd3b0
+Author: Doug Evans <dje@google.com>
+Date:   Fri Dec 16 19:06:38 2011 +0000
+
+    	* NEWS: Add entry for stdio gdbserver.
+    
+    	gdbserver/
+    	* linux-low.c (linux_create_inferior): If stdio connection,
+    	redirect stdin from /dev/null, stdout to stderr.
+    	* remote-utils.c (remote_is_stdio): New static global.
+    	(remote_connection_is_stdio): New function.
+    	(remote_prepare): Handle stdio connection.
+    	(remote_open): Ditto.
+    	(remote_close): Don't close stdin for stdio connections.
+    	(read_prim,write_prim): New functions.  Replace all calls to
+    	read/write to these.
+    	* server.c (main): Watch for "-" argument.  Move call to
+    	remote_prepare before start_inferior.
+    	* server.h (STDIO_CONNECTION_NAME): New macro.
+    	(remote_connection_is_stdio): Declare.
+    
+    	doc/
+    	* gdb.texinfo (Server): Document -/stdio argument to gdbserver.
+    
+    	testsuite/
+    	* lib/gdbserver-support.exp (gdb_target_cmd): Recognize stdio
+    	gdbserver output.
+    	(gdbserver_default_get_remote_address): New function.
+    	(gdbserver_start): Call gdb,get_remote_address to compute argument
+    	to "target remote" command.
+
+### a/gdb/ChangeLog
+### b/gdb/ChangeLog
+## -1,3 +1,7 @@
++2011-12-16  Doug Evans  <dje@google.com>
++
++	* NEWS: Add entry for stdio gdbserver.
++
+ 2011-12-16  Phil Muldoon  <pmuldoon@redhat.com>
+ 
+ 	* python/python.c: Define python_excp_enums.
+Index: gdb-7.2/gdb/NEWS
+===================================================================
+--- gdb-7.2.orig/gdb/NEWS	2015-10-05 22:20:03.000000000 +0200
++++ gdb-7.2/gdb/NEWS	2015-10-05 22:20:29.864242331 +0200
+@@ -9,6 +9,9 @@
+   on|off".  It allows to set whether GDB will read the content of the
+   /proc/PID/coredump_filter file when generating a corefile.
+ 
++* GDBserver now supports stdio connections.
++  E.g. (gdb) target remote | ssh myhost gdbserver - hello
++
+ *** Changes since GDB 7.2
+ 
+ * GDB now supports thread debugging of core dumps on GNU/Linux.
+Index: gdb-7.2/gdb/doc/gdb.texinfo
+===================================================================
+--- gdb-7.2.orig/gdb/doc/gdb.texinfo	2015-10-05 22:20:03.000000000 +0200
++++ gdb-7.2/gdb/doc/gdb.texinfo	2015-10-05 22:20:15.865147779 +0200
+@@ -16265,8 +16265,10 @@ syntax is:
+ target> gdbserver @var{comm} @var{program} [ @var{args} @dots{} ]
+ @end smallexample
+ 
+-@var{comm} is either a device name (to use a serial line) or a TCP
+-hostname and portnumber.  For example, to debug Emacs with the argument
++@var{comm} is either a device name (to use a serial line), or a TCP
++hostname and portnumber, or @code{-} or @code{stdio} to use
++stdin/stdout of @code{gdbserver}.
++For example, to debug Emacs with the argument
+ @samp{foo.txt} and communicate with @value{GDBN} over the serial port
+ @file{/dev/com1}:
+ 
+@@ -16295,6 +16297,23 @@ conflicts with another service, @code{gd
+ and exits.}  You must use the same port number with the host @value{GDBN}
+ @code{target remote} command.
+ 
++The @code{stdio} connection is useful when starting @code{gdbserver}
++with ssh:
++
++@smallexample
++(gdb) target remote | ssh -T hostname gdbserver - hello
++@end smallexample
++
++The @samp{-T} option to ssh is provided because we don't need a remote pty,
++and we don't want escape-character handling.  Ssh does this by default when
++a command is provided, the flag is provided to make it explicit.
++You could elide it if you want to.
++
++Programs started with stdio-connected gdbserver have @file{/dev/null} for
++@code{stdin}, and @code{stdout},@code{stderr} are sent back to gdb for
++display through a pipe connected to gdbserver.
++Both @code{stdout} and @code{stderr} use the same pipe.
++
+ @subsubsection Attaching to a Running Program
+ 
+ On some targets, @code{gdbserver} can also attach to running programs.
+Index: gdb-7.2/gdb/gdbserver/linux-low.c
+===================================================================
+--- gdb-7.2.orig/gdb/gdbserver/linux-low.c	2010-08-11 17:58:49.000000000 +0200
++++ gdb-7.2/gdb/gdbserver/linux-low.c	2015-10-05 22:20:15.898148002 +0200
+@@ -572,6 +572,18 @@ linux_create_inferior (char *program, ch
+ 
+       setpgid (0, 0);
+ 
++      /* If gdbserver is connected to gdb via stdio, redirect the inferior's
++	 stdout to stderr so that inferior i/o doesn't corrupt the connection.
++	 Also, redirect stdin to /dev/null.  */
++      if (remote_connection_is_stdio ())
++	{
++	  close (0);
++	  open ("/dev/null", O_RDONLY);
++	  dup2 (2, 1);
++	  write (2, "stdin/stdout redirected\n",
++		 sizeof ("stdin/stdout redirected\n") - 1);
++	}
++
+       execv (program, allargs);
+       if (errno == ENOENT)
+ 	execvp (program, allargs);
+Index: gdb-7.2/gdb/gdbserver/remote-utils.c
+===================================================================
+--- gdb-7.2.orig/gdb/gdbserver/remote-utils.c	2015-10-05 22:20:03.000000000 +0200
++++ gdb-7.2/gdb/gdbserver/remote-utils.c	2015-10-05 22:24:28.485854006 +0200
+@@ -107,6 +107,8 @@ struct sym_cache
+ int remote_debug = 0;
+ struct ui_file *gdb_stdlog;
+ 
++static int remote_is_stdio = 0;
++
+ static int remote_desc = INVALID_DESCRIPTOR;
+ static int listen_desc = INVALID_DESCRIPTOR;
+ 
+@@ -130,6 +132,14 @@ gdb_connected (void)
+   return remote_desc != INVALID_DESCRIPTOR;
+ }
+ 
++/* Return true if the remote connection is over stdio.  */
++
++int
++remote_connection_is_stdio (void)
++{
++  return remote_is_stdio;
++}
++
+ static void
+ enable_async_notification (int fd)
+ {
+@@ -213,6 +223,17 @@ remote_prepare (char *name)
+   socklen_t tmp;
+   char *port_end;
+ 
++  remote_is_stdio = 0;
++  if (strcmp (name, STDIO_CONNECTION_NAME) == 0)
++    {
++      /* We need to record fact that we're using stdio sooner than the
++	 call to remote_open so start_inferior knows the connection is
++	 via stdio.  */
++      remote_is_stdio = 1;
++      transport_is_reliable = 1;
++      return;
++    }
++
+   port_str = strchr (name, ':');
+   if (port_str == NULL)
+     {
+@@ -263,11 +284,27 @@ remote_open (char *name)
+   char *port_str;
+ 
+   port_str = strchr (name, ':');
++#ifdef USE_WIN32API
+   if (port_str == NULL)
++    error ("Only <host>:<port> is supported on this platform.");
++#endif
++
++  if (strcmp (name, STDIO_CONNECTION_NAME) == 0)
++    {
++      fprintf (stderr, "Remote debugging using stdio\n");
++
++      /* Use stdin as the handle of the connection.
++	 We only select on reads, for example.  */
++      remote_desc = fileno (stdin);
++
++      enable_async_notification (remote_desc);
++
++      /* Register the event loop handler.  */
++      add_file_handler (remote_desc, handle_serial_event, NULL);
++    }
++#ifndef USE_WIN32API
++  else if (port_str == NULL)
+     {
+-#ifdef USE_WIN32API
+-      error ("Only <host>:<port> is supported on this platform.");
+-#else
+       struct stat statbuf;
+ 
+       if (stat (name, &statbuf) == 0
+@@ -332,8 +369,8 @@ remote_open (char *name)
+ 
+       /* Register the event loop handler.  */
+       add_file_handler (remote_desc, handle_serial_event, NULL);
+-#endif /* USE_WIN32API */
+     }
++#endif /* USE_WIN32API */
+   else
+     {
+       int port;
+@@ -362,7 +399,8 @@ remote_close (void)
+ #ifdef USE_WIN32API
+   closesocket (remote_desc);
+ #else
+-  close (remote_desc);
++  if (! remote_connection_is_stdio ())
++    close (remote_desc);
+ #endif
+   remote_desc = INVALID_DESCRIPTOR;
+ 
+@@ -721,6 +759,32 @@ read_ptid (char *buf, char **obuf)
+   return ptid_build (pid, tid, 0);
+ }
+ 
++/* Write COUNT bytes in BUF to the client.
++   The result is the number of bytes written or -1 if error.
++   This may return less than COUNT.  */
++
++static int
++write_prim (const void *buf, int count)
++{
++  if (remote_connection_is_stdio ())
++    return write (fileno (stdout), buf, count);
++  else
++    return write (remote_desc, buf, count);
++}
++
++/* Read COUNT bytes from the client and store in BUF.
++   The result is the number of bytes read or -1 if error.
++   This may return less than COUNT.  */
++
++static int
++read_prim (void *buf, int count)
++{
++  if (remote_connection_is_stdio ())
++    return read (fileno (stdin), buf, count);
++  else
++    return read (remote_desc, buf, count);
++}
++
+ /* Send a packet to the remote machine, with error checking.
+    The data of the packet is in BUF, and the length of the
+    packet is in CNT.  Returns >= 0 on success, -1 otherwise.  */
+@@ -758,7 +822,7 @@ putpkt_binary_1 (char *buf, int cnt, int
+ 
+   do
+     {
+-      if (write (remote_desc, buf2, p - buf2) != p - buf2)
++      if (write_prim (buf2, p - buf2) != p - buf2)
+ 	{
+ 	  perror ("putpkt(write)");
+ 	  free (buf2);
+@@ -853,7 +917,7 @@ input_interrupt (int unused)
+       int cc;
+       char c = 0;
+ 
+-      cc = read (remote_desc, &c, 1);
++      cc = read_prim (&c, 1);
+ 
+       if (cc != 1 || c != '\003' || current_inferior == NULL)
+ 	{
+@@ -981,7 +1045,7 @@ readchar (void)
+ 
+   if (readchar_bufcnt == 0)
+     {
+-      readchar_bufcnt = read (remote_desc, readchar_buf, sizeof (readchar_buf));
++      readchar_bufcnt = read_prim (readchar_buf, sizeof (readchar_buf));
+ 
+       if (readchar_bufcnt <= 0)
+ 	{
+@@ -1101,7 +1165,7 @@ getpkt (char *buf)
+ 
+       fprintf (stderr, "Bad checksum, sentsum=0x%x, csum=0x%x, buf=%s\n",
+ 	       (c1 << 4) + c2, csum, buf);
+-      write (remote_desc, "-", 1);
++      write_prim ("-", 1);
+     }
+ 
+   if (!noack_mode)
+@@ -1112,7 +1176,7 @@ getpkt (char *buf)
+ 	  fflush (stderr);
+ 	}
+ 
+-      write (remote_desc, "+", 1);
++      write_prim ("+", 1);
+ 
+       if (remote_debug)
+ 	{
+Index: gdb-7.2/gdb/gdbserver/server.c
+===================================================================
+--- gdb-7.2.orig/gdb/gdbserver/server.c	2015-10-05 22:20:03.000000000 +0200
++++ gdb-7.2/gdb/gdbserver/server.c	2015-10-05 22:21:36.094689658 +0200
+@@ -2453,6 +2453,13 @@ main (int argc, char *argv[])
+ 		}
+ 	    }
+ 	}
++      else if (strcmp (*next_arg, "-") == 0)
++	{
++	  /* "-" specifies a stdio connection and is a form of port
++	     specification.  */
++	  *next_arg = STDIO_CONNECTION_NAME;
++	  break;
++	}
+       else
+ 	{
+ 	  fprintf (stderr, "Unknown argument: %s\n", *next_arg);
+@@ -2477,6 +2484,12 @@ main (int argc, char *argv[])
+       exit (1);
+     }
+ 
++  /* We need to know whether the remote connection is stdio before
++     starting the inferior.  Inferiors created in this scenario have
++     stdin,stdout redirected.  So do this here before we call
++     start_inferior.  */
++  remote_prepare (port);
++
+   bad_attach = 0;
+   pid = 0;
+ 
+@@ -2565,8 +2578,6 @@ main (int argc, char *argv[])
+       exit (1);
+     }
+ 
+-  remote_prepare (port);
+-
+   while (1)
+     {
+       noack_mode = 0;
+Index: gdb-7.2/gdb/gdbserver/server.h
+===================================================================
+--- gdb-7.2.orig/gdb/gdbserver/server.h	2015-10-05 22:20:03.000000000 +0200
++++ gdb-7.2/gdb/gdbserver/server.h	2015-10-05 22:20:15.904148043 +0200
+@@ -368,6 +368,9 @@ extern int transport_is_reliable;
+ 
+ int gdb_connected (void);
+ 
++#define STDIO_CONNECTION_NAME "stdio"
++int remote_connection_is_stdio (void);
++
+ ptid_t read_ptid (char *buf, char **obuf);
+ char *write_ptid (char *buf, ptid_t ptid);
+ 
+Index: gdb-7.2/gdb/testsuite/lib/gdbserver-support.exp
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/lib/gdbserver-support.exp	2010-01-12 01:50:26.000000000 +0100
++++ gdb-7.2/gdb/testsuite/lib/gdbserver-support.exp	2015-10-05 22:20:47.207359468 +0200
+@@ -66,6 +66,10 @@ proc gdb_target_cmd { targetname serialp
+ 		verbose "Set target to $targetname"
+ 		return 0
+ 	    }
++	    -re "Remote debugging using stdio.*$gdb_prompt $" {
++		verbose "Set target to $targetname"
++		return 0
++	    }
+ 	    -re "Remote target $targetname connected to.*$gdb_prompt $" {
+ 		verbose "Set target to $targetname"
+ 		return 0
+@@ -179,6 +183,12 @@ proc gdbserver_download_current_prog { }
+     return $gdbserver_server_exec
+ }
+ 
++# Default routine to compute the argument to "target remote".
++
++proc gdbserver_default_get_remote_address { host port } {
++    return "$host$port"
++}
++
+ # Start a gdbserver process with initial OPTIONS and trailing ARGUMENTS.
+ # The port will be filled in between them automatically.
+ #
+@@ -202,6 +212,15 @@ proc gdbserver_start { options arguments
+ 	set debughost "localhost:"
+     }
+ 
++    # Some boards use a different value for the port that is passed to
++    # gdbserver and the port that is passed to the "target remote" command.
++    # One example is the stdio gdbserver support.
++    if [target_info exists gdb,get_remote_address] {
++	set get_remote_address [target_info gdb,get_remote_address]
++    } else {
++	set get_remote_address gdbserver_default_get_remote_address
++    }
++
+     # Extract the protocol
+     if [target_info exists gdb_protocol] {
+ 	set protocol [target_info gdb_protocol]
+@@ -213,15 +232,14 @@ proc gdbserver_start { options arguments
+ 
+     # Loop till we find a free port.
+     while 1 {
+-	# Export the host:port pair.
+-	set gdbport $debughost$portnum
+-
+ 	# Fire off the debug agent.
+ 	set gdbserver_command "$gdbserver"
+ 	if { $options != "" } {
+ 	    append gdbserver_command " $options"
+ 	}
+-	append gdbserver_command " :$portnum"
++	if { $portnum != "" } {
++	    append gdbserver_command " :$portnum"
++	}
+ 	if { $arguments != "" } {
+ 	    append gdbserver_command " $arguments"
+ 	}
+@@ -259,7 +277,7 @@ proc gdbserver_start { options arguments
+ 	}
+     }
+ 
+-    return [list $protocol $gdbport]
++    return [list $protocol [$get_remote_address $debughost $portnum]]
+ }
+ 
+ # Start a gdbserver process running SERVER_EXEC, and connect GDB

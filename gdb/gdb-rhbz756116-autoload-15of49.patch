@@ -1,0 +1,244 @@
+http://sourceware.org/ml/gdb-cvs/2012-03/msg00235.html
+
+### src/gdb/ChangeLog	2012/03/19 18:16:17	1.14026
+### src/gdb/ChangeLog	2012/03/19 18:19:23	1.14027
+## -1,5 +1,18 @@
+ 2012-03-19  Jan Kratochvil  <jan.kratochvil@redhat.com>
+ 
++	* NEWS: Describe new options --init-command=FILE, -ix and
++	--init-eval-command=COMMAND, -iex.
++	* main.c (struct cmdarg): New enum items CMDARG_INIT_FILE and
++	CMDARG_INIT_COMMAND.
++	(captured_main): New enum items OPT_IX and OPT_IEX.  Add
++	"init-command", "init-eval-command", "ix" and "iex" to the variable
++	long_options.  Handle OPT_IX and OPT_IEX.  Process them from CMDARG_VEC.
++	New comment for CMDARG_FILE and CMDARG_COMMAND processing.
++	(print_gdb_help): Describe --init-command=FILE, -ix and
++	--init-eval-command=COMMAND, -iex.
++
++2012-03-19  Jan Kratochvil  <jan.kratochvil@redhat.com>
++
+ 	Code cleanup.
+ 	* main.c (struct cmdarg): Move it here from main.  Add more comments.
+ 	(cmdarg_s, VEC (cmdarg_s)): New.
+Index: gdb-7.2/gdb/NEWS
+===================================================================
+--- gdb-7.2.orig/gdb/NEWS
++++ gdb-7.2/gdb/NEWS
+@@ -37,6 +37,13 @@ info auto-load-scripts [REGEXP]
+   This command was formerly named "maintenance print section-scripts".
+   It is now generally useful and is no longer a maintenance-only command.
+ 
++* New command line options
++
++--init-command=FILE, -ix          Like --command, -x but execute it
++                                  before loading inferior.
++--init-eval-command=COMMAND, -iex Like --eval-command=COMMAND, -ex but
++                                  execute it before loading inferior.
++
+ *** Changes in GDB 7.2
+ 
+ * Shared library support for remote targets by default
+Index: gdb-7.2/gdb/main.c
+===================================================================
+--- gdb-7.2.orig/gdb/main.c
++++ gdb-7.2/gdb/main.c
+@@ -281,7 +281,13 @@ typedef struct cmdarg {
+     CMDARG_FILE,
+ 
+     /* Option type -ex.  */
+-    CMDARG_COMMAND
++    CMDARG_COMMAND,
++
++    /* Option type -ix.  */
++    CMDARG_INIT_FILE,
++    
++    /* Option type -iex.  */
++    CMDARG_INIT_COMMAND
+   } type;
+ 
+   /* Value of this option - filename or the GDB command itself.  String memory
+@@ -423,7 +429,9 @@ captured_main (void *data)
+       OPT_STATISTICS,
+       OPT_TUI,
+       OPT_NOWINDOWS,
+-      OPT_WINDOWS
++      OPT_WINDOWS,
++      OPT_IX,
++      OPT_IEX
+     };
+     static struct option long_options[] =
+     {
+@@ -464,6 +472,10 @@ captured_main (void *data)
+       {"version", no_argument, &print_version, 1},
+       {"x", required_argument, 0, 'x'},
+       {"ex", required_argument, 0, 'X'},
++      {"init-command", required_argument, 0, OPT_IX},
++      {"init-eval-command", required_argument, 0, OPT_IEX},
++      {"ix", required_argument, 0, OPT_IX},
++      {"iex", required_argument, 0, OPT_IEX},
+ #ifdef GDBTK
+       {"tclcommand", required_argument, 0, 'z'},
+       {"enable-external-editor", no_argument, 0, 'y'},
+@@ -590,6 +602,19 @@ captured_main (void *data)
+ 	      VEC_safe_push (cmdarg_s, cmdarg_vec, &cmdarg);
+ 	    }
+ 	    break;
++	  case OPT_IX:
++	    {
++	      struct cmdarg cmdarg = { CMDARG_INIT_FILE, optarg };
++
++	      VEC_safe_push (cmdarg_s, cmdarg_vec, &cmdarg);
++	    }
++	    break;
++	  case OPT_IEX:
++	    {
++	      struct cmdarg cmdarg = { CMDARG_INIT_COMMAND, optarg };
++
++	      VEC_safe_push (cmdarg_s, cmdarg_vec, &cmdarg);
++	    }
+ 	    break;
+ 	  case 'B':
+ 	    batch_flag = batch_silent = 1;
+@@ -853,6 +878,20 @@ Excess command line arguments ignored. (
+   quit_pre_print = error_pre_print;
+   warning_pre_print = _("\nwarning: ");
+ 
++  /* Process '-ix' and '-iex' options early.  */
++  for (i = 0; VEC_iterate (cmdarg_s, cmdarg_vec, i, cmdarg_p); i++)
++    switch (cmdarg_p->type)
++    {
++      case CMDARG_INIT_FILE:
++        catch_command_errors (source_script, cmdarg_p->string,
++			      !batch_flag, RETURN_MASK_ALL);
++	break;
++      case CMDARG_INIT_COMMAND:
++        catch_command_errors (execute_command, cmdarg_p->string,
++			      !batch_flag, RETURN_MASK_ALL);
++	break;
++    }
++
+   /* Read and execute the system-wide gdbinit file, if it exists.
+      This is done *before* all the command line arguments are
+      processed; it sets global parameters, which are independent of
+@@ -965,6 +1004,7 @@ Can't attach to process and specify a co
+   ALL_OBJFILES (objfile)
+     load_auto_scripts_for_objfile (objfile);
+ 
++  /* Process '-x' and '-ex' options.  */
+   for (i = 0; VEC_iterate (cmdarg_s, cmdarg_vec, i, cmdarg_p); i++)
+     switch (cmdarg_p->type)
+     {
+@@ -1064,6 +1104,8 @@ Options:\n\n\
+                      Execute a single GDB command.\n\
+                      May be used multiple times and in conjunction\n\
+                      with --command.\n\
++  --init-command=FILE, -ix Like -x but execute it before loading inferior.\n\
++  --init-eval-command=COMMAND, -iex Like -ex but before loading inferior.\n\
+   --core=COREFILE    Analyze the core dump COREFILE.\n\
+   --pid=PID          Attach to running process PID.\n\
+ "), stream);
+Index: gdb-7.2/gdb/doc/gdb.texinfo
+===================================================================
+--- gdb-7.2.orig/gdb/doc/gdb.texinfo
++++ gdb-7.2/gdb/doc/gdb.texinfo
+@@ -984,6 +984,22 @@ also be interleaved with @samp{-command}
+    -x setbreakpoints -ex 'run' a.out
+ @end smallexample
+ 
++@item -init-command @var{file}
++@itemx -ix @var{file}
++@cindex @code{--init-command}
++@cindex @code{-ix}
++Execute commands from file @var{file} before loading gdbinit files or the
++inferior.
++@xref{Startup}.
++
++@item -init-eval-command @var{command}
++@itemx -iex @var{command}
++@cindex @code{--init-eval-command}
++@cindex @code{-iex}
++Execute a single @value{GDBN} command before loading gdbinit files or the
++inferior.
++@xref{Startup}.
++
+ @item -directory @var{directory}
+ @itemx -d @var{directory}
+ @cindex @code{--directory}
+@@ -1240,6 +1256,13 @@ Sets up the command interpreter as speci
+ (@pxref{Mode Options, interpreter}).
+ 
+ @item
++Executes commands and command files specified by the @samp{-iex} and
++@samp{-ix} options in their specified order.  Usually you should use the
++@samp{-ex} and @samp{-x} options instead, but this way you can apply
++settings before @value{GDBN} init files get executed and before inferior
++gets loaded.
++
++@item
+ @cindex init file
+ Reads the system-wide @dfn{init file} (if @option{--with-system-gdbinit} was
+ used when building @value{GDBN}; @pxref{System-wide configuration,
+@@ -1273,14 +1296,11 @@ If you wish to disable the auto-loading 
+ you must do something like the following:
+ 
+ @smallexample
+-$ gdb -ex "set auto-load-scripts off" -ex "file myprogram"
++$ gdb -iex "set auto-load-scripts off" myprogram
+ @end smallexample
+ 
+-The following does not work because the auto-loading is turned off too late:
+-
+-@smallexample
+-$ gdb -ex "set auto-load-scripts off" myprogram
+-@end smallexample
++Option @samp{-ex} does not work because the auto-loading is then turned
++off too late.
+ 
+ @item
+ Reads command files specified by the @samp{-x} option.  @xref{Command
+Index: gdb-7.2/gdb/testsuite/gdb.gdb/selftest.exp
+===================================================================
+--- gdb-7.2.orig/gdb/testsuite/gdb.gdb/selftest.exp
++++ gdb-7.2/gdb/testsuite/gdb.gdb/selftest.exp
+@@ -96,6 +96,10 @@ proc do_steps_and_nexts {} {
+ 		set description "step over python_script initialization"
+ 		set command "step"
+ 	    }
++	    -re ".*cmdarg_vec = NULL.*$gdb_prompt $" {
++		set description "step over cmdarg_vec initialization"
++		set command "step"
++	    }
+ 	    -re ".*pre_stat_chain = make_command_stats_cleanup.*$gdb_prompt $" {
+ 		set description "next over make_command_stats_cleanup and everything it calls"
+ 		set command "next"
+@@ -132,18 +136,6 @@ proc do_steps_and_nexts {} {
+ 		set description "next over conditional stack alignment alloca"
+ 		set command "next"
+ 	    }
+-	    -re ".*cmdsize = 1.*$gdb_prompt $" {
+-		set description "step over cmdsize initialization"
+-		set command "next"
+-	    }
+-	    -re ".*cmdarg = .* xmalloc.*$gdb_prompt $" {
+-		set description "next over cmdarg initialization via xmalloc"
+-		set command "next"
+-	    }
+-	    -re ".*ncmd = 0.*$gdb_prompt $" {
+-		set description "next over ncmd initialization"
+-		set command "next"
+-	    }
+ 	    -re ".*dirsize = 1.*$gdb_prompt $" {
+ 		set description "next over dirsize initialization"
+ 		set command "next"
+@@ -167,6 +159,10 @@ proc do_steps_and_nexts {} {
+ 		set description "next over textdomain PACKAGE"
+ 		set command "next"
+ 	    }
++	    -re ".*VEC_cleanup .cmdarg_s.*$gdb_prompt $" {
++		set description "next over cmdarg_s VEC_cleanup"
++		set command "next"
++	    }
+ 	    -re "\[0-9\]+\[\t \]+\{\r\n$gdb_prompt $" {
+ 		set description "step over initial brace"
+ 		set command "step"

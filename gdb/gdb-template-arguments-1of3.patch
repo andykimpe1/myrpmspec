@@ -1,0 +1,887 @@
+http://sourceware.org/ml/gdb-cvs/2010-07/msg00184.html
+240d54e9507a9f69b59fe6dc8579a6459dded8b6
+
+### src/gdb/ChangeLog	2010/07/28 12:08:19	1.12035
+### src/gdb/ChangeLog	2010/07/28 16:23:54	1.12036
+## -1,3 +1,36 @@
++2010-07-28  Tom Tromey  <tromey@redhat.com>
++
++	PR c++/9946:
++	* symfile.c (reread_symbols): Clear template_symbols.
++	* symtab.h (struct symbol) <is_cplus_template_function>: New
++	field.
++	(SYMBOL_IS_CPLUS_TEMPLATE_FUNCTION): New macro.
++	(struct template_symbol): New.
++	* symtab.c (lookup_symbol_aux_local): Use
++	cp_lookup_symbol_imports_or_template.
++	* objfiles.h (struct objfile) <template_symbols>: New field.
++	* objfiles.c (relocate_one_symbol): New function.
++	(objfile_relocate1): Use it.  Relocate isolated symbols.
++	* gdbtypes.h (struct cplus_struct_type) <n_template_arguments,
++	template_arguments>: New fields.
++	(TYPE_N_TEMPLATE_ARGUMENTS): New macro.
++	(TYPE_TEMPLATE_ARGUMENTS): Likewise.
++	(TYPE_TEMPLATE_ARGUMENT): Likewise.
++	(lookup_typename): Update.
++	* gdbtypes.c (lookup_typename): Constify "block" argument.
++	* dwarf2read.c: Include vec.h.
++	(symbolp): New typedef.
++	(read_func_scope): Read template arguments.  Allocate a
++	template_symbol when needed.
++	(read_structure_type): Read template arguments.
++	(new_symbol_full): New function, from new_symbol.  Handle
++	DW_TAG_template_type_param and DW_TAG_template_value_param.
++	(new_symbol): Rewrite as wrapper.
++	* cp-support.h (cp_lookup_symbol_imports_or_template): Declare.
++	* cp-namespace.c: Include language.h.
++	(search_symbol_list): New function.
++	(cp_lookup_symbol_imports_or_template): Likewise.
++
+ 2010-07-28  Balazs Kezes  <rlblaster@gmail.com>
+ 
+ 	* tui/tui-win.c (make_visible_with_new_height): Resize and move
+Index: gdb-7.2/gdb/cp-namespace.c
+===================================================================
+--- gdb-7.2.orig/gdb/cp-namespace.c	2011-01-01 17:48:56.000000000 +0100
++++ gdb-7.2/gdb/cp-namespace.c	2011-01-01 17:52:44.000000000 +0100
+@@ -32,6 +32,7 @@
+ #include "command.h"
+ #include "frame.h"
+ #include "buildsym.h"
++#include "language.h"
+ 
+ static struct symbol *lookup_namespace_scope (const char *name,
+ 					      const struct block *block,
+@@ -412,6 +413,93 @@ cp_lookup_symbol_imports (const char *sc
+   return NULL;
+ }
+ 
++/* Helper function that searches an array of symbols for one named
++   NAME.  */
++
++static struct symbol *
++search_symbol_list (const char *name, int num, struct symbol **syms)
++{
++  int i;
++
++  /* Maybe we should store a dictionary in here instead.  */
++  for (i = 0; i < num; ++i)
++    {
++      if (strcmp (name, SYMBOL_NATURAL_NAME (syms[i])) == 0)
++	return syms[i];
++    }
++  return NULL;
++}
++
++/* Like cp_lookup_symbol_imports, but if BLOCK is a function, it
++   searches through the template parameters of the function and the
++   function's type.  */
++
++struct symbol *
++cp_lookup_symbol_imports_or_template (const char *scope,
++				      const char *name,
++				      const struct block *block,
++				      const domain_enum domain)
++{
++  struct symbol *function = BLOCK_FUNCTION (block);
++
++  if (function != NULL && SYMBOL_LANGUAGE (function) == language_cplus)
++    {
++      int i;
++
++      /* Search the function's template parameters.  */
++      if (SYMBOL_IS_CPLUS_TEMPLATE_FUNCTION (function))
++	{
++	  struct template_symbol *templ = (struct template_symbol *) function;
++	  struct symbol *result;
++
++	  result = search_symbol_list (name,
++				       templ->n_template_arguments,
++				       templ->template_arguments);
++	  if (result != NULL)
++	    return result;
++	}
++
++      /* Search the template parameters of the function's defining
++	 context.  */
++      if (SYMBOL_NATURAL_NAME (function))
++	{
++	  struct type *context;
++	  char *name_copy = xstrdup (SYMBOL_NATURAL_NAME (function));
++	  struct cleanup *cleanups = make_cleanup (xfree, name_copy);
++	  const struct language_defn *lang = language_def (language_cplus);
++	  struct gdbarch *arch = SYMBOL_SYMTAB (function)->objfile->gdbarch;
++	  const struct block *parent = BLOCK_SUPERBLOCK (block);
++
++	  while (1)
++	    {
++	      struct symbol *result;
++	      unsigned int prefix_len = cp_entire_prefix_len (name_copy);
++
++	      if (prefix_len == 0)
++		context = NULL;
++	      else
++		{
++		  name_copy[prefix_len] = '\0';
++		  context = lookup_typename (lang, arch, name_copy, parent, 1);
++		}
++
++	      if (context == NULL)
++		break;
++
++	      result = search_symbol_list (name,
++					   TYPE_N_TEMPLATE_ARGUMENTS (context),
++					   TYPE_TEMPLATE_ARGUMENTS (context));
++	      if (result != NULL)
++		return result;
++	    }
++
++	  do_cleanups (cleanups);
++	}
++    }
++
++  return cp_lookup_symbol_imports (scope, name, block, domain, 1, 1);
++}
++
+  /* Searches for NAME in the current namespace, and by applying relevant import
+     statements belonging to BLOCK and its parents. SCOPE is the namespace scope
+     of the context in which the search is being evaluated.  */
+Index: gdb-7.2/gdb/cp-support.h
+===================================================================
+--- gdb-7.2.orig/gdb/cp-support.h	2011-01-01 17:48:56.000000000 +0100
++++ gdb-7.2/gdb/cp-support.h	2011-01-01 17:48:57.000000000 +0100
+@@ -158,6 +158,12 @@ extern struct symbol *cp_lookup_symbol_i
+                                                 const int declaration_only,
+                                                 const int search_parents);
+ 
++extern struct symbol *cp_lookup_symbol_imports_or_template
++     (const char *scope,
++      const char *name,
++      const struct block *block,
++      const domain_enum domain);
++
+ extern struct type *cp_lookup_nested_type (struct type *parent_type,
+ 					   const char *nested_name,
+ 					   const struct block *block);
+Index: gdb-7.2/gdb/dwarf2read.c
+===================================================================
+--- gdb-7.2.orig/gdb/dwarf2read.c	2011-01-01 17:48:56.000000000 +0100
++++ gdb-7.2/gdb/dwarf2read.c	2011-01-01 17:52:36.000000000 +0100
+@@ -55,6 +55,7 @@
+ #include "gdb_stat.h"
+ #include "completer.h"
+ #include "top.h"
++#include "vec.h"
+ 
+ #include <fcntl.h>
+ #include "gdb_string.h"
+@@ -70,6 +71,9 @@
+ #endif
+ #endif
+ 
++typedef struct symbol *symbolp;
++DEF_VEC_P (symbolp);
++
+ #if 0
+ /* .debug_info header for a compilation unit
+    Because of alignment constraints, this structure has padding and cannot
+@@ -999,6 +1003,9 @@ static void dwarf2_start_subfile (char *
+ static struct symbol *new_symbol (struct die_info *, struct type *,
+ 				  struct dwarf2_cu *);
+ 
++static struct symbol *new_symbol_full (struct die_info *, struct type *,
++				       struct dwarf2_cu *, struct symbol *);
++
+ static void dwarf2_const_value (struct attribute *, struct symbol *,
+ 				struct dwarf2_cu *);
+ 
+@@ -5144,6 +5151,8 @@ read_func_scope (struct die_info *die, s
+   CORE_ADDR baseaddr;
+   struct block *block;
+   int inlined_func = (die->tag == DW_TAG_inlined_subroutine);
++  VEC (symbolp) *template_args = NULL;
++  struct template_symbol *templ_func = NULL;
+ 
+   if (inlined_func)
+     {
+@@ -5189,8 +5198,23 @@ read_func_scope (struct die_info *die, s
+   /* Record the function range for dwarf_decode_lines.  */
+   add_to_cu_func_list (name, lowpc, highpc, cu);
+ 
++  /* If we have any template arguments, then we must allocate a
++     different sort of symbol.  */
++  for (child_die = die->child; child_die; child_die = sibling_die (child_die))
++    {
++      if (child_die->tag == DW_TAG_template_type_param
++	  || child_die->tag == DW_TAG_template_value_param)
++	{
++	  templ_func = OBSTACK_ZALLOC (&objfile->objfile_obstack,
++				       struct template_symbol);
++	  templ_func->base.is_cplus_template_function = 1;
++	  break;
++	}
++    }
++
+   new = push_context (0, lowpc);
+-  new->name = new_symbol (die, read_type_die (die, cu), cu);
++  new->name = new_symbol_full (die, read_type_die (die, cu), cu,
++			       (struct symbol *) templ_func);
+ 
+   /* If there is a location expression for DW_AT_frame_base, record
+      it.  */
+@@ -5214,7 +5238,15 @@ read_func_scope (struct die_info *die, s
+       child_die = die->child;
+       while (child_die && child_die->tag)
+ 	{
+-	  process_die (child_die, cu);
++	  if (child_die->tag == DW_TAG_template_type_param
++	      || child_die->tag == DW_TAG_template_value_param)
++	    {
++	      struct symbol *arg = new_symbol (child_die, NULL, cu);
++
++	      VEC_safe_push (symbolp, template_args, arg);
++	    }
++	  else
++	    process_die (child_die, cu);
+ 	  child_die = sibling_die (child_die);
+ 	}
+     }
+@@ -5260,6 +5292,22 @@ read_func_scope (struct die_info *die, s
+   /* If we have address ranges, record them.  */
+   dwarf2_record_block_ranges (die, block, baseaddr, cu);
+ 
++  /* Attach template arguments to function.  */
++  if (! VEC_empty (symbolp, template_args))
++    {
++      gdb_assert (templ_func != NULL);
++
++      templ_func->n_template_arguments = VEC_length (symbolp, template_args);
++      templ_func->template_arguments
++	= obstack_alloc (&objfile->objfile_obstack,
++			 (templ_func->n_template_arguments
++			  * sizeof (struct symbol *)));
++      memcpy (templ_func->template_arguments,
++	      VEC_address (symbolp, template_args),
++	      (templ_func->n_template_arguments * sizeof (struct symbol *)));
++      VEC_free (symbolp, template_args);
++    }
++
+   /* In C++, we can have functions nested inside functions (e.g., when
+      a function declares a class that has methods).  This means that
+      when we finish processing a function scope, we may need to go
+@@ -6474,6 +6522,7 @@ read_structure_type (struct die_info *di
+     {
+       struct field_info fi;
+       struct die_info *child_die;
++      VEC (symbolp) *template_args = NULL;
+ 
+       memset (&fi, 0, sizeof (struct field_info));
+ 
+@@ -6504,9 +6553,34 @@ read_structure_type (struct die_info *di
+ 	    }
+ 	  else if (child_die->tag == DW_TAG_typedef)
+ 	    dwarf2_add_typedef (&fi, child_die, cu);
++	  else if (child_die->tag == DW_TAG_template_type_param
++		   || child_die->tag == DW_TAG_template_value_param)
++	    {
++	      struct symbol *arg = new_symbol (child_die, NULL, cu);
++
++	      VEC_safe_push (symbolp, template_args, arg);
++	    }
++
+ 	  child_die = sibling_die (child_die);
+ 	}
+ 
++      /* Attach template arguments to type.  */
++      if (! VEC_empty (symbolp, template_args))
++	{
++	  ALLOCATE_CPLUS_STRUCT_TYPE (type);
++	  TYPE_N_TEMPLATE_ARGUMENTS (type)
++	    = VEC_length (symbolp, template_args);
++	  TYPE_TEMPLATE_ARGUMENTS (type)
++	    = obstack_alloc (&objfile->objfile_obstack,
++			     (TYPE_N_TEMPLATE_ARGUMENTS (type)
++			      * sizeof (struct symbol *)));
++	  memcpy (TYPE_TEMPLATE_ARGUMENTS (type),
++		  VEC_address (symbolp, template_args),
++		  (TYPE_N_TEMPLATE_ARGUMENTS (type)
++		   * sizeof (struct symbol *)));
++	  VEC_free (symbolp, template_args);
++	}
++
+       /* Attach fields and member functions to the type.  */
+       if (fi.nfields)
+ 	dwarf2_attach_fields_to_type (&fi, type, cu);
+@@ -6630,7 +6704,9 @@ process_structure_scope (struct die_info
+       if (child_die->tag == DW_TAG_member
+ 	  || child_die->tag == DW_TAG_variable
+ 	  || child_die->tag == DW_TAG_constant
+-	  || child_die->tag == DW_TAG_inheritance)
++	  || child_die->tag == DW_TAG_inheritance
++	  || child_die->tag == DW_TAG_template_value_param
++	  || child_die->tag == DW_TAG_template_type_param)
+ 	{
+ 	  /* Do nothing.  */
+ 	}
+@@ -10241,10 +10317,13 @@ var_decode_location (struct attribute *a
+    to make a symbol table entry for it, and if so, create a new entry
+    and return a pointer to it.
+    If TYPE is NULL, determine symbol type from the die, otherwise
+-   used the passed type.  */
++   used the passed type.
++   If SPACE is not NULL, use it to hold the new symbol.  If it is
++   NULL, allocate a new symbol on the objfile's obstack.  */
+ 
+ static struct symbol *
+-new_symbol (struct die_info *die, struct type *type, struct dwarf2_cu *cu)
++new_symbol_full (struct die_info *die, struct type *type, struct dwarf2_cu *cu,
++		 struct symbol *space)
+ {
+   struct objfile *objfile = cu->objfile;
+   struct symbol *sym = NULL;
+@@ -10260,11 +10339,13 @@ new_symbol (struct die_info *die, struct
+   if (name)
+     {
+       const char *linkagename;
++      int suppress_add = 0;
+ 
+-      sym = (struct symbol *) obstack_alloc (&objfile->objfile_obstack,
+-					     sizeof (struct symbol));
++      if (space)
++	sym = space;
++      else
++	sym = OBSTACK_ZALLOC (&objfile->objfile_obstack, struct symbol);
+       OBJSTAT (objfile, n_syms++);
+-      memset (sym, 0, sizeof (struct symbol));
+       /* Some methods are called w/o checking SYMBOL_COMPUTED_OPS validity.  */
+       SYMBOL_COMPUTED_OPS (sym) = &dwarf2_missing_funcs;
+ 
+@@ -10355,11 +10436,15 @@ new_symbol (struct die_info *die, struct
+ 	  /* Do not add the symbol to any lists.  It will be found via
+ 	     BLOCK_FUNCTION from the blockvector.  */
+ 	  break;
++	case DW_TAG_template_value_param:
++	  suppress_add = 1;
++	  goto variable_or_member;
+ 	case DW_TAG_constant:
+ 	  SYMBOL_TYPE (sym) = make_cv_type (1,
+ 					    TYPE_VOLATILE (SYMBOL_TYPE (sym)),
+ 					    SYMBOL_TYPE (sym), NULL);
+ 	  /* PASSTHRU */
++variable_or_member:
+ 	case DW_TAG_variable:
+ 	case DW_TAG_member:
+ 	  /* Compilation with minimal debug info may result in variables
+@@ -10383,10 +10468,18 @@ new_symbol (struct die_info *die, struct
+ 	    {
+ 	      dwarf2_const_value (attr, sym, cu);
+ 	      attr2 = dwarf2_attr (die, DW_AT_external, cu);
+-	      if (attr2 && (DW_UNSND (attr2) != 0))
+-		add_symbol_to_list (sym, &global_symbols);
++	      if (suppress_add)
++		{
++		  sym->hash_next = objfile->template_symbols;
++		  objfile->template_symbols = sym;
++		}
+ 	      else
+-		add_symbol_to_list (sym, cu->list_in_scope);
++		{
++		  if (attr2 && (DW_UNSND (attr2) != 0))
++		    add_symbol_to_list (sym, &global_symbols);
++		  else
++		    add_symbol_to_list (sym, cu->list_in_scope);
++		}
+ 	      break;
+ 	    }
+ 	  attr = dwarf2_attr (die, DW_AT_location, cu);
+@@ -10448,13 +10541,25 @@ new_symbol (struct die_info *die, struct
+ 				 ? &global_symbols : cu->list_in_scope);
+ 
+ 		  SYMBOL_CLASS (sym) = LOC_UNRESOLVED;
+-		  add_symbol_to_list (sym, list_to_add);
++		  if (suppress_add)
++		    {
++		      sym->hash_next = objfile->template_symbols;
++		      objfile->template_symbols = sym;
++		    }
++		  else
++		    add_symbol_to_list (sym, list_to_add);
+ 		}
+ 	      else if (!die_is_declaration (die, cu))
+ 		{
+ 		  /* Use the default LOC_OPTIMIZED_OUT class.  */
+ 		  gdb_assert (SYMBOL_CLASS (sym) == LOC_OPTIMIZED_OUT);
+-		  add_symbol_to_list (sym, cu->list_in_scope);
++		  if (suppress_add)
++		    {
++		      sym->hash_next = objfile->template_symbols;
++		      objfile->template_symbols = sym;
++		    }
++		  else
++		    add_symbol_to_list (sym, cu->list_in_scope);
+ 		}
+ 	    }
+ 	  break;
+@@ -10493,6 +10598,9 @@ new_symbol (struct die_info *die, struct
+ 	     interest in this information, so just ignore it for now.
+ 	     (FIXME?) */
+ 	  break;
++	case DW_TAG_template_type_param:
++	  suppress_add = 1;
++	  /* Fall through.  */
+ 	case DW_TAG_class_type:
+ 	case DW_TAG_interface_type:
+ 	case DW_TAG_structure_type:
+@@ -10511,14 +10619,22 @@ new_symbol (struct die_info *die, struct
+ 	       saves you.  See the OtherFileClass tests in
+ 	       gdb.c++/namespace.exp.  */
+ 
+-	    struct pending **list_to_add;
++	    if (suppress_add)
++	      {
++		sym->hash_next = objfile->template_symbols;
++		objfile->template_symbols = sym;
++	      }
++	    else
++	      {
++		struct pending **list_to_add;
+ 
+-	    list_to_add = (cu->list_in_scope == &file_symbols
+-			   && (cu->language == language_cplus
+-			       || cu->language == language_java)
+-			   ? &global_symbols : cu->list_in_scope);
++		list_to_add = (cu->list_in_scope == &file_symbols
++			       && (cu->language == language_cplus
++				   || cu->language == language_java)
++			       ? &global_symbols : cu->list_in_scope);
+ 
+-	    add_symbol_to_list (sym, list_to_add);
++		add_symbol_to_list (sym, list_to_add);
++	      }
+ 
+ 	    /* The semantics of C++ state that "struct foo { ... }" also
+ 	       defines a typedef for "foo".  A Java class declaration also
+@@ -10594,6 +10710,14 @@ new_symbol (struct die_info *die, struct
+   return (sym);
+ }
+ 
++/* A wrapper for new_symbol_full that always allocates a new symbol.  */
++
++static struct symbol *
++new_symbol (struct die_info *die, struct type *type, struct dwarf2_cu *cu)
++{
++  return new_symbol_full (die, type, cu, NULL);
++}
++
+ /* Copy constant value from an attribute to a symbol.  */
+ 
+ static void
+Index: gdb-7.2/gdb/gdbtypes.c
+===================================================================
+--- gdb-7.2.orig/gdb/gdbtypes.c	2011-01-01 17:48:56.000000000 +0100
++++ gdb-7.2/gdb/gdbtypes.c	2011-01-01 17:48:57.000000000 +0100
+@@ -1107,7 +1107,7 @@ type_name_no_tag (const struct type *typ
+ struct type *
+ lookup_typename (const struct language_defn *language,
+ 		 struct gdbarch *gdbarch, char *name,
+-		 struct block *block, int noerr)
++		 const struct block *block, int noerr)
+ {
+   struct symbol *sym;
+   struct type *tmp;
+Index: gdb-7.2/gdb/gdbtypes.h
+===================================================================
+--- gdb-7.2.orig/gdb/gdbtypes.h	2011-01-01 17:48:56.000000000 +0100
++++ gdb-7.2/gdb/gdbtypes.h	2011-01-01 17:48:57.000000000 +0100
+@@ -780,6 +780,9 @@ struct cplus_struct_type
+ 
+     short nfn_fields_total;
+ 
++    /* Number of template arguments.  */
++    unsigned short n_template_arguments;
++
+     /* One if this struct is a dynamic class, as defined by the
+        Itanium C++ ABI: if it requires a virtual table pointer,
+        because it or any of its base classes have one or more virtual
+@@ -925,6 +928,11 @@ struct cplus_struct_type
+       }
+     *typedef_field;
+     unsigned typedef_field_count;
++
++    /* The template arguments.  This is an array with
++       N_TEMPLATE_ARGUMENTS elements.  This is NULL for non-template
++       classes.  */
++    struct symbol **template_arguments;
+   };
+ 
+ /* Struct used in computing virtual base list */
+@@ -1137,6 +1145,13 @@ extern void allocate_gnat_aux_type (stru
+ #define TYPE_FN_FIELDLIST_NAME(thistype, n) TYPE_CPLUS_SPECIFIC(thistype)->fn_fieldlists[n].name
+ #define TYPE_FN_FIELDLIST_LENGTH(thistype, n) TYPE_CPLUS_SPECIFIC(thistype)->fn_fieldlists[n].length
+ 
++#define TYPE_N_TEMPLATE_ARGUMENTS(thistype) \
++  TYPE_CPLUS_SPECIFIC (thistype)->n_template_arguments
++#define TYPE_TEMPLATE_ARGUMENTS(thistype) \
++  TYPE_CPLUS_SPECIFIC (thistype)->template_arguments
++#define TYPE_TEMPLATE_ARGUMENT(thistype, n) \
++  TYPE_CPLUS_SPECIFIC (thistype)->template_arguments[n]
++
+ #define TYPE_FN_FIELD(thisfn, n) (thisfn)[n]
+ #define TYPE_FN_FIELD_PHYSNAME(thisfn, n) (thisfn)[n].physname
+ #define TYPE_FN_FIELD_TYPE(thisfn, n) (thisfn)[n].type
+@@ -1487,7 +1502,7 @@ extern char *gdb_mangle_name (struct typ
+ 
+ extern struct type *lookup_typename (const struct language_defn *,
+ 				     struct gdbarch *, char *,
+-				     struct block *, int);
++				     const struct block *, int);
+ 
+ extern struct type *lookup_template_type (char *, struct type *,
+ 					  struct block *);
+Index: gdb-7.2/gdb/objfiles.c
+===================================================================
+--- gdb-7.2.orig/gdb/objfiles.c	2011-01-01 17:48:56.000000000 +0100
++++ gdb-7.2/gdb/objfiles.c	2011-01-01 17:48:57.000000000 +0100
+@@ -702,6 +702,27 @@ free_all_objfiles (void)
+   clear_symtab_users (0);
+ }
+ 
++/* A helper function for objfile_relocate1 that relocates a single
++   symbol.  */
++
++static void
++relocate_one_symbol (struct symbol *sym, struct objfile *objfile,
++		     struct section_offsets *delta)
++{
++  fixup_symbol_section (sym, objfile);
++
++  /* The RS6000 code from which this was taken skipped
++     any symbols in STRUCT_DOMAIN or UNDEF_DOMAIN.
++     But I'm leaving out that test, on the theory that
++     they can't possibly pass the tests below.  */
++  if ((SYMBOL_CLASS (sym) == LOC_LABEL
++       || SYMBOL_CLASS (sym) == LOC_STATIC)
++      && SYMBOL_SECTION (sym) >= 0)
++    {
++      SYMBOL_VALUE_ADDRESS (sym) += ANOFFSET (delta, SYMBOL_SECTION (sym));
++    }
++}
++
+ /* Relocate OBJFILE to NEW_OFFSETS.  There should be OBJFILE->NUM_SECTIONS
+    entries in new_offsets.  SEPARATE_DEBUG_OBJFILE is not touched here.
+    Return non-zero iff any change happened.  */
+@@ -767,24 +788,20 @@ objfile_relocate1 (struct objfile *objfi
+ 
+ 	  ALL_BLOCK_SYMBOLS (b, iter, sym)
+ 	    {
+-	      fixup_symbol_section (sym, objfile);
+-
+-	      /* The RS6000 code from which this was taken skipped
+-	         any symbols in STRUCT_DOMAIN or UNDEF_DOMAIN.
+-	         But I'm leaving out that test, on the theory that
+-	         they can't possibly pass the tests below.  */
+-	      if ((SYMBOL_CLASS (sym) == LOC_LABEL
+-		   || SYMBOL_CLASS (sym) == LOC_STATIC)
+-		  && SYMBOL_SECTION (sym) >= 0)
+-		{
+-		  SYMBOL_VALUE_ADDRESS (sym) +=
+-		    ANOFFSET (delta, SYMBOL_SECTION (sym));
+-		}
++	      relocate_one_symbol (sym, objfile, delta);
+ 	    }
+ 	}
+     }
+   }
+ 
++  /* Relocate isolated symbols.  */
++  {
++    struct symbol *iter;
++
++    for (iter = objfile->template_symbols; iter; iter = iter->hash_next)
++      relocate_one_symbol (iter, objfile, delta);
++  }
++
+   if (objfile->psymtabs_addrmap)
+     addrmap_relocate (objfile->psymtabs_addrmap,
+ 		      ANOFFSET (delta, SECT_OFF_TEXT (objfile)));
+Index: gdb-7.2/gdb/objfiles.h
+===================================================================
+--- gdb-7.2.orig/gdb/objfiles.h	2011-01-01 17:48:56.000000000 +0100
++++ gdb-7.2/gdb/objfiles.h	2011-01-01 17:48:57.000000000 +0100
+@@ -391,6 +391,12 @@ struct objfile
+     /* FIXME/carlton-2003-06-27: Delete this in a few years once
+        "possible namespace symbols" go away.  */
+     struct symtab *cp_namespace_symtab;
++
++    /* A linked list of symbols created when reading template types or
++       function templates.  These symbols are not stored in any symbol
++       table, so we have to keep them here to relocate them
++       properly.  */
++    struct symbol *template_symbols;
+   };
+ 
+ /* Defines for the objfile flag word. */
+Index: gdb-7.2/gdb/symfile.c
+===================================================================
+--- gdb-7.2.orig/gdb/symfile.c	2011-01-01 17:48:56.000000000 +0100
++++ gdb-7.2/gdb/symfile.c	2011-01-01 17:48:57.000000000 +0100
+@@ -2450,6 +2450,7 @@ reread_symbols (void)
+ 	  objfile->psymtabs_addrmap = NULL;
+ 	  objfile->free_psymtabs = NULL;
+ 	  objfile->cp_namespace_symtab = NULL;
++	  objfile->template_symbols = NULL;
+ 	  objfile->msymbols = NULL;
+ 	  objfile->deprecated_sym_private = NULL;
+ 	  objfile->minimal_symbol_count = 0;
+Index: gdb-7.2/gdb/symtab.c
+===================================================================
+--- gdb-7.2.orig/gdb/symtab.c	2011-01-01 17:48:56.000000000 +0100
++++ gdb-7.2/gdb/symtab.c	2011-01-01 17:48:57.000000000 +0100
+@@ -1176,12 +1176,8 @@ lookup_symbol_aux_local (const char *nam
+ 
+       if (language == language_cplus || language == language_fortran)
+         {
+-          sym = cp_lookup_symbol_imports (scope,
+-                                          name,
+-                                          block,
+-                                          domain,
+-                                          1,
+-                                          1);
++          sym = cp_lookup_symbol_imports_or_template (scope, name, block,
++						      domain);
+           if (sym != NULL)
+             return sym;
+         }
+Index: gdb-7.2/gdb/symtab.h
+===================================================================
+--- gdb-7.2.orig/gdb/symtab.h	2011-01-01 17:48:56.000000000 +0100
++++ gdb-7.2/gdb/symtab.h	2011-01-01 17:48:57.000000000 +0100
+@@ -583,6 +583,10 @@ struct symbol
+   /* Whether this is an inlined function (class LOC_BLOCK only).  */
+   unsigned is_inlined : 1;
+ 
++  /* True if this is a C++ function symbol with template arguments.
++     In this case the symbol is really a "struct template_symbol".  */
++  unsigned is_cplus_template_function : 1;
++
+   /* Line number of this symbol's definition, except for inlined
+      functions.  For an inlined function (class LOC_BLOCK and
+      SYMBOL_INLINED set) this is the line number of the function's call
+@@ -630,12 +634,34 @@ struct symbol
+ #define SYMBOL_CLASS(symbol)		(symbol)->aclass
+ #define SYMBOL_IS_ARGUMENT(symbol)	(symbol)->is_argument
+ #define SYMBOL_INLINED(symbol)		(symbol)->is_inlined
++#define SYMBOL_IS_CPLUS_TEMPLATE_FUNCTION(symbol) \
++  (symbol)->is_cplus_template_function
+ #define SYMBOL_TYPE(symbol)		(symbol)->type
+ #define SYMBOL_LINE(symbol)		(symbol)->line
+ #define SYMBOL_SYMTAB(symbol)		(symbol)->symtab
+ #define SYMBOL_COMPUTED_OPS(symbol)     (symbol)->ops.ops_computed
+ #define SYMBOL_REGISTER_OPS(symbol)     (symbol)->ops.ops_register
+ #define SYMBOL_LOCATION_BATON(symbol)   (symbol)->aux_value
++
++/* An instance of this type is used to represent a C++ template
++   function.  It includes a "struct symbol" as a kind of base class;
++   users downcast to "struct template_symbol *" when needed.  A symbol
++   is really of this type iff SYMBOL_IS_CPLUS_TEMPLATE_FUNCTION is
++   true.  */
++
++struct template_symbol
++{
++  /* The base class.  */
++  struct symbol base;
++
++  /* The number of template arguments.  */
++  int n_template_arguments;
++
++  /* The template arguments.  This is an array with
++     N_TEMPLATE_ARGUMENTS elements.  */
++  struct symbol **template_arguments;
++};
++
+ 
+ /* Each item represents a line-->pc (or the reverse) mapping.  This is
+    somewhat more wasteful of space than one might wish, but since only
+Index: gdb-7.2/gdb/testsuite/gdb.cp/temargs.cc
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.cp/temargs.cc	2011-01-01 17:48:57.000000000 +0100
+@@ -0,0 +1,71 @@
++/* Template argument tests.
++
++   Copyright 2010 Free Software Foundation, Inc.
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3 of the License, or
++   (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++   Please email any bugs, comments, and/or additions to this file to:
++   bug-gdb@gnu.org  */
++
++int a_global;
++
++struct S
++{
++  int f;
++};
++
++template<typename T, int I, int *P, int S::*MP>
++struct Base
++{
++  template<typename Z>
++  struct Inner
++  {
++    void inner_m ()
++    {
++      // Breakpoint 2.
++    }
++  };
++
++  void base_m ()
++  {
++    // Breakpoint 1.
++  }
++
++  template<typename Q>
++  void templ_m ()
++  {
++    // Breakpoint 4.
++  }
++};
++
++template<typename T, int I, int *P, int S::*MP>
++void func ()
++{
++  // Breakpoint 3.
++}
++
++int main ()
++{
++  Base<double, 23, &a_global, &S::f> base;
++  // Note that instantiating with P==0 does not work with g++.
++  // That would be worth testing, once g++ is fixed.
++  Base<long, 47, &a_global, &S::f>::Inner<float> inner;
++
++  base.base_m ();
++  inner.inner_m ();
++  func<unsigned char, 91, &a_global, &S::f> ();
++  base.templ_m<short> ();
++
++  return 0;
++}
+Index: gdb-7.2/gdb/testsuite/gdb.cp/temargs.exp
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ gdb-7.2/gdb/testsuite/gdb.cp/temargs.exp	2011-01-01 17:48:57.000000000 +0100
+@@ -0,0 +1,102 @@
++# temargs.exp - Template argument tests
++#
++# Copyright 2010 Free Software Foundation, Inc.
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# This file is part of the gdb testsuite.
++
++if {$tracelevel} {
++    strace $tracelevel
++}
++
++if {[skip_cplus_tests]} {
++    continue
++}
++
++set testfile "temargs"
++set srcfile "${testfile}.cc"
++
++if {[prepare_for_testing $testfile.exp $testfile $srcfile {debug c++}]} {
++    return -1
++}
++
++if {![runto_main]} {
++    return -1
++}
++
++set line [gdb_get_line_number "Breakpoint 1" $srcfile]
++gdb_test "break $srcfile:$line" "Breakpoint 2.*" \
++    "set first breakpoint for temargs"
++set line [gdb_get_line_number "Breakpoint 2" $srcfile]
++gdb_test "break $srcfile:$line" "Breakpoint 3.*" \
++    "set second breakpoint for temargs"
++set line [gdb_get_line_number "Breakpoint 3" $srcfile]
++gdb_test "break $srcfile:$line" "Breakpoint 4.*" \
++    "set third breakpoint for temargs"
++set line [gdb_get_line_number "Breakpoint 4" $srcfile]
++gdb_test "break $srcfile:$line" "Breakpoint 5.*" \
++    "set fourth breakpoint for temargs"
++
++#
++# Tests in Base::base_m.
++#
++
++gdb_continue_to_breakpoint "continue to first breakpoint for temargs"
++
++gdb_test "ptype T" "double" "test type of T in base_m"
++gdb_test "print I" " = 23" "test value of I in base_m"
++gdb_test "print P == &a_global" " = true" "test value of P in base_m"
++setup_kfail "gcc/41736" *-*-*
++gdb_test "print MP" "&S::f" "test value of MP in base_m"
++
++#
++# Tests in Inner::inner_m.
++#
++
++gdb_continue_to_breakpoint "continue to second breakpoint for temargs"
++
++setup_kfail "gcc/45024" *-*-*
++gdb_test "ptype T" "long" "test type of T in inner_m"
++setup_kfail "gcc/45024" *-*-*
++gdb_test "print I" " = 47" "test value of I in inner_m"
++gdb_test "print P == &a_global" " = true" "test value of P in inner_m"
++setup_kfail "gcc/41736" *-*-*
++gdb_test "print MP" "&S::f" "test value of MP in inner_m"
++gdb_test "whatis Z" "float" "test type of Z in inner_m"
++
++#
++# Tests in func.
++#
++
++gdb_continue_to_breakpoint "continue to third breakpoint for temargs"
++
++gdb_test "ptype T" "unsigned char" "test type of T in func"
++gdb_test "print I" " = 91" "test value of I in func"
++gdb_test "print P == &a_global" " = true" "test value of P in func"
++setup_kfail "gcc/41736" *-*-*
++gdb_test "print MP" "&S::f" "test value of MP in func"
++
++#
++# Tests in Base::templ_m.
++#
++
++gdb_continue_to_breakpoint "continue to fourth breakpoint for temargs"
++
++gdb_test "ptype T" "double" "test type of T in templ_m"
++gdb_test "print I" " = 23" "test value of I in templ_m"
++gdb_test "print P == &a_global" " = true" "test value of P in templ_m"
++setup_kfail "gcc/41736" *-*-*
++gdb_test "print MP" "&S::f" "test value of MP in templ_m"
++gdb_test "whatis Q" "short" "test type of Q in templ_m"

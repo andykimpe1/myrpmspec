@@ -1,0 +1,73 @@
+URL: <https://sourceware.org/ml/gdb-patches/2011-06/msg00015.html>
+Message-ID: <4DE6BB98.5070901@redhat.com>
+
+  From: Keith Seitz <keiths at redhat dot com>
+  To: Jan Kratochvil <jan dot kratochvil at redhat dot com>
+  CC: gdb-patches at sourceware dot org
+  Subject: Re: regression: gdb.objc/basicclass.exp  [Re: [RFA] "Error in re-setting breakpoint," c++/12750]
+  Date: Wed, 01 Jun 2011 15:22:16 -0700
+
+  On 06/01/2011 12:07 AM, Jan Kratochvil wrote:
+  > -PASS: gdb.objc/basicclass.exp: resetting breakpoints when rerunning
+  > -PASS: gdb.objc/basicclass.exp: continue until method breakpoint
+  > -PASS: gdb.objc/basicclass.exp: print an ivar of self
+  > -PASS: gdb.objc/basicclass.exp: print self
+  > -PASS: gdb.objc/basicclass.exp: print contents of self
+  > +FAIL: gdb.objc/basicclass.exp: resetting breakpoints when rerunning
+  > +FAIL: gdb.objc/basicclass.exp: continue until method breakpoint (GDB internal error)
+  > +FAIL: gdb.objc/basicclass.exp: print an ivar of self
+  > +FAIL: gdb.objc/basicclass.exp: print self
+  > +FAIL: gdb.objc/basicclass.exp: print contents of self
+
+  This is caused by a thinko in objc-lang.c:find_methods. Amongst its many 
+  duties, that function counts the number of ObjC symbols seen in an 
+  objfile, storing this result in the objfile. It is then checked every 
+  time find_methods is called.
+
+  However, the loop over the minimal symbols has a few continuations in 
+  it, e.g., to check if the symbol is in the desired block and other 
+  things; if not, it continues the loop with the next minimal symbol. 
+  Unfortunately, that bypasses the incrementing of the objfile's symbol 
+  counter.
+
+  The method not being in the desired block does not make it an invalid 
+  ObjC method for the objfile. It must still be counted for the later 
+  assertion.
+
+  Before the patch for c++/12750, decode_objc would always get NULL for 
+  file_symtab (so why does it even have that parameter?), and the check 
+  for the block would never occur.
+
+  This is all way more verbiage than the simple patch to fix it: increment 
+  the counter before shorting the loop.
+
+  Keith
+
+commit 8dfd1e6d6ee42d903a027e42670ef8d3553678c3
+Author: Keith Seitz <keiths@redhat.com>
+Date:   Thu Jun 2 18:44:01 2011 +0000
+
+    	* objc-lang.c (find_methods): Increment objfile_csym earlier.
+
+Index: gdb-7.2/gdb/objc-lang.c
+===================================================================
+--- gdb-7.2.orig/gdb/objc-lang.c
++++ gdb-7.2/gdb/objc-lang.c
+@@ -1201,6 +1201,8 @@ find_methods (struct symtab *symtab, cha
+ 	  pc = gdbarch_convert_from_func_ptr_addr (gdbarch, pc,
+ 						   &current_target);
+ 
++	  objfile_csym++;
++
+ 	  if (symtab)
+ 	    if (pc < BLOCK_START (block) || pc >= BLOCK_END (block))
+ 	      /* Not in the specified symtab.  */
+@@ -1216,8 +1218,6 @@ find_methods (struct symtab *symtab, cha
+ 
+ 	  if (parse_method (tmp, &ntype, &nclass, &ncategory, &nselector) == NULL)
+ 	    continue;
+-      
+-	  objfile_csym++;
+ 
+ 	  if ((type != '\0') && (ntype != type))
+ 	    continue;
