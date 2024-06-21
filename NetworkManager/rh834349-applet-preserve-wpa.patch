@@ -1,0 +1,196 @@
+diff -up NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c.applet-preserve-wpa NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c
+--- NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c.applet-preserve-wpa	2012-08-19 21:40:56.870006854 -0500
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c	2012-08-19 21:40:57.216007622 -0500
+@@ -194,6 +194,30 @@ wireless_security_clear_ciphers (NMConne
+ }
+ 
+ void
++wireless_security_copy_proto_and_ciphers (NMSettingWirelessSecurity *src,
++                                          NMSettingWirelessSecurity *dst)
++{
++	guint32 i;
++
++	g_return_if_fail (dst != NULL);
++
++	if (!src)
++		return;
++
++	/* Protocol: WPA or WPA2/RSN */
++	for (i = 0; i < nm_setting_wireless_security_get_num_protos (src); i++)
++		nm_setting_wireless_security_add_proto (dst, nm_setting_wireless_security_get_proto (src, i));
++
++	/* Pairwise ciphers */
++	for (i = 0; i < nm_setting_wireless_security_get_num_pairwise (src); i++)
++		nm_setting_wireless_security_add_pairwise (dst, nm_setting_wireless_security_get_pairwise (src, i));
++
++	/* Group ciphers */
++	for (i = 0; i < nm_setting_wireless_security_get_num_groups (src); i++)
++		nm_setting_wireless_security_add_group (dst, nm_setting_wireless_security_get_group (src, i));
++}
++
++void
+ ws_802_1x_add_to_size_group (WirelessSecurity *sec,
+                              GtkSizeGroup *size_group,
+                              const char *label_name,
+diff -up NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h.applet-preserve-wpa NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h
+--- NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h.applet-preserve-wpa	2010-08-02 16:51:35.000000000 -0500
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h	2012-08-19 21:40:57.216007622 -0500
+@@ -28,6 +28,7 @@
+ #include <glade/glade.h>
+ 
+ #include <nm-connection.h>
++#include <nm-setting-wireless-security.h>
+ 
+ typedef struct _WirelessSecurity WirelessSecurity;
+ 
+@@ -106,6 +107,9 @@ void wireless_security_changed_cb (GtkWi
+ 
+ void wireless_security_clear_ciphers (NMConnection *connection);
+ 
++void wireless_security_copy_proto_and_ciphers (NMSettingWirelessSecurity *src,
++                                               NMSettingWirelessSecurity *dst);
++
+ #define AUTH_NAME_COLUMN   0
+ #define AUTH_METHOD_COLUMN 1
+ 
+diff -up NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.c.applet-preserve-wpa NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.c
+--- NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.c.applet-preserve-wpa	2010-08-02 16:51:35.000000000 -0500
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.c	2012-08-19 21:40:57.217007971 -0500
+@@ -36,6 +36,8 @@ destroy (WirelessSecurity *parent)
+ 
+ 	if (sec->size_group)
+ 		g_object_unref (sec->size_group);
++	if (sec->orig_wsec)
++		g_object_unref (sec->orig_wsec);
+ 	g_slice_free (WirelessSecurityWPAEAP, sec);
+ }
+ 
+@@ -63,6 +65,7 @@ add_to_size_group (WirelessSecurity *par
+ static void
+ fill_connection (WirelessSecurity *parent, NMConnection *connection)
+ {
++	WirelessSecurityWPAEAP *sec = (WirelessSecurityWPAEAP *) parent;
+ 	NMSettingWirelessSecurity *s_wireless_sec;
+ 
+ 	ws_802_1x_fill_connection (parent, "wpa_eap_auth_combo", connection);
+@@ -72,6 +75,12 @@ fill_connection (WirelessSecurity *paren
+ 	g_assert (s_wireless_sec);
+ 
+ 	g_object_set (s_wireless_sec, NM_SETTING_WIRELESS_SECURITY_KEY_MGMT, "wpa-eap", NULL);
++
++	/* Re-apply protocols and ciphers from original connection since
++	 * ws_802_1x_fill_connection() clears them when recreating the wireless
++	 * security setting.
++	 */
++	wireless_security_copy_proto_and_ciphers (sec->orig_wsec, s_wireless_sec);
+ }
+ 
+ static void
+@@ -106,6 +115,7 @@ ws_wpa_eap_new (const char *glade_file,
+ 	WirelessSecurityWPAEAP *sec;
+ 	GtkWidget *widget;
+ 	GladeXML *xml;
++	NMSettingWirelessSecurity *s_wsec;
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+@@ -146,6 +156,10 @@ ws_wpa_eap_new (const char *glade_file,
+ 	                                    is_editor);
+ 	auth_combo_changed_cb (widget, (gpointer) sec);
+ 
++	s_wsec = (NMSettingWirelessSecurity *) nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS_SECURITY);
++	if (s_wsec)
++		sec->orig_wsec = (NMSettingWirelessSecurity *) nm_setting_duplicate (NM_SETTING (s_wsec));
++
+ 	return sec;
+ }
+ 
+diff -up NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.h.applet-preserve-wpa NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.h
+--- NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.h.applet-preserve-wpa	2010-08-02 16:51:35.000000000 -0500
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.h	2012-08-19 21:40:57.217007971 -0500
+@@ -23,10 +23,15 @@
+ #ifndef WS_WPA_EAP_H
+ #define WS_WPA_EAP_H
+ 
++#include <nm-setting-wireless-security.h>
++
+ typedef struct {
+ 	struct _WirelessSecurity parent;
+ 
+ 	GtkSizeGroup *size_group;
++
++	/* Original wireless security setting to preserve protocols and ciphers */
++	NMSettingWirelessSecurity *orig_wsec;
+ } WirelessSecurityWPAEAP;
+ 
+ WirelessSecurityWPAEAP * ws_wpa_eap_new (const char *glade_file,
+diff -up NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-psk.c.applet-preserve-wpa NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-psk.c
+--- NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-psk.c.applet-preserve-wpa	2010-08-02 16:51:35.000000000 -0500
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-psk.c	2012-08-19 21:43:04.387008064 -0500
+@@ -50,6 +50,8 @@ destroy (WirelessSecurity *parent)
+ {
+ 	WirelessSecurityWPAPSK *sec = (WirelessSecurityWPAPSK *) parent;
+ 
++	if (sec->orig_wsec)
++		g_object_unref (sec->orig_wsec);
+ 	g_slice_free (WirelessSecurityWPAPSK, sec);
+ }
+ 
+@@ -97,6 +99,7 @@ add_to_size_group (WirelessSecurity *par
+ static void
+ fill_connection (WirelessSecurity *parent, NMConnection *connection)
+ {
++	WirelessSecurityWPAPSK *sec = (WirelessSecurityWPAPSK *) parent;
+ 	GtkWidget *widget;
+ 	const char *key;
+ 	NMSettingWireless *s_wireless;
+@@ -135,9 +138,11 @@ fill_connection (WirelessSecurity *paren
+ 	} else {
+ 		g_object_set (s_wireless_sec, NM_SETTING_WIRELESS_SECURITY_KEY_MGMT, "wpa-psk", NULL);
+ 
+-		/* Just leave ciphers and protocol empty, the supplicant will
+-		 * figure that out magically based on the AP IEs and card capabilities.
++		/* Re-apply protocols and ciphers from original connection since
++		 * ws_802_1x_fill_connection() clears them when recreating the wireless
++		 * security setting.
+ 		 */
++		wireless_security_copy_proto_and_ciphers (sec->orig_wsec, s_wireless_sec);
+ 	}
+ }
+ 
+@@ -157,6 +162,7 @@ ws_wpa_psk_new (const char *glade_file, 
+ 	WirelessSecurityWPAPSK *sec;
+ 	GtkWidget *widget;
+ 	GladeXML *xml;
++	NMSettingWirelessSecurity *s_wsec;
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+@@ -187,6 +193,10 @@ ws_wpa_psk_new (const char *glade_file, 
+ 	                        widget,
+ 	                        "wpa_psk_entry");
+ 
++	s_wsec = (NMSettingWirelessSecurity *) nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS_SECURITY);
++	if (s_wsec)
++		sec->orig_wsec = (NMSettingWirelessSecurity *) nm_setting_duplicate (NM_SETTING (s_wsec));
++
+ 	widget = glade_xml_get_widget (xml, "wpa_psk_entry");
+ 	g_assert (widget);
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+diff -up NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-psk.h.applet-preserve-wpa NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-psk.h
+--- NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-psk.h.applet-preserve-wpa	2010-08-02 16:51:35.000000000 -0500
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-psk.h	2012-08-19 21:40:57.218007482 -0500
+@@ -23,9 +23,13 @@
+ #ifndef WS_WPA_PSK_H
+ #define WS_WPA_PSK_H
+ 
++#include <nm-setting-wireless-security.h>
++
+ typedef struct {
+ 	struct _WirelessSecurity parent;
+ 
++	/* Original wireless security setting to preserve protocols and ciphers */
++	NMSettingWirelessSecurity *orig_wsec;
+ } WirelessSecurityWPAPSK;
+ 
+ WirelessSecurityWPAPSK * ws_wpa_psk_new (const char *glade_file,

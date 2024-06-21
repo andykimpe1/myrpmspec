@@ -1,0 +1,121 @@
+From f19c6afc9461e0f820518b76797da09fab02154d Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Wed, 11 Sep 2013 16:52:08 +0200
+Subject: [PATCH 1/1] editor: fix enabling the Apply button for EAP-PEAP and EAP-TTLS.
+
+(backported from commit f5504d6b47bec16ef6c403eb2c0783e2e27b4558)
+
+The commit 3cae06120a4dd9bebd5f2e57e181ea95e87c8ac4 fixed the issue of
+loading the username/password when editing a connection with EAP-PEAP or
+EAP-TTLS (using EAPMethodSimple) or EAP-LEAP (using EAPMethodLEAP).
+
+There was a small issue when you edited such a connection: when opening
+the configuration dialog, the 'Apply' button was disabled until you switched
+to the security tab.
+
+The problem was, that in order to enable the 'Apply' button, 'validate' of
+the security dialog will be called. 'validate' looks at the content of the UI
+fields whether username and password are set. Due to a bug, they were
+unset until 'widget_realize' was called, i.e. not before you switched to the
+security tab the first time.
+
+Related to:
+https://bugzilla.redhat.com/show_bug.cgi?id=1000564
+
+Signed-off-by: Thomas Haller <thaller@redhat.com>
+---
+ .../src/wireless-security/eap-method-leap.c        |   18 +++++++++++++++++-
+ .../src/wireless-security/eap-method-simple.c      |   18 +++++++++++++++++-
+ 2 files changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c
+index c62f7dc..74cfa11 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c
+@@ -95,8 +95,10 @@ update_secrets (EAPMethod *parent, NMConnection *connection)
+ 	                          (HelperSecretFunc) nm_setting_802_1x_get_password);
+ }
+ 
++/* Set the UI fields for user, password and show_password to the
++ * values as provided by method->ws_parent. */
+ static void
+-widgets_realized (GtkWidget *widget, EAPMethodLEAP *method)
++set_userpass_ui (EAPMethodLEAP *method)
+ {
+ 	if (method->ws_parent->username)
+ 		gtk_entry_set_text (method->username_entry, method->ws_parent->username);
+@@ -112,6 +114,12 @@ widgets_realized (GtkWidget *widget, EAPMethodLEAP *method)
+ }
+ 
+ static void
++widgets_realized (GtkWidget *widget, EAPMethodLEAP *method)
++{
++	set_userpass_ui (method);
++}
++
++static void
+ widgets_unrealized (GtkWidget *widget, EAPMethodLEAP *method)
+ {
+ 	wireless_security_set_userpass (method->ws_parent,
+@@ -174,6 +182,14 @@ eap_method_leap_new (const char *glade_file,
+ 	                  (GCallback) show_toggled_cb,
+ 	                  method);
+ 
++	/* Initialize the UI fields with the security settings from method->ws_parent.
++	 * This will be done again when the widget gets realized. It must be done here as well,
++	 * because the outer dialog will ask to 'validate' the connection before the security tab
++	 * is shown/realized (to enable the 'Apply' button).
++	 * As 'validate' accesses the contents of the UI fields, they must be initialized now, even
++	 * if the widgets are not yet visible. */
++	set_userpass_ui (method);
++
+ 	return method;
+ }
+ 
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c
+index 823ad62..03ac035 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c
+@@ -168,8 +168,10 @@ password_always_ask_changed (GtkToggleButton *button, EAPMethodSimple *method)
+ 	gtk_widget_set_sensitive (GTK_WIDGET (method->show_password), !always_ask);
+ }
+ 
++/* Set the UI fields for user, password, always_ask and show_password to the
++ * values as provided by method->ws_parent. */
+ static void
+-widgets_realized (GtkWidget *widget, EAPMethodSimple *method)
++set_userpass_ui (EAPMethodSimple *method)
+ {
+ 	if (method->ws_parent->username)
+ 		gtk_entry_set_text (method->username_entry, method->ws_parent->username);
+@@ -186,6 +188,12 @@ widgets_realized (GtkWidget *widget, EAPMethodSimple *method)
+ }
+ 
+ static void
++widgets_realized (GtkWidget *widget, EAPMethodSimple *method)
++{
++	set_userpass_ui (method);
++}
++
++static void
+ widgets_unrealized (GtkWidget *widget, EAPMethodSimple *method)
+ {
+ 	wireless_security_set_userpass (method->ws_parent,
+@@ -271,6 +279,14 @@ eap_method_simple_new (const char *glade_file,
+ 	                  (GCallback) show_toggled_cb,
+ 	                  method);
+ 
++	/* Initialize the UI fields with the security settings from method->ws_parent.
++	 * This will be done again when the widget gets realized. It must be done here as well,
++	 * because the outer dialog will ask to 'validate' the connection before the security tab
++	 * is shown/realized (to enable the 'Apply' button).
++	 * As 'validate' accesses the contents of the UI fields, they must be initialized now, even
++	 * if the widgets are not yet visible. */
++	set_userpass_ui (method);
++
+ 	return method;
+ }
+ 
+-- 
+1.7.1
+

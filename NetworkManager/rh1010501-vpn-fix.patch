@@ -1,0 +1,243 @@
+Based on upstream patches:
+9dff830692c8ff0fe69291e4bc882e4060d77542
+282b9df60d8dcfaea14e927721ff99968bc22721
+
+---
+--- NetworkManager-0.8.1/include/NetworkManagerVPN.h	2010-08-04 01:46:40.000000000 +0200
++++ NetworkManager-0.8.1/include/NetworkManagerVPN.h.foo	2013-09-27 13:42:15.820828879 +0200
+@@ -41,12 +41,14 @@
+ #define NM_DBUS_NO_VPN_CONNECTIONS			"org.freedesktop.NetworkManager.VPNConnections.NoVPNConnections"
+ #define NM_DBUS_INVALID_VPN_CONNECTION		"org.freedesktop.NetworkManager.VPNConnections.InvalidVPNConnection"
+ 
++#define NM_DBUS_VPN_ERROR_PREFIX		"org.freedesktop.NetworkManager.VPN.Error"
+ #define NM_DBUS_VPN_STARTING_IN_PROGRESS	"StartingInProgress"
+ #define NM_DBUS_VPN_ALREADY_STARTED		"AlreadyStarted"
+ #define NM_DBUS_VPN_STOPPING_IN_PROGRESS	"StoppingInProgress"
+ #define NM_DBUS_VPN_ALREADY_STOPPED		"AlreadyStopped"
+ #define NM_DBUS_VPN_WRONG_STATE			"WrongState"
+ #define NM_DBUS_VPN_BAD_ARGUMENTS			"BadArguments"
++#define NM_DBUS_VPN_INTERACTIVE_NOT_SUPPORTED	"InteractiveNotSupported"
+ 
+ 
+ /*
+--- NetworkManager-0.8.1/libnm-glib/nm-vpn-plugin.h	2013-09-23 16:25:30.090030451 +0200
++++ NetworkManager-0.8.1/libnm-glib/nm-vpn-plugin.h.foo	2013-09-25 14:43:40.533113142 +0200
+@@ -18,7 +18,7 @@
+  * Boston, MA 02110-1301 USA.
+  *
+  * Copyright (C) 2007 - 2008 Novell, Inc.
+- * Copyright (C) 2007 - 2008 Red Hat, Inc.
++ * Copyright (C) 2007 - 2013 Red Hat, Inc.
+  */
+ 
+ #ifndef NM_VPN_PLUGIN_H
+@@ -43,15 +43,16 @@ G_BEGIN_DECLS
+ #define NM_VPN_PLUGIN_STATE             "state"
+ 
+ typedef enum {
+-	NM_VPN_PLUGIN_ERROR_GENERAL,
+-	NM_VPN_PLUGIN_ERROR_STARTING_IN_PROGRESS,
+-	NM_VPN_PLUGIN_ERROR_ALREADY_STARTED,
+-	NM_VPN_PLUGIN_ERROR_STOPPING_IN_PROGRESS,
+-	NM_VPN_PLUGIN_ERROR_ALREADY_STOPPED,
+-	NM_VPN_PLUGIN_ERROR_WRONG_STATE,
+-	NM_VPN_PLUGIN_ERROR_BAD_ARGUMENTS,
+-	NM_VPN_PLUGIN_ERROR_LAUNCH_FAILED,
+-	NM_VPN_PLUGIN_ERROR_CONNECTION_INVALID,
++	NM_VPN_PLUGIN_ERROR_GENERAL,                   /*< nick=General >*/
++	NM_VPN_PLUGIN_ERROR_STARTING_IN_PROGRESS,      /*< nick=StartingInProgress >*/
++	NM_VPN_PLUGIN_ERROR_ALREADY_STARTED,           /*< nick=AlreadyStarted >*/
++	NM_VPN_PLUGIN_ERROR_STOPPING_IN_PROGRESS,      /*< nick=StoppingInProgress >*/
++	NM_VPN_PLUGIN_ERROR_ALREADY_STOPPED,           /*< nick=AlreadyStopped >*/
++	NM_VPN_PLUGIN_ERROR_WRONG_STATE,               /*< nick=WrongState >*/
++	NM_VPN_PLUGIN_ERROR_BAD_ARGUMENTS,             /*< nick=BadArguments >*/
++	NM_VPN_PLUGIN_ERROR_LAUNCH_FAILED,             /*< nick=LaunchFailed >*/
++	NM_VPN_PLUGIN_ERROR_CONNECTION_INVALID,        /*< nick=ConnectionInvalid >*/
++	NM_VPN_PLUGIN_ERROR_INTERACTIVE_NOT_SUPPORTED  /*< nick=InteractiveNotSupported >*/
+ } NMVPNPluginError;
+ 
+ #define NM_VPN_PLUGIN_ERROR      (nm_vpn_plugin_error_quark ())
+--- NetworkManager-0.8.1/introspection/nm-vpn-plugin.xml	2013-09-23 16:25:30.087030488 +0200
++++ NetworkManager-0.8.1/introspection/nm-vpn-plugin.xml.foo	2013-09-25 14:47:00.459613716 +0200
+@@ -52,6 +52,7 @@
+         <tp:error name="org.freedesktop.NetworkManager.VPN.Error.BadArguments"/>
+         <tp:error name="org.freedesktop.NetworkManager.VPN.Error.LaunchFailed"/>
+         <tp:error name="org.freedesktop.NetworkManager.VPN.Error.WrongState"/>
++        <tp:error name="org.freedesktop.NetworkManager.VPN.Error.InteractiveNotSupported"/>
+       </tp:possible-errors>
+     </method>
+ 
+@@ -191,6 +192,7 @@
+         <tp:error name="org.freedesktop.NetworkManager.VPN.Error.WrongState"/>
+         <tp:error name="org.freedesktop.NetworkManager.VPN.Error.BadArguments"/>
+         <tp:error name="org.freedesktop.NetworkManager.VPN.Error.LaunchFailed"/>
++        <tp:error name="org.freedesktop.NetworkManager.VPN.Error.InteractiveNotSupported"/>
+       </tp:possible-errors>
+     </method>
+ 
+--- NetworkManager-0.8.1/libnm-glib/nm-vpn-plugin.c	2013-09-23 16:25:30.090030451 +0200
++++ NetworkManager-0.8.1/libnm-glib/nm-vpn-plugin.c.foo	2013-09-25 14:50:25.851045970 +0200
+@@ -135,6 +135,7 @@ nm_vpn_plugin_error_get_type (void)
+ 			ENUM_ENTRY (NM_VPN_PLUGIN_ERROR_BAD_ARGUMENTS,        "BadArguments"),
+ 			ENUM_ENTRY (NM_VPN_PLUGIN_ERROR_LAUNCH_FAILED,        "LaunchFailed"),
+ 			ENUM_ENTRY (NM_VPN_PLUGIN_ERROR_CONNECTION_INVALID,   "ConnectionInvalid"),
++			ENUM_ENTRY (NM_VPN_PLUGIN_ERROR_INTERACTIVE_NOT_SUPPORTED, "InteractiveNotSupported"),
+ 			{ 0, 0, 0 }
+ 		};
+ 
+@@ -367,15 +367,15 @@ _connect_generic (NMVPNPlugin *plugin,
+ 		return FALSE;
+ 	}
+ 
+-	nm_vpn_plugin_set_state (plugin, NM_VPN_SERVICE_STATE_STARTING);
+-
+ 	priv->interactive = FALSE;
+ 	if (details && !vpn_class->connect_interactive) {
+-		g_set_error_literal (error, NM_VPN_PLUGIN_ERROR, NM_VPN_PLUGIN_ERROR_GENERAL,
++		g_set_error_literal (error, NM_VPN_PLUGIN_ERROR, NM_VPN_PLUGIN_ERROR_INTERACTIVE_NOT_SUPPORTED,
+ 		                     "Plugin does not implement ConnectInteractive()");
+ 		return FALSE;
+ 	}
+ 
++	nm_vpn_plugin_set_state (plugin, NM_VPN_SERVICE_STATE_STARTING);
++
+ 	if (details) {
+ 		priv->interactive = TRUE;
+ 		success = vpn_class->connect_interactive (plugin, connection, details, error);
+@@ -496,7 +497,7 @@ impl_vpn_plugin_new_secrets (NMVPNPlugin
+ 	}
+ 
+ 	if (!NM_VPN_PLUGIN_GET_CLASS (plugin)->new_secrets) {
+-		g_set_error_literal (error, NM_VPN_PLUGIN_ERROR, NM_VPN_PLUGIN_ERROR_GENERAL,
++		g_set_error_literal (error, NM_VPN_PLUGIN_ERROR, NM_VPN_PLUGIN_ERROR_INTERACTIVE_NOT_SUPPORTED,
+ 		                     "Could not accept new secrets: plugin cannot process interactive secrets");
+ 		g_object_unref (connection);
+ 		return FALSE;
+@@ -918,8 +919,8 @@ nm_vpn_plugin_class_init (NMVPNPluginCla
+ 				    G_TYPE_NONE);
+ 
+ 	dbus_g_error_domain_register (NM_VPN_PLUGIN_ERROR,
+-							NULL,
+-							NM_TYPE_VPN_PLUGIN_ERROR);
++	                              NM_DBUS_VPN_ERROR_PREFIX,
++	                              NM_TYPE_VPN_PLUGIN_ERROR);
+ 
+ 	setup_unix_signal_handler ();
+ }
+--- NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection.c	2013-09-23 16:25:30.109030213 +0200
++++ NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection.c.foo	2013-09-25 14:38:01.817347671 +0200
+@@ -634,12 +634,20 @@ connect_interactive_cb (DBusGProxy *prox
+ 		return;
+ 	}
+ 
+-	/* Fall back to Connect() */
+-	priv->interactive_used = FALSE;
+-	dbus_g_proxy_begin_call (priv->proxy, "Connect",
+-	                         connect_cb, self, NULL,
+-	                         DBUS_TYPE_G_MAP_OF_MAP_OF_VARIANT, priv->connect_hash,
+-	                         G_TYPE_INVALID);
++	if (dbus_g_error_has_name (err, NM_DBUS_VPN_ERROR_PREFIX "." NM_DBUS_VPN_INTERACTIVE_NOT_SUPPORTED)) {
++		/* Fall back to Connect() */
++		dbus_g_proxy_begin_call (priv->proxy, "Connect",
++		                         connect_cb, self, NULL,
++		                         DBUS_TYPE_G_MAP_OF_MAP_OF_VARIANT, priv->connect_hash,
++		                         G_TYPE_INVALID);
++	} else {
++		nm_log_warn (LOGD_VPN, "VPN connection '%s' failed to connect interactively: '%s'.",
++		             nm_connection_get_id (priv->connection), err->message);
++		g_error_free (err);
++		nm_vpn_connection_set_vpn_state (self,
++		                                 NM_VPN_CONNECTION_STATE_FAILED,
++		                                 NM_VPN_CONNECTION_STATE_REASON_SERVICE_START_FAILED);
++	}
+ }
+ 
+ static void
+@@ -674,14 +682,14 @@ really_activate (NMVPNConnection *connec
+ 	 */
+ 	priv->interactive_used = priv->interactive_allowed;
+ 	if (priv->interactive_allowed) {
+-		nm_log_dbg (LOGD_VPN, "Allowing interactive secrets as all agents have that capability");
++		nm_log_dbg (LOGD_VPN, "Allowing interactive secrets as the user setting service has that capability");
+ 		dbus_g_proxy_begin_call (priv->proxy, "ConnectInteractive",
+ 		                         connect_interactive_cb, connection, NULL,
+ 		                         DBUS_TYPE_G_MAP_OF_MAP_OF_VARIANT, priv->connect_hash,
+ 		                         DBUS_TYPE_G_MAP_OF_VARIANT, details,
+ 		                         G_TYPE_INVALID);
+ 	} else {
+-		nm_log_dbg (LOGD_VPN, "Calling old Connect function as not all agents support interactive secrets");
++		nm_log_dbg (LOGD_VPN, "Calling old Connect function as the user setting service doesn't support interactive secrets");
+ 		dbus_g_proxy_begin_call (priv->proxy, "Connect",
+ 		                         connect_cb, connection, NULL,
+ 		                         DBUS_TYPE_G_MAP_OF_MAP_OF_VARIANT, priv->connect_hash,
+--- NetworkManager-0.8.1/introspection/vpn-errors.xml	2009-12-23 19:30:29.000000000 +0100
++++ NetworkManager-0.8.1/introspection/vpn-errors.xml.foo	2013-09-27 13:52:36.181073308 +0200
+@@ -2,31 +2,59 @@
+ <tp:errors xmlns:tp="http://telepathy.freedesktop.org/wiki/DbusSpec#extensions-v0"
+     namespace="org.freedesktop.NetworkManager.VPN.Error">
+   <tp:error name="General">
+-    <tp:docstring>This is a drab, nondescript error.</tp:docstring>
++    <tp:docstring>General failure without further details.</tp:docstring>
+   </tp:error>
+   <tp:error name="StartingInProgress">
+-    <tp:docstring>The request could not be processed because the VPN connection is already being started.</tp:docstring>
++    <tp:docstring>
++      The plugin is already starting, and another connect request was received.
++    </tp:docstring>
+   </tp:error>
+   <tp:error name="AlreadyStarted">
+-    <tp:docstring>The request could not be processed because a VPN connection was already active.</tp:docstring>
++    <tp:docstring>
++      The plugin is already connected, and another connect request was received.
++    </tp:docstring>
+   </tp:error>
+   <tp:error name="StoppingInProgress">
+-    <tp:docstring>The request could not be processed because the VPN connection is already being stopped.</tp:docstring>
++    <tp:docstring>
++      The plugin is already stopping, and another stop request was received.
++    </tp:docstring>
+   </tp:error>
+   <tp:error name="AlreadyStopped">
+-    <tp:docstring>The request could not be processed because the VPN connection was already stopped.</tp:docstring>
++    <tp:docstring>
++      The plugin is already stopped, and another disconnect request was received.
++    </tp:docstring>
+   </tp:error>
+   <tp:error name="WrongState">
+-    <tp:docstring>The request could not be processed because the VPN connection is in the wrong state for this type of request. FIXME: too general?</tp:docstring>
++    <tp:docstring>
++      The request could not be processed because the VPN plugin is in the wrong
++      state for this type of request.
++    </tp:docstring>
+   </tp:error>
+   <tp:error name="BadArguments">
+-    <tp:docstring>Invalid arguments were passed with the request.  FIXME: too general.</tp:docstring>
++    <tp:docstring>
++      The request could not be processed because it contained malformed
++      arguments, or arguments of unexpected type. It usually means that one of
++      the VPN setting data items or secrets was not of the expected type (i.e.
++      int, string, bool, etc).
++    </tp:docstring>
+   </tp:error>
+   <tp:error name="LaunchFailed">
+-    <tp:docstring>A binary providing the service failed to launch.</tp:docstring>
++    <tp:docstring>
++      A binary providing the service failed to launch.
++    </tp:docstring>
+   </tp:error>
+   <tp:error name="ConnectionInvalid">
+-    <tp:docstring>The request could not be processed because the VPN connection settings were invalid.</tp:docstring>
++    <tp:docstring>
++      The request could not be processed because the connection was invalid. It
++      usually means that the connection's VPN setting was missing some required
++      data item or secret.
++    </tp:docstring>
++  </tp:error>
++  <tp:error name="InteractiveNotSupported">
++    <tp:docstring>
++      The request could not be processed because the plugin does not support
++      interactive operations, such as ConnectInteractive() or NewSecrets().
++    </tp:docstring>
+   </tp:error>
+ </tp:errors>
+ 

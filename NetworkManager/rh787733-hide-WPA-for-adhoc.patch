@@ -1,0 +1,244 @@
+From 69247a00eacd00617acbf1dfcee8497437b8ad39 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Fri, 16 Mar 2012 17:56:32 -0500
+Subject: [PATCH] wifi: disable Ad-Hoc WPA connections (lp:905748)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The kernel is broken for Ad-Hoc WPA, and creates the connections
+as open connections instead.  Yeah, eventually we can use
+wpa_supplicant with RSN support, but for now we just have to
+disable Ad-Hoc WPA because it's a problem to say we're creating
+a protected network but then have the kernel not do that for
+us.  Will be re-enabled once all the necessary bits have been
+fixed.
+
+Note that Ad-Hoc WPA has been broken since at least 2.6.32 with
+mac80211-based drivers, which is what most users will be using.
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ libnm-util/nm-utils.c                       |  4 +++
+ src/nm-device-wifi.c                        | 52 +++++++++++++++++++++++++++++
+ src/system-settings/nm-sysconfig-settings.c | 44 ++++++++++++++++++++++++
+ 3 files changed, 100 insertions(+)
+
+diff --git a/libnm-util/nm-utils.c b/libnm-util/nm-utils.c
+index 656d301..e36932b 100644
+--- a/libnm-util/nm-utils.c
++++ b/libnm-util/nm-utils.c
+@@ -1269,6 +1269,8 @@ nm_utils_security_valid (NMUtilsSecurityType type,
+ 		}
+ 		break;
+ 	case NMU_SEC_WPA_PSK:
++		if (adhoc)
++			return FALSE;  /* FIXME: Kernel WPA Ad-Hoc support is buggy */
+ 		if (!(wifi_caps & NM_WIFI_DEVICE_CAP_WPA))
+ 			return FALSE;
+ 		if (have_ap) {
+@@ -1285,6 +1287,8 @@ nm_utils_security_valid (NMUtilsSecurityType type,
+ 		}
+ 		break;
+ 	case NMU_SEC_WPA2_PSK:
++		if (adhoc)
++			return FALSE;  /* FIXME: Kernel WPA Ad-Hoc support is buggy */
+ 		if (!(wifi_caps & NM_WIFI_DEVICE_CAP_RSN))
+ 			return FALSE;
+ 		if (have_ap) {
+diff --git a/src/nm-device-wifi.c b/src/nm-device-wifi.c
+index 3d1444f..fe1296a 100644
+--- a/src/nm-device-wifi.c
++++ b/src/nm-device-wifi.c
+@@ -1264,6 +1264,36 @@ real_deactivate (NMDevice *dev)
+ }
+ 
+ static gboolean
++is_adhoc_wpa (NMConnection *connection)
++{
++	NMSettingWireless *s_wifi;
++	NMSettingWirelessSecurity *s_wsec;
++	const char *mode, *key_mgmt;
++
++	/* The kernel doesn't support Ad-Hoc WPA connections well at this time,
++	 * and turns them into open networks.  It's been this way since at least
++	 * 2.6.30 or so; until that's fixed, disable WPA-protected Ad-Hoc networks.
++	 */
++
++	s_wifi = NM_SETTING_WIRELESS (nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS));
++	g_return_val_if_fail (s_wifi != NULL, FALSE);
++
++	mode = nm_setting_wireless_get_mode (s_wifi);
++	if (g_strcmp0 (mode, "adhoc") != 0)
++		return FALSE;
++
++	s_wsec = NM_SETTING_WIRELESS_SECURITY (nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS_SECURITY));
++	if (!s_wsec)
++		return FALSE;
++
++	key_mgmt = nm_setting_wireless_security_get_key_mgmt (s_wsec);
++	if (g_strcmp0 (key_mgmt, "wpa-none") != 0)
++		return FALSE;
++
++	return TRUE;
++}
++
++static gboolean
+ real_check_connection_compatible (NMDevice *device,
+                                   NMConnection *connection,
+                                   GError **error)
+@@ -1275,6 +1305,18 @@ real_check_connection_compatible (NMDevice *device,
+ 	const GByteArray *mac;
+ 	const char *ifname;
+ 
++	/* The kernel doesn't support Ad-Hoc WPA connections well at this time,
++	 * and turns them into open networks.  It's been this way since at least
++	 * 2.6.30 or so; until that's fixed, disable WPA-protected Ad-Hoc networks.
++	 */
++	if (is_adhoc_wpa (connection)) {
++		g_set_error_literal (error,
++				             NM_WIFI_ERROR,
++				             NM_WIFI_ERROR_CONNECTION_INCOMPATIBLE,
++				             "WPA Ad-Hoc disabled due to kernel bugs");
++		return FALSE;
++	}
++
+ 	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+ 	g_assert (s_con);
+ 
+@@ -3200,6 +3242,16 @@ real_act_stage1_prepare (NMDevice *dev, NMDeviceStateReason *reason)
+ 	connection = nm_act_request_get_connection (req);
+ 	g_return_val_if_fail (connection != NULL, NM_ACT_STAGE_RETURN_FAILURE);
+ 
++	/* The kernel doesn't support Ad-Hoc WPA connections well at this time,
++	 * and turns them into open networks.  It's been this way since at least
++	 * 2.6.30 or so; until that's fixed, disable WPA-protected Ad-Hoc networks.
++	 */
++	if (is_adhoc_wpa (connection)) {
++		nm_log_warn (LOGD_WIFI, "Ad-Hoc WPA disabled due to kernel bugs");
++		*reason = NM_DEVICE_STATE_REASON_SUPPLICANT_CONFIG_FAILED;
++		return NM_ACT_STAGE_RETURN_FAILURE;
++	}
++
+ 	/* Set spoof MAC to the interface */
+ 	s_wireless = (NMSettingWireless *) nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS);
+ 	g_assert (s_wireless);
+diff --git a/src/system-settings/nm-sysconfig-settings.c b/src/system-settings/nm-sysconfig-settings.c
+index 3e1ad20..0255502 100644
+--- a/src/system-settings/nm-sysconfig-settings.c
++++ b/src/system-settings/nm-sysconfig-settings.c
+@@ -904,6 +904,37 @@ out:
+ 		g_object_unref (pk_result);
+ }
+ 
++/* FIXME: remove if/when kernel supports adhoc wpa */
++static gboolean
++is_adhoc_wpa (NMConnection *connection)
++{
++	NMSettingWireless *s_wifi;
++	NMSettingWirelessSecurity *s_wsec;
++	const char *mode, *key_mgmt;
++
++	/* The kernel doesn't support Ad-Hoc WPA connections well at this time,
++	 * and turns them into open networks.  It's been this way since at least
++	 * 2.6.30 or so; until that's fixed, disable WPA-protected Ad-Hoc networks.
++	 */
++
++	s_wifi = NM_SETTING_WIRELESS (nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS));
++	g_return_val_if_fail (s_wifi != NULL, FALSE);
++
++	mode = nm_setting_wireless_get_mode (s_wifi);
++	if (g_strcmp0 (mode, "adhoc") != 0)
++		return FALSE;
++
++	s_wsec = NM_SETTING_WIRELESS_SECURITY (nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS_SECURITY));
++	if (!s_wsec)
++		return FALSE;
++
++	key_mgmt = nm_setting_wireless_security_get_key_mgmt (s_wsec);
++	if (g_strcmp0 (key_mgmt, "wpa-none") != 0)
++		return FALSE;
++
++	return TRUE;
++}
++
+ static void
+ add_connection_return (NMSettingsService *service,
+                        NMConnection *connection,
+@@ -916,6 +947,19 @@ add_connection_return (NMSettingsService *service,
+ 	PolkitCall *call;
+ 	GError *error = NULL;
+ 
++	/* The kernel doesn't support Ad-Hoc WPA connections well at this time,
++	 * and turns them into open networks.  It's been this way since at least
++	 * 2.6.30 or so; until that's fixed, disable WPA-protected Ad-Hoc networks.
++	 */
++	if (is_adhoc_wpa (connection)) {
++		error = g_error_new_literal (NM_SYSCONFIG_SETTINGS_ERROR,
++		                             NM_SETTINGS_INTERFACE_ERROR_INVALID_CONNECTION,
++		                             "WPA Ad-Hoc disabled due to kernel bugs");
++		callback (NM_SETTINGS_INTERFACE (service), NULL, error, user_data);
++		g_error_free (error);
++		return;
++	}
++
+ 	/* Do any of the plugins support adding? */
+ 	if (!get_plugin (self, NM_SYSTEM_CONFIG_INTERFACE_CAP_MODIFY_CONNECTIONS)) {
+ 		error = g_error_new_literal (NM_SYSCONFIG_SETTINGS_ERROR,
+-- 
+2.1.0
+
+From 9a902fa6dbfa87dcd08b70b4dfab98a0bc18e926 Mon Sep 17 00:00:00 2001
+From: Lubomir Rintel <lkundrak@v3.sk>
+Date: Wed, 16 Mar 2016 17:22:41 +0100
+Subject: [PATCH] wifi: check for wpa ad-hoc only when we know the connection is wifi
+
+Otherwise we trip an assert for each configured connection:
+
+  NetworkManager[28242]: <info> (bond0.171): device state change: prepare -> config (reason 'none') [4 5 0]
+  NetworkManager[28242]: is_adhoc_wpa: assertion `s_wifi != NULL' failed
+---
+ src/nm-device-wifi.c |   20 ++++++++++----------
+ 1 files changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/src/nm-device-wifi.c b/src/nm-device-wifi.c
+index a64b7c6..dc61116 100644
+--- a/src/nm-device-wifi.c
++++ b/src/nm-device-wifi.c
+@@ -1305,6 +1305,16 @@ real_check_connection_compatible (NMDevice *device,
+ 	const GByteArray *mac;
+ 	const char *ifname;
+ 
++	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
++	g_assert (s_con);
++
++	if (strcmp (nm_setting_connection_get_connection_type (s_con), NM_SETTING_WIRELESS_SETTING_NAME)) {
++		g_set_error (error,
++		             NM_WIFI_ERROR, NM_WIFI_ERROR_CONNECTION_NOT_WIRELESS,
++		             "The connection was not a WiFi connection.");
++		return FALSE;
++	}
++
+ 	/* The kernel doesn't support Ad-Hoc WPA connections well at this time,
+ 	 * and turns them into open networks.  It's been this way since at least
+ 	 * 2.6.30 or so; until that's fixed, disable WPA-protected Ad-Hoc networks.
+@@ -1317,16 +1327,6 @@ real_check_connection_compatible (NMDevice *device,
+ 		return FALSE;
+ 	}
+ 
+-	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+-	g_assert (s_con);
+-
+-	if (strcmp (nm_setting_connection_get_connection_type (s_con), NM_SETTING_WIRELESS_SETTING_NAME)) {
+-		g_set_error (error,
+-		             NM_WIFI_ERROR, NM_WIFI_ERROR_CONNECTION_NOT_WIRELESS,
+-		             "The connection was not a WiFi connection.");
+-		return FALSE;
+-	}
+-
+ 	ifname = nm_setting_connection_get_interface_name (s_con);
+ 	if (ifname && strcmp (ifname, nm_device_get_iface (device)) != 0) {
+ 		g_set_error (error,
+-- 
+1.7.1
+

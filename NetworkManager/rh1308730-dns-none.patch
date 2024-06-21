@@ -1,0 +1,184 @@
+From 750456d6966c93d75c3196a8239553372cd8ef79 Mon Sep 17 00:00:00 2001
+From: Beniamino Galvani <bgalvani@redhat.com>
+Date: Wed, 14 Sep 2016 09:54:01 +0200
+Subject: [PATCH] dns: add configuration option dns=none to avoid managing
+ resolv.conf
+
+This adds a new 'dns' option in NetworkManager.conf which can be set
+to 'none' to disable the updating of resolv.conf. The default when the
+key is unset is to manage resolv.conf.
+
+https://bugzilla.redhat.com/show_bug.cgi?id=1308730
+---
+ man/NetworkManager.conf.5.in         |  9 +++++++--
+ src/main.c                           | 17 ++++++++++++++---
+ src/named-manager/nm-named-manager.c | 21 +++++++++++++++++++++
+ src/named-manager/nm-named-manager.h |  3 +++
+ 4 files changed, 45 insertions(+), 5 deletions(-)
+
+diff --git a/man/NetworkManager.conf.5.in b/man/NetworkManager.conf.5.in
+index 9a208bd..84e8be4 100644
+--- a/man/NetworkManager.conf.5.in
++++ b/man/NetworkManager.conf.5.in
+@@ -104,11 +104,16 @@ no-auto-default=00:22:68:5c:5d:c4,00:1e:65:ff:aa:ee
+ .TP
+ .B wifi-wext-only=\fIfalse\fP | \fItrue\fP
+ This option controls NetworkManager's interaction with \fBwpa_supplicant\fP (8).
+-When \fIfalse\fB (default), 'nl80211' supplicant driver and background scanning are
++When \fIfalse\fP (default), 'nl80211' supplicant driver and background scanning are
+ used. This enables seamless connection and roaming in RSA token-enabled Wi-Fi networks.
+ If you encounter any problems with 'nl80211' (e.g. due to bad drivers), you can
+ switch back to 'wext' supplicant driver by setting this option to \fItrue\fP.
+-Missing option or an unrecognized value is regarded as \fIfalse\fB.
++Missing option or an unrecognized value is regarded as \fIfalse\fP.
++.TP
++.B dns=\fIdefault\fP | \fInone\fP
++When set to \fIdefault\fP, NetworkManager updates system DNS configuration by
++writing to /etc/resolv.conf. If set to \fInone\fP NetworkManager does not update
++DNS configuration. Missing option or an unrecognized value is regarded as \fIdefault\fP.
+ .SS [keyfile]
+ This section contains keyfile-specific options and thus only has effect when using \fIkeyfile\fP plugin.
+ .TP
+diff --git a/src/main.c b/src/main.c
+index 7240a6e..02bfde8 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -304,9 +304,11 @@ parse_config_file (const char *filename,
+                    char **log_level,
+                    char **log_domains,
+                    gboolean *wifi_wext_only,
++                   gboolean *dns_managed,
+                    GError **error)
+ {
+ 	GKeyFile *config;
++	char *dns;
+ 
+ 	config = g_key_file_new ();
+ 	if (!config) {
+@@ -327,6 +329,10 @@ parse_config_file (const char *filename,
+ 
+ 	*wifi_wext_only = g_key_file_get_boolean (config, "main", "wifi-wext-only", NULL);
+ 
++	dns = g_key_file_get_string (config, "main", "dns", NULL);
++	*dns_managed = !g_strcmp0 (dns, "none") ? FALSE : TRUE;
++	g_free (dns);
++
+ 	*log_level = g_key_file_get_value (config, "logging", "level", NULL);
+ 	*log_domains = g_key_file_get_value (config, "logging", "domains", NULL);
+ 
+@@ -458,6 +464,7 @@ main (int argc, char *argv[])
+ 	gboolean wrote_pidfile = FALSE;
+ 	char *cfg_log_level = NULL, *cfg_log_domains = NULL;
+ 	gboolean wifi_wext_only;  /* if TRUE only use 'wext' for wpa_supplicant, else use 'nl80211,wext' */
++	gboolean dns_managed;
+ 
+ 	GOptionEntry options[] = {
+ 		{ "no-daemon", 0, 0, G_OPTION_ARG_NONE, &become_daemon, "Don't become a daemon", NULL },
+@@ -520,7 +527,8 @@ main (int argc, char *argv[])
+ 
+ 	/* Parse the config file */
+ 	if (config) {
+-		if (!parse_config_file (config, &conf_plugins, &dhcp, &cfg_log_level, &cfg_log_domains, &wifi_wext_only, &error)) {
++		if (!parse_config_file (config, &conf_plugins, &dhcp, &cfg_log_level,
++		                        &cfg_log_domains, &wifi_wext_only, &dns_managed, &error)) {
+ 			fprintf (stderr, "Config file %s invalid: (%d) %s\n",
+ 			         config,
+ 			         error ? error->code : -1,
+@@ -540,7 +548,8 @@ main (int argc, char *argv[])
+ 		/* Try deprecated nm-system-settings.conf first */
+ 		if (g_file_test (NM_OLD_SYSTEM_CONF_FILE, G_FILE_TEST_EXISTS)) {
+ 			config = g_strdup (NM_OLD_SYSTEM_CONF_FILE);
+-			parsed = parse_config_file (config, &conf_plugins, &dhcp, &cfg_log_level, &cfg_log_domains, &wifi_wext_only, &error);
++			parsed = parse_config_file (config, &conf_plugins, &dhcp, &cfg_log_level,
++			                            &cfg_log_domains, &wifi_wext_only, &dns_managed, &error);
+ 			if (!parsed) {
+ 				fprintf (stderr, "Default config file %s invalid: (%d) %s\n",
+ 				         config,
+@@ -555,7 +564,8 @@ main (int argc, char *argv[])
+ 		/* Try the preferred NetworkManager.conf last */
+ 		if (!parsed && g_file_test (NM_DEFAULT_SYSTEM_CONF_FILE, G_FILE_TEST_EXISTS)) {
+ 			config = g_strdup (NM_DEFAULT_SYSTEM_CONF_FILE);
+-			parsed = parse_config_file (config, &conf_plugins, &dhcp, &cfg_log_level, &cfg_log_domains, &wifi_wext_only, &error);
++			parsed = parse_config_file (config, &conf_plugins, &dhcp, &cfg_log_level,
++			                            &cfg_log_domains, &wifi_wext_only, &dns_managed, &error);
+ 			if (!parsed) {
+ 				fprintf (stderr, "Default config file %s invalid: (%d) %s\n",
+ 				         config,
+@@ -684,6 +694,7 @@ main (int argc, char *argv[])
+ 		nm_log_err (LOGD_CORE, "failed to start the named manager.");
+ 		goto done;
+ 	}
++	nm_named_manager_set_dns_managed (named_mgr, dns_managed);
+ 
+ 	manager = nm_manager_get (config,
+ 	                          plugins,
+diff --git a/src/named-manager/nm-named-manager.c b/src/named-manager/nm-named-manager.c
+index ac9f257..0377fce 100644
+--- a/src/named-manager/nm-named-manager.c
++++ b/src/named-manager/nm-named-manager.c
+@@ -74,6 +74,7 @@ struct NMNamedManagerPrivate {
+ 	 * associated with a network interface (like hostnames).
+ 	 */
+ 	char *last_iface;
++	gboolean managed;
+ };
+ 
+ 
+@@ -91,6 +92,20 @@ nm_named_manager_get (void)
+ 	return singleton;
+ }
+ 
++void
++nm_named_manager_set_dns_managed (NMNamedManager *mgr, gboolean managed)
++{
++	NMNamedManagerPrivate *priv;
++
++	g_return_if_fail (mgr != NULL);
++
++	priv = NM_NAMED_MANAGER_GET_PRIVATE (mgr);
++
++	if (!managed)
++		nm_log_info (LOGD_DNS, "DNS configuration not managed by NetworkManager");
++
++	priv->managed = managed;
++}
+ 
+ GQuark
+ nm_named_manager_error_quark (void)
+@@ -628,6 +643,9 @@ rewrite_resolv_conf (NMNamedManager *mgr, const char *iface, GError **error)
+ 
+ 	priv = NM_NAMED_MANAGER_GET_PRIVATE (mgr);
+ 
++	if (!priv->managed)
++		return TRUE;
++
+ 	if (iface) {
+ 		g_free (priv->last_iface);
+ 		priv->last_iface = g_strdup (iface);
+@@ -938,6 +956,9 @@ nm_named_manager_set_hostname (NMNamedManager *mgr,
+ static void
+ nm_named_manager_init (NMNamedManager *mgr)
+ {
++	NMNamedManagerPrivate *priv = NM_NAMED_MANAGER_GET_PRIVATE (mgr);
++
++	priv->managed = TRUE;
+ }
+ 
+ static void
+diff --git a/src/named-manager/nm-named-manager.h b/src/named-manager/nm-named-manager.h
+index 27d5bc2..07e28d9 100644
+--- a/src/named-manager/nm-named-manager.h
++++ b/src/named-manager/nm-named-manager.h
+@@ -69,6 +69,9 @@ GType nm_named_manager_get_type (void);
+ 
+ NMNamedManager * nm_named_manager_get (void);
+ 
++void nm_named_manager_set_dns_managed (NMNamedManager *mgr,
++                                       gboolean managed);
++
+ gboolean nm_named_manager_add_ip4_config (NMNamedManager *mgr,
+ 										  const char *iface,
+                                           NMIP4Config *config,
+-- 
+2.7.4
+

@@ -1,0 +1,107 @@
+From 0050f1e54ba9d1b73a2e6f6cc6360a6c8b360cbf Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Wed, 11 Sep 2013 19:40:43 +0200
+Subject: [PATCH 1/1] libnm-gtk: fix use-after-free of 802.1x usernames/passwords
+
+(backported from commit eeb2430b933e938a0e2432689ed926f94367270b)
+
+The EAPMethod objects must keep a reference to the WirelessSecurity
+objects that they use, otherwise the WS can get freed before the
+EAPMethod does and wireless_security_set_userpass() can get called
+on an already-freed WirelessSecurity.
+---
+ .../src/wireless-security/eap-method-leap.c        |   19 +++++++++++++++++--
+ .../src/wireless-security/eap-method-simple.c      |   19 +++++++++++++++++--
+ 2 files changed, 34 insertions(+), 4 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c
+index 74cfa11..0bd9233 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c
+@@ -129,6 +129,21 @@ widgets_unrealized (GtkWidget *widget, EAPMethodLEAP *method)
+ 	                                gtk_toggle_button_get_active (method->show_password));
+ }
+ 
++static void
++destroy (EAPMethod *parent)
++{
++	EAPMethodLEAP *method = (EAPMethodLEAP *) parent;
++
++	g_signal_handlers_disconnect_by_func (G_OBJECT (parent->ui_widget),
++	                                      (GCallback) widgets_realized,
++	                                      method);
++	g_signal_handlers_disconnect_by_func (G_OBJECT (parent->ui_widget),
++	                                      (GCallback) widgets_unrealized,
++	                                      method);
++
++	wireless_security_unref (method->ws_parent);
++}
++
+ EAPMethodLEAP *
+ eap_method_leap_new (const char *glade_file,
+                      WirelessSecurity *ws_parent,
+@@ -145,7 +160,7 @@ eap_method_leap_new (const char *glade_file,
+ 	                          add_to_size_group,
+ 	                          fill_connection,
+ 	                          update_secrets,
+-	                          NULL,
++	                          destroy,
+ 	                          glade_file,
+ 	                          "eap_leap_notebook",
+ 	                          "eap_leap_username_entry");
+@@ -153,7 +168,7 @@ eap_method_leap_new (const char *glade_file,
+ 		return NULL;
+ 
+ 	method = (EAPMethodLEAP *) parent;
+-	method->ws_parent = ws_parent;
++	method->ws_parent = wireless_security_ref (ws_parent);
+ 	g_signal_connect (G_OBJECT (parent->ui_widget), "realize",
+ 	                  (GCallback) widgets_realized,
+ 	                  method);
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c
+index 03ac035..34e8aa5 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c
+@@ -203,6 +203,21 @@ widgets_unrealized (GtkWidget *widget, EAPMethodSimple *method)
+ 	                                gtk_toggle_button_get_active (method->show_password));
+ }
+ 
++static void
++destroy (EAPMethod *parent)
++{
++	EAPMethodSimple *method = (EAPMethodSimple *) parent;
++
++	g_signal_handlers_disconnect_by_func (G_OBJECT (parent->ui_widget),
++	                                      (GCallback) widgets_realized,
++	                                      method);
++	g_signal_handlers_disconnect_by_func (G_OBJECT (parent->ui_widget),
++	                                      (GCallback) widgets_unrealized,
++	                                      method);
++
++	wireless_security_unref (method->ws_parent);
++}
++
+ EAPMethodSimple *
+ eap_method_simple_new (const char *glade_file,
+                        WirelessSecurity *ws_parent,
+@@ -221,7 +236,7 @@ eap_method_simple_new (const char *glade_file,
+ 	                          add_to_size_group,
+ 	                          fill_connection,
+ 	                          update_secrets,
+-	                          NULL,
++	                          destroy,
+ 	                          glade_file,
+ 	                          "eap_simple_notebook",
+ 	                          "eap_simple_username_entry");
+@@ -231,7 +246,7 @@ eap_method_simple_new (const char *glade_file,
+ 	method = (EAPMethodSimple *) parent;
+ 	method->type = type;
+ 	method->is_editor = is_editor;
+-	method->ws_parent = ws_parent;
++	method->ws_parent = wireless_security_ref (ws_parent);
+ 
+ 	g_signal_connect (G_OBJECT (parent->ui_widget), "realize",
+ 	                  (GCallback) widgets_realized,
+-- 
+1.7.1
+

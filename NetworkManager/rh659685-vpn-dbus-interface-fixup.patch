@@ -1,0 +1,901 @@
+From af4bcf3ee9dd40ac5b5b5dbe9160ffd821380e50 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Tue, 25 Jan 2011 18:41:03 +0000
+Subject: vpn: fix VPN active connection D-Bus API handling (bgo #569294)
+
+Due to limitations in dbus-glib, where one GObject cannot have more
+than one introspection XML object attached to it, we used to include
+more than one <interface> in the VPNConnection object introspection
+XML.  This was suboptimal for two reasons:
+
+1) it duplicated the Connection.Active introspection XML which
+made it harder for clients to use the introspection data in a
+dynamic fashion, besides looking ugly in the docs
+
+2) not many other programs use this feature of dbus-glib, which
+means it didn't get a lot of testing, and broke, which sucks
+for NM.
+
+To fix this issue, create a base class for NMVpnConnection that
+handles the Connection.Active API, and make NMVpnConnection itself
+handle just the VPN pieces that it layers on top.  This  makes
+dbus-glib happy because we aren't using two <interface> blocks
+in the same introspection XML, and it makes the NM code more
+robust because we can re-use the existing Connection.Active
+introspection XML in the NMVpnConnectionBase class.
+---
+diff -up NetworkManager-0.8.1/introspection/nm-vpn-connection.xml.vpn-interface NetworkManager-0.8.1/introspection/nm-vpn-connection.xml
+--- NetworkManager-0.8.1/introspection/nm-vpn-connection.xml.vpn-interface	2009-12-23 12:30:29.000000000 -0600
++++ NetworkManager-0.8.1/introspection/nm-vpn-connection.xml	2011-10-25 16:32:39.932398384 -0500
+@@ -1,38 +1,6 @@
+ <?xml version="1.0" encoding="UTF-8" ?>
+ 
+ <node name="/" xmlns:tp="http://telepathy.freedesktop.org/wiki/DbusSpec#extensions-v0">
+-  <interface name="org.freedesktop.NetworkManager.Connection.Active">
+-    <property name="ServiceName" type="s" access="read">
+-      <tp:docstring>The D-Bus service name providing this connection.</tp:docstring>
+-    </property>
+-    <property name="Connection" type="o" access="read">
+-      <tp:docstring>The path of the connection.</tp:docstring>
+-    </property>
+-    <property name="SpecificObject" type="o" access="read">
+-      <tp:docstring>A specific object associated with the active connection.</tp:docstring>
+-    </property>
+-    <property name="Devices" type="ao" access="read">
+-      <tp:docstring>Array of object paths representing devices which are part of this active connection.</tp:docstring>
+-    </property>
+-    <property name="State" type="u" access="read" tp:type="NM_ACTIVE_CONNECTION_STATE">
+-      <tp:docstring>The state of this active connection.</tp:docstring>
+-    </property>
+-    <property name="Default" type="b" access="read">
+-      <tp:docstring>Whether this active connection is the default connection, i.e. whether it currently owns the default route.</tp:docstring>
+-    </property>
+-    <property name="Vpn" type="b" access="read">
+-      <tp:docstring>Whether this active connection is also a VPN connection.</tp:docstring>
+-    </property>
+-
+-    <signal name="PropertiesChanged">
+-        <arg name="properties" type="a{sv}" tp:type="String_Variant_Map">
+-            <tp:docstring>
+-                A dictionary mapping property names to variant boxed values
+-            </tp:docstring>
+-        </arg>
+-    </signal>
+-  </interface>
+-
+   <interface name="org.freedesktop.NetworkManager.VPN.Connection">
+     <tp:docstring>
+       Represents an active connection to a Virtual Private Network.
+diff -up NetworkManager-0.8.1/src/nm-activation-request.c.vpn-interface NetworkManager-0.8.1/src/nm-activation-request.c
+--- NetworkManager-0.8.1/src/nm-activation-request.c.vpn-interface	2010-08-06 13:59:05.000000000 -0500
++++ NetworkManager-0.8.1/src/nm-activation-request.c	2011-10-25 16:32:39.934398174 -0500
+@@ -35,6 +35,7 @@
+ #include "nm-properties-changed-signal.h"
+ #include "nm-active-connection.h"
+ #include "nm-dbus-glib-types.h"
++#include "nm-active-connection-glue.h"
+ 
+ 
+ static void secrets_provider_interface_init (NMSecretsProviderInterface *sp_interface_class);
+@@ -304,64 +305,15 @@ nm_act_request_class_init (NMActRequestC
+ 	object_class->finalize = finalize;
+ 
+ 	/* properties */
+-	g_object_class_install_property
+-		(object_class, PROP_SERVICE_NAME,
+-		 g_param_spec_string (NM_ACTIVE_CONNECTION_SERVICE_NAME,
+-							  "Service name",
+-							  "Service name",
+-							  NULL,
+-							  G_PARAM_READABLE));
+-	g_object_class_install_property
+-		(object_class, PROP_CONNECTION,
+-		 g_param_spec_boxed (NM_ACTIVE_CONNECTION_CONNECTION,
+-							  "Connection",
+-							  "Connection",
+-							  DBUS_TYPE_G_OBJECT_PATH,
+-							  G_PARAM_READABLE));
+-	g_object_class_install_property
+-		(object_class, PROP_SPECIFIC_OBJECT,
+-		 g_param_spec_boxed (NM_ACTIVE_CONNECTION_SPECIFIC_OBJECT,
+-							  "Specific object",
+-							  "Specific object",
+-							  DBUS_TYPE_G_OBJECT_PATH,
+-							  G_PARAM_READABLE));
+-	g_object_class_install_property
+-		(object_class, PROP_DEVICES,
+-		 g_param_spec_boxed (NM_ACTIVE_CONNECTION_DEVICES,
+-							  "Devices",
+-							  "Devices",
+-							  DBUS_TYPE_G_ARRAY_OF_OBJECT_PATH,
+-							  G_PARAM_READABLE));
+-	g_object_class_install_property
+-		(object_class, PROP_STATE,
+-		 g_param_spec_uint (NM_ACTIVE_CONNECTION_STATE,
+-							  "State",
+-							  "State",
+-							  NM_ACTIVE_CONNECTION_STATE_UNKNOWN,
+-							  NM_ACTIVE_CONNECTION_STATE_ACTIVATED,
+-							  NM_ACTIVE_CONNECTION_STATE_UNKNOWN,
+-							  G_PARAM_READABLE));
+-	g_object_class_install_property
+-		(object_class, PROP_DEFAULT,
+-		 g_param_spec_boolean (NM_ACTIVE_CONNECTION_DEFAULT,
+-							   "Default",
+-							   "Is the default IPv4 active connection",
+-							   FALSE,
+-							   G_PARAM_READABLE));
+-	g_object_class_install_property
+-		(object_class, PROP_DEFAULT6,
+-		 g_param_spec_boolean (NM_ACTIVE_CONNECTION_DEFAULT6,
+-							   "Default6",
+-							   "Is the default IPv6 active connection",
+-							   FALSE,
+-							   G_PARAM_READABLE));
+-	g_object_class_install_property
+-		(object_class, PROP_VPN,
+-		 g_param_spec_boolean (NM_ACTIVE_CONNECTION_VPN,
+-							   "VPN",
+-							   "Is a VPN connection",
+-							   FALSE,
+-							   G_PARAM_READABLE));
++    nm_active_connection_install_properties (object_class,
++                                             PROP_SERVICE_NAME,
++                                             PROP_CONNECTION,
++                                             PROP_SPECIFIC_OBJECT,
++                                             PROP_DEVICES,
++                                             PROP_STATE,
++                                             PROP_DEFAULT,
++                                             PROP_DEFAULT6,
++                                             PROP_VPN);
+ 
+ 	/* Signals */
+ 	signals[CONNECTION_SECRETS_UPDATED] =
+@@ -386,9 +338,10 @@ nm_act_request_class_init (NMActRequestC
+ 
+ 	signals[PROPERTIES_CHANGED] = 
+ 		nm_properties_changed_signal_new (object_class,
+-								    G_STRUCT_OFFSET (NMActRequestClass, properties_changed));
++		                                  G_STRUCT_OFFSET (NMActRequestClass, properties_changed));
+ 
+-	nm_active_connection_install_type_info (object_class);
++	dbus_g_object_type_install_info (G_TYPE_FROM_CLASS (req_class),
++	                                 &dbus_glib_nm_active_connection_object_info);
+ }
+ 
+ static gboolean
+diff -up NetworkManager-0.8.1/src/nm-active-connection.c.vpn-interface NetworkManager-0.8.1/src/nm-active-connection.c
+--- NetworkManager-0.8.1/src/nm-active-connection.c.vpn-interface	2010-08-06 13:59:05.000000000 -0500
++++ NetworkManager-0.8.1/src/nm-active-connection.c	2011-10-25 16:32:39.935398174 -0500
+@@ -21,8 +21,8 @@
+ #include <glib.h>
+ #include "nm-active-connection.h"
+ #include "NetworkManager.h"
+-#include "nm-active-connection-glue.h"
+ #include "nm-logging.h"
++#include "nm-dbus-glib-types.h"
+ 
+ char *
+ nm_active_connection_get_next_object_path (void)
+@@ -33,13 +33,6 @@ nm_active_connection_get_next_object_pat
+ }
+ 
+ void
+-nm_active_connection_install_type_info (GObjectClass *klass)
+-{
+-	dbus_g_object_type_install_info (G_TYPE_FROM_CLASS (klass),
+-									 &dbus_glib_nm_active_connection_object_info);
+-}
+-
+-void
+ nm_active_connection_scope_to_value (NMConnection *connection, GValue *value)
+ {
+ 	if (!connection) {
+@@ -60,4 +53,73 @@ nm_active_connection_scope_to_value (NMC
+ 	}
+ }
+ 
++void
++nm_active_connection_install_properties (GObjectClass *object_class,
++                                         guint prop_service_name,
++                                         guint prop_connection,
++                                         guint prop_specific_object,
++                                         guint prop_devices,
++                                         guint prop_state,
++                                         guint prop_default,
++                                         guint prop_default6,
++                                         guint prop_vpn)
++{
++	g_object_class_install_property (object_class, prop_service_name,
++		g_param_spec_string (NM_ACTIVE_CONNECTION_SERVICE_NAME,
++		                     "Service name",
++		                     "Service name",
++		                     NULL,
++		                     G_PARAM_READABLE));
++
++	g_object_class_install_property (object_class, prop_connection,
++		g_param_spec_boxed (NM_ACTIVE_CONNECTION_CONNECTION,
++		                    "Connection",
++		                    "Connection",
++		                    DBUS_TYPE_G_OBJECT_PATH,
++		                    G_PARAM_READABLE));
++
++	g_object_class_install_property (object_class, prop_specific_object,
++		g_param_spec_boxed (NM_ACTIVE_CONNECTION_SPECIFIC_OBJECT,
++		                    "Specific object",
++		                    "Specific object",
++		                    DBUS_TYPE_G_OBJECT_PATH,
++		                    G_PARAM_READABLE));
++
++	g_object_class_install_property (object_class, prop_devices,
++		g_param_spec_boxed (NM_ACTIVE_CONNECTION_DEVICES,
++		                    "Devices",
++		                    "Devices",
++		                    DBUS_TYPE_G_ARRAY_OF_OBJECT_PATH,
++		                    G_PARAM_READABLE));
++
++	g_object_class_install_property (object_class, prop_state,
++		g_param_spec_uint (NM_ACTIVE_CONNECTION_STATE,
++		                   "State",
++		                   "State",
++		                   NM_ACTIVE_CONNECTION_STATE_UNKNOWN,
++		                   NM_ACTIVE_CONNECTION_STATE_ACTIVATED,
++		                   NM_ACTIVE_CONNECTION_STATE_UNKNOWN,
++		                   G_PARAM_READABLE));
++
++	g_object_class_install_property (object_class, prop_default,
++		g_param_spec_boolean (NM_ACTIVE_CONNECTION_DEFAULT,
++		                      "Default",
++		                      "Is the default IPv4 active connection",
++		                      FALSE,
++		                      G_PARAM_READABLE));
++
++	g_object_class_install_property (object_class, prop_default6,
++		g_param_spec_boolean (NM_ACTIVE_CONNECTION_DEFAULT6,
++		                      "Default6",
++		                      "Is the default IPv6 active connection",
++		                      FALSE,
++		                      G_PARAM_READABLE));
++
++	g_object_class_install_property (object_class, prop_vpn,
++		g_param_spec_boolean (NM_ACTIVE_CONNECTION_VPN,
++		                      "VPN",
++		                      "Is a VPN connection",
++		                      FALSE,
++		                      G_PARAM_READABLE));
++}
+ 
+diff -up NetworkManager-0.8.1/src/nm-active-connection.h.vpn-interface NetworkManager-0.8.1/src/nm-active-connection.h
+--- NetworkManager-0.8.1/src/nm-active-connection.h.vpn-interface	2010-08-06 13:59:05.000000000 -0500
++++ NetworkManager-0.8.1/src/nm-active-connection.h	2011-10-25 16:32:39.935398174 -0500
+@@ -35,8 +35,16 @@
+ 
+ char *nm_active_connection_get_next_object_path (void);
+ 
+-void nm_active_connection_install_type_info (GObjectClass *klass);
+-
+ void nm_active_connection_scope_to_value (NMConnection *connection, GValue *value);
+ 
++void nm_active_connection_install_properties (GObjectClass *object_class,
++                                              guint prop_service_name,
++                                              guint prop_connection,
++                                              guint prop_specific_object,
++                                              guint prop_devices,
++                                              guint prop_state,
++                                              guint prop_default,
++                                              guint prop_default6,
++                                              guint prop_vpn);
++
+ #endif /* NM_ACTIVE_CONNECTION_H */
+diff -up NetworkManager-0.8.1/src/vpn-manager/Makefile.am.vpn-interface NetworkManager-0.8.1/src/vpn-manager/Makefile.am
+--- NetworkManager-0.8.1/src/vpn-manager/Makefile.am.vpn-interface	2010-08-06 13:59:06.000000000 -0500
++++ NetworkManager-0.8.1/src/vpn-manager/Makefile.am	2011-10-25 16:32:39.936398244 -0500
+@@ -11,12 +11,14 @@ INCLUDES = \
+ 
+ noinst_LTLIBRARIES = libvpn-manager.la
+ 
+-libvpn_manager_la_SOURCES =	\
+-	nm-vpn-manager.c	\
+-	nm-vpn-manager.h	\
+-	nm-vpn-service.c	\
+-	nm-vpn-service.h	\
+-	nm-vpn-connection.c	\
++libvpn_manager_la_SOURCES = \
++	nm-vpn-manager.c \
++	nm-vpn-manager.h \
++	nm-vpn-service.c \
++	nm-vpn-service.h \
++	nm-vpn-connection-base.c \
++	nm-vpn-connection-base.h \
++	nm-vpn-connection.c \
+ 	nm-vpn-connection.h
+ 
+ libvpn_manager_la_CPPFLAGS =	\
+@@ -31,6 +33,9 @@ libvpn_manager_la_LIBADD = \
+ 	$(DBUS_LIBS) \
+ 	$(GLIB_LIBS)
+ 
++nm-vpn-connection-base-glue.h: $(top_srcdir)/introspection/nm-active-connection.xml
++	$(AM_V_GEN) dbus-binding-tool --prefix=nm_vpn_connection_base --mode=glib-server --output=$@ $<
++
+ nm-vpn-connection-glue.h: $(top_srcdir)/introspection/nm-vpn-connection.xml
+ 	$(AM_V_GEN) dbus-binding-tool --prefix=nm_vpn_connection --mode=glib-server --output=$@ $<
+ 
+@@ -39,6 +44,7 @@ nm-vpn-plugin-bindings.h: $(top_srcdir)/
+ 
+ 
+ BUILT_SOURCES = \
++	nm-vpn-connection-base-glue.h \
+ 	nm-vpn-connection-glue.h \
+ 	nm-vpn-plugin-bindings.h
+ 
+diff -up NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection-base.c.vpn-interface NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection-base.c
+--- NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection-base.c.vpn-interface	2011-10-25 16:32:39.937398733 -0500
++++ NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection-base.c	2011-10-25 16:41:24.896408519 -0500
+@@ -0,0 +1,211 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager -- Network link manager
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Copyright (C) 2005 - 2011 Red Hat, Inc.
++ * Copyright (C) 2007 - 2008 Novell, Inc.
++ */
++
++#include "NetworkManager.h"
++#include "nm-vpn-connection-base.h"
++#include "nm-active-connection.h"
++#include "nm-vpn-connection-base-glue.h"
++#include "nm-dbus-manager.h"
++
++G_DEFINE_ABSTRACT_TYPE (NMVpnConnectionBase, nm_vpn_connection_base, G_TYPE_OBJECT)
++
++#define NM_VPN_CONNECTION_BASE_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), \
++                                               NM_TYPE_VPN_CONNECTION_BASE, \
++                                               NMVpnConnectionBasePrivate))
++
++typedef struct {
++	gboolean disposed;
++
++	NMConnection *connection;
++	char *ac_path;
++	char *so_path;
++	gboolean is_default;
++	gboolean is_default6;
++	NMActiveConnectionState state;
++} NMVpnConnectionBasePrivate;
++
++enum {
++	PROP_0,
++	PROP_SERVICE_NAME,
++	PROP_CONNECTION,
++	PROP_SPECIFIC_OBJECT,
++	PROP_DEVICES,
++	PROP_STATE,
++	PROP_DEFAULT,
++	PROP_DEFAULT6,
++	PROP_VPN,
++
++	LAST_PROP
++};
++
++/****************************************************************/
++
++void
++nm_vpn_connection_base_set_state (NMVpnConnectionBase *self,
++                                  NMVPNConnectionState vpn_state)
++{
++	NMVpnConnectionBasePrivate *priv = NM_VPN_CONNECTION_BASE_GET_PRIVATE (self);
++	NMActiveConnectionState new_ac_state = NM_ACTIVE_CONNECTION_STATE_UNKNOWN;
++
++	/* Set the NMActiveConnection state based on VPN state */
++	switch (vpn_state) {
++	case NM_VPN_CONNECTION_STATE_PREPARE:
++	case NM_VPN_CONNECTION_STATE_NEED_AUTH:
++	case NM_VPN_CONNECTION_STATE_CONNECT:
++	case NM_VPN_CONNECTION_STATE_IP_CONFIG_GET:
++		new_ac_state = NM_ACTIVE_CONNECTION_STATE_ACTIVATING;
++		break;
++	case NM_VPN_CONNECTION_STATE_ACTIVATED:
++		new_ac_state = NM_ACTIVE_CONNECTION_STATE_ACTIVATED;
++		break;
++	default:
++		break;
++	}
++
++	if (new_ac_state != priv->state) {
++		priv->state = new_ac_state;
++		g_object_notify (G_OBJECT (self), NM_ACTIVE_CONNECTION_STATE);
++	}
++}
++
++void
++nm_vpn_connection_base_set_specific_object (NMVpnConnectionBase *self,
++                                            const char *so_path)
++{
++	NMVpnConnectionBasePrivate *priv = NM_VPN_CONNECTION_BASE_GET_PRIVATE (self);
++
++	g_return_if_fail (priv->so_path == NULL);
++	priv->so_path = g_strdup (so_path);
++}
++
++const char *
++nm_vpn_connection_base_get_ac_path (NMVpnConnectionBase *self)
++{
++	return NM_VPN_CONNECTION_BASE_GET_PRIVATE (self)->ac_path;
++}
++
++void
++nm_vpn_connection_base_export (NMVpnConnectionBase *self,
++                               NMConnection *connection)
++{
++	NMVpnConnectionBasePrivate *priv = NM_VPN_CONNECTION_BASE_GET_PRIVATE (self);
++	NMDBusManager *dbus_mgr;
++
++	g_return_if_fail (priv->connection == NULL);
++
++	priv->connection = g_object_ref (connection);
++
++	dbus_mgr = nm_dbus_manager_get ();
++	dbus_g_connection_register_g_object (nm_dbus_manager_get_connection (dbus_mgr),
++	                                     priv->ac_path, G_OBJECT (self));
++	g_object_unref (dbus_mgr);
++}
++
++/****************************************************************/
++
++static void
++nm_vpn_connection_base_init (NMVpnConnectionBase *self)
++{
++	NMVpnConnectionBasePrivate *priv = NM_VPN_CONNECTION_BASE_GET_PRIVATE (self);
++
++	priv->state = NM_ACTIVE_CONNECTION_STATE_UNKNOWN;
++	priv->ac_path = nm_active_connection_get_next_object_path ();
++}
++
++static void
++dispose (GObject *object)
++{
++	NMVpnConnectionBasePrivate *priv = NM_VPN_CONNECTION_BASE_GET_PRIVATE (object);
++
++	if (!priv->disposed) {
++		priv->disposed = TRUE;
++
++		g_free (priv->ac_path);
++		g_free (priv->so_path);
++		g_object_unref (priv->connection);
++	}
++
++	G_OBJECT_CLASS (nm_vpn_connection_base_parent_class)->dispose (object);
++}
++
++static void
++get_property (GObject *object, guint prop_id,
++			  GValue *value, GParamSpec *pspec)
++{
++	NMVpnConnectionBasePrivate *priv = NM_VPN_CONNECTION_BASE_GET_PRIVATE (object);
++
++	switch (prop_id) {
++	case PROP_SERVICE_NAME:
++		nm_active_connection_scope_to_value (priv->connection, value);
++		break;
++	case PROP_CONNECTION:
++		g_value_set_boxed (value, nm_connection_get_path (priv->connection));
++		break;
++	case PROP_SPECIFIC_OBJECT:
++		g_value_set_boxed (value, priv->so_path ? priv->so_path : "/");
++		break;
++	case PROP_DEVICES:
++		g_value_take_boxed (value, g_ptr_array_new ());
++		break;
++	case PROP_STATE:
++		g_value_set_uint (value, priv->state);
++		break;
++	case PROP_DEFAULT:
++		g_value_set_boolean (value, priv->is_default);
++		break;
++	case PROP_DEFAULT6:
++		g_value_set_boolean (value, priv->is_default6);
++		break;
++	case PROP_VPN:
++		g_value_set_boolean (value, TRUE);
++		break;
++	default:
++		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++		break;
++	}
++}
++
++static void
++nm_vpn_connection_base_class_init (NMVpnConnectionBaseClass *vpn_class)
++{
++	GObjectClass *object_class = G_OBJECT_CLASS (vpn_class);
++
++	g_type_class_add_private (vpn_class, sizeof (NMVpnConnectionBasePrivate));
++
++	/* virtual methods */
++	object_class->get_property = get_property;
++	object_class->dispose = dispose;
++
++	/* properties */
++    nm_active_connection_install_properties (object_class,
++                                             PROP_SERVICE_NAME,
++                                             PROP_CONNECTION,
++                                             PROP_SPECIFIC_OBJECT,
++                                             PROP_DEVICES,
++                                             PROP_STATE,
++                                             PROP_DEFAULT,
++                                             PROP_DEFAULT6,
++                                             PROP_VPN);
++
++	dbus_g_object_type_install_info (G_TYPE_FROM_CLASS (vpn_class),
++									 &dbus_glib_nm_vpn_connection_base_object_info);
++}
++
+diff -up NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection-base.h.vpn-interface NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection-base.h
+--- NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection-base.h.vpn-interface	2011-10-25 16:32:39.937398733 -0500
++++ NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection-base.h	2011-10-25 16:40:32.517398195 -0500
+@@ -0,0 +1,57 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager -- Network link manager
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2005 - 2011 Red Hat, Inc.
++ */
++
++#ifndef NM_VPN_CONNECTION_BASE_H
++#define NM_VPN_CONNECTION_BASE_H
++
++#include <glib-object.h>
++#include "NetworkManagerVPN.h"
++#include "nm-connection.h"
++
++#define NM_TYPE_VPN_CONNECTION_BASE            (nm_vpn_connection_base_get_type ())
++#define NM_VPN_CONNECTION_BASE(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), NM_TYPE_VPN_CONNECTION_BASE, NMVpnConnectionBase))
++#define NM_VPN_CONNECTION_BASE_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST ((klass), NM_TYPE_VPN_CONNECTION_BASE, NMVpnConnectionBaseClass))
++#define NM_IS_VPN_CONNECTION_BASE(obj)         (G_TYPE_CHECK_INSTANCE_TYPE ((obj), NM_TYPE_VPN_CONNECTION_BASE))
++#define NM_IS_VPN_CONNECTION_BASE_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE ((obj), NM_TYPE_VPN_CONNECTION_BASE))
++#define NM_VPN_CONNECTION_BASE_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS ((obj), NM_TYPE_VPN_CONNECTION_BASE, NMVpnConnectionBaseClass))
++
++typedef struct {
++	GObject parent;
++} NMVpnConnectionBase;
++
++typedef struct {
++	GObjectClass parent;
++} NMVpnConnectionBaseClass;
++
++GType nm_vpn_connection_base_get_type (void);
++
++void nm_vpn_connection_base_set_specific_object (NMVpnConnectionBase *self,
++                                                 const char *so_path);
++
++const char *nm_vpn_connection_base_get_ac_path (NMVpnConnectionBase *self);
++
++void nm_vpn_connection_base_export (NMVpnConnectionBase *self,
++                                    NMConnection *connection);
++
++void nm_vpn_connection_base_set_state (NMVpnConnectionBase *self,
++                                       NMVPNConnectionState vpn_state);
++
++#endif /* NM_VPN_CONNECTION_BASE_H */
++
+diff -up NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection.c.vpn-interface NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection.c
+--- NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection.c.vpn-interface	2010-08-06 13:59:06.000000000 -0500
++++ NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection.c	2011-10-25 16:42:48.075153801 -0500
+@@ -52,7 +52,7 @@
+ 
+ static void secrets_provider_interface_init (NMSecretsProviderInterface *sp_interface_class);
+ 
+-G_DEFINE_TYPE_EXTENDED (NMVPNConnection, nm_vpn_connection, G_TYPE_OBJECT, 0,
++G_DEFINE_TYPE_EXTENDED (NMVPNConnection, nm_vpn_connection, NM_TYPE_VPN_CONNECTION_BASE, 0,
+                         G_IMPLEMENT_INTERFACE (NM_TYPE_SECRETS_PROVIDER_INTERFACE,
+                                                secrets_provider_interface_init))
+ 
+@@ -62,16 +62,11 @@ typedef struct {
+ 	NMConnection *connection;
+ 
+ 	NMActRequest *act_request;
+-	char *ac_path;
+ 
+ 	NMDevice *parent_dev;
+ 	gulong device_monitor;
+ 	gulong device_ip4;
+ 
+-	gboolean is_default;
+-	gboolean is_default6;
+-	NMActiveConnectionState state;
+-
+ 	NMVPNConnectionState vpn_state;
+ 	NMVPNConnectionStateReason failure_reason;
+ 	DBusGProxy *proxy;
+@@ -97,14 +92,6 @@ static guint signals[LAST_SIGNAL] = { 0 
+ 
+ enum {
+ 	PROP_0,
+-	PROP_SERVICE_NAME,
+-	PROP_CONNECTION,
+-	PROP_SPECIFIC_OBJECT,
+-	PROP_DEVICES,
+-	PROP_STATE,
+-	PROP_DEFAULT,
+-	PROP_DEFAULT6,
+-	PROP_VPN,
+ 	PROP_VPN_STATE,
+ 	PROP_BANNER,
+ 
+@@ -117,7 +104,6 @@ nm_vpn_connection_set_vpn_state (NMVPNCo
+                                  NMVPNConnectionStateReason reason)
+ {
+ 	NMVPNConnectionPrivate *priv;
+-	NMActiveConnectionState new_ac_state;
+ 	NMVPNConnectionState old_vpn_state;
+ 	char *ip_iface;
+ 
+@@ -131,32 +117,14 @@ nm_vpn_connection_set_vpn_state (NMVPNCo
+ 	old_vpn_state = priv->vpn_state;
+ 	priv->vpn_state = vpn_state;
+ 
++	/* Update active connection base class state */
++	nm_vpn_connection_base_set_state (NM_VPN_CONNECTION_BASE (connection), vpn_state);
++
+ 	/* Save ip_iface since when the VPN goes down it may get freed
+ 	 * before we're done with it.
+ 	 */
+ 	ip_iface = g_strdup (priv->ip_iface);
+ 
+-	/* Set the NMActiveConnection state based on VPN state */
+-	switch (vpn_state) {
+-	case NM_VPN_CONNECTION_STATE_PREPARE:
+-	case NM_VPN_CONNECTION_STATE_NEED_AUTH:
+-	case NM_VPN_CONNECTION_STATE_CONNECT:
+-	case NM_VPN_CONNECTION_STATE_IP_CONFIG_GET:
+-		new_ac_state = NM_ACTIVE_CONNECTION_STATE_ACTIVATING;
+-		break;
+-	case NM_VPN_CONNECTION_STATE_ACTIVATED:
+-		new_ac_state = NM_ACTIVE_CONNECTION_STATE_ACTIVATED;
+-		break;
+-	default:
+-		new_ac_state = NM_ACTIVE_CONNECTION_STATE_UNKNOWN;
+-		break;
+-	}
+-
+-	if (new_ac_state != priv->state) {
+-		priv->state = new_ac_state;
+-		g_object_notify (G_OBJECT (connection), NM_ACTIVE_CONNECTION_STATE);
+-	}
+-
+ 	/* The connection gets destroyed by the VPN manager when it enters the
+ 	 * disconnected/failed state, but we need to keep it around for a bit
+ 	 * to send out signals and handle the dispatcher.  So ref it.
+@@ -259,6 +227,11 @@ nm_vpn_connection_new (NMConnection *con
+ 	priv->device_ip4 = g_signal_connect (parent_device, "notify::" NM_DEVICE_INTERFACE_IP4_CONFIG,
+ 	                                     G_CALLBACK (device_ip4_config_changed),
+ 	                                     self);
++
++	nm_vpn_connection_base_set_specific_object (NM_VPN_CONNECTION_BASE (self),
++	                                            nm_act_request_get_active_connection_path (act_request));
++	nm_vpn_connection_base_export (NM_VPN_CONNECTION_BASE (self), connection);
++
+ 	return self;
+ }
+ 
+@@ -681,7 +654,7 @@ nm_vpn_connection_get_active_connection_
+ {
+ 	g_return_val_if_fail (NM_IS_VPN_CONNECTION (connection), NULL);
+ 
+-	return NM_VPN_CONNECTION_GET_PRIVATE (connection)->ac_path;
++	return nm_vpn_connection_base_get_ac_path (NM_VPN_CONNECTION_BASE (connection));
+ }
+ 
+ const char *
+@@ -972,20 +945,9 @@ connection_state_changed (NMVPNConnectio
+ }
+ 
+ static void
+-nm_vpn_connection_init (NMVPNConnection *connection)
++nm_vpn_connection_init (NMVPNConnection *self)
+ {
+-	NMVPNConnectionPrivate *priv = NM_VPN_CONNECTION_GET_PRIVATE (connection);
+-	NMDBusManager *dbus_mgr;
+-
+-	priv->state = NM_ACTIVE_CONNECTION_STATE_UNKNOWN;
+-	priv->vpn_state = NM_VPN_CONNECTION_STATE_PREPARE;
+-	priv->ac_path = nm_active_connection_get_next_object_path ();
+-
+-	dbus_mgr = nm_dbus_manager_get ();
+-	dbus_g_connection_register_g_object (nm_dbus_manager_get_connection (dbus_mgr),
+-								  priv->ac_path,
+-								  G_OBJECT (connection));
+-	g_object_unref (dbus_mgr);
++	NM_VPN_CONNECTION_GET_PRIVATE (self)->vpn_state = NM_VPN_CONNECTION_STATE_PREPARE;
+ }
+ 
+ static void
+@@ -1032,7 +994,6 @@ finalize (GObject *object)
+ 
+ 	g_free (priv->banner);
+ 	g_free (priv->ip_iface);
+-	g_free (priv->ac_path);
+ 
+ 	G_OBJECT_CLASS (nm_vpn_connection_parent_class)->finalize (object);
+ }
+@@ -1044,30 +1005,6 @@ get_property (GObject *object, guint pro
+ 	NMVPNConnectionPrivate *priv = NM_VPN_CONNECTION_GET_PRIVATE (object);
+ 
+ 	switch (prop_id) {
+-	case PROP_SERVICE_NAME:
+-		nm_active_connection_scope_to_value (priv->connection, value);
+-		break;
+-	case PROP_CONNECTION:
+-		g_value_set_boxed (value, nm_connection_get_path (priv->connection));
+-		break;
+-	case PROP_SPECIFIC_OBJECT:
+-		g_value_set_boxed (value, nm_act_request_get_active_connection_path (priv->act_request));
+-		break;
+-	case PROP_DEVICES:
+-		g_value_take_boxed (value, g_ptr_array_new ());
+-		break;
+-	case PROP_STATE:
+-		g_value_set_uint (value, priv->state);
+-		break;
+-	case PROP_DEFAULT:
+-		g_value_set_boolean (value, priv->is_default);
+-		break;
+-	case PROP_DEFAULT6:
+-		g_value_set_boolean (value, priv->is_default6);
+-		break;
+-	case PROP_VPN:
+-		g_value_set_boolean (value, TRUE);
+-		break;
+ 	case PROP_VPN_STATE:
+ 		g_value_set_uint (value, priv->vpn_state);
+ 		break;
+@@ -1094,82 +1031,21 @@ nm_vpn_connection_class_init (NMVPNConne
+ 	object_class->finalize = finalize;
+ 
+ 	/* properties */
+-	g_object_class_install_property
+-		(object_class, PROP_SERVICE_NAME,
+-		 g_param_spec_string (NM_ACTIVE_CONNECTION_SERVICE_NAME,
+-							  "Service name",
+-							  "Service name",
+-							  NULL,
+-							  G_PARAM_READABLE));
+-	g_object_class_install_property
+-		(object_class, PROP_CONNECTION,
+-		 g_param_spec_boxed (NM_ACTIVE_CONNECTION_CONNECTION,
+-							  "Connection",
+-							  "Connection",
+-							  DBUS_TYPE_G_OBJECT_PATH,
+-							  G_PARAM_READABLE));
+-	g_object_class_install_property
+-		(object_class, PROP_SPECIFIC_OBJECT,
+-		 g_param_spec_boxed (NM_ACTIVE_CONNECTION_SPECIFIC_OBJECT,
+-							  "Specific object",
+-							  "Specific object",
+-							  DBUS_TYPE_G_OBJECT_PATH,
+-							  G_PARAM_READABLE));
+-	g_object_class_install_property
+-		(object_class, PROP_DEVICES,
+-		 g_param_spec_boxed (NM_ACTIVE_CONNECTION_DEVICES,
+-							  "Devices",
+-							  "Devices",
+-							  DBUS_TYPE_G_ARRAY_OF_OBJECT_PATH,
+-							  G_PARAM_READABLE));
+-	g_object_class_install_property
+-		(object_class, PROP_STATE,
+-		 g_param_spec_uint (NM_ACTIVE_CONNECTION_STATE,
+-							  "State",
+-							  "State",
+-							  NM_ACTIVE_CONNECTION_STATE_UNKNOWN,
+-							  NM_ACTIVE_CONNECTION_STATE_ACTIVATED,
+-							  NM_ACTIVE_CONNECTION_STATE_UNKNOWN,
+-							  G_PARAM_READABLE));
+-	g_object_class_install_property
+-		(object_class, PROP_DEFAULT,
+-		 g_param_spec_boolean (NM_ACTIVE_CONNECTION_DEFAULT,
+-							   "Default",
+-							   "Is the default IPv4 active connection",
+-							   FALSE,
+-							   G_PARAM_READABLE));
+-	g_object_class_install_property
+-		(object_class, PROP_DEFAULT6,
+-		 g_param_spec_boolean (NM_ACTIVE_CONNECTION_DEFAULT6,
+-							   "Default6",
+-							   "Is the default IPv6 active connection",
+-							   FALSE,
+-							   G_PARAM_READABLE));
+-	g_object_class_install_property
+-		(object_class, PROP_VPN,
+-		 g_param_spec_boolean (NM_ACTIVE_CONNECTION_VPN,
+-							   "VPN",
+-							   "Is a VPN connection",
+-							   TRUE,
+-							   G_PARAM_READABLE));
+-
+-	g_object_class_install_property
+-		(object_class, PROP_VPN_STATE,
+-		 g_param_spec_uint (NM_VPN_CONNECTION_VPN_STATE,
+-						"VpnState",
+-						"Current VPN state",
+-						NM_VPN_CONNECTION_STATE_UNKNOWN,
+-						NM_VPN_CONNECTION_STATE_DISCONNECTED,
+-						NM_VPN_CONNECTION_STATE_UNKNOWN,
+-						G_PARAM_READABLE));
+-
+-	g_object_class_install_property
+-		(object_class, PROP_BANNER,
+-		 g_param_spec_string (NM_VPN_CONNECTION_BANNER,
+-						  "Banner",
+-						  "Login Banner",
+-						  NULL,
+-						  G_PARAM_READABLE));
++	g_object_class_install_property (object_class, PROP_VPN_STATE,
++		g_param_spec_uint (NM_VPN_CONNECTION_VPN_STATE,
++		                   "VpnState",
++		                   "Current VPN state",
++		                   NM_VPN_CONNECTION_STATE_UNKNOWN,
++		                   NM_VPN_CONNECTION_STATE_DISCONNECTED,
++		                   NM_VPN_CONNECTION_STATE_UNKNOWN,
++		                   G_PARAM_READABLE));
++
++	g_object_class_install_property (object_class, PROP_BANNER,
++		g_param_spec_string (NM_VPN_CONNECTION_BANNER,
++		                     "Banner",
++		                     "Login Banner",
++		                     NULL,
++		                     G_PARAM_READABLE));
+ 
+ 	/* signals */
+ 	signals[VPN_STATE_CHANGED] =
+diff -up NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection.h.vpn-interface NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection.h
+--- NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection.h.vpn-interface	2010-08-03 18:46:40.000000000 -0500
++++ NetworkManager-0.8.1/src/vpn-manager/nm-vpn-connection.h	2011-10-25 16:32:39.940398105 -0500
+@@ -28,6 +28,7 @@
+ #include "nm-device.h"
+ #include "nm-activation-request.h"
+ #include "nm-secrets-provider-interface.h"
++#include "nm-vpn-connection-base.h"
+ 
+ #define NM_TYPE_VPN_CONNECTION            (nm_vpn_connection_get_type ())
+ #define NM_VPN_CONNECTION(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), NM_TYPE_VPN_CONNECTION, NMVPNConnection))
+@@ -40,11 +41,11 @@
+ #define NM_VPN_CONNECTION_BANNER "banner"
+ 
+ typedef struct {
+-	GObject parent;
++	NMVpnConnectionBase parent;
+ } NMVPNConnection;
+ 
+ typedef struct {
+-	GObjectClass parent;
++	NMVpnConnectionBaseClass parent;
+ 
+ 	/* Signals */
+ 	void (*vpn_state_changed) (NMVPNConnection *connection,

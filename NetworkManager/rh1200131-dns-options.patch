@@ -1,0 +1,2238 @@
+From cb61798272f97f0d350533dd55d2459fd64b4613 Mon Sep 17 00:00:00 2001
+From: Beniamino Galvani <bgalvani@redhat.com>
+Date: Thu, 14 May 2015 10:18:11 +0200
+Subject: [PATCH 1/8] libnm-util: add dns-options property to
+ NMSettingIP[46]Config
+
+(based on upstream commit 019943bb5d9efea52392610b207dececafa6fdb3)
+---
+ libnm-util/libnm-util.ver          |  14 +++
+ libnm-util/nm-setting-ip4-config.c | 180 ++++++++++++++++++++++++++++++++++++-
+ libnm-util/nm-setting-ip4-config.h |  31 +++++++
+ libnm-util/nm-setting-ip6-config.c | 160 +++++++++++++++++++++++++++++++++
+ libnm-util/nm-setting-ip6-config.h |   8 ++
+ libnm-util/nm-utils.c              | 135 ++++++++++++++++++++++++++++
+ libnm-util/nm-utils.h              |   6 ++
+ 7 files changed, 533 insertions(+), 1 deletion(-)
+
+diff --git a/libnm-util/libnm-util.ver b/libnm-util/libnm-util.ver
+index 8baf5cd..554504b 100644
+--- a/libnm-util/libnm-util.ver
++++ b/libnm-util/libnm-util.ver
+@@ -210,6 +210,12 @@ global:
+ 	nm_setting_ip4_config_add_dns_search;
+ 	nm_setting_ip4_config_remove_dns_search;
+ 	nm_setting_ip4_config_clear_dns_searches;
++	nm_setting_ip4_config_get_num_dns_options;
++	nm_setting_ip4_config_get_dns_option;
++	nm_setting_ip4_config_add_dns_option;
++	nm_setting_ip4_config_remove_dns_option;
++	nm_setting_ip4_config_clear_dns_options;
++	nm_setting_ip4_config_next_valid_dns_option;
+ 	nm_setting_ip4_config_get_num_addresses;
+ 	nm_setting_ip4_config_get_address;
+ 	nm_setting_ip4_config_get_address_label;
+@@ -268,6 +274,12 @@ global:
+ 	nm_setting_ip6_config_add_dns_search;
+ 	nm_setting_ip6_config_remove_dns_search;
+ 	nm_setting_ip6_config_clear_dns_searches;
++	nm_setting_ip6_config_get_num_dns_options;
++	nm_setting_ip6_config_get_dns_option;
++	nm_setting_ip6_config_add_dns_option;
++	nm_setting_ip6_config_remove_dns_option;
++	nm_setting_ip6_config_clear_dns_options;
++	nm_setting_ip6_config_next_valid_dns_option;
+ 	nm_setting_ip6_config_get_num_addresses;
+ 	nm_setting_ip6_config_get_address;
+ 	nm_setting_ip6_config_add_address;
+@@ -459,6 +471,8 @@ global:
+ 	nm_utils_wifi_channel_to_freq;
+ 	nm_utils_wifi_find_next_channel;
+ 	nm_utils_wifi_is_channel_valid;
++	_nm_utils_dns_option_find_idx;
++	_nm_utils_dns_option_validate;
+ 	nm_ip4_address_compare;
+ 	nm_ip4_address_dup;
+ 	nm_ip4_address_get_address;
+diff --git a/libnm-util/nm-setting-ip4-config.c b/libnm-util/nm-setting-ip4-config.c
+index 34fe050..ea8222b 100644
+--- a/libnm-util/nm-setting-ip4-config.c
++++ b/libnm-util/nm-setting-ip4-config.c
+@@ -31,6 +31,24 @@
+ #include "nm-utils.h"
+ #include "nm-dbus-glib-types.h"
+ 
++const DNSOptionDesc dns_option_descs[] = {
++	{ NM_SETTING_DNS_OPTION_DEBUG,                 FALSE,   FALSE },
++	{ NM_SETTING_DNS_OPTION_NDOTS,                 TRUE,    FALSE },
++	{ NM_SETTING_DNS_OPTION_TIMEOUT,               TRUE,    FALSE },
++	{ NM_SETTING_DNS_OPTION_ATTEMPTS,              TRUE,    FALSE },
++	{ NM_SETTING_DNS_OPTION_ROTATE,                FALSE,   FALSE },
++	{ NM_SETTING_DNS_OPTION_NO_CHECK_NAMES,        FALSE,   FALSE },
++	{ NM_SETTING_DNS_OPTION_INET6,                 FALSE,   TRUE },
++	{ NM_SETTING_DNS_OPTION_IP6_BYTESTRING,        FALSE,   TRUE },
++	{ NM_SETTING_DNS_OPTION_IP6_DOTINT,            FALSE,   TRUE },
++	{ NM_SETTING_DNS_OPTION_NO_IP6_DOTINT,         FALSE,   TRUE },
++	{ NM_SETTING_DNS_OPTION_EDNS0,                 FALSE,   FALSE },
++	{ NM_SETTING_DNS_OPTION_SINGLE_REQUEST,        FALSE,   FALSE },
++	{ NM_SETTING_DNS_OPTION_SINGLE_REQUEST_REOPEN, FALSE,   FALSE },
++	{ NM_SETTING_DNS_OPTION_NO_TLD_QUERY,          FALSE,   FALSE },
++	{ NULL,                                        FALSE,   FALSE }
++};
++
+ GQuark
+ nm_setting_ip4_config_error_quark (void)
+ {
+@@ -75,6 +93,7 @@ typedef struct {
+ 	char *method;
+ 	GArray *dns;        /* array of guint32; elements in network byte order */
+ 	GSList *dns_search; /* list of strings */
++	GSList *dns_options; /* list of strings */
+ 	GSList *addresses;  /* array of NMIP4Address */
+ 	GSList *address_labels; /* list of strings */
+ 	GSList *routes;     /* array of NMIP4Route */
+@@ -92,6 +111,7 @@ enum {
+ 	PROP_METHOD,
+ 	PROP_DNS,
+ 	PROP_DNS_SEARCH,
++	PROP_DNS_OPTIONS,
+ 	PROP_ADDRESSES,
+ 	PROP_ADDRESS_LABELS,
+ 	PROP_ROUTES,
+@@ -250,6 +270,137 @@ nm_setting_ip4_config_clear_dns_searches (NMSettingIP4Config *setting)
+ 	NM_SETTING_IP4_CONFIG_GET_PRIVATE (setting)->dns_search = NULL;
+ }
+ 
++/**
++ * nm_setting_ip4_config_get_num_dns_options:
++ * @setting: the #NMSettingIP4Config
++ *
++ * Returns: the number of configured DNS options
++ **/
++guint32
++nm_setting_ip4_config_get_num_dns_options (NMSettingIP4Config *setting)
++{
++	g_return_val_if_fail (NM_IS_SETTING_IP4_CONFIG (setting), 0);
++
++	return g_slist_length (NM_SETTING_IP4_CONFIG_GET_PRIVATE (setting)->dns_options);
++}
++
++/**
++ * nm_setting_ip4_config_get_dns_option:
++ * @setting: the #NMSettingIP4Config
++ * @i: index number of the DNS option
++ *
++ * Returns: the DNS option at index @i
++ **/
++const char *
++nm_setting_ip4_config_get_dns_option (NMSettingIP4Config *setting, guint32 i)
++{
++	NMSettingIP4ConfigPrivate *priv;
++
++	g_return_val_if_fail (NM_IS_SETTING_IP4_CONFIG (setting), NULL);
++
++	priv = NM_SETTING_IP4_CONFIG_GET_PRIVATE (setting);
++	g_return_val_if_fail (i <= g_slist_length (priv->dns_options), NULL);
++
++	return (const char *) g_slist_nth_data (priv->dns_options, i);
++}
++
++/**
++ * nm_setting_ip4_config_next_valid_dns_option
++ * @setting: the #NMSettingIP4Config
++ * @i: index to start the search from
++ *
++ * Returns: the index, greater or equal than @i, of the first valid
++ * DNS option, or -1 if no valid option is found
++ **/
++gint
++nm_setting_ip4_config_next_valid_dns_option (NMSettingIP4Config *setting, guint32 i)
++{
++	NMSettingIP4ConfigPrivate *priv;
++	guint len;
++
++	g_return_val_if_fail (NM_IS_SETTING_IP4_CONFIG (setting), -1);
++
++	priv = NM_SETTING_IP4_CONFIG_GET_PRIVATE (setting);
++	len = g_slist_length (priv->dns_options);
++
++	for (; i < len; i++) {
++		if (_nm_utils_dns_option_validate (g_slist_nth_data (priv->dns_options, i),
++		                                   NULL, NULL, FALSE,
++		                                   dns_option_descs))
++			return i;
++	}
++
++	return -1;
++}
++
++/**
++ * nm_setting_ip4_config_add_dns_option:
++ * @setting: the #NMSettingIP4Config
++ * @dns_option: the DNS option to add
++ *
++ * Adds a new DNS option to the setting.
++ *
++ * Returns: %TRUE if the DNS option was added; %FALSE otherwise
++ **/
++gboolean
++nm_setting_ip4_config_add_dns_option (NMSettingIP4Config *setting,
++                                     const char *dns_option)
++{
++	NMSettingIP4ConfigPrivate *priv;
++
++	g_return_val_if_fail (NM_IS_SETTING_IP4_CONFIG (setting), FALSE);
++	g_return_val_if_fail (dns_option != NULL, FALSE);
++	g_return_val_if_fail (dns_option[0] != '\0', FALSE);
++
++	if (!_nm_utils_dns_option_validate (dns_option, NULL, NULL, FALSE, NULL))
++		return FALSE;
++
++	priv = NM_SETTING_IP4_CONFIG_GET_PRIVATE (setting);
++	if (_nm_utils_dns_option_find_idx (priv->dns_options, dns_option) >= 0)
++		return FALSE;
++
++	priv->dns_options = g_slist_append (priv->dns_options, g_strdup (dns_option));
++	return TRUE;
++}
++
++/**
++ * nm_setting_ip4_config_remove_dns_option:
++ * @setting: the #NMSettingIP4Config
++ * @i: index number of the DNS option
++ *
++ * Removes the DNS option at index @i.
++ **/
++void
++nm_setting_ip4_config_remove_dns_option (NMSettingIP4Config *setting, guint32 i)
++{
++	NMSettingIP4ConfigPrivate *priv;
++	GSList *elt;
++
++	g_return_if_fail (NM_IS_SETTING_IP4_CONFIG (setting));
++
++	priv = NM_SETTING_IP4_CONFIG_GET_PRIVATE (setting);
++	elt = g_slist_nth (priv->dns_options, i);
++	g_return_if_fail (elt != NULL);
++
++	g_free (elt->data);
++	priv->dns_options = g_slist_delete_link (priv->dns_options, elt);
++}
++
++/**
++ * nm_setting_ip4_config_clear_dns_options:
++ * @setting: the #NMSettingIP4Config
++ *
++ * Removes all configured DNS options.
++ **/
++void
++nm_setting_ip4_config_clear_dns_options (NMSettingIP4Config *setting)
++{
++	g_return_if_fail (NM_IS_SETTING_IP4_CONFIG (setting));
++
++	nm_utils_slist_free (NM_SETTING_IP4_CONFIG_GET_PRIVATE (setting)->dns_options, g_free);
++	NM_SETTING_IP4_CONFIG_GET_PRIVATE (setting)->dns_options = NULL;
++}
++
+ guint32
+ nm_setting_ip4_config_get_num_addresses (NMSettingIP4Config *setting)
+ {
+@@ -631,6 +782,7 @@ finalize (GObject *object)
+ 	g_array_free (priv->dns, TRUE);
+ 
+ 	nm_utils_slist_free (priv->dns_search, g_free);
++	nm_utils_slist_free (priv->dns_options, g_free);
+ 	nm_utils_slist_free (priv->addresses, (GDestroyNotify) nm_ip4_address_unref);
+ 	nm_utils_slist_free (priv->address_labels, (GDestroyNotify) g_free);
+ 	nm_utils_slist_free (priv->routes, (GDestroyNotify) nm_ip4_route_unref);
+@@ -644,7 +796,7 @@ set_property (GObject *object, guint prop_id,
+ {
+ 	NMSettingIP4Config *setting = NM_SETTING_IP4_CONFIG (object);
+ 	NMSettingIP4ConfigPrivate *priv = NM_SETTING_IP4_CONFIG_GET_PRIVATE (setting);
+-	GSList *iter;
++	GSList *list, *iter;
+ 
+ 	switch (prop_id) {
+ 	case PROP_METHOD:
+@@ -661,6 +813,16 @@ set_property (GObject *object, guint prop_id,
+ 		nm_utils_slist_free (priv->dns_search, g_free);
+ 		priv->dns_search = g_value_dup_boxed (value);
+ 		break;
++	case PROP_DNS_OPTIONS:
++		nm_utils_slist_free (priv->dns_options, g_free);
++		list = g_value_get_boxed (value);
++		for (iter = list; iter; iter = g_slist_next (iter)) {
++			if (   _nm_utils_dns_option_validate (iter->data, NULL, NULL, FALSE, NULL)
++			    && _nm_utils_dns_option_find_idx (priv->dns_options, iter->data) < 0)
++				priv->dns_options = g_slist_append (priv->dns_options,
++				                                    g_strdup ((char *) iter->data));
++		}
++		break;
+ 	case PROP_ADDRESSES:
+ 		nm_utils_slist_free (priv->addresses, (GDestroyNotify) nm_ip4_address_unref);
+ 		priv->addresses = nm_utils_ip4_addresses_from_gvalue (value);
+@@ -729,6 +891,9 @@ get_property (GObject *object, guint prop_id,
+ 	case PROP_DNS_SEARCH:
+ 		g_value_set_boxed (value, priv->dns_search);
+ 		break;
++	case PROP_DNS_OPTIONS:
++		g_value_set_boxed (value, priv->dns_options);
++		break;
+ 	case PROP_ADDRESSES:
+ 		nm_utils_ip4_addresses_to_gvalue (priv->addresses, value);
+ 		break;
+@@ -870,6 +1035,19 @@ nm_setting_ip4_config_class_init (NMSettingIP4ConfigClass *setting_class)
+ 							   G_PARAM_READWRITE | NM_SETTING_PARAM_SERIALIZE));
+ 
+ 	/**
++	 * NMSettingIP4Config:dns-options:
++	 *
++	 * List of DNS options.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_DNS_OPTIONS,
++		 _nm_param_spec_specialized (NM_SETTING_IP4_CONFIG_DNS_OPTIONS,
++							   "DNS options",
++							   "List of DNS options.",
++							   DBUS_TYPE_G_LIST_OF_STRING,
++							   G_PARAM_READWRITE | NM_SETTING_PARAM_SERIALIZE));
++
++	/**
+ 	 * NMSettingIP4Config:addresses:
+ 	 *
+ 	 * Array of IPv4 address structures.  Each IPv4 address structure is
+diff --git a/libnm-util/nm-setting-ip4-config.h b/libnm-util/nm-setting-ip4-config.h
+index 4c148ae..7ae45eb 100644
+--- a/libnm-util/nm-setting-ip4-config.h
++++ b/libnm-util/nm-setting-ip4-config.h
+@@ -56,6 +56,7 @@ GQuark nm_setting_ip4_config_error_quark (void);
+ #define NM_SETTING_IP4_CONFIG_METHOD             "method"
+ #define NM_SETTING_IP4_CONFIG_DNS                "dns"
+ #define NM_SETTING_IP4_CONFIG_DNS_SEARCH         "dns-search"
++#define NM_SETTING_IP4_CONFIG_DNS_OPTIONS        "dns-options"
+ #define NM_SETTING_IP4_CONFIG_ADDRESSES          "addresses"
+ #define NM_SETTING_IP4_CONFIG_ADDRESS_LABELS     "address-labels"
+ #define NM_SETTING_IP4_CONFIG_ROUTES             "routes"
+@@ -73,6 +74,29 @@ GQuark nm_setting_ip4_config_error_quark (void);
+ #define NM_SETTING_IP4_CONFIG_METHOD_SHARED     "shared"
+ #define NM_SETTING_IP4_CONFIG_METHOD_DISABLED   "disabled"
+ 
++typedef struct {
++	const char *name;
++	gboolean numeric;
++	gboolean ipv6_only;
++} DNSOptionDesc;
++
++extern const DNSOptionDesc dns_option_descs[];
++
++#define NM_SETTING_DNS_OPTION_DEBUG                     "debug"
++#define NM_SETTING_DNS_OPTION_NDOTS                     "ndots"
++#define NM_SETTING_DNS_OPTION_TIMEOUT                   "timeout"
++#define NM_SETTING_DNS_OPTION_ATTEMPTS                  "attempts"
++#define NM_SETTING_DNS_OPTION_ROTATE                    "rotate"
++#define NM_SETTING_DNS_OPTION_NO_CHECK_NAMES            "no-check-names"
++#define NM_SETTING_DNS_OPTION_INET6                     "inet6"
++#define NM_SETTING_DNS_OPTION_IP6_BYTESTRING            "ip6-bytestring"
++#define NM_SETTING_DNS_OPTION_IP6_DOTINT                "ip6-dotint"
++#define NM_SETTING_DNS_OPTION_NO_IP6_DOTINT             "no-ip6-dotint"
++#define NM_SETTING_DNS_OPTION_EDNS0                     "edns0"
++#define NM_SETTING_DNS_OPTION_SINGLE_REQUEST            "single-request"
++#define NM_SETTING_DNS_OPTION_SINGLE_REQUEST_REOPEN     "single-request-reopen"
++#define NM_SETTING_DNS_OPTION_NO_TLD_QUERY              "no-tld-query"
++
+ typedef struct NMIP4Address NMIP4Address;
+ 
+ NMIP4Address * nm_ip4_address_new         (void);
+@@ -151,6 +175,13 @@ gboolean      nm_setting_ip4_config_add_dns_search         (NMSettingIP4Config *
+ void          nm_setting_ip4_config_remove_dns_search      (NMSettingIP4Config *setting, guint32 i);
+ void          nm_setting_ip4_config_clear_dns_searches     (NMSettingIP4Config *setting);
+ 
++guint32       nm_setting_ip4_config_get_num_dns_options    (NMSettingIP4Config *setting);
++const char *  nm_setting_ip4_config_get_dns_option         (NMSettingIP4Config *setting, guint32 i);
++gboolean      nm_setting_ip4_config_add_dns_option         (NMSettingIP4Config *setting, const char *dns_option);
++void          nm_setting_ip4_config_remove_dns_option      (NMSettingIP4Config *setting, guint32 i);
++void          nm_setting_ip4_config_clear_dns_options      (NMSettingIP4Config *setting);
++gint          nm_setting_ip4_config_next_valid_dns_option  (NMSettingIP4Config *setting, guint32 i);
++
+ guint32       nm_setting_ip4_config_get_num_addresses      (NMSettingIP4Config *setting);
+ NMIP4Address *nm_setting_ip4_config_get_address            (NMSettingIP4Config *setting, guint32 i);
+ const char *  nm_setting_ip4_config_get_address_label      (NMSettingIP4Config *setting, guint32 i);
+diff --git a/libnm-util/nm-setting-ip6-config.c b/libnm-util/nm-setting-ip6-config.c
+index 6b8b4a8..d682f5d 100644
+--- a/libnm-util/nm-setting-ip6-config.c
++++ b/libnm-util/nm-setting-ip6-config.c
+@@ -74,6 +74,7 @@ typedef struct {
+ 	char *method;
+ 	GSList *dns;        /* array of struct in6_addr */
+ 	GSList *dns_search; /* list of strings */
++	GSList *dns_options; /* list of strings */
+ 	GSList *addresses;  /* array of NMIP6Address */
+ 	GSList *routes;     /* array of NMIP6Route */
+ 	gboolean ignore_auto_routes;
+@@ -88,6 +89,7 @@ enum {
+ 	PROP_METHOD,
+ 	PROP_DNS,
+ 	PROP_DNS_SEARCH,
++	PROP_DNS_OPTIONS,
+ 	PROP_ADDRESSES,
+ 	PROP_ROUTES,
+ 	PROP_IGNORE_AUTO_ROUTES,
+@@ -248,6 +250,137 @@ nm_setting_ip6_config_clear_dns_searches (NMSettingIP6Config *setting)
+ 	NM_SETTING_IP6_CONFIG_GET_PRIVATE (setting)->dns_search = NULL;
+ }
+ 
++/**
++ * nm_setting_ip6_config_get_num_dns_options:
++ * @setting: the #NMSettingIP6Config
++ *
++ * Returns: the number of configured DNS options
++ **/
++guint32
++nm_setting_ip6_config_get_num_dns_options (NMSettingIP6Config *setting)
++{
++	g_return_val_if_fail (NM_IS_SETTING_IP6_CONFIG (setting), 0);
++
++	return g_slist_length (NM_SETTING_IP6_CONFIG_GET_PRIVATE (setting)->dns_options);
++}
++
++/**
++ * nm_setting_ip6_config_get_dns_option:
++ * @setting: the #NMSettingIP6Config
++ * @i: index number of the DNS option
++ *
++ * Returns: the DNS option at index @i
++ **/
++const char *
++nm_setting_ip6_config_get_dns_option (NMSettingIP6Config *setting, guint32 i)
++{
++	NMSettingIP6ConfigPrivate *priv;
++
++	g_return_val_if_fail (NM_IS_SETTING_IP6_CONFIG (setting), NULL);
++
++	priv = NM_SETTING_IP6_CONFIG_GET_PRIVATE (setting);
++	g_return_val_if_fail (i <= g_slist_length (priv->dns_options), NULL);
++
++	return (const char *) g_slist_nth_data (priv->dns_options, i);
++}
++
++/**
++ * nm_setting_ip6_config_next_valid_dns_option
++ * @setting: the #NMSettingIP6Config
++ * @i: index to start the search from
++ *
++ * Returns: the index, greater or equal than @i, of the first valid
++ * DNS option, or -1 if no valid option is found
++ **/
++gint
++nm_setting_ip6_config_next_valid_dns_option (NMSettingIP6Config *setting, guint32 i)
++{
++	NMSettingIP6ConfigPrivate *priv;
++	guint len;
++
++	g_return_val_if_fail (NM_IS_SETTING_IP6_CONFIG (setting), -1);
++
++	priv = NM_SETTING_IP6_CONFIG_GET_PRIVATE (setting);
++	len = g_slist_length (priv->dns_options);
++
++	for (; i < len; i++) {
++		if (_nm_utils_dns_option_validate (g_slist_nth_data (priv->dns_options, i),
++		                                   NULL, NULL, TRUE,
++		                                   dns_option_descs))
++			return i;
++	}
++
++	return -1;
++}
++
++/**
++ * nm_setting_ip6_config_add_dns_option:
++ * @setting: the #NMSettingIP6Config
++ * @dns_option: the DNS option to add
++ *
++ * Adds a new DNS option to the setting.
++ *
++ * Returns: %TRUE if the DNS option was added; %FALSE otherwise
++ **/
++gboolean
++nm_setting_ip6_config_add_dns_option (NMSettingIP6Config *setting,
++                                     const char *dns_option)
++{
++	NMSettingIP6ConfigPrivate *priv;
++
++	g_return_val_if_fail (NM_IS_SETTING_IP6_CONFIG (setting), FALSE);
++	g_return_val_if_fail (dns_option != NULL, FALSE);
++	g_return_val_if_fail (dns_option[0] != '\0', FALSE);
++
++	if (!_nm_utils_dns_option_validate (dns_option, NULL, NULL, FALSE, NULL))
++		return FALSE;
++
++	priv = NM_SETTING_IP6_CONFIG_GET_PRIVATE (setting);
++	if (_nm_utils_dns_option_find_idx (priv->dns_options, dns_option) >= 0)
++		return FALSE;
++
++	priv->dns_options = g_slist_append (priv->dns_options, g_strdup (dns_option));
++	return TRUE;
++}
++
++/**
++ * nm_setting_ip6_config_remove_dns_option:
++ * @setting: the #NMSettingIP6Config
++ * @i: index number of the DNS option
++ *
++ * Removes the DNS option at index @i.
++ **/
++void
++nm_setting_ip6_config_remove_dns_option (NMSettingIP6Config *setting, guint32 i)
++{
++	NMSettingIP6ConfigPrivate *priv;
++	GSList *elt;
++
++	g_return_if_fail (NM_IS_SETTING_IP6_CONFIG (setting));
++
++	priv = NM_SETTING_IP6_CONFIG_GET_PRIVATE (setting);
++	elt = g_slist_nth (priv->dns_options, i);
++	g_return_if_fail (elt != NULL);
++
++	g_free (elt->data);
++	priv->dns_options = g_slist_delete_link (priv->dns_options, elt);
++}
++
++/**
++ * nm_setting_ip6_config_clear_dns_options:
++ * @setting: the #NMSettingIP6Config
++ *
++ * Removes all configured DNS options.
++ **/
++void
++nm_setting_ip6_config_clear_dns_options (NMSettingIP6Config *setting)
++{
++	g_return_if_fail (NM_IS_SETTING_IP6_CONFIG (setting));
++
++	nm_utils_slist_free (NM_SETTING_IP6_CONFIG_GET_PRIVATE (setting)->dns_options, g_free);
++	NM_SETTING_IP6_CONFIG_GET_PRIVATE (setting)->dns_options = NULL;
++}
++
+ guint32
+ nm_setting_ip6_config_get_num_addresses (NMSettingIP6Config *setting)
+ {
+@@ -514,6 +647,7 @@ set_property (GObject *object, guint prop_id,
+ 		    const GValue *value, GParamSpec *pspec)
+ {
+ 	NMSettingIP6ConfigPrivate *priv = NM_SETTING_IP6_CONFIG_GET_PRIVATE (object);
++	GSList *list, *iter;
+ 
+ 	switch (prop_id) {
+ 	case PROP_METHOD:
+@@ -528,6 +662,16 @@ set_property (GObject *object, guint prop_id,
+ 		nm_utils_slist_free (priv->dns_search, g_free);
+ 		priv->dns_search = g_value_dup_boxed (value);
+ 		break;
++	case PROP_DNS_OPTIONS:
++		nm_utils_slist_free (priv->dns_options, g_free);
++		list = g_value_get_boxed (value);
++		for (iter = list; iter; iter = g_slist_next (iter)) {
++			if (   _nm_utils_dns_option_validate (iter->data, NULL, NULL, FALSE, NULL)
++			    && _nm_utils_dns_option_find_idx (priv->dns_options, iter->data) < 0)
++				priv->dns_options = g_slist_append (priv->dns_options,
++				                                    g_strdup ((char *) iter->data));
++		}
++		break;
+ 	case PROP_ADDRESSES:
+ 		nm_utils_slist_free (priv->addresses, g_free);
+ 		priv->addresses = nm_utils_ip6_addresses_from_gvalue (value);
+@@ -570,6 +714,9 @@ get_property (GObject *object, guint prop_id,
+ 	case PROP_DNS_SEARCH:
+ 		g_value_set_boxed (value, priv->dns_search);
+ 		break;
++	case PROP_DNS_OPTIONS:
++		g_value_set_boxed (value, priv->dns_options);
++		break;
+ 	case PROP_ADDRESSES:
+ 		nm_utils_ip6_addresses_to_gvalue (priv->addresses, value);
+ 		break;
+@@ -697,6 +844,19 @@ nm_setting_ip6_config_class_init (NMSettingIP6ConfigClass *setting_class)
+ 							   G_PARAM_READWRITE | NM_SETTING_PARAM_SERIALIZE));
+ 
+ 	/**
++	 * NMSettingIP6Config:dns-options:
++	 *
++	 * List of DNS options.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_DNS_OPTIONS,
++		 _nm_param_spec_specialized (NM_SETTING_IP6_CONFIG_DNS_OPTIONS,
++							   "DNS options",
++							   "List of DNS options.",
++							   DBUS_TYPE_G_LIST_OF_STRING,
++							   G_PARAM_READWRITE | NM_SETTING_PARAM_SERIALIZE));
++
++	/**
+ 	 * NMSettingIP6Config:addresses:
+ 	 *
+ 	 * Array of IPv6 address structures.  Each IPv6 address structure is
+diff --git a/libnm-util/nm-setting-ip6-config.h b/libnm-util/nm-setting-ip6-config.h
+index e3e286e..0832b9c 100644
+--- a/libnm-util/nm-setting-ip6-config.h
++++ b/libnm-util/nm-setting-ip6-config.h
+@@ -57,6 +57,7 @@ GQuark nm_setting_ip6_config_error_quark (void);
+ #define NM_SETTING_IP6_CONFIG_METHOD             "method"
+ #define NM_SETTING_IP6_CONFIG_DNS                "dns"
+ #define NM_SETTING_IP6_CONFIG_DNS_SEARCH         "dns-search"
++#define NM_SETTING_IP6_CONFIG_DNS_OPTIONS        "dns-options"
+ #define NM_SETTING_IP6_CONFIG_ADDRESSES          "addresses"
+ #define NM_SETTING_IP6_CONFIG_ROUTES             "routes"
+ #define NM_SETTING_IP6_CONFIG_IGNORE_AUTO_ROUTES "ignore-auto-routes"
+@@ -149,6 +150,13 @@ gboolean               nm_setting_ip6_config_add_dns_search         (NMSettingIP
+ void                   nm_setting_ip6_config_remove_dns_search      (NMSettingIP6Config *setting, guint32 i);
+ void                   nm_setting_ip6_config_clear_dns_searches     (NMSettingIP6Config *setting);
+ 
++guint32                nm_setting_ip6_config_get_num_dns_options    (NMSettingIP6Config *setting);
++const char *           nm_setting_ip6_config_get_dns_option         (NMSettingIP6Config *setting, guint32 i);
++gboolean               nm_setting_ip6_config_add_dns_option         (NMSettingIP6Config *setting, const char *dns_option);
++void                   nm_setting_ip6_config_remove_dns_option      (NMSettingIP6Config *setting, guint32 i);
++void                   nm_setting_ip6_config_clear_dns_options      (NMSettingIP6Config *setting);
++gint                   nm_setting_ip6_config_next_valid_dns_option  (NMSettingIP6Config *setting, guint32 i);
++
+ guint32                nm_setting_ip6_config_get_num_addresses      (NMSettingIP6Config *setting);
+ NMIP6Address *         nm_setting_ip6_config_get_address            (NMSettingIP6Config *setting, guint32 i);
+ gboolean               nm_setting_ip6_config_add_address            (NMSettingIP6Config *setting, NMIP6Address *address);
+diff --git a/libnm-util/nm-utils.c b/libnm-util/nm-utils.c
+index 1598b94..656d301 100644
+--- a/libnm-util/nm-utils.c
++++ b/libnm-util/nm-utils.c
+@@ -2561,3 +2561,138 @@ nm_utils_iface_valid_name(const char *name)
+ 
+ 	return TRUE;
+ }
++
++static gboolean
++validate_dns_option (const char *name, gboolean numeric, gboolean ipv6,
++                     const DNSOptionDesc *option_descs)
++{
++	const DNSOptionDesc *desc;
++
++	if (!option_descs)
++		return !!*name;
++
++	for (desc = option_descs; desc->name; desc++) {
++		if (!strcmp (name, desc->name) &&
++		    numeric == desc->numeric &&
++		    (!desc->ipv6_only || ipv6))
++			return TRUE;
++	}
++
++	return FALSE;
++}
++
++/**
++ * _nm_utils_dns_option_validate
++ * @option: option string
++ * @out_name: (out) (allow-none) the option name
++ * @out_value: (out) (allow-none) the option value
++ * @ipv6: whether the option refers to a IPv6 configuration
++ * @option_descs: (allow-none) an array of DNSOptionDesc which describes the
++ * valid options
++ *
++ * Parses a DNS option in the form "name" or "name:number" and, if
++ * @option_descs is not NULL, checks that the option conforms to one
++ * of the provided descriptors. If @option_descs is NULL @ipv6 is
++ * not considered.
++ *
++ * Returns: %TRUE when the parsing was successful and the option is valid,
++ * %FALSE otherwise
++ */
++gboolean
++_nm_utils_dns_option_validate (const char *option, char **out_name,
++                               long *out_value, gboolean ipv6,
++                               const DNSOptionDesc *option_descs)
++{
++	char **tokens, *ptr;
++	gboolean ret = FALSE;
++
++	g_return_val_if_fail (option != NULL, FALSE);
++
++	if (out_name)
++		*out_name = NULL;
++	if (out_value)
++		*out_value = -1;
++
++	if (!option[0])
++		return FALSE;
++
++	tokens = g_strsplit (option, ":", 2);
++
++	if (g_strv_length (tokens) == 1) {
++		ret = validate_dns_option (tokens[0], FALSE, ipv6, option_descs);
++		if (ret && out_name)
++			*out_name = g_strdup (tokens[0]);
++		goto out;
++	}
++
++	if (!tokens[1][0]) {
++		ret = FALSE;
++		goto out;
++	}
++
++	for (ptr = tokens[1]; *ptr; ptr++) {
++		if (!g_ascii_isdigit (*ptr)) {
++			ret = FALSE;
++			goto out;
++		}
++	}
++
++	ret = FALSE;
++	if (validate_dns_option (tokens[0], TRUE, ipv6, option_descs)) {
++		int value = strtol (tokens[1], NULL, 10);
++
++		if ((errno == ERANGE && (value == LONG_MAX || value == LONG_MIN))
++			|| (errno != 0 && value == 0)) {
++			ret = FALSE;
++			goto out;
++		}
++
++		if (value >= 0) {
++			if (out_name)
++				*out_name = g_strdup (tokens[0]);
++			if (out_value)
++				*out_value = value;
++			ret = TRUE;
++		}
++	}
++out:
++	g_strfreev (tokens);
++	return ret;
++}
++
++/**
++ * _nm_utils_dns_option_find_idx
++ * @list: an array of strings
++ * @option: a dns option string
++ *
++ * Searches for an option in an array of strings. The match is
++ * performed only the option name; the option value is ignored.
++ *
++ * Returns: the index of the option in the array or -1 if was not
++ * found.
++ */
++int _nm_utils_dns_option_find_idx (GSList *list, const char *option)
++{
++	gboolean ret;
++	char *option_name, *tmp_name;
++	GSList *iter;
++	int i = 0;
++
++	if (!_nm_utils_dns_option_validate (option, &option_name, NULL, FALSE, NULL))
++		return -1;
++
++	for (iter = list; iter; iter = g_slist_next (iter)) {
++		if (_nm_utils_dns_option_validate (iter->data, &tmp_name, NULL, FALSE, NULL)) {
++			ret = strcmp (tmp_name, option_name);
++			g_free (tmp_name);
++			if (!ret) {
++				g_free (option_name);
++				return i;
++			}
++		}
++		i++;
++	}
++
++	g_free (option_name);
++	return -1;
++}
+diff --git a/libnm-util/nm-utils.h b/libnm-util/nm-utils.h
+index c71a958..d0f8170 100644
+--- a/libnm-util/nm-utils.h
++++ b/libnm-util/nm-utils.h
+@@ -30,6 +30,7 @@
+ #include <execinfo.h>
+ 
+ #include "nm-connection.h"
++#include "nm-setting-ip4-config.h"
+ 
+ G_BEGIN_DECLS
+ 
+@@ -237,6 +238,11 @@ gboolean nm_utils_is_uuid (const char *str);
+ 
+ gboolean    nm_utils_iface_valid_name(const char *name);
+ 
++gboolean    _nm_utils_dns_option_validate (const char *option, char **out_name,
++                                           long *out_value, gboolean ipv6,
++                                           const DNSOptionDesc *option_descs);
++int         _nm_utils_dns_option_find_idx (GSList *list, const char *option);
++
+ G_END_DECLS
+ 
+ #endif /* NM_UTILS_H */
+-- 
+2.1.0
+
+From d49cc04b26e4d4ca3b6437849af85d418cbc7533 Mon Sep 17 00:00:00 2001
+From: Beniamino Galvani <bgalvani@redhat.com>
+Date: Thu, 14 May 2015 13:43:12 +0200
+Subject: [PATCH 2/8] libnm-util/test: add tests for DNS option utilities
+
+(based on upstream commit 262c27935d0a1d8f24caa586cadd44293a9dc011)
+---
+ libnm-util/tests/test-general.c | 83 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 83 insertions(+)
+
+diff --git a/libnm-util/tests/test-general.c b/libnm-util/tests/test-general.c
+index 2ecafdc..ac67b91 100644
+--- a/libnm-util/tests/test-general.c
++++ b/libnm-util/tests/test-general.c
+@@ -308,6 +308,87 @@ test_setting_gsm_apn_underscore (void)
+ 	g_assert (success == TRUE);
+ }
+ 
++static void
++test_nm_utils_dns_option_validate_do (char *option, gboolean ipv6, const DNSOptionDesc *descs,
++                                      gboolean exp_result, char *exp_name, gboolean exp_value)
++{
++	char *name;
++	long value = 0;
++	gboolean result;
++
++	result = _nm_utils_dns_option_validate (option, &name, &value, ipv6, descs);
++
++	g_assert (result == exp_result);
++	g_assert_cmpstr (name, ==, exp_name);
++	g_assert (value == exp_value);
++
++	g_free (name);
++}
++
++static const DNSOptionDesc opt_descs[] = {
++	/* name                   num      ipv6 */
++	{ "opt1",                 FALSE,   FALSE },
++	{ "opt2",                 TRUE,    FALSE },
++	{ "opt3",                 FALSE,   TRUE  },
++	{ "opt4",                 TRUE,    TRUE  },
++	{ NULL,                   FALSE,   FALSE }
++};
++
++static void
++test_nm_utils_dns_option_validate (void)
++{
++	/*                                    opt            ipv6    descs        result name       value */
++	test_nm_utils_dns_option_validate_do ("",            FALSE,  NULL,        FALSE, NULL,      -1);
++	test_nm_utils_dns_option_validate_do (":",           FALSE,  NULL,        FALSE, NULL,      -1);
++	test_nm_utils_dns_option_validate_do (":1",          FALSE,  NULL,        FALSE, NULL,      -1);
++	test_nm_utils_dns_option_validate_do (":val",        FALSE,  NULL,        FALSE, NULL,      -1);
++	test_nm_utils_dns_option_validate_do ("opt",         FALSE,  NULL,        TRUE,  "opt",     -1);
++	test_nm_utils_dns_option_validate_do ("opt:",        FALSE,  NULL,        FALSE, NULL,      -1);
++	test_nm_utils_dns_option_validate_do ("opt:12",      FALSE,  NULL,        TRUE,  "opt",     12);
++	test_nm_utils_dns_option_validate_do ("opt:12 ",     FALSE,  NULL,        FALSE, NULL,      -1);
++	test_nm_utils_dns_option_validate_do ("opt:val",     FALSE,  NULL,        FALSE, NULL,      -1);
++	test_nm_utils_dns_option_validate_do ("opt:2val",    FALSE,  NULL,        FALSE, NULL,      -1);
++	test_nm_utils_dns_option_validate_do ("opt:2:3",     FALSE,  NULL,        FALSE, NULL,      -1);
++	test_nm_utils_dns_option_validate_do ("opt-6",       FALSE,  NULL,        TRUE,  "opt-6",   -1);
++
++	test_nm_utils_dns_option_validate_do ("opt1",        FALSE,  opt_descs,   TRUE,  "opt1",    -1);
++	test_nm_utils_dns_option_validate_do ("opt1",        TRUE,   opt_descs,   TRUE,  "opt1",    -1);
++	test_nm_utils_dns_option_validate_do ("opt1:3",      FALSE,  opt_descs,   FALSE,  NULL,     -1);
++
++	test_nm_utils_dns_option_validate_do ("opt2",        FALSE,  opt_descs,   FALSE, NULL,      -1);
++	test_nm_utils_dns_option_validate_do ("opt2:5",      FALSE,  opt_descs,   TRUE,  "opt2",    5);
++
++	test_nm_utils_dns_option_validate_do ("opt3",        FALSE,  opt_descs,   FALSE, NULL,      -1);
++	test_nm_utils_dns_option_validate_do ("opt3",        TRUE,   opt_descs,   TRUE,  "opt3",    -1);
++
++	test_nm_utils_dns_option_validate_do ("opt4",        FALSE,  opt_descs,   FALSE, NULL,      -1);
++	test_nm_utils_dns_option_validate_do ("opt4",        TRUE,   opt_descs,   FALSE, NULL,      -1);
++	test_nm_utils_dns_option_validate_do ("opt4:40",     FALSE,  opt_descs,   FALSE, NULL,      -1);
++	test_nm_utils_dns_option_validate_do ("opt4:40",     TRUE,   opt_descs,   TRUE,  "opt4",    40);
++}
++
++static void
++test_nm_utils_dns_option_find_idx (void)
++{
++	GSList *options = NULL;
++
++	options = g_slist_append (options, "debug");
++	options = g_slist_append (options, "timeout:5");
++	options = g_slist_append (options, "edns0");
++
++	g_assert_cmpint (_nm_utils_dns_option_find_idx (options, "debug"),      ==, 0);
++	g_assert_cmpint (_nm_utils_dns_option_find_idx (options, "debug:1"),    ==, 0);
++	g_assert_cmpint (_nm_utils_dns_option_find_idx (options, "timeout"),    ==, 1);
++	g_assert_cmpint (_nm_utils_dns_option_find_idx (options, "timeout:5"),  ==, 1);
++	g_assert_cmpint (_nm_utils_dns_option_find_idx (options, "timeout:2"),  ==, 1);
++	g_assert_cmpint (_nm_utils_dns_option_find_idx (options, "edns0"),      ==, 2);
++	g_assert_cmpint (_nm_utils_dns_option_find_idx (options, "rotate"),     ==, -1);
++	g_assert_cmpint (_nm_utils_dns_option_find_idx (options, ""),           ==, -1);
++
++	g_slist_free (options);
++}
++
++
+ int main (int argc, char **argv)
+ {
+ 	GError *error = NULL;
+@@ -326,6 +407,8 @@ int main (int argc, char **argv)
+ 	test_setting_gsm_apn_spaces ();
+ 	test_setting_gsm_apn_bad_chars ();
+ 	test_setting_gsm_apn_underscore ();
++	test_nm_utils_dns_option_validate ();
++	test_nm_utils_dns_option_find_idx ();
+ 
+ 	base = g_path_get_basename (argv[0]);
+ 	fprintf (stdout, "%s: SUCCESS\n", base);
+-- 
+2.1.0
+
+From c54c47e25165f1181700000269425305124f043c Mon Sep 17 00:00:00 2001
+From: Beniamino Galvani <bgalvani@redhat.com>
+Date: Thu, 14 May 2015 14:01:08 +0200
+Subject: [PATCH 3/8] core: add DNS options property to NMIP4Config and
+ NMIP6Config
+
+(based on upstream commit b02f59d4a459cb1f0a4d5cac014f595ff008fe0e)
+---
+ src/NetworkManagerUtils.c | 14 ++++++++++
+ src/nm-ip4-config.c       | 71 +++++++++++++++++++++++++++++++++++++++++++++++
+ src/nm-ip4-config.h       | 17 ++++++++----
+ src/nm-ip6-config.c       | 71 +++++++++++++++++++++++++++++++++++++++++++++++
+ src/nm-ip6-config.h       |  7 +++++
+ 5 files changed, 175 insertions(+), 5 deletions(-)
+
+diff --git a/src/NetworkManagerUtils.c b/src/NetworkManagerUtils.c
+index b59d76a..9e7630e 100644
+--- a/src/NetworkManagerUtils.c
++++ b/src/NetworkManagerUtils.c
+@@ -219,6 +219,13 @@ nm_utils_merge_ip4_config (NMIP4Config *ip4_config, NMSettingIP4Config *setting)
+ 			nm_ip4_config_add_search (ip4_config, search);
+ 	}
+ 
++	/* DNS options */
++	i = 0;
++	while ((i = nm_setting_ip4_config_next_valid_dns_option (setting, i)) >= 0) {
++		nm_ip4_config_add_dns_option (ip4_config, nm_setting_ip4_config_get_dns_option (setting, i));
++		i++;
++	}
++
+ 	/* IPv4 addresses */
+ 	for (i = 0; i < nm_setting_ip4_config_get_num_addresses (setting); i++) {
+ 		NMIP4Address *setting_addr = nm_setting_ip4_config_get_address (setting, i);
+@@ -332,6 +339,13 @@ nm_utils_merge_ip6_config (NMIP6Config *ip6_config, NMSettingIP6Config *setting)
+ 			nm_ip6_config_add_search (ip6_config, search);
+ 	}
+ 
++	/* DNS options */
++	i = 0;
++	while ((i = nm_setting_ip6_config_next_valid_dns_option (setting, i)) >= 0) {
++		nm_ip6_config_add_dns_option (ip6_config, nm_setting_ip6_config_get_dns_option (setting, i));
++		i++;
++	}
++
+ 	/* IPv6 addresses */
+ 	for (i = 0; i < nm_setting_ip6_config_get_num_addresses (setting); i++) {
+ 		NMIP6Address *setting_addr = nm_setting_ip6_config_get_address (setting, i);
+diff --git a/src/nm-ip4-config.c b/src/nm-ip4-config.c
+index 533971a..1167663 100644
+--- a/src/nm-ip4-config.c
++++ b/src/nm-ip4-config.c
+@@ -54,6 +54,7 @@ typedef struct {
+ 	GArray *nameservers;
+ 	GPtrArray *domains;
+ 	GPtrArray *searches;
++	GPtrArray *dns_options;
+ 
+ 	GArray *wins;
+ 
+@@ -71,6 +72,7 @@ enum {
+ 	PROP_ADDRESSES,
+ 	PROP_NAMESERVERS,
+ 	PROP_DOMAINS,
++	PROP_DNS_OPTIONS,
+ 	PROP_ROUTES,
+ 	PROP_WINS_SERVERS,
+ 
+@@ -504,6 +506,58 @@ void nm_ip4_config_reset_searches (NMIP4Config *config)
+ 	priv->searches = g_ptr_array_sized_new (3);
+ }
+ 
++void nm_ip4_config_add_dns_option (NMIP4Config *config, const char *option)
++{
++	NMIP4ConfigPrivate *priv;
++	GSList *list = NULL;
++	int i;
++
++	g_return_if_fail (config != NULL);
++	g_return_if_fail (option != NULL);
++	g_return_if_fail (strlen (option) > 0);
++
++	priv = NM_IP4_CONFIG_GET_PRIVATE (config);
++
++	if (!_nm_utils_dns_option_validate (option, NULL, NULL, FALSE, NULL))
++		return;
++
++	for (i = 0; i < priv->dns_options->len; i++)
++		list = g_slist_append (list, priv->dns_options->pdata[i]);
++
++	if (_nm_utils_dns_option_find_idx (list, option) < 0)
++		g_ptr_array_add (priv->dns_options, g_strdup (option));
++
++	g_slist_free (list);
++}
++
++const char *nm_ip4_config_get_dns_option (NMIP4Config *config, guint i)
++{
++	g_return_val_if_fail (config != NULL, NULL);
++
++	return (const char *) g_ptr_array_index (NM_IP4_CONFIG_GET_PRIVATE (config)->dns_options, i);
++}
++
++guint32 nm_ip4_config_get_num_dns_options (NMIP4Config *config)
++{
++	g_return_val_if_fail (config != NULL, 0);
++
++	return NM_IP4_CONFIG_GET_PRIVATE (config)->dns_options->len;
++}
++
++void nm_ip4_config_reset_dns_options (NMIP4Config *config)
++{
++	NMIP4ConfigPrivate *priv;
++	int i;
++
++	g_return_if_fail (NM_IS_IP4_CONFIG (config));
++
++	priv = NM_IP4_CONFIG_GET_PRIVATE (config);
++	for (i = 0; i < priv->dns_options->len; i++)
++		g_free (g_ptr_array_index (priv->dns_options, i));
++	g_ptr_array_free (priv->dns_options, TRUE);
++	priv->dns_options = g_ptr_array_sized_new (3);
++}
++
+ guint32 nm_ip4_config_get_mtu (NMIP4Config *config)
+ {
+ 	g_return_val_if_fail (NM_IS_IP4_CONFIG (config), 0);
+@@ -881,6 +935,11 @@ nm_ip4_config_diff (NMIP4Config *a, NMIP4Config *b)
+ 	    || !string_array_compare (b_priv->searches, a_priv->searches))
+ 		flags |= NM_IP4_COMPARE_FLAG_SEARCHES;
+ 
++	if (   (a_priv->dns_options->len != b_priv->dns_options->len)
++	    || !string_array_compare (a_priv->dns_options, b_priv->dns_options)
++	    || !string_array_compare (b_priv->dns_options, a_priv->dns_options))
++		flags |= NM_IP4_COMPARE_FLAG_DNS_OPTIONS;
++
+ 	if (a_priv->mtu != b_priv->mtu)
+ 		flags |= NM_IP4_COMPARE_FLAG_MTU;
+ 
+@@ -899,6 +958,7 @@ nm_ip4_config_init (NMIP4Config *config)
+ 	priv->wins = g_array_new (FALSE, TRUE, sizeof (guint32));
+ 	priv->domains = g_ptr_array_sized_new (3);
+ 	priv->searches = g_ptr_array_sized_new (3);
++	priv->dns_options = g_ptr_array_sized_new (3);
+ 	priv->nis = g_array_new (FALSE, TRUE, sizeof (guint32));
+ }
+ 
+@@ -914,6 +974,7 @@ finalize (GObject *object)
+ 	g_array_free (priv->nameservers, TRUE);
+ 	g_ptr_array_free (priv->domains, TRUE);
+ 	g_ptr_array_free (priv->searches, TRUE);
++	g_ptr_array_free (priv->dns_options, TRUE);
+ 	g_array_free (priv->nis, TRUE);
+ 	g_free (priv->nis_domain);
+ 
+@@ -936,6 +997,9 @@ get_property (GObject *object, guint prop_id,
+ 	case PROP_DOMAINS:
+ 		g_value_set_boxed (value, priv->domains);
+ 		break;
++	case PROP_DNS_OPTIONS:
++		g_value_set_boxed (value, priv->dns_options);
++		break;
+ 	case PROP_ROUTES:
+ 		nm_utils_ip4_routes_to_gvalue (priv->routes, value);
+ 		break;
+@@ -982,6 +1046,13 @@ nm_ip4_config_class_init (NMIP4ConfigClass *config_class)
+ 							 DBUS_TYPE_G_ARRAY_OF_STRING,
+ 							 G_PARAM_READABLE));
+ 	g_object_class_install_property
++		(object_class, PROP_DNS_OPTIONS,
++		 g_param_spec_boxed (NM_IP4_CONFIG_DNS_OPTIONS,
++		                     "DNSOptions",
++		                     "DNS options",
++		                     DBUS_TYPE_G_ARRAY_OF_STRING,
++		                     G_PARAM_READABLE));
++	g_object_class_install_property
+ 		(object_class, PROP_ROUTES,
+ 		 g_param_spec_boxed (NM_IP4_CONFIG_ROUTES,
+ 						 "Routes",
+diff --git a/src/nm-ip4-config.h b/src/nm-ip4-config.h
+index a2fc930..aa1a33e 100644
+--- a/src/nm-ip4-config.h
++++ b/src/nm-ip4-config.h
+@@ -44,6 +44,7 @@ typedef struct {
+ #define NM_IP4_CONFIG_ADDRESSES "addresses"
+ #define NM_IP4_CONFIG_NAMESERVERS "nameservers"
+ #define NM_IP4_CONFIG_DOMAINS "domains"
++#define NM_IP4_CONFIG_DNS_OPTIONS "dns-options"
+ #define NM_IP4_CONFIG_ROUTES "routes"
+ #define NM_IP4_CONFIG_WINS_SERVERS "wins-servers"
+ 
+@@ -94,6 +95,11 @@ const char *  nm_ip4_config_get_search          (NMIP4Config *config, guint i);
+ guint32       nm_ip4_config_get_num_searches    (NMIP4Config *config);
+ void          nm_ip4_config_reset_searches      (NMIP4Config *config);
+ 
++void          nm_ip4_config_add_dns_option      (NMIP4Config *config, const char *option);
++const char *  nm_ip4_config_get_dns_option      (NMIP4Config *config, guint i);
++guint32       nm_ip4_config_get_num_dns_options (NMIP4Config *config);
++void          nm_ip4_config_reset_dns_options   (NMIP4Config *config);
++
+ guint32       nm_ip4_config_get_mtu             (NMIP4Config *config);
+ void          nm_ip4_config_set_mtu             (NMIP4Config *config, guint32 mtu);
+ 
+@@ -132,11 +138,12 @@ typedef enum {
+ 	NM_IP4_COMPARE_FLAG_ROUTES      = 0x00000008,
+ 	NM_IP4_COMPARE_FLAG_DOMAINS     = 0x00000010,
+ 	NM_IP4_COMPARE_FLAG_SEARCHES    = 0x00000020,
+-	NM_IP4_COMPARE_FLAG_MTU         = 0x00000040,
+-	NM_IP4_COMPARE_FLAG_MSS         = 0x00000080,
+-	NM_IP4_COMPARE_FLAG_WINS_SERVERS= 0x00000100,
+-	NM_IP4_COMPARE_FLAG_NIS_SERVERS = 0x00000200,
+-	NM_IP4_COMPARE_FLAG_NIS_DOMAIN  = 0x00000400,
++	NM_IP4_COMPARE_FLAG_DNS_OPTIONS = 0x00000040,
++	NM_IP4_COMPARE_FLAG_MTU         = 0x00000080,
++	NM_IP4_COMPARE_FLAG_MSS         = 0x00000100,
++	NM_IP4_COMPARE_FLAG_WINS_SERVERS= 0x00000200,
++	NM_IP4_COMPARE_FLAG_NIS_SERVERS = 0x00000400,
++	NM_IP4_COMPARE_FLAG_NIS_DOMAIN  = 0x00000800,
+ 	NM_IP4_COMPARE_FLAG_ALL         = 0xFFFFFFFF   /* match everything */
+ } NMIP4ConfigCompareFlags;
+ 
+diff --git a/src/nm-ip6-config.c b/src/nm-ip6-config.c
+index 90a98bb..37bfff6 100644
+--- a/src/nm-ip6-config.c
++++ b/src/nm-ip6-config.c
+@@ -52,6 +52,7 @@ typedef struct {
+ 	GArray *nameservers;
+ 	GPtrArray *domains;
+ 	GPtrArray *searches;
++	GPtrArray *dns_options;
+ 
+ 	GSList *routes;
+ 
+@@ -64,6 +65,7 @@ enum {
+ 	PROP_ADDRESSES,
+ 	PROP_NAMESERVERS,
+ 	PROP_DOMAINS,
++	PROP_DNS_OPTIONS,
+ 	PROP_ROUTES,
+ 
+ 	LAST_PROP
+@@ -428,6 +430,58 @@ void nm_ip6_config_reset_searches (NMIP6Config *config)
+ 	priv->searches = g_ptr_array_sized_new (3);
+ }
+ 
++void nm_ip6_config_add_dns_option (NMIP6Config *config, const char *option)
++{
++	NMIP6ConfigPrivate *priv;
++	GSList *list = NULL;
++	int i;
++
++	g_return_if_fail (config != NULL);
++	g_return_if_fail (option != NULL);
++	g_return_if_fail (strlen (option) > 0);
++
++	priv = NM_IP6_CONFIG_GET_PRIVATE (config);
++
++	if (!_nm_utils_dns_option_validate (option, NULL, NULL, FALSE, NULL))
++		return;
++
++	for (i = 0; i < priv->dns_options->len; i++)
++		list = g_slist_append (list, priv->dns_options->pdata[i]);
++
++	if (_nm_utils_dns_option_find_idx (list, option) < 0)
++		g_ptr_array_add (priv->dns_options, g_strdup (option));
++
++	g_slist_free (list);
++}
++
++const char *nm_ip6_config_get_dns_option (NMIP6Config *config, guint i)
++{
++	g_return_val_if_fail (config != NULL, NULL);
++
++	return (const char *) g_ptr_array_index (NM_IP6_CONFIG_GET_PRIVATE (config)->dns_options, i);
++}
++
++guint32 nm_ip6_config_get_num_dns_options (NMIP6Config *config)
++{
++	g_return_val_if_fail (config != NULL, 0);
++
++	return NM_IP6_CONFIG_GET_PRIVATE (config)->dns_options->len;
++}
++
++void nm_ip6_config_reset_dns_options (NMIP6Config *config)
++{
++	NMIP6ConfigPrivate *priv;
++	int i;
++
++	g_return_if_fail (NM_IS_IP6_CONFIG (config));
++
++	priv = NM_IP6_CONFIG_GET_PRIVATE (config);
++	for (i = 0; i < priv->dns_options->len; i++)
++		g_free (g_ptr_array_index (priv->dns_options, i));
++	g_ptr_array_free (priv->dns_options, TRUE);
++	priv->dns_options = g_ptr_array_sized_new (3);
++}
++
+ guint32 nm_ip6_config_get_mss (NMIP6Config *config)
+ {
+ 	g_return_val_if_fail (NM_IS_IP6_CONFIG (config), 0);
+@@ -656,6 +710,11 @@ nm_ip6_config_diff (NMIP6Config *a, NMIP6Config *b)
+ 	    || !string_array_compare (b_priv->searches, a_priv->searches))
+ 		flags |= NM_IP6_COMPARE_FLAG_SEARCHES;
+ 
++	if (   (a_priv->dns_options->len != b_priv->dns_options->len)
++	    || !string_array_compare (a_priv->dns_options, b_priv->dns_options)
++	    || !string_array_compare (b_priv->dns_options, a_priv->dns_options))
++		flags |= NM_IP6_COMPARE_FLAG_DNS_OPTIONS;
++
+ 	if (a_priv->mss != b_priv->mss)
+ 		flags |= NM_IP6_COMPARE_FLAG_MSS;
+ 
+@@ -670,6 +729,7 @@ nm_ip6_config_init (NMIP6Config *config)
+ 	priv->nameservers = g_array_new (FALSE, TRUE, sizeof (struct in6_addr));
+ 	priv->domains = g_ptr_array_sized_new (3);
+ 	priv->searches = g_ptr_array_sized_new (3);
++	priv->dns_options = g_ptr_array_sized_new (3);
+ }
+ 
+ static void
+@@ -682,6 +742,7 @@ finalize (GObject *object)
+ 	g_array_free (priv->nameservers, TRUE);
+ 	g_ptr_array_free (priv->domains, TRUE);
+ 	g_ptr_array_free (priv->searches, TRUE);
++	g_ptr_array_free (priv->dns_options, TRUE);
+ 
+ 	G_OBJECT_CLASS (nm_ip6_config_parent_class)->finalize (object);
+ }
+@@ -723,6 +784,9 @@ get_property (GObject *object, guint prop_id,
+ 	case PROP_DOMAINS:
+ 		g_value_set_boxed (value, priv->domains);
+ 		break;
++	case PROP_DNS_OPTIONS:
++		g_value_set_boxed (value, priv->dns_options);
++		break;
+ 	case PROP_ROUTES:
+ 		nm_utils_ip6_routes_to_gvalue (priv->routes, value);
+ 		break;
+@@ -765,6 +829,13 @@ nm_ip6_config_class_init (NMIP6ConfigClass *config_class)
+ 		                    DBUS_TYPE_G_ARRAY_OF_STRING,
+ 		                    G_PARAM_READABLE));
+ 
++	g_object_class_install_property (object_class, PROP_DNS_OPTIONS,
++		g_param_spec_boxed (NM_IP6_CONFIG_DNS_OPTIONS,
++		                    "DNSOptions",
++		                    "DNS options",
++		                    DBUS_TYPE_G_ARRAY_OF_STRING,
++		                    G_PARAM_READABLE));
++
+ 	g_object_class_install_property (object_class, PROP_ROUTES,
+ 		g_param_spec_boxed (NM_IP6_CONFIG_ROUTES,
+ 		                    "Routes",
+diff --git a/src/nm-ip6-config.h b/src/nm-ip6-config.h
+index 808e92a..1f8cbab 100644
+--- a/src/nm-ip6-config.h
++++ b/src/nm-ip6-config.h
+@@ -44,6 +44,7 @@ typedef struct {
+ #define NM_IP6_CONFIG_ADDRESSES "addresses"
+ #define NM_IP6_CONFIG_NAMESERVERS "nameservers"
+ #define NM_IP6_CONFIG_DOMAINS "domains"
++#define NM_IP6_CONFIG_DNS_OPTIONS "dns-options"
+ #define NM_IP6_CONFIG_ROUTES "routes"
+ 
+ GType nm_ip6_config_get_type (void);
+@@ -86,6 +87,11 @@ const char *  nm_ip6_config_get_search          (NMIP6Config *config, guint i);
+ guint32       nm_ip6_config_get_num_searches    (NMIP6Config *config);
+ void          nm_ip6_config_reset_searches      (NMIP6Config *config);
+ 
++void          nm_ip6_config_add_dns_option      (NMIP6Config *config, const char *option);
++const char *  nm_ip6_config_get_dns_option      (NMIP6Config *config, guint i);
++guint32       nm_ip6_config_get_num_dns_options (NMIP6Config *config);
++void          nm_ip6_config_reset_dns_options   (NMIP6Config *config);
++
+ guint32       nm_ip6_config_get_mss             (NMIP6Config *config);
+ void          nm_ip6_config_set_mss             (NMIP6Config *config, guint32 mss);
+ 
+@@ -112,6 +118,7 @@ typedef enum {
+ 	NM_IP6_COMPARE_FLAG_ROUTES      = 0x00000008,
+ 	NM_IP6_COMPARE_FLAG_DOMAINS     = 0x00000010,
+ 	NM_IP6_COMPARE_FLAG_SEARCHES    = 0x00000020,
++	NM_IP6_COMPARE_FLAG_DNS_OPTIONS = 0x00000040,
+ 	NM_IP6_COMPARE_FLAG_MSS         = 0x00000080,
+ 	NM_IP6_COMPARE_FLAG_ALL         = 0xFFFFFFFF   /* match everything */
+ } NMIP6ConfigCompareFlags;
+-- 
+2.1.0
+
+From 859804a96d8171d0fc4c7609d2b8b8d89edf19c1 Mon Sep 17 00:00:00 2001
+From: Beniamino Galvani <bgalvani@redhat.com>
+Date: Thu, 14 May 2015 15:04:00 +0200
+Subject: [PATCH 4/8] named-manager: add support for DNS options
+
+(based on upstream commit e7ff906f910e948f3a0b0ddd08f7c645c9a09cc4)
+---
+ src/named-manager/nm-named-manager.c | 73 +++++++++++++++++++++++++++++++++---
+ 1 file changed, 67 insertions(+), 6 deletions(-)
+
+diff --git a/src/named-manager/nm-named-manager.c b/src/named-manager/nm-named-manager.c
+index db34406..c17ca67 100644
+--- a/src/named-manager/nm-named-manager.c
++++ b/src/named-manager/nm-named-manager.c
+@@ -42,6 +42,7 @@
+ #include "nm-logging.h"
+ #include "nm-system.h"
+ #include "NetworkManagerUtils.h"
++#include "nm-utils.h"
+ 
+ #ifdef HAVE_SELINUX
+ #include <selinux/selinux.h>
+@@ -105,6 +106,7 @@ typedef struct {
+ 	GPtrArray *nameservers;
+ 	const char *domain;
+ 	GPtrArray *searches;
++	GPtrArray *options;
+ 	const char *nis_domain;
+ 	GPtrArray *nis_servers;
+ } NMResolvConfData;
+@@ -130,6 +132,26 @@ add_string_item (GPtrArray *array, const char *str)
+ }
+ 
+ static void
++add_dns_option_item (GPtrArray *array, const char *str, gboolean ipv6)
++{
++	GSList *list = NULL;
++	int i;
++
++	for (i = 0; i < array->len; i++)
++		list = g_slist_append (list, array->pdata[i]);
++
++	i = _nm_utils_dns_option_find_idx (list, str);
++	if (i < 0)
++		g_ptr_array_add (array, g_strdup (str));
++	else {
++		g_free (array->pdata[i]);
++		array->pdata[i] = g_strdup (str);
++	}
++
++	g_slist_free (list);
++}
++
++static void
+ merge_one_ip4_config (NMResolvConfData *rc, NMIP4Config *src)
+ {
+ 	guint32 num, i;
+@@ -158,6 +180,14 @@ merge_one_ip4_config (NMResolvConfData *rc, NMIP4Config *src)
+ 	for (i = 0; i < num; i++)
+ 		add_string_item (rc->searches, nm_ip4_config_get_search (src, i));
+ 
++	num = nm_ip4_config_get_num_dns_options (src);
++	for (i = 0; i < num; i++) {
++		const char *option;
++
++		option = nm_ip4_config_get_dns_option (src, i);
++		add_dns_option_item (rc->options, option, FALSE);
++	}
++
+ 	/* NIS stuff */
+ 	num = nm_ip4_config_get_num_nis_servers (src);
+ 	for (i = 0; i < num; i++) {
+@@ -218,6 +248,14 @@ merge_one_ip6_config (NMResolvConfData *rc, NMIP6Config *src, const char *iface)
+ 	num = nm_ip6_config_get_num_searches (src);
+ 	for (i = 0; i < num; i++)
+ 		add_string_item (rc->searches, nm_ip6_config_get_search (src, i));
++
++	num = nm_ip6_config_get_num_dns_options (src);
++	for (i = 0; i < num; i++) {
++		const char *option;
++
++		option = nm_ip6_config_get_dns_option (src, i);
++		add_dns_option_item (rc->options, option, TRUE);
++	}
+ }
+ 
+ 
+@@ -350,11 +388,13 @@ static gboolean
+ write_resolv_conf (FILE *f, const char *domain,
+                    char **searches,
+                    char **nameservers,
++                   char **options,
+                    GError **error)
+ {
+ 	char *domain_str = NULL;
+ 	char *searches_str = NULL;
+ 	char *nameservers_str = NULL;
++	char *options_str = NULL;
+ 	int i;
+ 	gboolean retval = FALSE;
+ 
+@@ -378,6 +418,14 @@ write_resolv_conf (FILE *f, const char *domain,
+ 		g_free (tmp_str);
+ 	}
+ 
++	if (options) {
++		char *tmp_str;
++
++		tmp_str = g_strjoinv (" ", options);
++		options_str = g_strconcat ("option ", tmp_str, "\n", NULL);
++		g_free (tmp_str);
++	}
++
+ 	if (nameservers && g_strv_length (nameservers)) {
+ 		GString *str;
+ 		int num;
+@@ -410,10 +458,11 @@ write_resolv_conf (FILE *f, const char *domain,
+ 		                                   "# DOMAIN=lab.foo.com bar.foo.com\n");
+ 	}
+ 
+-	if (fprintf (f, "%s%s%s",
++	if (fprintf (f, "%s%s%s%s",
+ 	             domain_str ? domain_str : "",
+ 	             searches_str ? searches_str : "",
+-	             nameservers_str ? nameservers_str : "") != -1)
++	             nameservers_str ? nameservers_str : "",
++	             options_str ? options_str : "") != -1)
+ 		retval = TRUE;
+ 
+ 	g_free (domain_str);
+@@ -428,6 +477,7 @@ static gboolean
+ dispatch_resolvconf (const char *domain,
+                      char **searches,
+                      char **nameservers,
++                     char **options,
+                      const char *iface,
+                      GError **error)
+ {
+@@ -449,7 +499,7 @@ dispatch_resolvconf (const char *domain,
+ 				     RESOLVCONF_PATH,
+ 				     g_strerror (errno));
+ 		else {
+-			retval = write_resolv_conf (f, domain, searches, nameservers, error);
++			retval = write_resolv_conf (f, domain, searches, nameservers, options, error);
+ 			retval &= (pclose (f) == 0);
+ 		}
+ 	} else {
+@@ -469,6 +519,7 @@ static gboolean
+ update_resolv_conf (const char *domain,
+                     char **searches,
+                     char **nameservers,
++                    char **options,
+                     const char *iface,
+                     GError **error)
+ {
+@@ -516,7 +567,7 @@ update_resolv_conf (const char *domain,
+ 		strcpy (tmp_resolv_conf_realpath, RESOLV_CONF);
+ 	}
+ 
+-	write_resolv_conf (f, domain, searches, nameservers, error);
++	write_resolv_conf (f, domain, searches, nameservers, options, error);
+ 
+ 	if (fclose (f) < 0) {
+ 		if (*error == NULL) {
+@@ -562,6 +613,7 @@ rewrite_resolv_conf (NMNamedManager *mgr, const char *iface, GError **error)
+ 	char **searches = NULL;
+ 	char **nameservers = NULL;
+ 	char **nis_servers = NULL;
++	char **options = NULL;
+ 	int num, i, len;
+ 	gboolean success = FALSE;
+ 
+@@ -578,6 +630,7 @@ rewrite_resolv_conf (NMNamedManager *mgr, const char *iface, GError **error)
+ 	rc.nameservers = g_ptr_array_new ();
+ 	rc.domain = NULL;
+ 	rc.searches = g_ptr_array_new ();
++	rc.options = g_ptr_array_new ();
+ 	rc.nis_servers = g_ptr_array_new ();
+ 
+ 	if (priv->ip4_vpn_config)
+@@ -647,6 +700,12 @@ rewrite_resolv_conf (NMNamedManager *mgr, const char *iface, GError **error)
+ 	} else
+ 		g_ptr_array_free (rc.nameservers, TRUE);
+ 
++	if (rc.options->len) {
++		g_ptr_array_add (rc.options, NULL);
++		options = (char **) g_ptr_array_free (rc.options, FALSE);
++	} else
++		g_ptr_array_free (rc.options, TRUE);
++
+ 	if (rc.nis_servers->len) {
+ 		g_ptr_array_add (rc.nis_servers, NULL);
+ 		nis_servers = (char **) g_ptr_array_free (rc.nis_servers, FALSE);
+@@ -656,7 +715,7 @@ rewrite_resolv_conf (NMNamedManager *mgr, const char *iface, GError **error)
+ 	nis_domain = rc.nis_domain;
+ 
+ #ifdef RESOLVCONF_PATH
+-	success = dispatch_resolvconf (domain, searches, nameservers, iface, error);
++	success = dispatch_resolvconf (domain, searches, nameservers, options, iface, error);
+ #endif
+ 
+ #ifdef TARGET_SUSE
+@@ -668,7 +727,7 @@ rewrite_resolv_conf (NMNamedManager *mgr, const char *iface, GError **error)
+ #endif
+ 
+ 	if (success == FALSE)
+-		success = update_resolv_conf (domain, searches, nameservers, iface, error);
++		success = update_resolv_conf (domain, searches, nameservers, options, iface, error);
+ 
+ 	if (success)
+ 		nm_system_update_dns ();
+@@ -677,6 +736,8 @@ rewrite_resolv_conf (NMNamedManager *mgr, const char *iface, GError **error)
+ 		g_strfreev (searches);
+ 	if (nameservers)
+ 		g_strfreev (nameservers);
++	if (options)
++		g_strfreev (options);
+ 	if (nis_servers)
+ 		g_strfreev (nis_servers);
+ 
+-- 
+2.1.0
+
+From 7a09d4a01748474685461360766318c5f011032b Mon Sep 17 00:00:00 2001
+From: Beniamino Galvani <bgalvani@redhat.com>
+Date: Thu, 14 May 2015 15:20:18 +0200
+Subject: [PATCH 5/8] ifcfg-rh: support RES_OPTIONS
+
+(based on upstream commit bb9c7e2c188f351ef78e506fdd8c45df0a9315c5)
+---
+ system-settings/plugins/ifcfg-rh/reader.c | 67 +++++++++++++++++++++++++++++++
+ system-settings/plugins/ifcfg-rh/writer.c | 67 +++++++++++++++++++++++++++++++
+ 2 files changed, 134 insertions(+)
+
+diff --git a/system-settings/plugins/ifcfg-rh/reader.c b/system-settings/plugins/ifcfg-rh/reader.c
+index c5a399c..91deeb5 100644
+--- a/system-settings/plugins/ifcfg-rh/reader.c
++++ b/system-settings/plugins/ifcfg-rh/reader.c
+@@ -935,6 +935,52 @@ error:
+ 	return success;
+ }
+ 
++static void
++parse_ip4_dns_options (NMSettingIP4Config *ip_config, char *value)
++{
++	char **options = NULL;
++
++	g_return_if_fail (ip_config);
++
++	if (!value)
++		return;
++
++	options = g_strsplit (value, " ", 0);
++	if (options) {
++		char **item;
++		for (item = options; *item; item++) {
++			if (strlen (*item)) {
++				if (!nm_setting_ip4_config_add_dns_option (ip_config, *item))
++					PLUGIN_WARN (IFCFG_PLUGIN_NAME, "can't add DNS option '%s'", *item);
++			}
++		}
++		g_strfreev (options);
++	}
++}
++
++static void
++parse_ip6_dns_options (NMSettingIP6Config *ip_config, char *value)
++{
++	char **options = NULL;
++
++	g_return_if_fail (ip_config);
++
++	if (!value)
++		return;
++
++	options = g_strsplit (value, " ", 0);
++	if (options) {
++		char **item;
++		for (item = options; *item; item++) {
++			if (strlen (*item)) {
++				if (!nm_setting_ip6_config_add_dns_option (ip_config, *item))
++					PLUGIN_WARN (IFCFG_PLUGIN_NAME, "can't add DNS option '%s'", *item);
++			}
++		}
++		g_strfreev (options);
++	}
++}
++
+ static NMIP6Address *
+ parse_full_ip6_address (shvarFile *ifcfg,
+                         const char *network_file,
+@@ -1200,6 +1246,7 @@ make_ip4_setting (shvarFile *ifcfg,
+ 	char *value = NULL;
+ 	char *route_path = NULL;
+ 	char *method = NM_SETTING_IP4_CONFIG_METHOD_MANUAL;
++	char *dns_options = NULL;
+ 	char *gateway_str = NULL;
+ 	guint32 i, gateway = 0;
+ 	shvarFile *network_ifcfg;
+@@ -1227,6 +1274,7 @@ make_ip4_setting (shvarFile *ifcfg,
+ 
+ 		/* Get the connection ifcfg device name and the global gateway device */
+ 		value = svGetValue (ifcfg, "DEVICE", FALSE);
++		dns_options = svGetValue (network_ifcfg, "RES_OPTIONS", FALSE);
+ 		gatewaydev = svGetValue (network_ifcfg, "GATEWAYDEV", FALSE);
+ 		gateway_str = svGetValue (network_ifcfg, "GATEWAY", FALSE);
+ 		if (gateway_str) {
+@@ -1429,6 +1477,14 @@ make_ip4_setting (shvarFile *ifcfg,
+ 		g_free (value);
+ 	}
+ 
++	/* DNS options */
++	value = svGetValue (ifcfg, "RES_OPTIONS", FALSE);
++	parse_ip4_dns_options (s_ip4, value);
++	parse_ip4_dns_options (s_ip4, dns_options);
++	g_free (value);
++	g_free (dns_options);
++	dns_options = NULL;
++
+ 	/* Static routes  - route-<name> file */
+ 	route_path = utils_get_route_path (ifcfg->fileName);
+ 	if (!route_path) {
+@@ -1490,6 +1546,7 @@ make_ip4_setting (shvarFile *ifcfg,
+ 	return NM_SETTING (s_ip4);
+ 
+ done:
++	g_free (dns_options);
+ 	g_object_unref (s_ip4);
+ 	return NULL;
+ }
+@@ -1504,6 +1561,7 @@ make_ip6_setting (shvarFile *ifcfg,
+ 	char *value = NULL;
+ 	char *str_value;
+ 	char *route6_path = NULL;
++	char *dns_options = NULL;
+ 	gboolean bool_value, ipv6forwarding, ipv6_autoconf, dhcp6 = FALSE;
+ 	char *method = NM_SETTING_IP6_CONFIG_METHOD_MANUAL;
+ 	guint32 i;
+@@ -1557,6 +1615,7 @@ make_ip6_setting (shvarFile *ifcfg,
+ 		value = svGetValue (ifcfg, "DEVICE", FALSE);
+ 		ipv6_defaultgw = svGetValue (network_ifcfg, "IPV6_DEFAULTGW", FALSE);
+ 		ipv6_defaultdev = svGetValue (network_ifcfg, "IPV6_DEFAULTDEV", FALSE);
++		dns_options = svGetValue (network_ifcfg, "RES_OPTIONS", FALSE);
+ 
+ 		if (ipv6_defaultgw) {
+ 			default_dev = strchr (ipv6_defaultgw, '%');
+@@ -1687,9 +1746,17 @@ make_ip6_setting (shvarFile *ifcfg,
+ 	if (error && *error)
+ 		goto error;
+ 
++	/* DNS options */
++	value = svGetValue (ifcfg, "RES_OPTIONS", FALSE);
++	parse_ip6_dns_options (s_ip6, value);
++	parse_ip6_dns_options (s_ip6, dns_options);
++	g_free (value);
++	g_free (dns_options);
++
+ 	return NM_SETTING (s_ip6);
+ 
+ error:
++	g_free (dns_options);
+ 	g_object_unref (s_ip6);
+ 	return NULL;
+ }
+diff --git a/system-settings/plugins/ifcfg-rh/writer.c b/system-settings/plugins/ifcfg-rh/writer.c
+index baea960..e51987c 100644
+--- a/system-settings/plugins/ifcfg-rh/writer.c
++++ b/system-settings/plugins/ifcfg-rh/writer.c
+@@ -2012,6 +2012,70 @@ error:
+ 	return FALSE;
+ }
+ 
++static void
++add_dns_option (GPtrArray *array, const char *option)
++{
++	GSList *list = NULL;
++	int i;
++
++	for (i = 0; i < array->len; i++)
++		list = g_slist_append (list, array->pdata[i]);
++
++	if (_nm_utils_dns_option_find_idx (list, option) < 0)
++		g_ptr_array_add (array, (gpointer) option);
++
++	g_slist_free (list);
++}
++
++static gboolean
++write_res_options (NMConnection *connection, shvarFile *ifcfg, GError **error)
++{
++	NMSettingIP6Config *s_ip6;
++	NMSettingIP4Config *s_ip4;
++	const char *method;
++	int i, num_options;
++	GPtrArray *array;
++	GString *value;
++
++	s_ip4 = (NMSettingIP4Config *) nm_connection_get_setting (connection, NM_TYPE_SETTING_IP4_CONFIG);
++	s_ip6 = (NMSettingIP6Config *) nm_connection_get_setting (connection, NM_TYPE_SETTING_IP6_CONFIG);
++
++	array = g_ptr_array_new ();
++
++	if (s_ip4) {
++		method = nm_setting_ip4_config_get_method (s_ip4);
++		if (g_strcmp0 (method, NM_SETTING_IP4_CONFIG_METHOD_DISABLED)) {
++			num_options = nm_setting_ip4_config_get_num_dns_options (s_ip4);
++			for (i = 0; i < num_options; i++)
++				add_dns_option (array, nm_setting_ip4_config_get_dns_option (s_ip4, i));
++		}
++	}
++
++	if (s_ip6) {
++		method = nm_setting_ip6_config_get_method (s_ip6);
++		if (g_strcmp0 (method, NM_SETTING_IP6_CONFIG_METHOD_IGNORE)) {
++			num_options = nm_setting_ip6_config_get_num_dns_options (s_ip6);
++			for (i = 0; i < num_options; i++)
++				add_dns_option (array, nm_setting_ip6_config_get_dns_option (s_ip6, i));
++		}
++	}
++
++	if (array->len > 0) {
++		value = g_string_new (NULL);
++		for (i = 0; i < array->len; i++) {
++			if (i > 0)
++				g_string_append_c (value, ' ');
++			g_string_append (value, array->pdata[i]);
++		}
++		svSetValue (ifcfg, "RES_OPTIONS", value->str, FALSE);
++		g_string_free (value, TRUE);
++	} else
++		svSetValue (ifcfg, "RES_OPTIONS", NULL, FALSE);
++
++	g_ptr_array_unref (array);
++	return TRUE;
++}
++
+ static char *
+ escape_id (const char *id)
+ {
+@@ -2132,6 +2196,9 @@ write_connection (NMConnection *connection,
+ 			if (!write_ip6_setting (connection, ifcfg, error))
+ 				goto out;
+ 		}
++
++		if (!write_res_options (connection, ifcfg, error))
++			goto out;
+ 	}
+ 
+ 	write_connection_setting (s_con, ifcfg);
+-- 
+2.1.0
+
+From 3e64978f5da32ddbaae8cd1f8776a877d93de7e3 Mon Sep 17 00:00:00 2001
+From: Beniamino Galvani <bgalvani@redhat.com>
+Date: Thu, 14 May 2015 17:18:54 +0200
+Subject: [PATCH 6/8] cli: add support for DNS options
+
+(based on upstream commit 7467e255935392885c8fb4efd46327edac7b96c7)
+---
+ cli/src/settings.c | 86 ++++++++++++++++++++++++++++++++++++------------------
+ 1 file changed, 58 insertions(+), 28 deletions(-)
+
+diff --git a/cli/src/settings.c b/cli/src/settings.c
+index 8cbfc8d..1e59575 100644
+--- a/cli/src/settings.c
++++ b/cli/src/settings.c
+@@ -202,20 +202,22 @@ static NmcOutputField nmc_fields_setting_ip4_config[] = {
+ 	SETTING_FIELD (NM_SETTING_IP4_CONFIG_METHOD, 10),                  /* 1 */
+ 	SETTING_FIELD (NM_SETTING_IP4_CONFIG_DNS, 20),                     /* 2 */
+ 	SETTING_FIELD (NM_SETTING_IP4_CONFIG_DNS_SEARCH, 15),              /* 3 */
+-	SETTING_FIELD (NM_SETTING_IP4_CONFIG_ADDRESSES, 20),               /* 4 */
+-	SETTING_FIELD (NM_SETTING_IP4_CONFIG_ROUTES, 20),                  /* 5 */
+-	SETTING_FIELD (NM_SETTING_IP4_CONFIG_IGNORE_AUTO_ROUTES, 19),      /* 6 */
+-	SETTING_FIELD (NM_SETTING_IP4_CONFIG_IGNORE_AUTO_DNS, 16),         /* 7 */
+-	SETTING_FIELD (NM_SETTING_IP4_CONFIG_DHCP_CLIENT_ID, 15),          /* 8 */
+-	SETTING_FIELD (NM_SETTING_IP4_CONFIG_DHCP_SEND_HOSTNAME, 19),      /* 9 */
+-	SETTING_FIELD (NM_SETTING_IP4_CONFIG_DHCP_HOSTNAME, 14),           /* 10 */
+-	SETTING_FIELD (NM_SETTING_IP4_CONFIG_NEVER_DEFAULT, 15),           /* 11 */
++	SETTING_FIELD (NM_SETTING_IP4_CONFIG_DNS_OPTIONS, 15),             /* 4 */
++	SETTING_FIELD (NM_SETTING_IP4_CONFIG_ADDRESSES, 20),               /* 5 */
++	SETTING_FIELD (NM_SETTING_IP4_CONFIG_ROUTES, 20),                  /* 6 */
++	SETTING_FIELD (NM_SETTING_IP4_CONFIG_IGNORE_AUTO_ROUTES, 19),      /* 7 */
++	SETTING_FIELD (NM_SETTING_IP4_CONFIG_IGNORE_AUTO_DNS, 16),         /* 8 */
++	SETTING_FIELD (NM_SETTING_IP4_CONFIG_DHCP_CLIENT_ID, 15),          /* 9 */
++	SETTING_FIELD (NM_SETTING_IP4_CONFIG_DHCP_SEND_HOSTNAME, 19),      /* 10 */
++	SETTING_FIELD (NM_SETTING_IP4_CONFIG_DHCP_HOSTNAME, 14),           /* 11 */
++	SETTING_FIELD (NM_SETTING_IP4_CONFIG_NEVER_DEFAULT, 15),           /* 12 */
+ 	{NULL, NULL, 0, NULL, 0}
+ };
+ #define NMC_FIELDS_SETTING_IP4_CONFIG_ALL     "name"","\
+                                               NM_SETTING_IP4_CONFIG_METHOD","\
+                                               NM_SETTING_IP4_CONFIG_DNS","\
+                                               NM_SETTING_IP4_CONFIG_DNS_SEARCH","\
++                                              NM_SETTING_IP4_CONFIG_DNS_OPTIONS","\
+                                               NM_SETTING_IP4_CONFIG_ADDRESSES","\
+                                               NM_SETTING_IP4_CONFIG_ROUTES","\
+                                               NM_SETTING_IP4_CONFIG_IGNORE_AUTO_ROUTES","\
+@@ -232,17 +234,19 @@ static NmcOutputField nmc_fields_setting_ip6_config[] = {
+ 	SETTING_FIELD (NM_SETTING_IP6_CONFIG_METHOD, 10),                  /* 1 */
+ 	SETTING_FIELD (NM_SETTING_IP6_CONFIG_DNS, 20),                     /* 2 */
+ 	SETTING_FIELD (NM_SETTING_IP6_CONFIG_DNS_SEARCH, 15),              /* 3 */
+-	SETTING_FIELD (NM_SETTING_IP6_CONFIG_ADDRESSES, 20),               /* 4 */
+-	SETTING_FIELD (NM_SETTING_IP6_CONFIG_ROUTES, 20),                  /* 5 */
+-	SETTING_FIELD (NM_SETTING_IP6_CONFIG_IGNORE_AUTO_ROUTES, 19),      /* 6 */
+-	SETTING_FIELD (NM_SETTING_IP6_CONFIG_IGNORE_AUTO_DNS, 16),         /* 7 */
+-	SETTING_FIELD (NM_SETTING_IP6_CONFIG_NEVER_DEFAULT, 15),           /* 8 */
++	SETTING_FIELD (NM_SETTING_IP6_CONFIG_DNS_OPTIONS, 15),             /* 4 */
++	SETTING_FIELD (NM_SETTING_IP6_CONFIG_ADDRESSES, 20),               /* 5 */
++	SETTING_FIELD (NM_SETTING_IP6_CONFIG_ROUTES, 20),                  /* 6 */
++	SETTING_FIELD (NM_SETTING_IP6_CONFIG_IGNORE_AUTO_ROUTES, 19),      /* 7 */
++	SETTING_FIELD (NM_SETTING_IP6_CONFIG_IGNORE_AUTO_DNS, 16),         /* 8 */
++	SETTING_FIELD (NM_SETTING_IP6_CONFIG_NEVER_DEFAULT, 15),           /* 9 */
+ 	{NULL, NULL, 0, NULL, 0}
+ };
+ #define NMC_FIELDS_SETTING_IP6_CONFIG_ALL     "name"","\
+                                               NM_SETTING_IP6_CONFIG_METHOD","\
+                                               NM_SETTING_IP6_CONFIG_DNS","\
+                                               NM_SETTING_IP6_CONFIG_DNS_SEARCH","\
++                                              NM_SETTING_IP6_CONFIG_DNS_OPTIONS","\
+                                               NM_SETTING_IP6_CONFIG_ADDRESSES","\
+                                               NM_SETTING_IP6_CONFIG_ROUTES","\
+                                               NM_SETTING_IP6_CONFIG_IGNORE_AUTO_ROUTES","\
+@@ -946,7 +950,7 @@ gboolean
+ setting_ip4_config_details (NMSetting *setting, NmCli *nmc)
+ {
+ 	NMSettingIP4Config *s_ip4;
+-	GString *dns_str, *dns_search_str, *addr_str, *route_str;
++	GString *dns_str, *dns_search_str, *dns_options_str, *addr_str, *route_str;
+ 	int i, num;
+ 	guint32 mode_flag = (nmc->print_output == NMC_PRINT_PRETTY) ? NMC_PF_FLAG_PRETTY : (nmc->print_output == NMC_PRINT_TERSE) ? NMC_PF_FLAG_TERSE : 0;
+ 	guint32 multiline_flag = nmc->multiline_output ? NMC_PF_FLAG_MULTILINE : 0;
+@@ -985,6 +989,17 @@ setting_ip4_config_details (NMSetting *setting, NmCli *nmc)
+ 		g_string_append (dns_search_str, domain);
+ 	}
+ 
++	dns_options_str = g_string_new (NULL);
++	num = nm_setting_ip4_config_get_num_dns_options (s_ip4);
++	for (i = 0; i < num; i++) {
++		const char *option;
++
++		option = nm_setting_ip4_config_get_dns_option (s_ip4, i);
++		if (i > 0)
++			g_string_append (dns_options_str, ", ");
++		g_string_append (dns_options_str, option);
++	}
++
+ 	addr_str = g_string_new (NULL);
+ 	num = nm_setting_ip4_config_get_num_addresses (s_ip4);
+ 	for (i = 0; i < num; i++) {
+@@ -1057,20 +1072,22 @@ setting_ip4_config_details (NMSetting *setting, NmCli *nmc)
+ 	nmc->allowed_fields[1].value = nm_setting_ip4_config_get_method (s_ip4);
+ 	nmc->allowed_fields[2].value = dns_str->str;
+ 	nmc->allowed_fields[3].value = dns_search_str->str;
+-	nmc->allowed_fields[4].value = addr_str->str;
+-	nmc->allowed_fields[5].value = route_str->str;
+-	nmc->allowed_fields[6].value = nm_setting_ip4_config_get_ignore_auto_routes (s_ip4) ? _("yes") : _("no");
+-	nmc->allowed_fields[7].value = nm_setting_ip4_config_get_ignore_auto_dns (s_ip4) ? _("yes") : _("no");
+-	nmc->allowed_fields[8].value = nm_setting_ip4_config_get_dhcp_client_id (s_ip4);
+-	nmc->allowed_fields[9].value = nm_setting_ip4_config_get_dhcp_send_hostname (s_ip4) ? _("yes") : _("no");
+-	nmc->allowed_fields[10].value = nm_setting_ip4_config_get_dhcp_hostname (s_ip4);
+-	nmc->allowed_fields[11].value = nm_setting_ip4_config_get_never_default (s_ip4) ? _("yes") : _("no");
++	nmc->allowed_fields[4].value = dns_options_str->str;
++	nmc->allowed_fields[5].value = addr_str->str;
++	nmc->allowed_fields[6].value = route_str->str;
++	nmc->allowed_fields[7].value = nm_setting_ip4_config_get_ignore_auto_routes (s_ip4) ? _("yes") : _("no");
++	nmc->allowed_fields[8].value = nm_setting_ip4_config_get_ignore_auto_dns (s_ip4) ? _("yes") : _("no");
++	nmc->allowed_fields[9].value = nm_setting_ip4_config_get_dhcp_client_id (s_ip4);
++	nmc->allowed_fields[10].value = nm_setting_ip4_config_get_dhcp_send_hostname (s_ip4) ? _("yes") : _("no");
++	nmc->allowed_fields[11].value = nm_setting_ip4_config_get_dhcp_hostname (s_ip4);
++	nmc->allowed_fields[12].value = nm_setting_ip4_config_get_never_default (s_ip4) ? _("yes") : _("no");
+ 
+ 	nmc->print_fields.flags = multiline_flag | mode_flag | escape_flag | NMC_PF_FLAG_SECTION_PREFIX;
+ 	print_fields (nmc->print_fields, nmc->allowed_fields); /* Print values */
+ 
+ 	g_string_free (dns_str, TRUE);
+ 	g_string_free (dns_search_str, TRUE);
++	g_string_free (dns_options_str, TRUE);
+ 	g_string_free (addr_str, TRUE);
+ 	g_string_free (route_str, TRUE);
+ 
+@@ -1081,7 +1098,7 @@ gboolean
+ setting_ip6_config_details (NMSetting *setting, NmCli *nmc)
+ {
+ 	NMSettingIP6Config *s_ip6;
+-	GString *dns_str, *dns_search_str, *addr_str, *route_str;
++	GString *dns_str, *dns_search_str, *dns_options_str, *addr_str, *route_str;
+ 	int i, num;
+ 	guint32 mode_flag = (nmc->print_output == NMC_PRINT_PRETTY) ? NMC_PF_FLAG_PRETTY : (nmc->print_output == NMC_PRINT_TERSE) ? NMC_PF_FLAG_TERSE : 0;
+ 	guint32 multiline_flag = nmc->multiline_output ? NMC_PF_FLAG_MULTILINE : 0;
+@@ -1120,6 +1137,17 @@ setting_ip6_config_details (NMSetting *setting, NmCli *nmc)
+ 		g_string_append (dns_search_str, domain);
+ 	}
+ 
++	dns_options_str = g_string_new (NULL);
++	num = nm_setting_ip6_config_get_num_dns_options (s_ip6);
++	for (i = 0; i < num; i++) {
++		const char *option;
++
++		option = nm_setting_ip6_config_get_dns_option (s_ip6, i);
++		if (i > 0)
++			g_string_append (dns_options_str, ", ");
++		g_string_append (dns_options_str, option);
++	}
++
+ 	addr_str = g_string_new (NULL);
+ 	num = nm_setting_ip6_config_get_num_addresses (s_ip6);
+ 	for (i = 0; i < num; i++) {
+@@ -1187,17 +1215,19 @@ setting_ip6_config_details (NMSetting *setting, NmCli *nmc)
+ 	nmc->allowed_fields[1].value = nm_setting_ip6_config_get_method (s_ip6);
+ 	nmc->allowed_fields[2].value = dns_str->str;
+ 	nmc->allowed_fields[3].value = dns_search_str->str;
+-	nmc->allowed_fields[4].value = addr_str->str;
+-	nmc->allowed_fields[5].value = route_str->str;
+-	nmc->allowed_fields[6].value = nm_setting_ip6_config_get_ignore_auto_routes (s_ip6) ? _("yes") : _("no");
+-	nmc->allowed_fields[7].value = nm_setting_ip6_config_get_ignore_auto_dns (s_ip6) ? _("yes") : _("no");
+-	nmc->allowed_fields[8].value = nm_setting_ip6_config_get_never_default (s_ip6) ? _("yes") : _("no");
++	nmc->allowed_fields[4].value = dns_options_str->str;
++	nmc->allowed_fields[5].value = addr_str->str;
++	nmc->allowed_fields[6].value = route_str->str;
++	nmc->allowed_fields[7].value = nm_setting_ip6_config_get_ignore_auto_routes (s_ip6) ? _("yes") : _("no");
++	nmc->allowed_fields[8].value = nm_setting_ip6_config_get_ignore_auto_dns (s_ip6) ? _("yes") : _("no");
++	nmc->allowed_fields[9].value = nm_setting_ip6_config_get_never_default (s_ip6) ? _("yes") : _("no");
+ 
+ 	nmc->print_fields.flags = multiline_flag | mode_flag | escape_flag | NMC_PF_FLAG_SECTION_PREFIX;
+ 	print_fields (nmc->print_fields, nmc->allowed_fields); /* Print values */
+ 
+ 	g_string_free (dns_str, TRUE);
+ 	g_string_free (dns_search_str, TRUE);
++	g_string_free (dns_options_str, TRUE);
+ 	g_string_free (addr_str, TRUE);
+ 	g_string_free (route_str, TRUE);
+ 
+-- 
+2.1.0
+
+From 8471c765e12c28afe76e3620685c5f603743d68b Mon Sep 17 00:00:00 2001
+From: Beniamino Galvani <bgalvani@redhat.com>
+Date: Thu, 14 May 2015 18:50:17 +0200
+Subject: [PATCH 7/8] ifcfg-rh/tests: add tests for RES_OPTIONS parsing
+
+(based on upstream commit 66e63c16324b503f535bfcd361512fcfe658095b)
+---
+ .../ifcfg-rh/tests/network-scripts/Makefile.am     |   3 +-
+ .../tests/network-scripts/ifcfg-test-dns-options   |  15 ++
+ .../plugins/ifcfg-rh/tests/test-ifcfg-rh.c         | 230 +++++++++++++++++++++
+ 3 files changed, 247 insertions(+), 1 deletion(-)
+ create mode 100644 system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-dns-options
+
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am b/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
+index 2c87415..1280dc3 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
+@@ -77,7 +77,8 @@ EXTRA_DIST = \
+ 	ifcfg-test-infiniband \
+ 	ifcfg-test-wifi-dynamic-wep-leap \
+ 	keys-test-wifi-dynamic-wep-leap \
+-	ifcfg-test-vlan-trailing-spaces
++	ifcfg-test-vlan-trailing-spaces \
++	ifcfg-test-dns-options
+ 
+ check-local:
+ 	@for f in $(EXTRA_DIST); do \
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-dns-options b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-dns-options
+new file mode 100644
+index 0000000..62e301e
+--- /dev/null
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-dns-options
+@@ -0,0 +1,15 @@
++TYPE=Ethernet
++DEVICE=eth2
++HWADDR=00:11:22:33:44:ee
++BOOTPROTO=dhcp
++ONBOOT=yes
++USERCTL=yes
++NM_CONTROLLED=yes
++PEERDNS=yes
++DNS1=10.2.0.4
++DOMAIN="lorem.com ipsum.org dolor.edu"
++RES_OPTIONS="ndots:3 single-request-reopen  inet6"
++IPV6INIT=yes
++IPV6_AUTOCONF=no
++IPV6ADDR="1001:abba::1234/56"
++IPV6ADDR_SECONDARIES="2001:abba::2234/64 3001:abba::3234/96"
+diff --git a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+index ae6625f..e4aa152 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
++++ b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+@@ -2930,6 +2930,234 @@ test_read_wired_aliases_bad (void)
+ 	g_object_unref (connection);
+ }
+ 
++#define TEST_IFCFG_DNS_OPTIONS TEST_IFCFG_DIR "/network-scripts/ifcfg-test-dns-options"
++
++static void
++test_read_dns_options (void)
++{
++	NMConnection *connection;
++	NMSettingIP4Config *s_ip4;
++	NMSettingIP6Config *s_ip6;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE;
++	const char *option;
++	GError *error = NULL;
++	const char *options[] = { "ndots:3", "single-request-reopen", "inet6" };
++	guint32 i, options_len = sizeof (options) / sizeof (options[0]);
++
++	connection = connection_from_file (TEST_IFCFG_DNS_OPTIONS,
++	                                   NULL,
++	                                   TYPE_ETHERNET,
++	                                   NULL,
++	                                   &unmanaged,
++	                                   &keyfile,
++	                                   &routefile,
++	                                   &route6file,
++	                                   &error,
++	                                   &ignore_error);
++	ASSERT (connection != NULL,
++	        "read-dns-options",
++	        "failed to read %s: %s", TEST_IFCFG_DNS_OPTIONS, error->message);
++
++	ASSERT (nm_connection_verify (connection, &error),
++	        "read-dns-options",
++	        "failed to verify %s: %s", TEST_IFCFG_DNS_OPTIONS, error->message);
++
++	ASSERT (unmanaged == NULL,
++	        "read-dns-options",
++	        "failed to verify %s: unexpected unmanaged value", TEST_IFCFG_DNS_OPTIONS);
++
++	s_ip4 = NM_SETTING_IP4_CONFIG (nm_connection_get_setting (connection, NM_TYPE_SETTING_IP4_CONFIG));
++	ASSERT (s_ip4 != NULL,
++	        "read-dns-options",
++	        "failed to verify %s: missing %s setting", TEST_IFCFG_DNS_OPTIONS,
++	        NM_SETTING_IP4_CONFIG_SETTING_NAME);
++
++	s_ip6 = NM_SETTING_IP6_CONFIG (nm_connection_get_setting (connection, NM_TYPE_SETTING_IP6_CONFIG));
++	ASSERT (s_ip6 != NULL,
++	        "read-dns-options",
++	        "failed to verify %s: missing %s setting", TEST_IFCFG_DNS_OPTIONS,
++	        NM_SETTING_IP6_CONFIG_SETTING_NAME);
++
++	i = nm_setting_ip4_config_get_num_dns_options (s_ip4);
++	ASSERT (i == options_len,
++	        "read-dns-options",
++	        "failed to verify %s: wrong IPv4 DNS options number %u",
++	        TEST_IFCFG_DNS_OPTIONS, i);
++
++	i = nm_setting_ip6_config_get_num_dns_options (s_ip6);
++	ASSERT (i == options_len,
++	        "read-dns-options",
++	        "failed to verify %s: wrong IPv6 DNS options number %u",
++	        TEST_IFCFG_DNS_OPTIONS, i);
++
++	for (i = 0; i < options_len; i++) {
++		option = nm_setting_ip4_config_get_dns_option (s_ip4, i);
++		ASSERT (strcmp (options[i], option) == 0,
++		        "read-dns-options",
++		        "failed to verify %s: wrong IPv4 DNS option %u '%s'",
++		        TEST_IFCFG_DNS_OPTIONS, i, option);
++
++		option = nm_setting_ip6_config_get_dns_option (s_ip6, i);
++		ASSERT (strcmp (options[i], option) == 0,
++		        "read-dns-options",
++		        "failed to verify %s: wrong IPv6 DNS option %u '%s'"
++		        TEST_IFCFG_DNS_OPTIONS, i, option);
++	}
++
++	g_object_unref (connection);
++}
++
++static void
++test_write_dns_options (void)
++{
++	NMConnection *connection;
++	NMConnection *reread;
++	NMSettingConnection *s_con;
++	NMSettingWired *s_wired;
++	NMSettingIP4Config *s_ip4;
++	NMSettingIP6Config *s_ip6;
++	static unsigned char tmpmac[] = { 0x31, 0x33, 0x33, 0x37, 0xbe, 0xcd };
++	GByteArray *mac;
++	guint32 mtu = 1492;
++	char *uuid;
++	NMIP4Address *addr;
++	NMIP6Address *addr6;
++	gboolean success;
++	GError *error = NULL;
++	char *testfile = NULL;
++	struct in6_addr ip6;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE;
++
++	connection = nm_connection_new ();
++
++	/* Connection setting */
++	s_con = (NMSettingConnection *) nm_setting_connection_new ();
++	nm_connection_add_setting (connection, NM_SETTING (s_con));
++
++	uuid = nm_utils_uuid_generate ();
++	g_object_set (s_con,
++	              NM_SETTING_CONNECTION_ID, "Test DNS options",
++	              NM_SETTING_CONNECTION_UUID, uuid,
++	              NM_SETTING_CONNECTION_AUTOCONNECT, TRUE,
++	              NM_SETTING_CONNECTION_TYPE, NM_SETTING_WIRED_SETTING_NAME,
++	              NULL);
++	g_free (uuid);
++
++	/* Wired setting */
++	s_wired = (NMSettingWired *) nm_setting_wired_new ();
++	nm_connection_add_setting (connection, NM_SETTING (s_wired));
++
++	mac = g_byte_array_sized_new (sizeof (tmpmac));
++	g_byte_array_append (mac, &tmpmac[0], sizeof (tmpmac));
++
++	g_object_set (s_wired,
++	              NM_SETTING_WIRED_MAC_ADDRESS, mac,
++	              NM_SETTING_WIRED_MTU, mtu,
++	              NULL);
++	g_byte_array_free (mac, TRUE);
++
++	/* IP4 setting */
++	s_ip4 = (NMSettingIP4Config *) nm_setting_ip4_config_new ();
++	nm_connection_add_setting (connection, NM_SETTING (s_ip4));
++
++	g_object_set (s_ip4,
++	              NM_SETTING_IP4_CONFIG_METHOD, NM_SETTING_IP4_CONFIG_METHOD_MANUAL,
++	              NM_SETTING_IP4_CONFIG_MAY_FAIL, TRUE,
++	              NULL);
++
++	addr = nm_ip4_address_new ();
++	nm_ip4_address_set_address (addr, htonl (0x01010103));
++	nm_ip4_address_set_prefix (addr, 24);
++	nm_ip4_address_set_gateway (addr, htonl (0x01010101));
++	nm_setting_ip4_config_add_address (s_ip4, addr);
++	nm_ip4_address_unref (addr);
++
++	/* IP6 setting */
++	s_ip6 = (NMSettingIP6Config *) nm_setting_ip6_config_new ();
++	nm_connection_add_setting (connection, NM_SETTING (s_ip6));
++
++	g_object_set (s_ip6,
++	              NM_SETTING_IP6_CONFIG_METHOD, NM_SETTING_IP6_CONFIG_METHOD_MANUAL,
++	              NM_SETTING_IP6_CONFIG_MAY_FAIL, TRUE,
++	              NULL);
++
++	inet_pton (AF_INET6, "1003:1234:abcd::1", &ip6);
++
++	addr6 = nm_ip6_address_new ();
++	nm_ip6_address_set_address (addr6, &ip6);
++	nm_ip6_address_set_prefix (addr6, 11);
++	nm_setting_ip6_config_add_address (s_ip6, addr6);
++	nm_ip6_address_unref (addr6);
++
++	nm_setting_ip4_config_add_dns_option (s_ip4, "debug");
++	nm_setting_ip6_config_add_dns_option (s_ip6, "timeout:3");
++
++	ASSERT (nm_connection_verify (connection, &error) == TRUE,
++	        "write-dns-options",
++	        "failed to verify connection: %s",
++	        (error && error->message) ? error->message : "(unknown)");
++
++	/* Save the ifcfg */
++	success = writer_new_connection (connection,
++	                                 TEST_SCRATCH_DIR "/network-scripts/",
++	                                 &testfile,
++	                                 &error);
++	ASSERT (success == TRUE,
++	        "write-dns-options",
++	        "failed to write connection to disk: %s",
++	        (error && error->message) ? error->message : "(unknown)");
++
++	ASSERT (testfile != NULL,
++	        "write-dns-options",
++	        "didn't get ifcfg file path back after writing connection");
++
++	/* re-read the connection for comparison */
++	reread = connection_from_file (testfile,
++	                               NULL,
++	                               TYPE_ETHERNET,
++	                               NULL,
++	                               &unmanaged,
++	                               &keyfile,
++	                               &routefile,
++	                               &route6file,
++	                               &error,
++	                               &ignore_error);
++	unlink (testfile);
++
++	/* RES_OPTIONS is copied to both IPv4 and IPv6 settings */
++	nm_setting_ip4_config_clear_dns_options (s_ip4);
++	nm_setting_ip4_config_add_dns_option (s_ip4, "debug");
++	nm_setting_ip4_config_add_dns_option (s_ip4, "timeout:3");
++
++	nm_setting_ip6_config_clear_dns_options (s_ip6);
++	nm_setting_ip6_config_add_dns_option (s_ip6, "debug");
++	nm_setting_ip6_config_add_dns_option (s_ip6, "timeout:3");
++
++	ASSERT (reread != NULL,
++	        "write-dns-options",
++	        "failed to read %s: %s", testfile, error->message);
++
++	ASSERT (nm_connection_verify (reread, &error),
++	        "write-dns-options",
++	        "failed to verify %s: %s", testfile, error->message);
++
++	ASSERT (nm_connection_compare (connection, reread, NM_SETTING_COMPARE_FLAG_EXACT) == TRUE,
++	        "write-dns-options",
++	        "written and re-read connection weren't the same.");
++
++	g_free (testfile);
++	g_object_unref (connection);
++	g_object_unref (reread);
++}
++
+ #define TEST_IFCFG_WIFI_OPEN TEST_IFCFG_DIR"/network-scripts/ifcfg-test-wifi-open"
+ 
+ static void
+@@ -11584,6 +11812,7 @@ int main (int argc, char **argv)
+ 	test_read_vlan_interface ();
+ 	test_read_vlan_only_vlan_id ();
+ 	test_read_vlan_only_device ();
++	test_read_dns_options ();
+ 
+ 	test_write_wired_static ();
+ 	test_write_wired_static_ip6_only ();
+@@ -11640,6 +11869,7 @@ int main (int argc, char **argv)
+ 	test_write_infiniband ();
+ 	test_write_vlan ();
+ 	test_write_vlan_only_vlanid ();
++	test_write_dns_options ();
+ 
+ 	/* iSCSI / ibft */
+ 	test_read_ibft_dhcp ();
+-- 
+2.1.0
+
+From d9d0d1d3b01789c7d4e17df902aba6d7359b68a0 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Tue, 19 May 2015 13:01:00 +0200
+Subject: [PATCH 8/8] keyfile/test: fix test failure due to missing D-Bus
+ session bus
+
+For me these tests fail because "dbus_g_bus_get (DBUS_BUS_SESSION, NULL);"
+returns NULL.
+---
+ system-settings/plugins/keyfile/tests/test-keyfile.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/system-settings/plugins/keyfile/tests/test-keyfile.c b/system-settings/plugins/keyfile/tests/test-keyfile.c
+index bb15b3b..c84dbae 100644
+--- a/system-settings/plugins/keyfile/tests/test-keyfile.c
++++ b/system-settings/plugins/keyfile/tests/test-keyfile.c
+@@ -2268,7 +2268,8 @@ int main (int argc, char **argv)
+ 	base = g_path_get_basename (argv[0]);
+ 	fprintf (stdout, "%s: SUCCESS\n", base);
+ 	g_free (base);
+-	dbus_g_connection_unref (bus);
++	if (bus)
++		dbus_g_connection_unref (bus);
+ 	return 0;
+ }
+ 
+-- 
+2.1.0
+

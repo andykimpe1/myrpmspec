@@ -1,0 +1,300 @@
+From: Dan Williams <dcbw@redhat.com>
+Date: Fri, 8 Mar 2013 10:50:43 -0600
+Subject: [PATCH] core/editor: indicate when NM_BOND_BRIDGE_VLAN_ENABLED is not set (rh #919242)
+
+The editor allows creation of bond, bridge, and VLAN connections which
+then cannot be used by NetworkManager when NM_BOND_BRIDGE_VLAN_ENABLED
+is not set.  Inform the user when they are creating a connection which
+cannot be used until that setting is enabled.
+---
+ introspection/nm-manager-client.xml                |    1 +
+ introspection/nm-manager.xml                       |    6 ++
+ .../src/connection-editor/nm-connection-editor.c   |   87 ++++++++++++++++++++
+ .../src/connection-editor/nm-connection-editor.h   |    1 +
+ .../src/connection-editor/nm-connection-editor.ui  |   18 ++++-
+ src/nm-manager.c                                   |   13 +++
+ 6 files changed, 123 insertions(+), 3 deletions(-)
+
+diff --git a/introspection/nm-manager-client.xml b/introspection/nm-manager-client.xml
+index f30d1d6..652282f 100644
+--- a/introspection/nm-manager-client.xml
++++ b/introspection/nm-manager-client.xml
+@@ -62,6 +62,7 @@ object.  dbus-glib generates the same bound function names for D-Bus the methods
+     <property name="WwanHardwareEnabled" type="b" access="read"/>
+     <property name="ActiveConnections" type="ao" access="read"/>
+     <property name="State" type="u" access="read"/>
++    <property name="BondBridgeVlanEnabled" type="b" access="read"/>
+ 
+     <signal name="StateChanged">
+       <arg name="state" type="u"/>
+diff --git a/introspection/nm-manager.xml b/introspection/nm-manager.xml
+index e1b4667..019a2de 100644
+--- a/introspection/nm-manager.xml
++++ b/introspection/nm-manager.xml
+@@ -212,6 +212,12 @@
+       </tp:docstring>
+     </property>
+ 
++    <property name="BondBridgeVlanEnabled" type="b" access="read">
++      <tp:docstring>
++        Whether Bonding/Bridging/VLAN support is enabled.
++      </tp:docstring>
++    </property>
++
+     <signal name="StateChanged">
+       <tp:docstring>
+         NetworkManager's state changed.
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c b/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
+index 028272d..d1f9858 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
+@@ -333,6 +333,7 @@ nm_connection_editor_init (NMConnectionEditor *editor)
+ 	editor->cancel_button = GTK_WIDGET (gtk_builder_get_object (editor->builder, "cancel_button"));
+ 	editor->export_button = GTK_WIDGET (gtk_builder_get_object (editor->builder, "export_button"));
+ 	editor->system_checkbutton = GTK_WIDGET (gtk_builder_get_object (editor->builder, "system_checkbutton"));
++	editor->info_bar_hbox = GTK_WIDGET (gtk_builder_get_object (editor->builder, "info_bar_hbox"));
+ }
+ 
+ static void
+@@ -426,6 +427,75 @@ nm_connection_editor_class_init (NMConnectionEditorClass *klass)
+ 		              G_TYPE_NONE, 1, GTK_TYPE_RESPONSE_TYPE);
+ }
+ 
++static gboolean
++show_bbv_disabled_banner (NMConnection *connection)
++{
++	DBusGProxy *proxy;
++	DBusGConnection *bus;
++	gboolean enabled = FALSE;
++
++	if (   !nm_connection_get_setting_bond (connection)
++	    && !nm_connection_get_setting_vlan (connection)
++	    && !nm_connection_get_setting_bridge (connection)
++	    && !nm_connection_get_setting_bridge_port (connection))
++		return FALSE;
++
++	bus = dbus_g_bus_get (DBUS_BUS_SYSTEM, NULL);
++	if (!bus)
++		return FALSE;
++
++	proxy = dbus_g_proxy_new_for_name (bus,
++	                                   NM_DBUS_SERVICE,
++	                                   NM_DBUS_PATH,
++	                                   "org.freedesktop.DBus.Properties");
++	if (proxy) {
++		dbus_g_proxy_call_with_timeout (proxy, "Get", 1000, NULL,
++		                                G_TYPE_STRING, NM_DBUS_INTERFACE,
++		                                G_TYPE_STRING, "BondBridgeVlanEnabled",
++		                                G_TYPE_INVALID,
++		                                G_TYPE_BOOLEAN, &enabled,
++		                                G_TYPE_INVALID);
++		g_object_unref (proxy);
++	}
++
++	dbus_g_connection_unref (bus);
++	return !enabled;
++}
++
++static void
++info_bar_response (GtkWidget *bar,
++                   gint response_id,
++                   gpointer user_data)
++{
++	NMConnectionEditor *editor = user_data;
++	GtkWidget *dialog;
++	const char *help_text = NULL;
++
++	if (response_id != GTK_RESPONSE_HELP) {
++		gtk_widget_hide (bar);
++		return;
++	}
++
++	if (help_text == NULL) {
++		help_text = _(
++"Support for bond, bridge, and VLAN interfaces must be enabled by setting the "
++"NM_BOND_BRIDGE_VLAN_ENABLED key to 'yes' in <tt>/etc/sysconfig/network</tt>:\n\n"
++"\t<tt>NM_BOND_BRIDGE_VLAN_ENABLED=yes</tt>\n\n"
++"After making this modification, NetworkManager must be restarted to ensure "
++"the new functionality is enabled.");
++	}
++
++	/* Help dialog */
++	dialog = gtk_message_dialog_new (GTK_WINDOW (editor->window),
++	                                 GTK_DIALOG_DESTROY_WITH_PARENT | GTK_DIALOG_MODAL,
++	                                 GTK_MESSAGE_INFO,
++	                                 GTK_BUTTONS_OK,
++	                                 _("Bridging, bonding, and VLAN functionality not enabled"));
++	gtk_message_dialog_format_secondary_markup (GTK_MESSAGE_DIALOG (dialog), help_text);
++	gtk_dialog_run (GTK_DIALOG (dialog));
++	gtk_widget_destroy (dialog);
++}
++
+ NMConnectionEditor *
+ nm_connection_editor_new (GtkWindow *parent_window,
+                           NMConnection *connection,
+@@ -498,6 +568,23 @@ nm_connection_editor_new (GtkWindow *parent_window,
+ 		active_editors = g_hash_table_new (NULL, NULL);
+ 	g_hash_table_insert (active_editors, connection, editor);
+ 
++	/* Info bar display */
++	if (show_bbv_disabled_banner (connection)) {
++		GtkWidget *bar, *label, *area;
++
++		bar = gtk_info_bar_new ();
++		label = gtk_label_new (_("Bonding, bridging, and VLANs are disabled in NetworkManager."));
++		gtk_widget_show (label);
++		area = gtk_info_bar_get_content_area (GTK_INFO_BAR (bar));
++		gtk_container_add (GTK_CONTAINER (area), label);
++		gtk_info_bar_add_button (GTK_INFO_BAR (bar), GTK_STOCK_HELP, GTK_RESPONSE_HELP);
++		gtk_info_bar_add_button (GTK_INFO_BAR (bar), GTK_STOCK_OK, GTK_RESPONSE_OK);
++		g_signal_connect (bar, "response", G_CALLBACK (info_bar_response), editor);
++		gtk_container_add (GTK_CONTAINER (editor->info_bar_hbox), bar);
++		gtk_widget_show_all (editor->info_bar_hbox);
++	} else
++		gtk_widget_hide (editor->info_bar_hbox);
++
+ 	return editor;
+ }
+ 
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.h b/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.h
+index ec02b03..23e4842 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.h
++++ b/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.h
+@@ -66,6 +66,7 @@ typedef struct {
+ 	GtkWidget *ok_button;
+ 	GtkWidget *cancel_button;
+ 	GtkWidget *export_button;
++	GtkWidget *info_bar_hbox;
+ 
+ 	gboolean busy;
+ } NMConnectionEditor;
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.ui b/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.ui
+index 46ed6bc..6fcf1eb 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.ui
++++ b/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.ui
+@@ -275,6 +275,18 @@
+             <property name="border_width">5</property>
+             <property name="spacing">6</property>
+             <child>
++              <object class="GtkHBox" id="info_bar_hbox">
++                <property name="visible">True</property>
++                <property name="can_focus">False</property>
++                <property name="spacing">0</property>
++              </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="fill">True</property>
++                <property name="position">0</property>
++              </packing>
++            </child>
++            <child>
+               <object class="GtkHBox" id="hbox3">
+                 <property name="visible">True</property>
+                 <property name="can_focus">False</property>
+@@ -308,7 +320,7 @@
+               <packing>
+                 <property name="expand">False</property>
+                 <property name="fill">True</property>
+-                <property name="position">0</property>
++                <property name="position">1</property>
+               </packing>
+             </child>
+             <child>
+@@ -353,7 +365,7 @@
+               <packing>
+                 <property name="expand">False</property>
+                 <property name="fill">False</property>
+-                <property name="position">1</property>
++                <property name="position">2</property>
+               </packing>
+             </child>
+             <child>
+@@ -364,7 +376,7 @@
+               <packing>
+                 <property name="expand">True</property>
+                 <property name="fill">True</property>
+-                <property name="position">2</property>
++                <property name="position">3</property>
+               </packing>
+             </child>
+           </object>
+diff --git a/src/nm-manager.c b/src/nm-manager.c
+index ddf0fc3..4f3cddf 100644
+--- a/src/nm-manager.c
++++ b/src/nm-manager.c
+@@ -283,6 +283,7 @@ enum {
+ 	PROP_WWAN_ENABLED,
+ 	PROP_WWAN_HARDWARE_ENABLED,
+ 	PROP_ACTIVE_CONNECTIONS,
++	PROP_BBV_ENABLED,
+ 
+ 	/* Not exported */
+ 	PROP_HOSTNAME,
+@@ -5469,6 +5470,9 @@ get_property (GObject *object, guint prop_id,
+ 	case PROP_SLEEPING:
+ 		g_value_set_boolean (value, priv->sleeping);
+ 		break;
++	case PROP_BBV_ENABLED:
++		g_value_set_boolean (value, priv->bbv_enabled);
++		break;
+ 	default:
+ 		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+ 		break;
+@@ -5730,6 +5734,15 @@ nm_manager_class_init (NMManagerClass *manager_class)
+ 		                       FALSE,
+ 		                       G_PARAM_READABLE | NM_PROPERTY_PARAM_NO_EXPORT));
+ 
++	/* Sleeping is not exported over D-Bus */
++	g_object_class_install_property
++		(object_class, PROP_BBV_ENABLED,
++		 g_param_spec_boolean ("bond-bridge-vlan-enabled",
++		                       "Bond/Bridge/VLAN enabled",
++		                       "Bond/Bridge/VLAN enabled",
++		                       FALSE,
++		                       G_PARAM_READABLE));
++
+ 	/* signals */
+ 	signals[DEVICE_ADDED] =
+ 		g_signal_new ("device-added",
+-- 
+1.7.1
+
+From 074301b1607ae3598c190f86be7d7b238560b0e9 Mon Sep 17 00:00:00 2001
+From: Lubomir Rintel <lkundrak@v3.sk>
+Date: Tue, 3 Mar 2015 12:43:06 +0100
+Subject: [PATCH] connection-editor: correct getting BondBridgeVlanEnabled
+
+o.fd.DBus.Properties.Get() returns a variant, not a boolean.
+---
+ .../src/connection-editor/nm-connection-editor.c   |   15 +++++++++------
+ 1 files changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c b/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
+index 3a87c55..bedb18f 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
+@@ -456,12 +456,15 @@ show_bbv_disabled_banner (NMConnection *connection)
+ 	                                   NM_DBUS_PATH,
+ 	                                   "org.freedesktop.DBus.Properties");
+ 	if (proxy) {
+-		dbus_g_proxy_call_with_timeout (proxy, "Get", 1000, NULL,
+-		                                G_TYPE_STRING, NM_DBUS_INTERFACE,
+-		                                G_TYPE_STRING, "BondBridgeVlanEnabled",
+-		                                G_TYPE_INVALID,
+-		                                G_TYPE_BOOLEAN, &enabled,
+-		                                G_TYPE_INVALID);
++		GValue value = {0,};
++
++		if (dbus_g_proxy_call_with_timeout (proxy, "Get", 1000, NULL,
++		                                    G_TYPE_STRING, NM_DBUS_INTERFACE,
++		                                    G_TYPE_STRING, "BondBridgeVlanEnabled",
++		                                    G_TYPE_INVALID,
++		                                    G_TYPE_VALUE, &value,
++		                                    G_TYPE_INVALID))
++			enabled = g_value_get_boolean (&value);
+ 		g_object_unref (proxy);
+ 	}
+ 
+-- 
+1.7.1
+

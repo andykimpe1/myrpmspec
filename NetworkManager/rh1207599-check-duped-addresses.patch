@@ -1,0 +1,195 @@
+From 68a450f885e5efa7f9c2d0a72c969ba7882c0270 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Thu, 16 Apr 2015 14:50:10 +0200
+Subject: [PATCH 1/2] core: silently ignore duplicates in NMIP[46]Config
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The various nm_ip[46]_config_add_* routines were inconsistent in their
+behavior when trying to add a duplicate item: add_address() and
+add_route() would add it anyway; add_nameserver() and add_wins() would
+g_return_if_fail(); and add_domain() and add_search() would return
+silently. Update to use the "return silently" behavior everywhere.
+
+In particular: if we get an RDNSS message listing the same nameserver
+twice, don't cause a warning. (rh #820752)
+
+Upstream commit cca40524ac108eec7ca0337b02b52f1eb0f37b0c, rebase to RHEL 6.
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ src/nm-ip4-config.c | 18 ++++++++++++++++--
+ src/nm-ip6-config.c | 18 ++++++++++++++++--
+ 2 files changed, 32 insertions(+), 4 deletions(-)
+
+diff --git a/src/nm-ip4-config.c b/src/nm-ip4-config.c
+index c2da64c..533971a 100644
+--- a/src/nm-ip4-config.c
++++ b/src/nm-ip4-config.c
+@@ -153,11 +153,17 @@ nm_ip4_config_add_address_with_label (NMIP4Config  *config,
+                                       const char   *label)
+ {
+ 	NMIP4ConfigPrivate *priv;
++	GSList *iter;
+ 
+ 	g_return_if_fail (NM_IS_IP4_CONFIG (config));
+ 	g_return_if_fail (address != NULL);
+ 
+ 	priv = NM_IP4_CONFIG_GET_PRIVATE (config);
++	for (iter = priv->addresses; iter; iter = g_slist_next (iter)) {
++		if (nm_ip4_address_compare ((NMIP4Address *) iter->data, address))
++			return;
++	}
++
+ 	priv->addresses = g_slist_append (priv->addresses, nm_ip4_address_dup (address));
+ 	priv->address_labels = g_slist_append (priv->address_labels, g_strdup (label));
+ }
+@@ -253,7 +259,8 @@ void nm_ip4_config_add_nameserver (NMIP4Config *config, guint32 nameserver)
+ 		guint32 s = g_array_index (priv->nameservers, guint32, i);
+ 
+ 		/* No dupes */
+-		g_return_if_fail (nameserver != s);
++		if (nameserver == s)
++			return;
+ 	}
+ 
+ 	g_array_append_val (priv->nameservers, nameserver);
+@@ -297,7 +304,8 @@ void nm_ip4_config_add_wins (NMIP4Config *config, guint32 wins)
+ 		guint32 s = g_array_index (priv->wins, guint32, i);
+ 
+ 		/* No dupes */
+-		g_return_if_fail (wins != s);
++		if (wins == s)
++			return;
+ 	}
+ 
+ 	g_array_append_val (priv->wins, wins);
+@@ -344,11 +352,17 @@ void
+ nm_ip4_config_add_route (NMIP4Config *config, NMIP4Route *route)
+ {
+ 	NMIP4ConfigPrivate *priv;
++	GSList *iter;
+ 
+ 	g_return_if_fail (NM_IS_IP4_CONFIG (config));
+ 	g_return_if_fail (route != NULL);
+ 
+ 	priv = NM_IP4_CONFIG_GET_PRIVATE (config);
++	for (iter = priv->routes; iter; iter = g_slist_next (iter)) {
++		if (nm_ip4_route_compare ((NMIP4Route *) iter->data, route))
++			return;
++	}
++
+ 	priv->routes = g_slist_append (priv->routes, nm_ip4_route_dup (route));
+ }
+ 
+diff --git a/src/nm-ip6-config.c b/src/nm-ip6-config.c
+index 042db39..90a98bb 100644
+--- a/src/nm-ip6-config.c
++++ b/src/nm-ip6-config.c
+@@ -136,11 +136,17 @@ nm_ip6_config_add_address (NMIP6Config *config,
+                            NMIP6Address *address)
+ {
+ 	NMIP6ConfigPrivate *priv;
++	GSList *iter;
+ 
+ 	g_return_if_fail (NM_IS_IP6_CONFIG (config));
+ 	g_return_if_fail (address != NULL);
+ 
+ 	priv = NM_IP6_CONFIG_GET_PRIVATE (config);
++	for (iter = priv->addresses; iter; iter = g_slist_next (iter)) {
++		if (nm_ip6_address_compare ((NMIP6Address *) iter->data, address))
++			return;
++	}
++
+ 	priv->addresses = g_slist_append (priv->addresses, nm_ip6_address_dup (address));
+ }
+ 
+@@ -221,8 +227,10 @@ void nm_ip6_config_add_nameserver (NMIP6Config *config, const struct in6_addr *n
+ 
+ 	/* No dupes */
+ 	nameservers = (struct in6_addr *)priv->nameservers->data;
+-	for (i = 0; i < priv->nameservers->len; i++)
+-		g_return_if_fail (IN6_ARE_ADDR_EQUAL (nameserver, &nameservers[i]) == FALSE);
++	for (i = 0; i < priv->nameservers->len; i++) {
++		if (IN6_ARE_ADDR_EQUAL (nameserver, &nameservers[i]))
++			return;
++	}
+ 
+ 	g_array_append_val (priv->nameservers, *nameserver);
+ }
+@@ -268,11 +276,17 @@ void
+ nm_ip6_config_add_route (NMIP6Config *config, NMIP6Route *route)
+ {
+ 	NMIP6ConfigPrivate *priv;
++	GSList *iter;
+ 
+ 	g_return_if_fail (NM_IS_IP6_CONFIG (config));
+ 	g_return_if_fail (route != NULL);
+ 
+ 	priv = NM_IP6_CONFIG_GET_PRIVATE (config);
++	for (iter = priv->routes; iter; iter = g_slist_next (iter)) {
++		if (nm_ip6_route_compare ((NMIP6Route *) iter->data, route))
++			return;
++	}
++
+ 	priv->routes = g_slist_append (priv->routes, nm_ip6_route_dup (route));
+ }
+ 
+-- 
+2.1.0
+
+
+From e2c4dbcf05c410b2bb7def66bff096fcc39874bc Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Thu, 16 Apr 2015 15:47:45 +0200
+Subject: [PATCH 2/2] core: do not compare gateway when comparing addresses
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When address and prefix are the same (no matter what gateway), the addresses
+are equal.
+
+E.g.
+Addresss         Gateway
+2001:db8:242/64  fe80::3e97:eff:fe18:4db2
+2001:db8:242/64  ::
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ libnm-util/nm-setting-ip4-config.c | 3 +--
+ libnm-util/nm-setting-ip6-config.c | 3 +--
+ 2 files changed, 2 insertions(+), 4 deletions(-)
+
+diff --git a/libnm-util/nm-setting-ip4-config.c b/libnm-util/nm-setting-ip4-config.c
+index 6e6d9a9..34fe050 100644
+--- a/libnm-util/nm-setting-ip4-config.c
++++ b/libnm-util/nm-setting-ip4-config.c
+@@ -1149,8 +1149,7 @@ nm_ip4_address_compare (NMIP4Address *address, NMIP4Address *other)
+ 	g_return_val_if_fail (other->refcount > 0, FALSE);
+ 
+ 	if (   address->address != other->address
+-	    || address->prefix != other->prefix
+-	    || address->gateway != other->gateway)
++	    || address->prefix != other->prefix)
+ 		return FALSE;
+ 	return TRUE;
+ }
+diff --git a/libnm-util/nm-setting-ip6-config.c b/libnm-util/nm-setting-ip6-config.c
+index e8af058..6b8b4a8 100644
+--- a/libnm-util/nm-setting-ip6-config.c
++++ b/libnm-util/nm-setting-ip6-config.c
+@@ -911,8 +911,7 @@ nm_ip6_address_compare (NMIP6Address *address, NMIP6Address *other)
+ 	g_return_val_if_fail (other->refcount > 0, FALSE);
+ 
+ 	if (   memcmp (&address->address, &other->address, sizeof (struct in6_addr))
+-	    || address->prefix != other->prefix
+-	    || memcmp (&address->gateway, &other->gateway, sizeof (struct in6_addr)))
++	    || address->prefix != other->prefix)
+ 		return FALSE;
+ 	return TRUE;
+ }
+-- 
+2.1.0
+

@@ -1,0 +1,311 @@
+--- NetworkManager-0.8.1/src/nm-policy.c.orig	2012-06-11 15:49:10.747068968 +0200
++++ NetworkManager-0.8.1/src/nm-policy.c	2012-06-12 10:21:26.987751146 +0200
+@@ -59,11 +59,18 @@ struct NMPolicy {
+ 
+ 	HostnameThread *lookup;
+ 
++	gint reset_retries_id;  /* idle handler for resetting the retries count */
++
+ 	char *orig_hostname; /* hostname at NM start time */
+ 	char *cur_hostname;  /* hostname we want to assign */
+ };
+ 
+-#define INVALID_TAG "invalid"
++#define RETRIES_TAG "autoconnect-retries"
++#define RETRIES_DEFAULT 4
++#define RESET_RETRIES_TIMESTAMP_TAG "reset-retries-timestamp-tag"
++#define RESET_RETRIES_TIMER 300
++
++static void schedule_activate_all (NMPolicy *policy);
+ 
+ static const char *
+ get_connection_id (NMConnection *connection)
+@@ -666,6 +673,38 @@ update_routing_and_dns (NMPolicy *policy
+ 	update_system_hostname (policy, policy->default_device4, policy->default_device6);
+ }
+ 
++static GSList *
++get_all_connections (NMPolicy *policy)
++{
++	GSList *connections;
++ 
++	connections = nm_manager_get_connections (policy->manager, NM_CONNECTION_SCOPE_SYSTEM, FALSE);
++	connections = g_slist_concat (connections, nm_manager_get_connections (policy->manager, NM_CONNECTION_SCOPE_USER, FALSE));
++
++	return connections;
++}
++
++static void
++free_connections_list (GSList *connections)
++{
++	g_slist_foreach (connections, (GFunc) g_object_unref, NULL);
++	g_slist_free (connections);
++}
++
++static void
++set_connection_auto_retries (NMConnection *connection, guint retries)
++{
++	/* add +1 so that the tag still exists if the # retries is 0 */
++	g_object_set_data (G_OBJECT (connection), RETRIES_TAG, GUINT_TO_POINTER (retries + 1));
++}
++
++static guint32
++get_connection_auto_retries (NMConnection *connection)
++{
++	/* subtract 1 to handle the +1 from set_connection_auto_retries() */
++	return GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (connection), RETRIES_TAG)) - 1;
++}
++
+ typedef struct {
+ 	NMPolicy *policy;
+ 	NMDevice *device;
+@@ -696,13 +735,13 @@ auto_activate_device (gpointer user_data
+ 	if (nm_manager_auto_user_connections_allowed (policy->manager))
+ 		connections = g_slist_concat (connections, nm_manager_get_connections (policy->manager, NM_CONNECTION_SCOPE_USER, TRUE));
+ 
+-	/* Remove connections that are in the invalid list. */
++	/* Remove connections that shouldn't be auto-activated */
+ 	iter = connections;
+ 	while (iter) {
+ 		NMConnection *iter_connection = NM_CONNECTION (iter->data);
+ 		GSList *next = g_slist_next (iter);
+ 
+-		if (g_object_get_data (G_OBJECT (iter_connection), INVALID_TAG)) {
++		if (get_connection_auto_retries (iter_connection) == 0) {
+ 			connections = g_slist_remove_link (connections, iter);
+ 			g_object_unref (iter_connection);
+ 			g_slist_free (iter);
+@@ -714,6 +753,8 @@ auto_activate_device (gpointer user_data
+ 	if (best_connection) {
+ 		GError *error = NULL;
+ 
++		nm_log_info (LOGD_DEVICE, "Auto-activating connection '%s'.",
++		             nm_connection_get_id (best_connection));
+ 		if (!nm_manager_activate_connection (policy->manager,
+ 		                                     best_connection,
+ 		                                     specific_object,
+@@ -726,7 +767,9 @@ auto_activate_device (gpointer user_data
+ 			                      NM_DEVICE_INTERFACE_ERROR,
+ 			                      NM_DEVICE_INTERFACE_ERROR_CONNECTION_ACTIVATING)) {
+ 				nm_log_info (LOGD_DEVICE, "Connection '%s' auto-activation failed: (%d) %s",
+-				             nm_setting_connection_get_id (s_con), error->code, error->message);
++				             nm_setting_connection_get_id (s_con),
++				             error ? error->code : -1,
++				             error ? error->message : "(none)");
+ 			}
+ 			g_error_free (error);
+ 		}
+@@ -775,21 +818,32 @@ hostname_changed (NMManager *manager, GP
+ }
+ 
+ static void
++reset_retries_all (GSList *connections, NMDevice *device)
++{
++	GSList *iter;
++	GError *error = NULL;
++
++	for (iter = connections; iter; iter = g_slist_next (iter)) {
++		if (!device || nm_device_interface_check_connection_compatible (NM_DEVICE_INTERFACE (device), iter->data, &error))
++			set_connection_auto_retries (NM_CONNECTION (iter->data), RETRIES_DEFAULT);
++		g_clear_error (&error);
++	}
++}
++
++static void
+ sleeping_changed (NMManager *manager, GParamSpec *pspec, gpointer user_data)
+ {
++	NMPolicy *policy = (NMPolicy *) user_data;
+ 	gboolean sleeping = FALSE, enabled = FALSE;
+-	GSList *connections, *iter;
+ 
+ 	g_object_get (G_OBJECT (manager), NM_MANAGER_SLEEPING, &sleeping, NULL);
+ 	g_object_get (G_OBJECT (manager), NM_MANAGER_NETWORKING_ENABLED, &enabled, NULL);
+ 
+-	/* Clear the invalid flag on all connections so they'll get retried on wakeup */
++	/* Reset retries on all connections so they'll get checked on wakeup */
+ 	if (sleeping || !enabled) {
+-		connections = nm_manager_get_connections (manager, NM_CONNECTION_SCOPE_SYSTEM, FALSE);
+-		connections = g_slist_concat (connections, nm_manager_get_connections (manager, NM_CONNECTION_SCOPE_USER, FALSE));
+-		for (iter = connections; iter; iter = g_slist_next (iter))
+-			g_object_set_data (G_OBJECT (iter->data), INVALID_TAG, NULL);
+-		g_slist_free (connections);
++		GSList *connections = get_all_connections (policy);
++		reset_retries_all (connections, NULL);
++		free_connections_list (connections);
+ 	}
+ }
+ 
+@@ -825,6 +879,45 @@ schedule_activate_check (NMPolicy *polic
+ 	policy->pending_activation_checks = g_slist_append (policy->pending_activation_checks, data);
+ }
+ 
++static gboolean
++reset_connections_retries (gpointer user_data)
++{
++	NMPolicy *policy = (NMPolicy *) user_data;
++	GSList *connections, *iter;
++	time_t con_stamp, min_stamp, now;
++	gboolean changed = FALSE;
++
++	policy->reset_retries_id = 0;
++
++	min_stamp = now = time (NULL);
++
++	connections = get_all_connections (policy);
++	for (iter = connections; iter; iter = g_slist_next (iter)) {
++		con_stamp = GPOINTER_TO_SIZE (g_object_get_data (G_OBJECT (iter->data), RESET_RETRIES_TIMESTAMP_TAG));
++		if (con_stamp == 0)
++			continue;
++		if (con_stamp + RESET_RETRIES_TIMER <= now) {
++			set_connection_auto_retries (NM_CONNECTION (iter->data), RETRIES_DEFAULT);
++			g_object_set_data (G_OBJECT (iter->data), RESET_RETRIES_TIMESTAMP_TAG, GSIZE_TO_POINTER (0));
++			changed = TRUE;
++			continue;
++		}
++		if (con_stamp < min_stamp)
++			min_stamp = con_stamp;
++	}
++	free_connections_list (connections);
++
++	/* Schedule the handler again if there are some stamps left */
++	if (min_stamp != now)
++		policy->reset_retries_id = g_timeout_add_seconds (RESET_RETRIES_TIMER - (now - min_stamp), reset_connections_retries, policy);
++
++	/* If anything changed, try to activate the newly re-enabled connections */
++	if (changed)
++		schedule_activate_all (policy);
++
++	return FALSE;
++}
++
+ static NMConnection *
+ get_device_connection (NMDevice *device)
+ {
+@@ -852,17 +945,41 @@ device_state_changed (NMDevice *device,
+ 		/* Mark the connection invalid if it failed during activation so that
+ 		 * it doesn't get automatically chosen over and over and over again.
+ 		 */
+-		if (connection && IS_ACTIVATING_STATE (old_state)) {
+-			g_object_set_data (G_OBJECT (connection), INVALID_TAG, GUINT_TO_POINTER (TRUE));
+-			nm_log_info (LOGD_DEVICE, "Marking connection '%s' invalid.", get_connection_id (connection));
++		if (   connection
++		    && old_state >= NM_DEVICE_STATE_PREPARE
++		    && old_state <= NM_DEVICE_STATE_ACTIVATED) {
++			guint32 tries = get_connection_auto_retries (connection);
++
++			if (reason == NM_DEVICE_STATE_REASON_NO_SECRETS) {
++				/* If the connection couldn't get the secrets it needed (ex because
++				 * the user canceled, or no secrets exist), there's no point in
++				 * automatically retrying because it's just going to fail anyway.
++				 */
++				set_connection_auto_retries (connection, 0);
++			} else if (tries > 0) {
++				/* Otherwise if it's a random failure, just decrease the number
++				 * of automatic retries so that the connection gets tried again
++				 * if it still has a retry count.
++				 */
++				set_connection_auto_retries (connection, tries - 1);
++			}
++
++			if (get_connection_auto_retries (connection) == 0) {
++				nm_log_info (LOGD_DEVICE, "Marking connection '%s' invalid.", get_connection_id (connection));
++				/* Schedule a handler to reset retries count */
++				g_object_set_data (G_OBJECT (connection), RESET_RETRIES_TIMESTAMP_TAG, GSIZE_TO_POINTER ((gsize) time (NULL)));
++				if (!policy->reset_retries_id)
++					policy->reset_retries_id = g_timeout_add_seconds (RESET_RETRIES_TIMER, reset_connections_retries, policy);
++			}
++
+ 			nm_connection_clear_secrets (connection);
+ 		}
+ 		schedule_activate_check (policy, device, 3);
+ 		break;
+ 	case NM_DEVICE_STATE_ACTIVATED:
+ 		if (connection) {
+-			/* Clear the invalid tag on the connection */
+-			g_object_set_data (G_OBJECT (connection), INVALID_TAG, NULL);
++			/* Reset auto retries back to default since connection was successful */
++			set_connection_auto_retries (connection, RETRIES_DEFAULT);
+ 
+ 			/* And clear secrets so they will always be requested from the
+ 			 * settings service when the next connection is made.
+@@ -875,6 +992,14 @@ device_state_changed (NMDevice *device,
+ 	case NM_DEVICE_STATE_UNMANAGED:
+ 	case NM_DEVICE_STATE_UNAVAILABLE:
+ 	case NM_DEVICE_STATE_DISCONNECTED:
++		/* Reset RETRIES_TAG when carrier on. If cable was unplugged
++		 * and plugged again, we should try to reconnect */
++		if (reason == NM_DEVICE_STATE_REASON_CARRIER && old_state == NM_DEVICE_STATE_UNAVAILABLE) {
++			GSList *connections = get_all_connections (policy);
++			reset_retries_all (connections, device);
++			free_connections_list (connections);
++		}
++
+ 		update_routing_and_dns (policy, FALSE);
+ 		schedule_activate_check (policy, device, 0);
+ 		break;
+@@ -1003,7 +1128,15 @@ connections_added (NMManager *manager,
+                    NMConnectionScope scope,
+                    gpointer user_data)
+ {
+-	schedule_activate_all ((NMPolicy *) user_data);
++	NMPolicy *policy = (NMPolicy *) user_data;
++	GSList *connections;
++
++	connections = get_all_connections (policy);
++	reset_retries_all (connections, NULL);
++	free_connections_list (connections);
++
++	schedule_activate_all (policy);
++
+ }
+ 
+ static void
+@@ -1012,6 +1145,7 @@ connection_added (NMManager *manager,
+                   NMConnectionScope scope,
+                   gpointer user_data)
+ {
++	set_connection_auto_retries (connection, RETRIES_DEFAULT);
+ 	schedule_activate_all ((NMPolicy *) user_data);
+ }
+ 
+@@ -1021,8 +1155,8 @@ connection_updated (NMManager *manager,
+                     NMConnectionScope scope,
+                     gpointer user_data)
+ {
+-	/* Clear the invalid tag on the connection if it got updated. */
+-	g_object_set_data (G_OBJECT (connection), INVALID_TAG, NULL);
++	/* Reset auto retries back to default since connection was updated */
++	set_connection_auto_retries (connection, RETRIES_DEFAULT);
+ 
+ 	schedule_activate_all ((NMPolicy *) user_data);
+ }
+@@ -1072,6 +1206,7 @@ nm_policy_new (NMManager *manager, NMVPN
+ 	static gboolean initialized = FALSE;
+ 	gulong id;
+ 	char hostname[HOST_NAME_MAX + 2];
++	GSList *connections;
+ 
+ 	g_return_val_if_fail (NM_IS_MANAGER (manager), NULL);
+ 	g_return_val_if_fail (initialized == FALSE, NULL);
+@@ -1144,6 +1279,11 @@ nm_policy_new (NMManager *manager, NMVPN
+ 	                       G_CALLBACK (manager_user_permissions_changed), policy);
+ 	policy->signal_ids = g_slist_append (policy->signal_ids, (gpointer) id);
+ 
++	/* Initialize connections' auto-retries */
++	connections = get_all_connections (policy);
++	reset_retries_all (connections, NULL);
++	free_connections_list (connections);
++
+ 	return policy;
+ }
+ 
+@@ -1186,6 +1326,9 @@ nm_policy_destroy (NMPolicy *policy)
+ 	}
+ 	g_slist_free (policy->dev_signal_ids);
+ 
++	if (policy->reset_retries_id)
++		g_source_remove (policy->reset_retries_id);
++
+ 	g_free (policy->orig_hostname);
+ 	g_free (policy->cur_hostname);
+ 

@@ -1,0 +1,5895 @@
+commit 00e8f135ee661a504af9d4fcc07190ec8a79ba22
+Author: Dan Williams <dcbw@redhat.com>
+Date:   Mon Mar 5 01:27:52 2012 -0600
+
+    initial vlan stuff
+
+diff --git a/cli/src/connections.c b/cli/src/connections.c
+index c14d943..857fb47 100644
+--- a/cli/src/connections.c
++++ b/cli/src/connections.c
+@@ -40,6 +40,7 @@
+ #include <nm-setting-olpc-mesh.h>
+ #include <nm-setting-infiniband.h>
+ #include <nm-device-bond.h>
++#include <nm-device-vlan.h>
+ #include <nm-device-ethernet.h>
+ #include <nm-device-wifi.h>
+ #include <nm-gsm-device.h>
+@@ -112,6 +113,7 @@ static NmcOutputField nmc_fields_settings_names[] = {
+ 	SETTING_FIELD (NM_SETTING_VPN_SETTING_NAME, 0),                   /* 14 */
+ 	SETTING_FIELD (NM_SETTING_INFINIBAND_SETTING_NAME, 0),            /* 15 */
+ 	SETTING_FIELD (NM_SETTING_BOND_SETTING_NAME, 0),                  /* 16 */
++	SETTING_FIELD (NM_SETTING_VLAN_SETTING_NAME, 0),                  /* 17 */
+ 	{NULL, NULL, 0, NULL, 0}
+ };
+ #define NMC_FIELDS_SETTINGS_NAMES_ALL    NM_SETTING_CONNECTION_SETTING_NAME","\
+@@ -130,7 +132,8 @@ static NmcOutputField nmc_fields_settings_names[] = {
+                                          NM_SETTING_OLPC_MESH_SETTING_NAME","\
+                                          NM_SETTING_VPN_SETTING_NAME"," \
+                                          NM_SETTING_INFINIBAND_SETTING_NAME"," \
+-                                         NM_SETTING_BOND_SETTING_NAME
++                                         NM_SETTING_BOND_SETTING_NAME"," \
++                                         NM_SETTING_VLAN_SETTING_NAME
+ 
+ 
+ typedef struct {
+@@ -378,6 +381,15 @@ nmc_connection_detail (NMConnection *connection, NmCli *nmc)
+ 				continue;
+ 			}
+ 		}
++
++		if (!strcasecmp (nmc_fields_settings_names[section_idx].name, nmc_fields_settings_names[17].name)) {
++			setting = nm_connection_get_setting (connection, NM_TYPE_SETTING_VLAN);
++			if (setting) {
++				setting_vlan_details (setting, nmc);
++				was_output = TRUE;
++				continue;
++			}
++		}
+ 	}
+ 
+ 	if (print_settings_array)
+@@ -994,6 +1006,47 @@ check_bond_compatible (NMDeviceBond *device, NMConnection *connection, GError **
+ }
+ 
+ static gboolean
++check_vlan_compatible (NMDeviceVlan *device, NMConnection *connection, GError **error)
++{
++	NMSettingConnection *s_con;
++	NMSettingVlan *s_vlan;
++	const char *ctype, *dev_iface_name, *vlan_iface_name;
++
++	s_con = nm_connection_get_setting_connection (connection);
++	g_assert (s_con);
++
++	ctype = nm_setting_connection_get_connection_type (s_con);
++	if (strcmp (ctype, NM_SETTING_VLAN_SETTING_NAME) != 0) {
++		g_set_error (error, 0, 0,
++		             "The connection was not an VLAN connection.");
++		return FALSE;
++	}
++
++	s_vlan = nm_connection_get_setting_vlan (connection);
++	if (!s_vlan) {
++		g_set_error (error, 0, 0,
++		             "The connection was not a valid VLAN connection.");
++		return FALSE;
++	}
++
++	if (nm_setting_vlan_get_id (s_vlan) != nm_device_vlan_get_vlan_id (NM_DEVICE_VLAN (device))) {
++		g_set_error (error, 0, 0,
++		             "The connection did not match the device's VLAN ID.");
++		return FALSE;
++	}
++
++	dev_iface_name = nm_device_get_iface (NM_DEVICE (device));
++	vlan_iface_name = nm_setting_vlan_get_interface_name (s_vlan);
++	if (vlan_iface_name && g_strcmp0 (dev_iface_name, vlan_iface_name) != 0) {
++		g_set_error (error, 0, 0,
++		             "The connection's and device's interface names did not match.");
++		return FALSE;
++	}
++
++	return TRUE;
++}
++
++static gboolean
+ nm_device_is_connection_compatible (NMDevice *device, NMConnection *connection, GError **error)
+ {
+ 	g_return_val_if_fail (NM_IS_DEVICE (device), FALSE);
+@@ -1011,6 +1064,8 @@ nm_device_is_connection_compatible (NMDevice *device, NMConnection *connection,
+ 		return check_infiniband_compatible (NM_DEVICE_INFINIBAND (device), connection, error);
+ 	else if (NM_IS_DEVICE_BOND (device))
+ 		return check_bond_compatible (NM_DEVICE_BOND (device), connection, error);
++	else if (NM_IS_DEVICE_VLAN (device))
++		return check_vlan_compatible (NM_DEVICE_VLAN (device), connection, error);
+ 
+ 	g_set_error (error, 0, 0, "unhandled device type '%s'", G_OBJECT_TYPE_NAME (device));
+ 	return FALSE;
+@@ -1525,7 +1580,8 @@ do_connection_up (NmCli *nmc, int argc, char **argv)
+ 	g_assert (s_con);
+ 	con_type = nm_setting_connection_get_connection_type (s_con);
+ 
+-	if (nm_connection_is_type (connection, NM_SETTING_BOND_SETTING_NAME))
++	if (   nm_connection_is_type (connection, NM_SETTING_BOND_SETTING_NAME)
++	    || nm_connection_is_type (connection, NM_SETTING_VLAN_SETTING_NAME))
+ 		is_virtual = TRUE;
+ 
+ 	device_found = find_device_for_connection (nmc, connection, iface, ap, &device, &spec_object, &error);
+diff --git a/cli/src/devices.c b/cli/src/devices.c
+index e8e557a..f10bd07 100644
+--- a/cli/src/devices.c
++++ b/cli/src/devices.c
+@@ -41,6 +41,7 @@
+ //#include <nm-device-olpc-mesh.h>
+ #include <nm-device-infiniband.h>
+ #include <nm-device-bond.h>
++#include <nm-device-vlan.h>
+ #include <nm-utils.h>
+ #include <nm-setting-ip4-config.h>
+ #include <nm-setting-ip6-config.h>
+@@ -55,6 +56,7 @@
+ #include <nm-setting-olpc-mesh.h>
+ #include <nm-setting-infiniband.h>
+ #include <nm-setting-bond.h>
++#include <nm-setting-vlan.h>
+ 
+ #include "utils.h"
+ #include "devices.h"
+@@ -271,6 +273,8 @@ get_device_type (NMDevice * device)
+ 		return NM_SETTING_INFINIBAND_SETTING_NAME;
+ 	else if (NM_IS_DEVICE_BOND (device))
+ 		return NM_SETTING_BOND_SETTING_NAME;
++	else if (NM_IS_DEVICE_VLAN (device))
++		return NM_SETTING_VLAN_SETTING_NAME;
+ 	else
+ 		return _("Unknown");
+ }
+@@ -532,6 +536,8 @@ show_device_info (gpointer data, gpointer user_data)
+ 				hwaddr = nm_device_infiniband_get_hw_address (NM_DEVICE_INFINIBAND (device));
+ 			else if (NM_IS_DEVICE_BOND (device))
+ 				hwaddr = nm_device_bond_get_hw_address (NM_DEVICE_BOND (device));
++			else if (NM_IS_DEVICE_VLAN (device))
++				hwaddr = nm_device_vlan_get_hw_address (NM_DEVICE_VLAN (device));
+ 
+ 			nmc->allowed_fields[0].value = nmc_fields_dev_list_sections[0].name;  /* "GENERAL"*/
+ 			nmc->allowed_fields[1].value = nm_device_get_iface (device);
+diff --git a/cli/src/settings.c b/cli/src/settings.c
+index 3d6699c..32208d6 100644
+--- a/cli/src/settings.c
++++ b/cli/src/settings.c
+@@ -434,6 +434,26 @@ static NmcOutputField nmc_fields_setting_bond[] = {
+                                         NM_SETTING_BOND_OPTIONS
+ #define NMC_FIELDS_SETTING_BOND_COMMON  NMC_FIELDS_SETTING_BOND_ALL
+ 
++/* Available fields for NM_SETTING_VLAN_SETTING_NAME */
++static NmcOutputField nmc_fields_setting_vlan[] = {
++	SETTING_FIELD ("name",  6),                                        /* 0 */
++	SETTING_FIELD (NM_SETTING_VLAN_INTERFACE_NAME, 15),                /* 1 */
++	SETTING_FIELD (NM_SETTING_VLAN_PARENT, 8),                         /* 2 */
++	SETTING_FIELD (NM_SETTING_VLAN_ID, 6),                             /* 3 */
++	SETTING_FIELD (NM_SETTING_VLAN_FLAGS, 45),                         /* 4 */
++	SETTING_FIELD (NM_SETTING_VLAN_INGRESS_PRIORITY_MAP, 22),          /* 5 */
++	SETTING_FIELD (NM_SETTING_VLAN_EGRESS_PRIORITY_MAP, 22),           /* 6 */
++	{NULL, NULL, 0, NULL, 0}
++};
++#define NMC_FIELDS_SETTING_VLAN_ALL     "name"","\
++                                        NM_SETTING_VLAN_INTERFACE_NAME","\
++                                        NM_SETTING_VLAN_PARENT","\
++                                        NM_SETTING_VLAN_ID","\
++                                        NM_SETTING_VLAN_FLAGS","\
++                                        NM_SETTING_VLAN_INGRESS_PRIORITY_MAP","\
++                                        NM_SETTING_VLAN_EGRESS_PRIORITY_MAP
++#define NMC_FIELDS_SETTING_VLAN_COMMON  NMC_FIELDS_SETTING_VLAN_ALL
++
+ 
+ static char *
+ wep_key_type_to_string (NMWepKeyType type)
+@@ -511,6 +531,52 @@ allowed_bands_to_string (guint32 bands)
+ 	return g_string_free (band_str, FALSE);
+ }
+ 
++static char *
++vlan_flags_to_string (guint32 flags)
++{
++	GString *flag_str;
++
++	if (flags == 0)
++		return g_strdup (_("0 (NONE)"));
++
++	flag_str = g_string_new (NULL);
++	g_string_printf (flag_str, "%d (", flags);
++
++	if (flags & NM_VLAN_FLAG_REORDER_HEADERS)
++		g_string_append (flag_str, _("REORDER_HEADERS, "));
++	if (flags & NM_VLAN_FLAG_GVRP)
++		g_string_append (flag_str, _("GVRP, "));
++	if (flags & NM_VLAN_FLAG_LOOSE_BINDING)
++		g_string_append (flag_str, _("LOOSE_BINDING, "));
++
++	if (flag_str->str[flag_str->len-1] == '(')
++		g_string_assign (flag_str, _("unknown"));
++	else
++		g_string_truncate (flag_str, flag_str->len-2);  /* chop off trailing ', ' */
++
++	g_string_append_c (flag_str, ')');
++
++	return g_string_free (flag_str, FALSE);
++}
++
++static char *
++vlan_priorities_to_string (NMSettingVlan *s_vlan, NMVlanPriorityMap map)
++{
++	GString *priorities;
++	int i;
++
++	priorities = g_string_new (NULL);
++	for (i = 0; i < nm_setting_vlan_get_num_priorities (s_vlan, map); i++) {
++		guint32 from, to;
++
++		nm_setting_vlan_get_priority (s_vlan, map, i, &from, &to);
++		g_string_append_printf (priorities, "%d:%d,", from, to);
++	}
++	g_string_truncate (priorities, priorities->len-1);  /* chop off trailing ',' */
++
++	return g_string_free (priorities, FALSE);
++}
++
+ 
+ gboolean
+ setting_connection_details (NMSetting *setting, NmCli *nmc)
+@@ -1490,3 +1556,44 @@ setting_bond_details (NMSetting *setting, NmCli *nmc)
+ 	return TRUE;
+ }
+ 
++gboolean
++setting_vlan_details (NMSetting *setting, NmCli *nmc)
++{
++	NMSettingVlan *s_vlan;
++	char *vlan_id_str, *vlan_flags_str, *vlan_ingress_prio_str, *vlan_egress_prio_str;
++	guint32 mode_flag = (nmc->print_output == NMC_PRINT_PRETTY) ? NMC_PF_FLAG_PRETTY : (nmc->print_output == NMC_PRINT_TERSE) ? NMC_PF_FLAG_TERSE : 0;
++	guint32 multiline_flag = nmc->multiline_output ? NMC_PF_FLAG_MULTILINE : 0;
++	guint32 escape_flag = nmc->escape_values ? NMC_PF_FLAG_ESCAPE : 0;
++
++	g_return_val_if_fail (NM_IS_SETTING_VLAN (setting), FALSE);
++	s_vlan = (NMSettingVlan *) setting;
++
++	nmc->allowed_fields = nmc_fields_setting_vlan;
++	nmc->print_fields.indices = parse_output_fields (NMC_FIELDS_SETTING_VLAN_ALL, nmc->allowed_fields, NULL);
++	nmc->print_fields.flags = multiline_flag | mode_flag | escape_flag | NMC_PF_FLAG_FIELD_NAMES;
++	print_fields (nmc->print_fields, nmc->allowed_fields);  /* Print field names */
++
++	vlan_id_str = g_strdup_printf ("%d", nm_setting_vlan_get_id (s_vlan));
++	vlan_flags_str = vlan_flags_to_string (nm_setting_vlan_get_flags (s_vlan));
++	vlan_ingress_prio_str = vlan_priorities_to_string (s_vlan, NM_VLAN_INGRESS_MAP);
++	vlan_egress_prio_str = vlan_priorities_to_string (s_vlan, NM_VLAN_EGRESS_MAP);
++
++	nmc->allowed_fields[0].value = NM_SETTING_VLAN_SETTING_NAME;
++	nmc->allowed_fields[1].value = nm_setting_vlan_get_interface_name (s_vlan);
++	nmc->allowed_fields[2].value = nm_setting_vlan_get_parent (s_vlan);
++	nmc->allowed_fields[3].value = vlan_id_str;
++	nmc->allowed_fields[4].value = vlan_flags_str;
++	nmc->allowed_fields[5].value = vlan_ingress_prio_str;
++	nmc->allowed_fields[6].value = vlan_egress_prio_str;
++
++	nmc->print_fields.flags = multiline_flag | mode_flag | escape_flag | NMC_PF_FLAG_SECTION_PREFIX;
++	print_fields (nmc->print_fields, nmc->allowed_fields); /* Print values */
++
++	g_free (vlan_id_str);
++	g_free (vlan_flags_str);
++	g_free (vlan_ingress_prio_str);
++	g_free (vlan_egress_prio_str);
++
++	return TRUE;
++}
++
+diff --git a/cli/src/settings.h b/cli/src/settings.h
+index 590005e..e7ba3df 100644
+--- a/cli/src/settings.h
++++ b/cli/src/settings.h
+@@ -37,6 +37,7 @@
+ #include <nm-setting-vpn.h>
+ #include <nm-setting-infiniband.h>
+ #include <nm-setting-bond.h>
++#include <nm-setting-vlan.h>
+ 
+ #include "nmcli.h"
+ #include "utils.h"
+@@ -59,5 +60,6 @@ gboolean setting_olpc_mesh_details (NMSetting *setting, NmCli *nmc);
+ gboolean setting_vpn_details (NMSetting *setting, NmCli *nmc);
+ gboolean setting_infiniband_details (NMSetting *setting, NmCli *nmc);
+ gboolean setting_bond_details (NMSetting *setting, NmCli *nmc);
++gboolean setting_vlan_details (NMSetting *setting, NmCli *nmc);
+ 
+ #endif /* NMC_SETTINGS_H */
+diff --git a/configure.ac b/configure.ac
+index 3217734..9adafb5 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -241,6 +241,7 @@ PKG_CHECK_MODULES(LIBNL, libnl-1 >= 1.0-pre8)
+ AC_SUBST(LIBNL_CFLAGS)
+ AC_SUBST(LIBNL_LIBS)
+ NM_LIBNL_CHECK
++AC_DEFINE(HAVE_LIBNL1, 1, [Define if you have libnl1])
+ 
+ PKG_CHECK_MODULES(UUID, uuid)
+ AC_SUBST(UUID_CFLAGS)
+diff --git a/docs/generate-settings-spec.c b/docs/generate-settings-spec.c
+index 95dcc24..6c81913 100644
+--- a/docs/generate-settings-spec.c
++++ b/docs/generate-settings-spec.c
+@@ -43,6 +43,7 @@
+ #include <nm-setting-ppp.h>
+ #include <nm-setting-pppoe.h>
+ #include <nm-setting-serial.h>
++#include <nm-setting-vlan.h>
+ #include <nm-setting-vpn.h>
+ #include <nm-setting-wired.h>
+ #include <nm-setting-wireless.h>
+@@ -67,6 +68,7 @@ static SettingNewFunc funcs[] = {
+ 	nm_setting_pppoe_new,
+ 	nm_setting_serial_new,
+ 	nm_setting_vpn_new,
++	nm_setting_vlan_new,
+ 	nm_setting_wired_new,
+ 	nm_setting_wireless_new,
+ 	nm_setting_wireless_security_new,
+diff --git a/docs/libnm-glib/Makefile.am b/docs/libnm-glib/Makefile.am
+index 19e9968..a419256 100644
+--- a/docs/libnm-glib/Makefile.am
++++ b/docs/libnm-glib/Makefile.am
+@@ -45,6 +45,7 @@ IGNORE_HFILES= \
+ 	nm-device-ethernet-bindings.h \
+ 	nm-device-wifi-bindings.h \
+ 	nm-device-infiniband-bindings.h \
++	nm-device-vlan-bindings.h \
+ 	nm-dhcp4-config-bindings.h \
+ 	nm-dhcp6-config-bindings.h \
+ 	nm-exported-connection-bindings.h \
+diff --git a/docs/libnm-glib/libnm-glib-docs.sgml b/docs/libnm-glib/libnm-glib-docs.sgml
+index 4d7a16f..47de919 100644
+--- a/docs/libnm-glib/libnm-glib-docs.sgml
++++ b/docs/libnm-glib/libnm-glib-docs.sgml
+@@ -24,6 +24,7 @@
+     <xi:include href="xml/nm-device-bond.xml"/>
+     <xi:include href="xml/nm-device-bt.xml"/>
+     <xi:include href="xml/nm-device-infiniband.xml"/>
++    <xi:include href="xml/nm-device-vlan.xml"/>
+     <xi:include href="xml/nm-access-point.xml"/>
+     <xi:include href="xml/nm-ip4-config.xml"/>
+     <xi:include href="xml/nm-ip6-config.xml"/>
+diff --git a/docs/libnm-util/libnm-util-docs.sgml b/docs/libnm-util/libnm-util-docs.sgml
+index bbf18f2..9dd3c68 100644
+--- a/docs/libnm-util/libnm-util-docs.sgml
++++ b/docs/libnm-util/libnm-util-docs.sgml
+@@ -34,6 +34,7 @@
+     <xi:include href="xml/nm-setting-ip6-config.xml"/>
+     <xi:include href="xml/nm-setting-ppp.xml"/>
+     <xi:include href="xml/nm-setting-pppoe.xml"/>
++    <xi:include href="xml/nm-setting-vlan.xml"/>
+     <xi:include href="xml/nm-setting-vpn.xml"/>
+     <xi:include href="xml/nm-utils.xml"/>
+ 
+diff --git a/docs/libnm-glib/tmpl/nm-device-vlan.sgml b/docs/libnm-glib/tmpl/nm-device-vlan.sgml
+new file mode 100644
+index 0000000..bdd058e
+--- /dev/null
++++ b/docs/libnm-glib/tmpl/nm-device-vlan.sgml
+@@ -0,0 +1,116 @@
++<!-- ##### SECTION Title ##### -->
++NMDeviceVlan
++
++<!-- ##### SECTION Short_Description ##### -->
++
++
++<!-- ##### SECTION Long_Description ##### -->
++<para>
++
++</para>
++
++
++<!-- ##### SECTION See_Also ##### -->
++<para>
++
++</para>
++
++
++<!-- ##### SECTION Stability_Level ##### -->
++
++
++<!-- ##### SECTION Image ##### -->
++
++
++<!-- ##### STRUCT NMDeviceVlan ##### -->
++<para>
++
++</para>
++
++
++<!-- ##### ARG NMDeviceVlan:carrier ##### -->
++<para>
++
++</para>
++
++<!-- ##### ARG NMDeviceVlan:hw-address ##### -->
++<para>
++
++</para>
++
++<!-- ##### ARG NMDeviceVlan:vlan-id ##### -->
++<para>
++
++</para>
++
++<!-- ##### STRUCT NMDeviceVlanClass ##### -->
++<para>
++
++</para>
++
++@parent: 
++@_reserved1: 
++@_reserved2: 
++@_reserved3: 
++@_reserved4: 
++@_reserved5: 
++@_reserved6: 
++
++<!-- ##### MACRO NM_DEVICE_VLAN_CARRIER ##### -->
++<para>
++
++</para>
++
++
++
++<!-- ##### MACRO NM_DEVICE_VLAN_HW_ADDRESS ##### -->
++<para>
++
++</para>
++
++
++
++<!-- ##### MACRO NM_DEVICE_VLAN_VLAN_ID ##### -->
++<para>
++
++</para>
++
++
++
++<!-- ##### FUNCTION nm_device_vlan_get_carrier ##### -->
++<para>
++
++</para>
++
++@device: 
++@Returns: 
++
++
++<!-- ##### FUNCTION nm_device_vlan_get_hw_address ##### -->
++<para>
++
++</para>
++
++@device: 
++@Returns: 
++
++
++<!-- ##### FUNCTION nm_device_vlan_get_vlan_id ##### -->
++<para>
++
++</para>
++
++@device: 
++@Returns: 
++
++
++<!-- ##### FUNCTION nm_device_vlan_new ##### -->
++<para>
++
++</para>
++
++@connection: 
++@path: 
++@Returns: 
++
++
+diff --git a/docs/libnm-glib/libnm-glib-sections.txt b/docs/libnm-glib/libnm-glib-sections.txt
+index 6171547..7ef3384 100644
+--- a/docs/libnm-glib/libnm-glib-sections.txt
++++ b/docs/libnm-glib/libnm-glib-sections.txt
+@@ -103,6 +103,28 @@ NM_SERIAL_DEVICE_GET_CLASS
+ </SECTION>
+ 
+ <SECTION>
++<FILE>nm-device-vlan</FILE>
++<TITLE>NMDeviceVlan</TITLE>
++NMDeviceVlan
++NMDeviceVlanClass
++NM_DEVICE_VLAN_CARRIER
++NM_DEVICE_VLAN_HW_ADDRESS
++NM_DEVICE_VLAN_VLAN_ID
++nm_device_vlan_get_carrier
++nm_device_vlan_get_hw_address
++nm_device_vlan_get_vlan_id
++nm_device_vlan_new
++<SUBSECTION Standard>
++NM_DEVICE_VLAN
++NM_DEVICE_VLAN_CLASS
++NM_DEVICE_VLAN_GET_CLASS
++NM_IS_DEVICE_VLAN
++NM_IS_DEVICE_VLAN_CLASS
++NM_TYPE_DEVICE_VLAN
++nm_device_vlan_get_type
++</SECTION>
++
++<SECTION>
+ <FILE>nm-device-wifi</FILE>
+ <TITLE>NMDeviceWifi</TITLE>
+ NM_DEVICE_WIFI_HW_ADDRESS
+diff --git a/include/NetworkManager.h b/include/NetworkManager.h
+index 1852997..6be0bed 100644
+--- a/include/NetworkManager.h
++++ b/include/NetworkManager.h
+@@ -45,6 +45,7 @@
+ #define NM_DBUS_INTERFACE_DHCP6_CONFIG      NM_DBUS_INTERFACE ".DHCP6Config"
+ #define NM_DBUS_INTERFACE_DEVICE_INFINIBAND NM_DBUS_INTERFACE_DEVICE ".Infiniband"
+ #define NM_DBUS_INTERFACE_DEVICE_BOND       NM_DBUS_INTERFACE_DEVICE ".Bond"
++#define NM_DBUS_INTERFACE_DEVICE_VLAN       NM_DBUS_INTERFACE_DEVICE ".Vlan"
+ 
+ 
+ #define NM_DBUS_SERVICE_USER_SETTINGS     "org.freedesktop.NetworkManagerUserSettings"
+@@ -85,6 +86,7 @@ typedef enum NMDeviceType
+ 	NM_DEVICE_TYPE_OLPC_MESH,
+ 	NM_DEVICE_TYPE_INFINIBAND = 9,
+ 	NM_DEVICE_TYPE_BOND = 10,
++	NM_DEVICE_TYPE_VLAN = 11,
+ } NMDeviceType;
+ 
+ /* DEPRECATED TYPE NAMES */
+diff --git a/introspection/Makefile.am b/introspection/Makefile.am
+index 97b72bd..98d1e08 100644
+--- a/introspection/Makefile.am
++++ b/introspection/Makefile.am
+@@ -12,6 +12,7 @@ EXTRA_DIST = \
+ 	nm-device-gsm.xml \
+ 	nm-device-infiniband.xml \
+ 	nm-device-serial.xml \
++	nm-device-vlan.xml \
+ 	nm-device.xml \
+ 	nm-ip4-config.xml \
+ 	nm-ip6-config.xml \
+diff --git a/introspection/all.xml b/introspection/all.xml
+index 83a7eaf..e192531 100644
+--- a/introspection/all.xml
++++ b/introspection/all.xml
+@@ -37,6 +37,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.</
+ <xi:include href="nm-device-olpc-mesh.xml"/>
+ <xi:include href="nm-device-infiniband.xml"/>
+ <xi:include href="nm-device-bond.xml"/>
++<xi:include href="nm-device-vlan.xml"/>
+ <xi:include href="nm-ip4-config.xml"/>
+ <xi:include href="nm-ip6-config.xml"/>
+ <xi:include href="nm-dhcp4-config.xml"/>
+diff --git a/introspection/nm-device-vlan.xml b/introspection/nm-device-vlan.xml
+new file mode 100644
+index 0000000..54b7bbe
+--- /dev/null
++++ b/introspection/nm-device-vlan.xml
+@@ -0,0 +1,33 @@
++<?xml version="1.0" encoding="UTF-8" ?>
++
++<node name="/" xmlns:tp="http://telepathy.freedesktop.org/wiki/DbusSpec#extensions-v0">
++  <interface name="org.freedesktop.NetworkManager.Device.Vlan">
++
++    <property name="HwAddress" type="s" access="read">
++      <tp:docstring>
++        Hardware address of the device.
++      </tp:docstring>
++    </property>
++
++    <property name="Carrier" type="b" access="read">
++      <tp:docstring>
++        Indicates whether the physical carrier is found (e.g. whether a cable is plugged in or not).
++      </tp:docstring>
++    </property>
++
++    <property name="VlanId" type="u" access="read">
++      <tp:docstring>
++        The VLAN ID of this VLAN interface.
++      </tp:docstring>
++    </property>
++
++    <signal name="PropertiesChanged">
++        <arg name="properties" type="a{sv}" tp:type="String_Variant_Map">
++            <tp:docstring>
++                A dictionary mapping property names to variant boxed values
++            </tp:docstring>
++        </arg>
++    </signal>
++
++  </interface>
++</node>
+diff --git a/introspection/nm-device.xml b/introspection/nm-device.xml
+index cc9cc91..6c70a44 100644
+--- a/introspection/nm-device.xml
++++ b/introspection/nm-device.xml
+@@ -187,6 +187,11 @@
+           The device is a bond master interface.
+         </tp:docstring>
+       </tp:enumvalue>
++      <tp:enumvalue suffix="VLAN" value="11">
++        <tp:docstring>
++          The device is a VLAN interface.
++        </tp:docstring>
++      </tp:enumvalue>
+     </tp:enum>
+ 
+     <tp:flags name="NM_DEVICE_CAP" value-prefix="NM_DEVICE_CAP" type="u">
+diff --git a/libnm-glib/Makefile.am b/libnm-glib/Makefile.am
+index d11428b..a863295 100644
+--- a/libnm-glib/Makefile.am
++++ b/libnm-glib/Makefile.am
+@@ -12,6 +12,7 @@ BUILT_SOURCES = \
+ 	nm-device-wifi-bindings.h \
+ 	nm-device-bt-bindings.h \
+ 	nm-device-bond-bindings.h \
++	nm-device-vlan-bindings.h \
+ 	nm-exported-connection-glue.h \
+ 	nm-exported-connection-bindings.h \
+ 	nm-settings-glue.h \
+@@ -69,6 +70,7 @@ libnminclude_HEADERS = \
+ 	nm-device-wifi.h \
+ 	nm-device-bt.h \
+ 	nm-device-bond.h \
++	nm-device-vlan.h \
+ 	nm-access-point.h \
+ 	nm-ip4-config.h \
+ 	nm-gsm-device.h \
+@@ -104,6 +106,7 @@ libnm_glib_la_SOURCES = \
+ 	nm-device-wifi.c \
+ 	nm-device-bt.c \
+ 	nm-device-bond.c \
++	nm-device-vlan.c \
+ 	nm-access-point.c \
+ 	nm-ip4-config.c \
+ 	nm-gsm-device.c \
+@@ -175,6 +178,9 @@ nm-device-bt-bindings.h: $(top_srcdir)/introspection/nm-device-bt.xml
+ nm-device-bond-bindings.h: $(top_srcdir)/introspection/nm-device-bond.xml
+ 	$(AM_V_GEN) dbus-binding-tool --prefix=nm_device_bond --mode=glib-client --output=$@ $<
+ 
++nm-device-vlan-bindings.h: $(top_srcdir)/introspection/nm-device-vlan.xml
++	$(AM_V_GEN) dbus-binding-tool --prefix=nm_device_vlan --mode=glib-client --output=$@ $<
++
+ nm-access-point-bindings.h: $(top_srcdir)/introspection/nm-access-point.xml
+ 	$(AM_V_GEN) dbus-binding-tool --prefix=nm_access_point --mode=glib-client --output=$@ $<
+ 
+diff --git a/libnm-glib/libnm-glib.ver b/libnm-glib/libnm-glib.ver
+index 18d6b1d..20a070d 100644
+--- a/libnm-glib/libnm-glib.ver
++++ b/libnm-glib/libnm-glib.ver
+@@ -89,6 +89,11 @@ global:
+ 	nm_device_infiniband_get_type;
+ 	nm_device_infiniband_new;
+ 	nm_device_new;
++	nm_device_vlan_get_carrier;
++	nm_device_vlan_get_hw_address;
++	nm_device_vlan_get_type;
++	nm_device_vlan_get_vlan_id;
++	nm_device_vlan_new;
+ 	nm_device_wifi_get_access_point_by_path;
+ 	nm_device_wifi_get_access_points;
+ 	nm_device_wifi_get_active_access_point;
+diff --git a/libnm-glib/nm-device-vlan.c b/libnm-glib/nm-device-vlan.c
+new file mode 100644
+index 0000000..a470dd6
+--- /dev/null
++++ b/libnm-glib/nm-device-vlan.c
+@@ -0,0 +1,307 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/*
++ * libnm_glib -- Access network status & information from glib applications
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301 USA.
++ *
++ * Copyright (C) 2007 - 2008 Novell, Inc.
++ * Copyright (C) 2007 - 2012 Red Hat, Inc.
++ */
++
++#include <config.h>
++#include <string.h>
++#include <netinet/ether.h>
++
++#include <nm-setting-connection.h>
++#include <nm-setting-vlan.h>
++#include <nm-utils.h>
++
++#include "nm-device-vlan.h"
++#include "nm-device-private.h"
++#include "nm-object-private.h"
++
++G_DEFINE_TYPE (NMDeviceVlan, nm_device_vlan, NM_TYPE_DEVICE)
++
++#define NM_DEVICE_VLAN_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_DEVICE_VLAN, NMDeviceVlanPrivate))
++
++typedef struct {
++	DBusGProxy *proxy;
++
++	char *hw_address;
++	gboolean carrier;
++	gboolean carrier_valid;
++	guint vlan_id;
++} NMDeviceVlanPrivate;
++
++enum {
++	PROP_0,
++	PROP_HW_ADDRESS,
++	PROP_CARRIER,
++	PROP_VLAN_ID,
++
++	LAST_PROP
++};
++
++#define DBUS_PROP_HW_ADDRESS "HwAddress"
++#define DBUS_PROP_CARRIER "Carrier"
++#define DBUS_PROP_VLAN_ID "VlanId"
++
++/**
++ * nm_device_vlan_new:
++ * @connection: the #DBusGConnection
++ * @path: the DBus object path of the device
++ *
++ * Creates a new #NMDeviceVlan.
++ *
++ * Returns: (transfer full): a new device
++ **/
++GObject *
++nm_device_vlan_new (DBusGConnection *connection, const char *path)
++{
++	g_return_val_if_fail (connection != NULL, NULL);
++	g_return_val_if_fail (path != NULL, NULL);
++
++	return g_object_new (NM_TYPE_DEVICE_VLAN,
++	                     NM_OBJECT_DBUS_CONNECTION, connection,
++	                     NM_OBJECT_DBUS_PATH, path,
++	                     NULL);
++}
++
++/**
++ * nm_device_vlan_get_hw_address:
++ * @device: a #NMDeviceVlan
++ *
++ * Gets the hardware (MAC) address of the #NMDeviceVlan
++ *
++ * Returns: the hardware address. This is the internal string used by the
++ * device, and must not be modified.
++ **/
++const char *
++nm_device_vlan_get_hw_address (NMDeviceVlan *device)
++{
++	NMDeviceVlanPrivate *priv;
++
++	g_return_val_if_fail (NM_IS_DEVICE_VLAN (device), NULL);
++
++	priv = NM_DEVICE_VLAN_GET_PRIVATE (device);
++	if (!priv->hw_address) {
++		priv->hw_address = _nm_object_get_string_property (NM_OBJECT (device),
++														   NM_DBUS_INTERFACE_DEVICE_VLAN,
++														   DBUS_PROP_HW_ADDRESS);
++	}
++
++	return priv->hw_address;
++}
++
++/**
++ * nm_device_vlan_get_carrier:
++ * @device: a #NMDeviceVlan
++ *
++ * Whether the device has carrier.
++ *
++ * Returns: %TRUE if the device has carrier
++ **/
++gboolean
++nm_device_vlan_get_carrier (NMDeviceVlan *device)
++{
++	NMDeviceVlanPrivate *priv;
++
++	g_return_val_if_fail (NM_IS_DEVICE_VLAN (device), FALSE);
++
++	priv = NM_DEVICE_VLAN_GET_PRIVATE (device);
++	if (!priv->carrier_valid) {
++		priv->carrier = _nm_object_get_boolean_property (NM_OBJECT (device),
++														 NM_DBUS_INTERFACE_DEVICE_VLAN,
++														 DBUS_PROP_CARRIER);
++		priv->carrier_valid = TRUE;
++	}
++
++	return priv->carrier;
++}
++
++/**
++ * nm_device_vlan_get_vlan_id:
++ * @device: a #NMDeviceVlan
++ *
++ * Returns: the device's VLAN ID
++ **/
++guint
++nm_device_vlan_get_vlan_id (NMDeviceVlan *device)
++{
++	NMDeviceVlanPrivate *priv;
++
++	g_return_val_if_fail (NM_IS_DEVICE_VLAN (device), FALSE);
++
++	priv = NM_DEVICE_VLAN_GET_PRIVATE (device);
++	if (!priv->vlan_id) {
++		priv->vlan_id = _nm_object_get_uint_property (NM_OBJECT (device),
++													  NM_DBUS_INTERFACE_DEVICE_VLAN,
++													  DBUS_PROP_CARRIER);
++	}
++
++	return priv->vlan_id;
++}
++
++/***********************************************************/
++
++static void
++nm_device_vlan_init (NMDeviceVlan *device)
++{
++}
++
++static void
++register_for_property_changed (NMDeviceVlan *device)
++{
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (device);
++	const NMPropertiesChangedInfo property_changed_info[] = {
++		{ NM_DEVICE_VLAN_HW_ADDRESS, _nm_object_demarshal_generic, &priv->hw_address },
++		{ NM_DEVICE_VLAN_CARRIER,    _nm_object_demarshal_generic, &priv->carrier },
++		{ NM_DEVICE_VLAN_VLAN_ID,    _nm_object_demarshal_generic, &priv->vlan_id },
++		{ NULL },
++	};
++
++	_nm_object_handle_properties_changed (NM_OBJECT (device),
++	                                      priv->proxy,
++	                                      property_changed_info);
++}
++
++static GObject*
++constructor (GType type,
++             guint n_construct_params,
++             GObjectConstructParam *construct_params)
++{
++	GObject *object;
++	NMDeviceVlanPrivate *priv;
++
++	object = G_OBJECT_CLASS (nm_device_vlan_parent_class)->constructor (type,
++	                                                                    n_construct_params,
++	                                                                    construct_params);
++	if (!object)
++		return NULL;
++
++	priv = NM_DEVICE_VLAN_GET_PRIVATE (object);
++
++	priv->proxy = dbus_g_proxy_new_for_name (nm_object_get_connection (NM_OBJECT (object)),
++	                                         NM_DBUS_SERVICE,
++	                                         nm_object_get_path (NM_OBJECT (object)),
++	                                         NM_DBUS_INTERFACE_DEVICE_VLAN);
++
++	register_for_property_changed (NM_DEVICE_VLAN (object));
++
++	return object;
++}
++
++static void
++dispose (GObject *object)
++{
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (object);
++
++	if (priv->proxy) {
++		g_object_unref (priv->proxy);
++		priv->proxy = NULL;
++	}
++
++	G_OBJECT_CLASS (nm_device_vlan_parent_class)->dispose (object);
++}
++
++static void
++finalize (GObject *object)
++{
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (object);
++
++	g_free (priv->hw_address);
++
++	G_OBJECT_CLASS (nm_device_vlan_parent_class)->finalize (object);
++}
++
++static void
++get_property (GObject *object,
++              guint prop_id,
++              GValue *value,
++              GParamSpec *pspec)
++{
++	NMDeviceVlan *device = NM_DEVICE_VLAN (object);
++
++	switch (prop_id) {
++	case PROP_HW_ADDRESS:
++		g_value_set_string (value, nm_device_vlan_get_hw_address (device));
++		break;
++	case PROP_CARRIER:
++		g_value_set_boolean (value, nm_device_vlan_get_carrier (device));
++		break;
++	case PROP_VLAN_ID:
++		g_value_set_uint (value, nm_device_vlan_get_vlan_id (device));
++		break;
++	default:
++		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++		break;
++	}
++}
++
++static void
++nm_device_vlan_class_init (NMDeviceVlanClass *eth_class)
++{
++	GObjectClass *object_class = G_OBJECT_CLASS (eth_class);
++
++	g_type_class_add_private (eth_class, sizeof (NMDeviceVlanPrivate));
++
++	/* virtual methods */
++	object_class->constructor = constructor;
++	object_class->dispose = dispose;
++	object_class->finalize = finalize;
++	object_class->get_property = get_property;
++
++	/* properties */
++
++	/**
++	 * NMDeviceVlan:hw-address:
++	 *
++	 * The hardware (MAC) address of the device.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_HW_ADDRESS,
++		 g_param_spec_string (NM_DEVICE_VLAN_HW_ADDRESS,
++		                      "Active MAC Address",
++		                      "Currently set hardware MAC address",
++		                      NULL,
++		                      G_PARAM_READABLE));
++
++	/**
++	 * NMDeviceVlan:carrier:
++	 *
++	 * Whether the device has carrier.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_CARRIER,
++		 g_param_spec_boolean (NM_DEVICE_VLAN_CARRIER,
++		                       "Carrier",
++		                       "Carrier",
++		                       FALSE,
++		                       G_PARAM_READABLE));
++
++	/**
++	 * NMDeviceVlan:vlan-id:
++	 *
++	 * The device's VLAN ID.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_VLAN_ID,
++		 g_param_spec_uint (NM_DEVICE_VLAN_VLAN_ID,
++		                    "VLAN ID",
++		                    "VLAN ID",
++		                    0, 4095, 0,
++		                    G_PARAM_READABLE));
++}
+diff --git a/libnm-glib/nm-device-vlan.h b/libnm-glib/nm-device-vlan.h
+new file mode 100644
+index 0000000..d39effd
+--- /dev/null
++++ b/libnm-glib/nm-device-vlan.h
+@@ -0,0 +1,68 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/*
++ * libnm_glib -- Access network status & information from glib applications
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301 USA.
++ *
++ * Copyright (C) 2007 - 2008 Novell, Inc.
++ * Copyright (C) 2007 - 2012 Red Hat, Inc.
++ */
++
++#ifndef NM_DEVICE_VLAN_H
++#define NM_DEVICE_VLAN_H
++
++#include "nm-device.h"
++
++G_BEGIN_DECLS
++
++#define NM_TYPE_DEVICE_VLAN            (nm_device_vlan_get_type ())
++#define NM_DEVICE_VLAN(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), NM_TYPE_DEVICE_VLAN, NMDeviceVlan))
++#define NM_DEVICE_VLAN_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST ((klass), NM_TYPE_DEVICE_VLAN, NMDeviceVlanClass))
++#define NM_IS_DEVICE_VLAN(obj)         (G_TYPE_CHECK_INSTANCE_TYPE ((obj), NM_TYPE_DEVICE_VLAN))
++#define NM_IS_DEVICE_VLAN_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE ((obj), NM_TYPE_DEVICE_VLAN))
++#define NM_DEVICE_VLAN_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS ((obj), NM_TYPE_DEVICE_VLAN, NMDeviceVlanClass))
++
++#define NM_DEVICE_VLAN_HW_ADDRESS  "hw-address"
++#define NM_DEVICE_VLAN_CARRIER     "carrier"
++#define NM_DEVICE_VLAN_VLAN_ID     "vlan-id"
++
++typedef struct {
++	NMDevice parent;
++} NMDeviceVlan;
++
++typedef struct {
++	NMDeviceClass parent;
++
++	/* Padding for future expansion */
++	void (*_reserved1) (void);
++	void (*_reserved2) (void);
++	void (*_reserved3) (void);
++	void (*_reserved4) (void);
++	void (*_reserved5) (void);
++	void (*_reserved6) (void);
++} NMDeviceVlanClass;
++
++GType nm_device_vlan_get_type (void);
++
++GObject *nm_device_vlan_new (DBusGConnection *connection, const char *path);
++
++const char * nm_device_vlan_get_hw_address (NMDeviceVlan *device);
++gboolean     nm_device_vlan_get_carrier (NMDeviceVlan *device);
++guint        nm_device_vlan_get_vlan_id (NMDeviceVlan *device);
++
++G_END_DECLS
++
++#endif /* NM_DEVICE_VLAN_H */
+diff --git a/libnm-glib/nm-device.c b/libnm-glib/nm-device.c
+index 6c010e7..585f331 100644
+--- a/libnm-glib/nm-device.c
++++ b/libnm-glib/nm-device.c
+@@ -34,6 +34,7 @@
+ #include "nm-device-bt.h"
+ #include "nm-device-infiniband.h"
+ #include "nm-device-bond.h"
++#include "nm-device-vlan.h"
+ #include "nm-device.h"
+ #include "nm-device-private.h"
+ #include "nm-object-private.h"
+@@ -717,6 +718,9 @@ nm_device_new (DBusGConnection *connection, const char *path)
+ 	case NM_DEVICE_TYPE_BOND:
+ 		dtype = NM_TYPE_DEVICE_BOND;
+ 		break;
++	case NM_DEVICE_TYPE_VLAN:
++		dtype = NM_TYPE_DEVICE_VLAN;
++		break;
+ 	default:
+ 		g_warning ("Unknown device type %d", g_value_get_uint (&value));
+ 		break;
+diff --git a/libnm-util/Makefile.am b/libnm-util/Makefile.am
+index c611261..18f4dae 100644
+--- a/libnm-util/Makefile.am
++++ b/libnm-util/Makefile.am
+@@ -19,6 +19,7 @@ libnm_util_include_HEADERS = 		\
+ 	nm-setting-connection.h		\
+ 	nm-setting-infiniband.h		\
+ 	nm-setting-ip4-config.h		\
++	nm-setting-vlan.h               \
+ 	nm-setting-ip6-config.h		\
+ 	nm-setting-ppp.h		\
+ 	nm-setting-pppoe.h		\
+@@ -45,6 +46,7 @@ libnm_util_la_SOURCES=			\
+ 	nm-setting-connection.c		\
+ 	nm-setting-infiniband.c		\
+ 	nm-setting-ip4-config.c		\
++	nm-setting-vlan.c               \
+ 	nm-setting-ip6-config.c		\
+ 	nm-setting-ppp.c		\
+ 	nm-setting-pppoe.c		\
+diff --git a/libnm-util/libnm-util.ver b/libnm-util/libnm-util.ver
+index 086ade5..dc7c14b 100644
+--- a/libnm-util/libnm-util.ver
++++ b/libnm-util/libnm-util.ver
+@@ -20,6 +20,7 @@ global:
+ 	nm_connection_get_setting_connection;
+ 	nm_connection_get_setting_ip4_config;
+ 	nm_connection_get_setting_bond;
++	nm_connection_get_setting_vlan;
+ 	nm_connection_get_setting_wired;
+ 	nm_connection_get_type;
+ 	nm_connection_lookup_setting_type;
+@@ -297,6 +298,20 @@ global:
+ 	nm_setting_to_string;
+ 	nm_setting_update_secrets;
+ 	nm_setting_verify;
++	nm_setting_vlan_add_priority;
++	nm_setting_vlan_add_priority_str;
++	nm_setting_vlan_clear_priorities;
++	nm_setting_vlan_error_get_type;
++	nm_setting_vlan_error_quark;
++	nm_setting_vlan_get_flags;
++	nm_setting_vlan_get_id;
++	nm_setting_vlan_get_interface_name;
++	nm_setting_vlan_get_num_priorities;
++	nm_setting_vlan_get_parent;
++	nm_setting_vlan_get_priority;
++	nm_setting_vlan_get_type;
++	nm_setting_vlan_new;
++	nm_setting_vlan_remove_priority;
+ 	nm_setting_vpn_error_get_type;
+ 	nm_setting_vpn_error_quark;
+ 	nm_setting_vpn_get_type;
+@@ -391,6 +406,7 @@ global:
+ 	nm_utils_hwaddr_aton;
+ 	nm_utils_hwaddr_len;
+ 	nm_utils_hwaddr_ntoa;
++	nm_utils_hwaddr_type;
+ 	nm_utils_init;
+ 	nm_utils_ip4_addresses_from_gvalue;
+ 	nm_utils_ip4_addresses_to_gvalue;
+diff --git a/libnm-util/nm-connection.c b/libnm-util/nm-connection.c
+index 23a1052..e8943f3 100644
+--- a/libnm-util/nm-connection.c
++++ b/libnm-util/nm-connection.c
+@@ -45,6 +45,7 @@
+ #include "nm-setting-vpn.h"
+ #include "nm-setting-olpc-mesh.h"
+ 
++#include "nm-setting-vlan.h"
+ #include "nm-setting-serial.h"
+ #include "nm-setting-gsm.h"
+ #include "nm-setting-cdma.h"
+@@ -143,7 +144,7 @@ static guint signals[LAST_SIGNAL] = { 0 };
+ 
+ static GHashTable *registered_settings = NULL;
+ 
+-#define DEFAULT_MAP_SIZE 17
++#define DEFAULT_MAP_SIZE 18
+ 
+ static struct SettingInfo {
+ 	const char *name;
+@@ -249,6 +250,11 @@ register_default_settings (void)
+ 	                      NM_SETTING_BOND_ERROR,
+ 	                      1);
+ 
++	register_one_setting (NM_SETTING_VLAN_SETTING_NAME,
++	                      NM_TYPE_SETTING_VLAN,
++	                      NM_SETTING_VLAN_ERROR,
++	                      1);
++
+ 	register_one_setting (NM_SETTING_WIRELESS_SECURITY_SETTING_NAME,
+ 	                      NM_TYPE_SETTING_WIRELESS_SECURITY,
+ 	                      NM_SETTING_WIRELESS_SECURITY_ERROR,
+@@ -557,6 +563,23 @@ nm_connection_get_setting_bond (NMConnection *connection)
+ }
+ 
+ /**
++ * nm_connection_get_setting_vlan:
++ * @connection: the #NMConnection
++ *
++ * A shortcut to return any #NMSettingVlan the connection might contain.
++ *
++ * Returns: (transfer none): an #NMSettingVlan if the connection contains one, otherwise NULL
++ **/
++NMSettingVlan *
++nm_connection_get_setting_vlan (NMConnection *connection)
++{
++	g_return_val_if_fail (connection != NULL, NULL);
++	g_return_val_if_fail (NM_IS_CONNECTION (connection), NULL);
++
++	return (NMSettingVlan *) nm_connection_get_setting (connection, NM_TYPE_SETTING_VLAN);
++}
++
++/**
+  * nm_connection_get_setting_wired:
+  * @connection: the #NMConnection
+  *
+diff --git a/libnm-util/nm-connection.h b/libnm-util/nm-connection.h
+index b47972b..f977876 100644
+--- a/libnm-util/nm-connection.h
++++ b/libnm-util/nm-connection.h
+@@ -34,6 +34,7 @@
+ #include <nm-setting-ip4-config.h>
+ #include <nm-setting-bond.h>
+ #include <nm-setting-wired.h>
++#include <nm-setting-vlan.h>
+ 
+ G_BEGIN_DECLS
+ 
+@@ -179,6 +180,7 @@ NMSettingConnection *      nm_connection_get_setting_connection        (NMConnec
+ NMSettingIP4Config *       nm_connection_get_setting_ip4_config        (NMConnection *connection);
+ NMSettingBond *            nm_connection_get_setting_bond              (NMConnection *connection);
+ NMSettingWired *           nm_connection_get_setting_wired             (NMConnection *connection);
++NMSettingVlan *            nm_connection_get_setting_vlan              (NMConnection *connection);
+ 
+ G_END_DECLS
+ 
+diff --git a/libnm-util/nm-setting-vlan.c b/libnm-util/nm-setting-vlan.c
+new file mode 100644
+index 0000000..f51913e
+--- /dev/null
++++ b/libnm-util/nm-setting-vlan.c
+@@ -0,0 +1,751 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++
++/*
++ * Weiping Pan <wpan@redhat.com>
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2011 Red Hat, Inc.
++ */
++
++#include <dbus/dbus-glib.h>
++#include "nm-setting-vlan.h"
++#include "nm-param-spec-specialized.h"
++#include "nm-utils.h"
++#include "nm-dbus-glib-types.h"
++#include "nm-setting-connection.h"
++
++/**
++ * SECTION:nm-setting-vlan
++ * @short_description: Describes connection properties for VLAN interfaces
++ * @include: nm-setting-vlan.h
++ *
++ * The #NMSettingVlan object is a #NMSetting subclass that describes properties
++ * necessary for connection to VLAN interfaces.
++ **/
++
++/**
++ * nm_setting_vlan_error_quark:
++ *
++ * Registers an error quark for #NMSettingVlan if necessary.
++ *
++ * Returns: the error quark used for #NMSettingVlan errors.
++ **/
++GQuark
++nm_setting_vlan_error_quark (void)
++{
++	static GQuark quark;
++
++	if (G_UNLIKELY (!quark))
++		quark = g_quark_from_static_string ("nm-setting-vlan-error-quark");
++	return quark;
++}
++
++/* This should really be standard. */
++#define ENUM_ENTRY(NAME, DESC) { NAME, "" #NAME "", DESC }
++
++GType
++nm_setting_vlan_error_get_type (void)
++{
++	static GType etype = 0;
++
++	if (etype == 0) {
++		static const GEnumValue values[] = {
++			/* Unknown error. */
++			ENUM_ENTRY (NM_SETTING_VLAN_ERROR_UNKNOWN, "UnknownError"),
++			/* The specified property was invalid. */
++			ENUM_ENTRY (NM_SETTING_VLAN_ERROR_INVALID_PROPERTY, "InvalidProperty"),
++			/* The specified property was missing and is required. */
++			ENUM_ENTRY (NM_SETTING_VLAN_ERROR_MISSING_PROPERTY, "MissingProperty"),
++			{ 0, 0, 0 }
++		};
++		etype = g_enum_register_static ("NMSettingVlanError", values);
++	}
++	return etype;
++}
++
++G_DEFINE_TYPE (NMSettingVlan, nm_setting_vlan, NM_TYPE_SETTING)
++
++#define NM_SETTING_VLAN_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_SETTING_VLAN, NMSettingVlanPrivate))
++
++typedef struct {
++	char *iface_name;
++	char *parent;
++	guint32 id;
++	guint32 flags;
++	GSList *ingress_priority_map;
++	GSList *egress_priority_map;
++} NMSettingVlanPrivate;
++
++enum {
++	PROP_0,
++	PROP_IFACE_NAME,
++	PROP_PARENT,
++	PROP_ID,
++	PROP_FLAGS,
++	PROP_INGRESS_PRIORITY_MAP,
++	PROP_EGRESS_PRIORITY_MAP,
++	LAST_PROP
++};
++
++#define MAX_SKB_PRIO   G_MAXUINT32
++#define MAX_8021P_PRIO 7  /* Max 802.1p priority */
++
++typedef struct {
++	guint32 from;
++	guint32 to;
++} PriorityMap;
++
++/**
++ * nm_setting_vlan_new:
++ * Creates a new #NMSettingVlan object with default values.
++ *
++ * Returns: (transfer full): the new empty #NMSettingVlan object
++ **/
++NMSetting *
++nm_setting_vlan_new (void)
++{
++	return (NMSetting *) g_object_new (NM_TYPE_SETTING_VLAN, NULL);
++}
++
++/**
++ * nm_setting_vlan_get_interface_name:
++ * @setting: the #NMSettingVlan
++ *
++ * Returns: the #NMSettingVlan:interface_name property of the setting
++ **/
++const char *
++nm_setting_vlan_get_interface_name (NMSettingVlan *setting)
++{
++	g_return_val_if_fail (NM_IS_SETTING_VLAN (setting), NULL);
++	return NM_SETTING_VLAN_GET_PRIVATE (setting)->iface_name;
++}
++
++/**
++ * nm_setting_vlan_get_parent:
++ * @setting: the #NMSettingVlan
++ *
++ * Returns: the #NMSettingVlan:parent property of the setting
++ **/
++const char *
++nm_setting_vlan_get_parent (NMSettingVlan *setting)
++{
++	g_return_val_if_fail (NM_IS_SETTING_VLAN (setting), NULL);
++	return NM_SETTING_VLAN_GET_PRIVATE (setting)->parent;
++}
++
++/**
++ * nm_setting_vlan_get_id:
++ * @setting: the #NMSettingVlan
++ *
++ * Returns: the #NMSettingVlan:id property of the setting
++ **/
++guint32
++nm_setting_vlan_get_id (NMSettingVlan *setting)
++{
++	g_return_val_if_fail (NM_IS_SETTING_VLAN (setting), 0);
++	return NM_SETTING_VLAN_GET_PRIVATE (setting)->id;
++}
++
++/**
++ * nm_setting_vlan_get_flags:
++ * @setting: the #NMSettingVlan
++ *
++ * Returns: the #NMSettingVlan:flags property of the setting
++ **/
++guint32
++nm_setting_vlan_get_flags (NMSettingVlan *setting)
++{
++	g_return_val_if_fail (NM_IS_SETTING_VLAN (setting), 0);
++	return NM_SETTING_VLAN_GET_PRIVATE (setting)->flags;
++}
++
++static guint32
++get_max_prio (NMVlanPriorityMap map, gboolean from)
++{
++	if (map == NM_VLAN_INGRESS_MAP)
++		return from ? MAX_8021P_PRIO : MAX_SKB_PRIO;
++	else if (map == NM_VLAN_EGRESS_MAP)
++		return from ? MAX_SKB_PRIO : MAX_8021P_PRIO;
++	g_assert_not_reached ();
++}
++
++static PriorityMap *
++priority_map_new_from_str (NMVlanPriorityMap map, const char *str)
++{
++	PriorityMap *p = NULL;
++	gchar **t = NULL;
++	guint32 len;
++	guint64 from, to;
++
++	g_return_val_if_fail (str && str[0], NULL);
++
++	t = g_strsplit (str, ":", 0);
++	len = g_strv_length (t);
++	if (len == 2) {
++		from = g_ascii_strtoull (t[0], NULL, 10);
++		to = g_ascii_strtoull (t[1], NULL, 10);
++
++		if ((from <= get_max_prio (map, TRUE)) && (to <= get_max_prio (map, FALSE))) {
++			p = g_malloc0 (sizeof (PriorityMap));
++			p->from = from;
++			p->to = to;
++		}
++	} else {
++		/* Warn */
++		g_warn_if_fail (len == 2);
++	}
++
++	g_strfreev (t);
++	return p;
++}
++
++static void
++priority_map_free (PriorityMap *map)
++{
++	g_return_if_fail (map != NULL);
++	g_free (map);
++}
++
++static GSList *
++get_map (NMSettingVlan *self, NMVlanPriorityMap map)
++{
++	if (map == NM_VLAN_INGRESS_MAP)
++		return NM_SETTING_VLAN_GET_PRIVATE (self)->ingress_priority_map;
++	else if (map == NM_VLAN_EGRESS_MAP)
++		return NM_SETTING_VLAN_GET_PRIVATE (self)->egress_priority_map;
++	g_assert_not_reached ();
++	return NULL;
++}
++
++static void
++set_map (NMSettingVlan *self, NMVlanPriorityMap map, GSList *list)
++{
++	if (map == NM_VLAN_INGRESS_MAP)
++		NM_SETTING_VLAN_GET_PRIVATE (self)->ingress_priority_map = list;
++	else if (map == NM_VLAN_EGRESS_MAP)
++		NM_SETTING_VLAN_GET_PRIVATE (self)->egress_priority_map = list;
++	else
++		g_assert_not_reached ();
++}
++
++/**
++ * nm_setting_vlan_add_priority_str
++ * @setting: the #NMSettingVlan
++ * @map: the type of priority map
++ * @str: the string which contains a priority map, like "3:7"
++ *
++ * Adds a priority map entry into either the #NMSettingVlan:ingress_priority_map
++ * or the #NMSettingVlan:egress_priority_map properties.  The priority map maps
++ * the Linux SKB priorities to 802.1p priorities.
++ *
++ * Returns: TRUE if the entry was successfully added to the list, or it
++ * overwrote the old value, FALSE if error
++ */
++gboolean
++nm_setting_vlan_add_priority_str (NMSettingVlan *setting,
++                                  NMVlanPriorityMap map,
++                                  const char *str)
++{
++	NMSettingVlanPrivate *priv = NULL;
++	GSList *list = NULL, *iter = NULL;
++	PriorityMap *item = NULL;
++
++	g_return_val_if_fail (NM_IS_SETTING_VLAN (setting), FALSE);
++	g_return_val_if_fail (map == NM_VLAN_INGRESS_MAP || map == NM_VLAN_EGRESS_MAP, FALSE);
++	g_return_val_if_fail (str && str[0], FALSE);
++
++	priv = NM_SETTING_VLAN_GET_PRIVATE (setting);
++	list = get_map (setting, map);
++
++	item = priority_map_new_from_str (map, str);
++	g_return_val_if_fail (item != NULL, FALSE);
++
++	/* Duplicates get replaced */
++	for (iter = list; iter; iter = g_slist_next (iter)) {
++		PriorityMap *p = iter->data;
++
++		if (p->from == item->from) {
++			p->to = item->to;
++			g_free (item);
++			return TRUE;
++		}
++	}
++
++	set_map (setting, map, g_slist_append (list, item));
++	return TRUE;
++}
++
++/**
++ * nm_setting_vlan_get_num_priorities:
++ * @map: the type of priority map
++ * @setting: the #NMSettingVlan
++ *
++ * Returns the number of entires in the
++ * #NMSettingVlan:ingress_priority_map or #NMSettingVlan:egress_priority_map
++ * properties of this setting.
++ *
++ * Returns: return the number of ingress/egress priority entries, -1 if error
++ **/
++gint32
++nm_setting_vlan_get_num_priorities (NMSettingVlan *setting, NMVlanPriorityMap map)
++{
++	g_return_val_if_fail (NM_IS_SETTING_VLAN (setting), -1);
++	g_return_val_if_fail (map == NM_VLAN_INGRESS_MAP || map == NM_VLAN_EGRESS_MAP, -1);
++
++	return g_slist_length (get_map (setting, map));
++}
++
++/**
++ * nm_setting_vlan_get_priority:
++ * @map: the type of priority map
++ * @setting: the #NMSettingVlan
++ * @idx: the zero-based index of the ingress/egress priority map entry
++ * @out_from: (out): on return the value of the priority map's 'from' item
++ * @out_to: (out): on return the value of priority map's 'to' item
++ *
++ * Retrieve one of the entries of the #NMSettingVlan:ingress_priority_map
++ * or #NMSettingVlan:egress_priority_map properties of this setting.
++ *
++ * Returns: %TRUE if a priority map was returned, %FALSE if error
++ **/
++gboolean
++nm_setting_vlan_get_priority (NMSettingVlan *setting,
++                              NMVlanPriorityMap map,
++                              guint32 idx,
++                              guint32 *out_from,
++                              guint32 *out_to)
++{
++	GSList *list = NULL;
++	PriorityMap *item = NULL;
++
++	g_return_val_if_fail (NM_IS_SETTING_VLAN (setting), FALSE);
++	g_return_val_if_fail (map == NM_VLAN_INGRESS_MAP || map == NM_VLAN_EGRESS_MAP, FALSE);
++	g_return_val_if_fail (out_from != NULL, FALSE);
++	g_return_val_if_fail (out_to != NULL, FALSE);
++
++	list = get_map (setting, map);
++	g_return_val_if_fail (idx < g_slist_length (list), FALSE);
++
++	item = g_slist_nth_data (list, idx);
++	g_assert (item);
++	*out_from = item->from;
++	*out_to = item->to;
++	return TRUE;
++}
++
++/**
++ * nm_setting_vlan_add_priority:
++ * @map: the type of priority map
++ * @setting: the #NMSettingVlan
++ * @from: the priority to map to @to
++ * @to: the priority to map @from to
++ *
++ * Adds a priority mapping to the #NMSettingVlan:ingress_priority_map or
++ * #NMSettingVlan:egress_priority_map properties of the setting. If @from is
++ * already in the given priority map, this function will overwrite the
++ * existing entry with the new @to.
++ *
++ * If @map is #NM_VLAN_INGRESS_MAP then @from is the incoming 802.1q VLAN
++ * Priority Code Point (PCP) value, and @to is the Linux SKB priority value.
++ *
++ * If @map is #NM_VLAN_EGRESS_MAP then @from is the Linux SKB priority value and
++ * @to is the outgoing 802.1q VLAN Priority Code Point (PCP) value.
++ *
++ * Returns: TRUE if the new priority mapping was successfully added to the
++ * list, FALSE if error
++ */
++gboolean
++nm_setting_vlan_add_priority (NMSettingVlan *setting,
++                              NMVlanPriorityMap map,
++                              guint32 from,
++                              guint32 to)
++{
++	GSList *list = NULL, *iter = NULL;
++	PriorityMap *item;
++
++	g_return_val_if_fail (NM_IS_SETTING_VLAN (setting), FALSE);
++	g_return_val_if_fail (map == NM_VLAN_INGRESS_MAP || map == NM_VLAN_EGRESS_MAP, FALSE);
++
++	list = get_map (setting, map);
++	for (iter = list; iter; iter = g_slist_next (iter)) {
++		item = iter->data;
++		if (item->from == from) {
++			item->to = to;
++			return TRUE;
++		}
++	}
++
++	item = g_malloc0 (sizeof (PriorityMap));
++	item->from = from;
++	item->to = to;
++	set_map (setting, map, g_slist_append (list, item));
++
++	return TRUE;
++}
++
++/**
++ * nm_setting_vlan_remove_priority:
++ * @map: the type of priority map
++ * @setting: the #NMSettingVlan
++ * @idx: the zero-based index of the priority map to remove
++ *
++ * Removes the priority map at index @idx from the
++ * #NMSettingVlan:ingress_priority_map or #NMSettingVlan:egress_priority_map
++ * properties.
++ */
++void
++nm_setting_vlan_remove_priority (NMSettingVlan *setting,
++                                 NMVlanPriorityMap map,
++                                 guint32 idx)
++{
++	GSList *list = NULL, *item = NULL;
++
++	g_return_if_fail (NM_IS_SETTING_VLAN (setting));
++	g_return_if_fail (map == NM_VLAN_INGRESS_MAP || map == NM_VLAN_EGRESS_MAP);
++
++	list = get_map (setting, map);
++	g_return_if_fail (idx < g_slist_length (list));
++
++	item = g_slist_nth_data (list, idx);
++	priority_map_free ((PriorityMap *) item);
++	set_map (setting, map, g_slist_delete_link (list, item));
++}
++
++/**
++ * nm_setting_vlan_clear_priorities:
++ * @map: the type of priority map
++ * @setting: the #NMSettingVlan
++ *
++ * Clear all the entires from #NMSettingVlan:ingress_priority_map or
++ * #NMSettingVlan:egress_priority_map properties.
++ */
++void
++nm_setting_vlan_clear_priorities (NMSettingVlan *setting, NMVlanPriorityMap map)
++{
++	GSList *list = NULL;
++
++	g_return_if_fail (NM_IS_SETTING_VLAN (setting));
++	g_return_if_fail (map == NM_VLAN_INGRESS_MAP || map == NM_VLAN_EGRESS_MAP);
++
++	list = get_map (setting, map);
++	nm_utils_slist_free (list, g_free);
++	set_map (setting, map, NULL);
++}
++
++/*********************************************************************/
++
++static void
++nm_setting_vlan_init (NMSettingVlan *setting)
++{
++	g_object_set (setting, NM_SETTING_NAME, NM_SETTING_VLAN_SETTING_NAME, NULL);
++}
++
++static gboolean
++verify (NMSetting *setting, GSList *all_settings, GError **error)
++{
++	NMSettingVlanPrivate *priv = NM_SETTING_VLAN_GET_PRIVATE (setting);
++
++	if (priv->iface_name && !priv->iface_name[0]) {
++		g_set_error (error,
++		             NM_SETTING_VLAN_ERROR,
++		             NM_SETTING_VLAN_ERROR_INVALID_PROPERTY,
++		             NM_SETTING_VLAN_INTERFACE_NAME);
++		return FALSE;
++	}
++
++	if (priv->parent && !priv->parent[0]) {
++		g_set_error (error,
++		             NM_SETTING_VLAN_ERROR,
++		             NM_SETTING_VLAN_ERROR_INVALID_PROPERTY,
++		             NM_SETTING_VLAN_PARENT);
++		return FALSE;
++	}
++
++	if (priv->id > 4095) {
++		g_set_error (error,
++		             NM_SETTING_VLAN_ERROR,
++		             NM_SETTING_VLAN_ERROR_INVALID_PROPERTY,
++		             NM_SETTING_VLAN_ID);
++		return FALSE;
++	}
++
++	if (priv->flags & !(NM_VLAN_FLAG_REORDER_HEADERS |
++	                    NM_VLAN_FLAG_GVRP |
++	                    NM_VLAN_FLAG_LOOSE_BINDING)) {
++		g_set_error (error,
++		             NM_SETTING_VLAN_ERROR,
++		             NM_SETTING_VLAN_ERROR_INVALID_PROPERTY,
++		             NM_SETTING_VLAN_FLAGS);
++		return FALSE;
++	}
++
++	return TRUE;
++}
++
++static const char *
++get_virtual_iface_name (NMSetting *setting)
++{
++	return nm_setting_vlan_get_interface_name (NM_SETTING_VLAN (setting));
++}
++
++static GSList *
++priority_stringlist_to_maplist (NMVlanPriorityMap map, GSList *strlist)
++{
++	GSList *list = NULL, *iter;
++
++	for (iter = strlist; iter; iter = g_slist_next (iter)) {
++		PriorityMap *item;
++
++		item = priority_map_new_from_str (map, (const char *) iter->data);
++		if (item)
++			list = g_slist_prepend (list, item);
++	}
++	return g_slist_reverse (list);
++}
++
++static void
++set_property (GObject *object, guint prop_id,
++              const GValue *value, GParamSpec *pspec)
++{
++	NMSettingVlan *setting = NM_SETTING_VLAN (object);
++	NMSettingVlanPrivate *priv = NM_SETTING_VLAN_GET_PRIVATE (setting);
++
++	switch (prop_id) {
++	case PROP_IFACE_NAME:
++		g_free (priv->iface_name);
++		priv->iface_name = g_value_dup_string (value);
++		break;
++	case PROP_PARENT:
++		g_free (priv->parent);
++		priv->parent = g_value_dup_string (value);
++		break;
++	case PROP_ID:
++		priv->id = g_value_get_uint (value);
++		break;
++	case PROP_FLAGS:
++		priv->flags = g_value_get_uint (value);
++		break;
++	case PROP_INGRESS_PRIORITY_MAP:
++		nm_utils_slist_free (priv->ingress_priority_map, g_free);
++		priv->ingress_priority_map =
++			priority_stringlist_to_maplist (NM_VLAN_INGRESS_MAP, g_value_get_boxed (value));
++		break;
++	case PROP_EGRESS_PRIORITY_MAP:
++		nm_utils_slist_free (priv->egress_priority_map, g_free);
++		priv->egress_priority_map =
++			priority_stringlist_to_maplist (NM_VLAN_EGRESS_MAP, g_value_get_boxed (value));
++		break;
++	default:
++		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++		break;
++	}
++}
++
++static GSList *
++priority_maplist_to_stringlist (GSList *list)
++{
++	GSList *strlist = NULL, *iter;
++
++	for (iter = list; iter; iter = g_slist_next (iter)) {
++		PriorityMap *item = iter->data;
++
++		strlist = g_slist_prepend (strlist, g_strdup_printf ("%d:%d", item->from, item->to));
++	}
++	return g_slist_reverse (strlist);
++}
++
++static void
++get_property (GObject *object, guint prop_id,
++              GValue *value, GParamSpec *pspec)
++{
++	NMSettingVlan *setting = NM_SETTING_VLAN (object);
++	NMSettingVlanPrivate *priv = NM_SETTING_VLAN_GET_PRIVATE (setting);
++
++	switch (prop_id) {
++	case PROP_IFACE_NAME:
++		g_value_set_string (value, priv->iface_name);
++		break;
++	case PROP_PARENT:
++		g_value_set_string (value, priv->parent);
++		break;
++	case PROP_ID:
++		g_value_set_uint (value, priv->id);
++		break;
++	case PROP_FLAGS:
++		g_value_set_uint (value, priv->flags);
++		break;
++	case PROP_INGRESS_PRIORITY_MAP:
++		g_value_take_boxed (value, priority_maplist_to_stringlist (priv->ingress_priority_map));
++		break;
++	case PROP_EGRESS_PRIORITY_MAP:
++		g_value_take_boxed (value, priority_maplist_to_stringlist (priv->egress_priority_map));
++		break;
++	default:
++		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++		break;
++	}
++}
++
++static void
++finalize (GObject *object)
++{
++	NMSettingVlan *setting = NM_SETTING_VLAN (object);
++	NMSettingVlanPrivate *priv = NM_SETTING_VLAN_GET_PRIVATE (setting);
++
++	g_free (priv->iface_name);
++	g_free (priv->parent);
++	nm_utils_slist_free (priv->ingress_priority_map, g_free);
++	nm_utils_slist_free (priv->egress_priority_map, g_free);
++}
++
++static void
++nm_setting_vlan_class_init (NMSettingVlanClass *setting_class)
++{
++	GObjectClass *object_class = G_OBJECT_CLASS (setting_class);
++	NMSettingClass *parent_class = NM_SETTING_CLASS (setting_class);
++
++	g_type_class_add_private (setting_class, sizeof (NMSettingVlanPrivate));
++
++	/* virtual methods */
++	object_class->set_property = set_property;
++	object_class->get_property = get_property;
++	object_class->finalize     = finalize;
++	parent_class->verify       = verify;
++	parent_class->get_virtual_iface_name = get_virtual_iface_name;
++
++	/* Properties */
++
++	/**
++	 * NMSettingVlan:interface-name:
++	 *
++	 * If given, specifies the kernel name of the VLAN interface. If not given,
++	 * a default name will be constructed from the interface described by the
++	 * parent interface and the #NMSettingVlan:id , ex 'eth2.1'. The parent
++	 * interface may be given by the #NMSettingVlan:parent property or by a
++	 * hardware address property, eg #NMSettingWired:mac-address or
++	 * #NMSettingInfiniband:mac-address.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_IFACE_NAME,
++		g_param_spec_string (NM_SETTING_VLAN_INTERFACE_NAME,
++		                     "InterfaceName",
++		                     "If given, specifies the kernel name of the VLAN "
++		                     "interface. If not given, a default name will be "
++		                     "constructed from the interface described by the "
++		                     "parent interface and the 'id' property, ex "
++		                     "'eth2.1'. The parent interface may be given by "
++		                     "the 'parent' property or by a hardware address "
++		                     "property, eg the 'wired' or 'infiniband' "
++		                     "settings' 'mac-address' property.",
++		                     NULL,
++		                     G_PARAM_READWRITE | G_PARAM_CONSTRUCT | NM_SETTING_PARAM_SERIALIZE));
++
++	/**
++	 * NMSettingVlan:parent:
++	 *
++	 * If given, specifies the parent interface name or parent connection UUID
++	 * from which this VLAN interface should be created.  If this property is
++	 * not specified, the connection must contain a hardware address in a
++	 * hardware-specific setting, like #NMSettingWired:mac-address or
++	 * #NMSettingInfiniband:mac-address.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_PARENT,
++		g_param_spec_string (NM_SETTING_VLAN_PARENT,
++		                     "Parent",
++		                     "If given, specifies the parent interface name or "
++		                     "parent connection UUID from which this VLAN "
++		                     "interface should be created.  If this property is "
++		                     "not specified, the connection must contain a "
++		                     "hardware address in a hardware-specific setting, "
++		                     "like the 'wired' or 'infiniband' settings' "
++		                     "'mac-address' property.",
++		                     NULL,
++		                     G_PARAM_READWRITE | G_PARAM_CONSTRUCT | NM_SETTING_PARAM_SERIALIZE));
++
++	/**
++	 * NMSettingVlan:id:
++	 *
++	 * The VLAN identifier the interface created by this connection should be
++	 * assigned.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_ID,
++		 g_param_spec_uint (NM_SETTING_VLAN_ID,
++		                    "VLAN ID",
++		                    "The VLAN indentifier the interface created by "
++		                    "this connection should be assigned.",
++		                    0, 4095, 0,
++		                    G_PARAM_READWRITE | G_PARAM_CONSTRUCT | NM_SETTING_PARAM_SERIALIZE));
++
++	/**
++	 * NMSettingVlan:flags:
++	 *
++	 * One or more of %NMVlanFlags which control the behavior and features of
++	 * the VLAN interface.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_FLAGS,
++		 g_param_spec_uint (NM_SETTING_VLAN_FLAGS,
++		                    "VLAN flags",
++		                    "One or more flags which control the behavior and "
++		                    "features of the VLAN interface.  Flags include "
++		                    "reordering of output packet headers (0x01), use "
++		                    "of the GVRP protocol (0x02), and loose binding "
++		                    "of the interface to its master device's operating "
++		                    "state (0x04).",
++		                    0, G_MAXUINT32, 0,
++		                    G_PARAM_READWRITE | G_PARAM_CONSTRUCT | NM_SETTING_PARAM_SERIALIZE));
++
++	/**
++	 * NMSettingVlan:ingress-priority-map:
++	 *
++	 * For incoming packets, a list of mappings from 802.1p priorities to Linux
++	 * SKB priorities.  The mapping is given in the format 'from:to' where both
++	 * 'from' and 'to' are unsigned integers, ie '7:3'.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_INGRESS_PRIORITY_MAP,
++		_nm_param_spec_specialized (NM_SETTING_VLAN_INGRESS_PRIORITY_MAP,
++		                            "VLAN ingress priority mapping",
++		                            "For incoming packets, a list of mappings "
++		                            "from 802.1p priorities to Linux SKB "
++		                            "priorities.  The mapping is given in the "
++		                            "format 'from:to' where both 'from' and "
++		                            "'to' are unsigned integers, ie '7:3'.",
++		                            DBUS_TYPE_G_LIST_OF_STRING,
++		                            G_PARAM_READWRITE | NM_SETTING_PARAM_SERIALIZE));
++
++	/**
++	 * NMSettingVlan:egress-priority-map:
++	 *
++	 * For outgoing packets, a list of mappings from Linux SKB priorities to
++	 * 802.1p priorities.  The mapping is given in the format 'from:to'
++	 * where both 'from' and 'to' are unsigned integers, ie '7:3'.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_EGRESS_PRIORITY_MAP,
++		_nm_param_spec_specialized (NM_SETTING_VLAN_EGRESS_PRIORITY_MAP,
++		                            "VLAN egress priority mapping",
++		                            "For outgoing packets, a list of mappings "
++		                            "from Linux SKB priorities to 802.1p "
++		                            "priorities.  The mapping is given in the "
++		                            "format 'from:to' where both 'from' and "
++		                            "'to' are unsigned integers, ie '7:3'.",
++		                            DBUS_TYPE_G_LIST_OF_STRING,
++		                            G_PARAM_READWRITE | NM_SETTING_PARAM_SERIALIZE));
++}
+diff --git a/libnm-util/nm-setting-vlan.h b/libnm-util/nm-setting-vlan.h
+new file mode 100644
+index 0000000..27f7e79
+--- /dev/null
++++ b/libnm-util/nm-setting-vlan.h
+@@ -0,0 +1,147 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++
++/*
++ * Weiping Pan <wpan@redhat.com>
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2011 Red Hat, Inc.
++ */
++
++#ifndef NM_SETTING_VLAN_H
++#define NM_SETTING_VLAN_H
++
++#include "nm-setting.h"
++#include <linux/if_vlan.h>
++
++G_BEGIN_DECLS
++
++#define NM_TYPE_SETTING_VLAN            (nm_setting_vlan_get_type ())
++#define NM_SETTING_VLAN(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), NM_TYPE_SETTING_VLAN, NMSettingVlan))
++#define NM_SETTING_VLAN_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST ((klass), NM_TYPE_SETTING_VLANCONFIG, NMSettingVlanClass))
++#define NM_IS_SETTING_VLAN(obj)         (G_TYPE_CHECK_INSTANCE_TYPE ((obj), NM_TYPE_SETTING_VLAN))
++#define NM_IS_SETTING_VLAN_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE ((obj), NM_TYPE_SETTING_VLAN))
++#define NM_SETTING_VLAN_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS ((obj), NM_TYPE_SETTING_VLAN, NMSettingVlanClass))
++
++#define NM_SETTING_VLAN_SETTING_NAME "vlan"
++
++/**
++ * NMSettingVlanError:
++ * @NM_SETTING_VLAN_ERROR_UNKNOWN: unknown or unclassified error
++ * @NM_SETTING_VLAN_ERROR_INVALID_PROPERTY: the property was invalid
++ * @NM_SETTING_VLAN_ERROR_MISSING_PROPERTY: the property was missing and is
++ * required
++ */
++typedef enum {
++	NM_SETTING_VLAN_ERROR_UNKNOWN = 0,
++	NM_SETTING_VLAN_ERROR_INVALID_PROPERTY,
++	NM_SETTING_VLAN_ERROR_MISSING_PROPERTY
++} NMSettingVlanError;
++
++#define NM_TYPE_SETTING_VLAN_ERROR (nm_setting_vlan_error_get_type ()) 
++GType nm_setting_vlan_error_get_type (void);
++
++#define NM_SETTING_VLAN_ERROR nm_setting_vlan_error_quark ()
++GQuark nm_setting_vlan_error_quark (void);
++
++#define NM_SETTING_VLAN_INTERFACE_NAME       "interface-name"
++#define NM_SETTING_VLAN_PARENT               "parent"
++#define NM_SETTING_VLAN_ID                   "id"
++#define NM_SETTING_VLAN_FLAGS                "flags"
++#define NM_SETTING_VLAN_INGRESS_PRIORITY_MAP "ingress-priority-map"
++#define NM_SETTING_VLAN_EGRESS_PRIORITY_MAP  "egress-priority-map"
++
++typedef struct {
++	NMSetting parent;
++} NMSettingVlan;
++
++typedef struct {
++	NMSettingClass parent;
++
++	/* Padding for future expansion */
++	void (*_reserved1) (void);
++	void (*_reserved2) (void);
++	void (*_reserved3) (void);
++	void (*_reserved4) (void);
++} NMSettingVlanClass;
++
++/**
++ * NMVlanPriorityMap:
++ * @NM_VLAN_INGRESS_MAP: map for incoming data
++ * @NM_VLAN_EGRESS_MAP: map for outgoing data
++ *
++ * A selector for traffic priority maps; these map Linux SKB priorities
++ * to 802.1p priorities used in VLANs.
++ **/
++typedef enum {
++	NM_VLAN_INGRESS_MAP,
++	NM_VLAN_EGRESS_MAP
++} NMVlanPriorityMap;
++
++/**
++ * NMVlanFlags:
++ * @NM_VLAN_FLAG_REORDER_HEADERS: indicates that this interface should reorder
++ *  outgoing packet headers to look more like a non-VLAN ethernet interface
++ * @NM_VLAN_FLAG_GVRP: indicates that this interface should use GVRP to register
++ *  itself with it's switch
++ * @NM_VLAN_FLAG_LOOSE_BINDING: indicates that this interface's operating
++ *  state is tied to the underlying network interface but other details
++ *  (like routing) are not.
++ *
++ * #NMVlanFlags values control the behavior of the VLAN interface.
++ **/
++typedef enum {
++	NM_VLAN_FLAG_REORDER_HEADERS = 0x1,
++	NM_VLAN_FLAG_GVRP            = 0x2,
++	NM_VLAN_FLAG_LOOSE_BINDING   = 0x4,
++
++	/* NOTE: if adding flags update nm-setting-vlan.c::verify() */
++} NMVlanFlags;
++
++GType nm_setting_vlan_get_type (void);
++NMSetting *nm_setting_vlan_new (void);
++
++const char *nm_setting_vlan_get_interface_name (NMSettingVlan *setting);
++const char *nm_setting_vlan_get_parent         (NMSettingVlan *setting);
++guint32     nm_setting_vlan_get_id             (NMSettingVlan *setting);
++guint32     nm_setting_vlan_get_flags          (NMSettingVlan *setting);
++
++gint32   nm_setting_vlan_get_num_priorities (NMSettingVlan *setting, NMVlanPriorityMap map);
++
++gboolean nm_setting_vlan_get_priority       (NMSettingVlan *setting,
++                                             NMVlanPriorityMap map,
++                                             guint32 idx,
++                                             guint32 *out_from,
++                                             guint32 *out_to);
++
++gboolean nm_setting_vlan_add_priority       (NMSettingVlan *setting,
++                                             NMVlanPriorityMap map,
++                                             guint32 from,
++                                             guint32 to);
++
++void     nm_setting_vlan_remove_priority    (NMSettingVlan *setting,
++                                             NMVlanPriorityMap map,
++                                             guint32 idx);
++
++void     nm_setting_vlan_clear_priorities   (NMSettingVlan *setting, NMVlanPriorityMap map);
++
++gboolean nm_setting_vlan_add_priority_str   (NMSettingVlan *setting,
++                                             NMVlanPriorityMap map,
++                                             const char *str);
++
++G_END_DECLS
++
++#endif /* NM_SETTING_VLAN_H */
+diff --git a/libnm-util/nm-utils.c b/libnm-util/nm-utils.c
+index a580113..ae7ea93 100644
+--- a/libnm-util/nm-utils.c
++++ b/libnm-util/nm-utils.c
+@@ -2383,6 +2383,27 @@ nm_utils_hwaddr_len (int type)
+ 		g_return_val_if_reached (-1);
+ }
+ 
++/**
++ * nm_utils_hwaddr_type:
++ * @len: the length of hardware address in bytes
++ *
++ * Returns the type (either %ARPHRD_ETHER or %ARPHRD_INFINIBAND) of the raw
++ * address given its length.
++ *
++ * Return value: the type, either %ARPHRD_ETHER or %ARPHRD_INFINIBAND, or -1 if
++ * the address length was not recognized
++ */
++int
++nm_utils_hwaddr_type (int len)
++{
++	if (len == ETH_ALEN)
++		return ARPHRD_ETHER;
++	else if (len == INFINIBAND_ALEN)
++		return ARPHRD_INFINIBAND;
++	else
++		g_return_val_if_reached (-1);
++}
++
+ #define HEXVAL(c) ((c) <= '9' ? (c) - '0' : ((c) & 0x4F) - 'A' + 10)
+ 
+ /**
+diff --git a/libnm-util/nm-utils.h b/libnm-util/nm-utils.h
+index dda0e9f..6408f41 100644
+--- a/libnm-util/nm-utils.h
++++ b/libnm-util/nm-utils.h
+@@ -228,6 +228,7 @@ gboolean nm_utils_wifi_is_channel_valid (guint32 channel, const char *band);
+ #define NM_UTILS_HWADDR_LEN_MAX 20 /* INFINIBAND_ALEN */
+ 
+ int         nm_utils_hwaddr_len   (int type) G_GNUC_PURE;
++int         nm_utils_hwaddr_type  (int len) G_GNUC_PURE;
+ char       *nm_utils_hwaddr_ntoa  (gconstpointer addr, int type);
+ GByteArray *nm_utils_hwaddr_atoba (const char *asc, int type);
+ guint8     *nm_utils_hwaddr_aton  (const char *asc, int type, gpointer buffer);
+diff --git a/marshallers/nm-marshal.list b/marshallers/nm-marshal.list
+index 359fbed..c0c4fcd 100644
+--- a/marshallers/nm-marshal.list
++++ b/marshallers/nm-marshal.list
+@@ -26,4 +26,4 @@ BOOLEAN:VOID
+ VOID:STRING,BOOLEAN
+ VOID:STRING,OBJECT,POINTER
+ VOID:BOOLEAN,UINT
+-
++VOID:POINTER,POINTER,POINTER,POINTER,INT
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 9ef3474..4c1bb51 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -110,6 +110,8 @@ NetworkManager_SOURCES = \
+ 		nm-device-infiniband.h \
+ 		nm-device-bond.c \
+ 		nm-device-bond.h \
++		nm-device-vlan.c \
++		nm-device-vlan.h \
+ 		nm-wifi-ap.c \
+ 		nm-wifi-ap.h \
+ 		nm-dbus-manager.h \
+@@ -145,6 +147,8 @@ NetworkManager_SOURCES = \
+ 		nm-netlink-monitor.h \
+ 		nm-netlink-utils.c \
+ 		nm-netlink-utils.h \
++		nm-netlink-compat.h \
++		nm-netlink-compat.c \
+ 		nm-activation-request.c \
+ 		nm-activation-request.h \
+ 		nm-properties-changed-signal.c \
+@@ -175,6 +179,9 @@ nm-device-infiniband-glue.h: $(top_srcdir)/introspection/nm-device-infiniband.xm
+ nm-device-bond-glue.h: $(top_srcdir)/introspection/nm-device-bond.xml
+ 	$(AM_V_GEN) dbus-binding-tool --prefix=nm_device_bond --mode=glib-server --output=$@ $<
+ 
++nm-device-vlan-glue.h: $(top_srcdir)/introspection/nm-device-vlan.xml
++	$(AM_V_GEN) dbus-binding-tool --prefix=nm_device_vlan --mode=glib-server --output=$@ $<
++
+ nm-device-wifi-glue.h: $(top_srcdir)/introspection/nm-device-wifi.xml
+ 	$(AM_V_GEN) dbus-binding-tool --prefix=nm_device_wifi --mode=glib-server --output=$@ $<
+ 
+@@ -212,6 +219,7 @@ BUILT_SOURCES = \
+ 	nm-device-ethernet-glue.h \
+ 	nm-device-infiniband-glue.h \
+ 	nm-device-bond-glue.h \
++	nm-device-vlan-glue.h \
+ 	nm-device-wifi-glue.h \
+ 	nm-device-olpc-mesh-glue.h \
+ 	nm-device-bt-glue.h \
+diff --git a/src/NetworkManagerUtils.c b/src/NetworkManagerUtils.c
+index 9609819..a542216 100644
+--- a/src/NetworkManagerUtils.c
++++ b/src/NetworkManagerUtils.c
+@@ -735,3 +735,10 @@ nm_utils_is_uuid (const char *str)
+ 
+ 	return (num_dashes == 4) && (p - str == 36);
+ }
++
++char *
++nm_utils_new_vlan_name (const char *parent_iface, guint32 vlan_id)
++{
++	return g_strdup_printf ("%s.%d", parent_iface, vlan_id);
++}
++
+diff --git a/src/NetworkManagerUtils.h b/src/NetworkManagerUtils.h
+index 50577cb..0b930db 100644
+--- a/src/NetworkManagerUtils.h
++++ b/src/NetworkManagerUtils.h
+@@ -80,4 +80,6 @@ gboolean nm_utils_get_proc_sys_net_value (const char *path,
+ 
+ gboolean nm_utils_is_uuid (const char *str);
+ 
++char *nm_utils_new_vlan_name (const char *parent_iface, guint32 vlan_id);
++
+ #endif /* NETWORK_MANAGER_UTILS_H */
+diff --git a/src/nm-device-bt.c b/src/nm-device-bt.c
+index 3ef08de..c4d5c45 100644
+--- a/src/nm-device-bt.c
++++ b/src/nm-device-bt.c
+@@ -21,6 +21,7 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include <net/ethernet.h>
++#include <net/if_arp.h>
+ 
+ #include "nm-glib-compat.h"
+ #include "nm-bluez-common.h"
+@@ -38,6 +39,7 @@
+ #include "nm-setting-gsm.h"
+ #include "nm-device-bt-glue.h"
+ #include "NetworkManagerUtils.h"
++#include "nm-utils.h"
+ 
+ #define BLUETOOTH_DUN_UUID "dun"
+ #define BLUETOOTH_NAP_UUID "nap"
+@@ -254,6 +256,42 @@ real_get_generic_capabilities (NMDevice *dev)
+ 	return NM_DEVICE_CAP_NM_SUPPORTED;
+ }
+ 
++static gboolean
++hwaddr_matches (NMDevice *device,
++                NMConnection *connection,
++                const guint8 *other_hwaddr,
++                guint other_hwaddr_len,
++                gboolean fail_if_no_hwaddr)
++{
++	NMDeviceBtPrivate *priv = NM_DEVICE_BT_GET_PRIVATE (device);
++	NMSettingBluetooth *s_bt;
++	const GByteArray *mac = NULL;
++	gboolean matches = FALSE;
++	GByteArray *devmac;
++
++	s_bt = (NMSettingBluetooth *) nm_connection_get_setting (connection, NM_TYPE_SETTING_BLUETOOTH);
++	if (s_bt)
++		mac = nm_setting_bluetooth_get_bdaddr (s_bt);
++
++	if (mac) {
++		devmac = nm_utils_hwaddr_atoba (priv->bdaddr, ARPHRD_ETHER);
++		g_return_val_if_fail (devmac != NULL, FALSE);
++		g_return_val_if_fail (devmac->len == mac->len, FALSE);
++
++		if (other_hwaddr) {
++			g_return_val_if_fail (other_hwaddr_len == devmac->len, FALSE);
++			matches = (memcmp (mac->data, other_hwaddr, mac->len) == 0) ? TRUE : FALSE;
++		} else
++			matches = (memcmp (mac->data, devmac->data, mac->len) == 0) ? TRUE : FALSE;
++
++		g_byte_array_free (devmac, TRUE);
++		return matches;
++	} else if (fail_if_no_hwaddr == FALSE)
++		return TRUE;
++
++	return FALSE;
++}
++
+ /*****************************************************************************/
+ /* IP method PPP */
+ 
+@@ -1025,6 +1063,7 @@ nm_device_bt_class_init (NMDeviceBtClass *klass)
+ 	device_class->act_stage3_ip4_config_start = real_act_stage3_ip4_config_start;
+ 	device_class->act_stage4_get_ip4_config = real_act_stage4_get_ip4_config;
+ 	device_class->check_connection_compatible = real_check_connection_compatible;
++	device_class->hwaddr_matches = hwaddr_matches;
+ 
+ 	/* Properties */
+ 	g_object_class_install_property
+diff --git a/src/nm-device-ethernet.c b/src/nm-device-ethernet.c
+index 626e949..34e9b94 100644
+--- a/src/nm-device-ethernet.c
++++ b/src/nm-device-ethernet.c
+@@ -1631,6 +1631,40 @@ connection_match_config (NMDevice *self, const GSList *connections)
+ 	return match;
+ }
+ 
++static gboolean
++hwaddr_matches (NMDevice *device,
++                NMConnection *connection,
++                const guint8 *other_hwaddr,
++                guint other_hwaddr_len,
++                gboolean fail_if_no_hwaddr)
++{
++	NMSettingWired *s_wired;
++	const guint8 *devaddr;
++	const GByteArray *mac = NULL;
++	int devtype;
++
++	devtype = nm_device_wired_get_hwaddr_type (NM_DEVICE_WIRED (device));
++	devaddr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (device));
++	g_return_val_if_fail (devaddr != NULL, FALSE);
++
++	s_wired = nm_connection_get_setting_wired (connection);
++	if (s_wired)
++		mac = nm_setting_wired_get_mac_address (s_wired);
++
++	if (mac) {
++		g_return_val_if_fail (mac->len == ETH_ALEN, FALSE);
++		if (other_hwaddr) {
++			g_return_val_if_fail (other_hwaddr_len == ETH_ALEN, FALSE);
++			if (memcmp (mac->data, other_hwaddr, mac->len) == 0)
++				return TRUE;
++		} else if (memcmp (mac->data, devaddr, mac->len) == 0)
++			return TRUE;
++	} else if (fail_if_no_hwaddr == FALSE)
++		return TRUE;
++
++	return FALSE;
++}
++
+ static void
+ dispose (GObject *object)
+ {
+@@ -1728,6 +1762,7 @@ nm_device_ethernet_class_init (NMDeviceEthernetClass *klass)
+ 	parent_class->deactivate_quickly = real_deactivate_quickly;
+ 	parent_class->spec_match_list = spec_match_list;
+ 	parent_class->connection_match_config = connection_match_config;
++	parent_class->hwaddr_matches = hwaddr_matches;
+ 
+ 	/* properties */
+ 	g_object_class_install_property
+diff --git a/src/nm-device-infiniband.c b/src/nm-device-infiniband.c
+index 7fda1d0..6b1da61 100644
+--- a/src/nm-device-infiniband.c
++++ b/src/nm-device-infiniband.c
+@@ -407,6 +407,40 @@ connection_match_config (NMDevice *self, const GSList *connections)
+ 	return match;
+ }
+ 
++static gboolean
++hwaddr_matches (NMDevice *device,
++                NMConnection *connection,
++                const guint8 *other_hwaddr,
++                guint other_hwaddr_len,
++                gboolean fail_if_no_hwaddr)
++{
++	NMSettingInfiniband *s_ib;
++	const guint8 *devaddr;
++	const GByteArray *mac = NULL;
++	int devtype;
++
++	devtype = nm_device_wired_get_hwaddr_type (NM_DEVICE_WIRED (device));
++	devaddr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (device));
++	g_return_val_if_fail (devaddr != NULL, FALSE);
++
++	s_ib = (NMSettingInfiniband *) nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND);
++	if (s_ib)
++		mac = nm_setting_infiniband_get_mac_address (s_ib);
++
++	if (mac) {
++		g_return_val_if_fail (mac->len == INFINIBAND_ALEN, FALSE);
++		if (other_hwaddr) {
++			g_return_val_if_fail (other_hwaddr_len == INFINIBAND_ALEN, FALSE);
++			if (memcmp (mac->data, other_hwaddr, mac->len) == 0)
++				return TRUE;
++		} else if (memcmp (mac->data, devaddr, mac->len) == 0)
++			return TRUE;
++	} else if (fail_if_no_hwaddr == FALSE)
++		return TRUE;
++
++	return FALSE;
++}
++
+ static void
+ get_property (GObject *object, guint prop_id,
+               GValue *value, GParamSpec *pspec)
+@@ -460,6 +494,7 @@ nm_device_infiniband_class_init (NMDeviceInfinibandClass *klass)
+ 	parent_class->act_stage4_get_ip4_config = real_act_stage4_get_ip4_config;
+ 	parent_class->spec_match_list = spec_match_list;
+ 	parent_class->connection_match_config = connection_match_config;
++	parent_class->hwaddr_matches = hwaddr_matches;
+ 
+ 	/* properties */
+ 	g_object_class_install_property
+diff --git a/src/nm-device-vlan.c b/src/nm-device-vlan.c
+new file mode 100644
+index 0000000..8a04f31
+--- /dev/null
++++ b/src/nm-device-vlan.c
+@@ -0,0 +1,794 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager -- Network link manager
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Copyright 2011 - 2012 Red Hat, Inc.
++ */
++
++#include "config.h"
++
++#include <glib.h>
++#include <glib/gi18n.h>
++
++#include <sys/socket.h>
++#include <linux/if.h>
++#include <netinet/ether.h>
++#include <errno.h>
++
++#include "nm-device-vlan.h"
++#include "nm-device-interface.h"
++#include "nm-logging.h"
++#include "nm-properties-changed-signal.h"
++#include "nm-utils.h"
++#include "NetworkManagerUtils.h"
++#include "nm-device-private.h"
++#include "nm-netlink-monitor.h"
++#include "nm-system.h"
++
++#include "nm-device-vlan-glue.h"
++
++
++G_DEFINE_TYPE (NMDeviceVlan, nm_device_vlan, NM_TYPE_DEVICE)
++
++#define NM_DEVICE_VLAN_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_DEVICE_VLAN, NMDeviceVlanPrivate))
++
++#define NM_VLAN_ERROR (nm_vlan_error_quark ())
++
++typedef struct {
++	gboolean disposed;
++
++	NMDevice *parent;
++	guint parent_state_id;
++
++	guint vlan_id;
++
++	guint8 hw_addr[NM_UTILS_HWADDR_LEN_MAX];
++	guint hw_addr_len;
++
++	gboolean          carrier;
++	NMNetlinkMonitor *monitor;
++	gulong            link_connected_id;
++	gulong            link_disconnected_id;
++	guint             carrier_action_defer_id;
++} NMDeviceVlanPrivate;
++
++enum {
++	PROPERTIES_CHANGED,
++
++	LAST_SIGNAL
++};
++
++static guint signals[LAST_SIGNAL] = { 0 };
++
++enum {
++	PROP_0,
++	PROP_HW_ADDRESS,
++	PROP_CARRIER,
++	PROP_VLAN_ID,
++
++	LAST_PROP
++};
++
++static void
++set_carrier (NMDeviceVlan *self,
++             const gboolean carrier,
++             const gboolean defer_action);
++
++/******************************************************************/
++
++typedef enum {
++	NM_VLAN_ERROR_CONNECTION_NOT_VLAN = 0,
++	NM_VLAN_ERROR_CONNECTION_INVALID,
++	NM_VLAN_ERROR_CONNECTION_INCOMPATIBLE,
++} NMVlanError;
++
++#define NM_VLAN_ERROR (nm_vlan_error_quark ())
++#define NM_TYPE_VLAN_ERROR (nm_vlan_error_get_type ())
++
++static GQuark
++nm_vlan_error_quark (void)
++{
++	static GQuark quark = 0;
++	if (!quark)
++		quark = g_quark_from_static_string ("nm-vlan-error");
++	return quark;
++}
++
++/* This should really be standard. */
++#define ENUM_ENTRY(NAME, DESC) { NAME, "" #NAME "", DESC }
++
++static GType
++nm_vlan_error_get_type (void)
++{
++	static GType etype = 0;
++
++	if (etype == 0) {
++		static const GEnumValue values[] = {
++			/* Connection was not a VLAN connection. */
++			ENUM_ENTRY (NM_VLAN_ERROR_CONNECTION_NOT_VLAN, "ConnectionNotVlan"),
++			/* Connection was not a valid VLAN connection. */
++			ENUM_ENTRY (NM_VLAN_ERROR_CONNECTION_INVALID, "ConnectionInvalid"),
++			/* Connection does not apply to this device. */
++			ENUM_ENTRY (NM_VLAN_ERROR_CONNECTION_INCOMPATIBLE, "ConnectionIncompatible"),
++			{ 0, 0, 0 }
++		};
++		etype = g_enum_register_static ("NMVlanError", values);
++	}
++	return etype;
++}
++
++/******************************************************************/
++
++static guint32
++real_get_generic_capabilities (NMDevice *dev)
++{
++	/* We assume VLAN interfaces always support carrier detect */
++	return NM_DEVICE_CAP_CARRIER_DETECT | NM_DEVICE_CAP_NM_SUPPORTED;
++}
++
++static gboolean
++get_carrier_sync (NMDeviceVlan *self)
++{
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (self);
++	GError *error = NULL;
++	guint32 ifflags = 0;
++
++	/* Get initial link state */
++	if (!nm_netlink_monitor_get_flags_sync (priv->monitor,
++	                                        nm_device_get_ip_ifindex (NM_DEVICE (self)),
++	                                        &ifflags,
++	                                        &error)) {
++		nm_log_warn (LOGD_HW | LOGD_DEVICE,
++		             "(%s): couldn't get carrier state: (%d) %s",
++		             nm_device_get_ip_iface (NM_DEVICE (self)),
++		             error ? error->code : -1,
++		             (error && error->message) ? error->message : "unknown");
++		g_clear_error (&error);
++	}
++
++	return !!(ifflags & IFF_LOWER_UP);
++}
++
++static gboolean
++real_hw_is_up (NMDevice *device)
++{
++	return nm_system_device_is_up (device);
++}
++
++static gboolean
++real_hw_bring_up (NMDevice *dev, gboolean *no_firmware)
++{
++	gboolean success = FALSE, carrier;
++	guint i = 20;
++
++	while (i-- > 0 && !success) {
++		success = nm_system_device_set_up_down (dev, TRUE, no_firmware);
++		g_usleep (50);
++	}
++
++	if (success) {
++		/* Block a bit to make sure the carrier comes on; it's delayed a bit
++		 * after setting the interface up.
++		 */
++		i = 20;
++		while (i-- > 0) {
++			carrier = get_carrier_sync (NM_DEVICE_VLAN (dev));
++			set_carrier (NM_DEVICE_VLAN (dev), carrier, carrier ? FALSE : TRUE);
++			if (carrier)
++				break;
++			g_usleep (100);
++		}
++	}
++	return success;
++}
++
++static void
++real_hw_take_down (NMDevice *dev)
++{
++	nm_system_device_set_up_down (dev, FALSE, NULL);
++}
++
++static void
++real_update_hw_address (NMDevice *dev)
++{
++	NMDeviceVlan *self = NM_DEVICE_VLAN (dev);
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (self);
++	struct rtnl_link *rtnl;
++	struct nl_addr *addr;
++
++	rtnl = nm_netlink_index_to_rtnl_link (nm_device_get_ip_ifindex (dev));
++	if (!rtnl) {
++		nm_log_err (LOGD_HW | LOGD_DEVICE,
++		            "(%s) failed to read hardware address (error %d)",
++		            nm_device_get_iface (dev), errno);
++		return;
++	}
++
++	addr = rtnl_link_get_addr (rtnl);
++	if (!addr) {
++		nm_log_err (LOGD_HW | LOGD_DEVICE,
++		            "(%s) no hardware address?",
++		            nm_device_get_iface (dev));
++		goto out;
++	}
++
++	if (nl_addr_get_len (addr) > sizeof (priv->hw_addr)) {
++		nm_log_err (LOGD_HW | LOGD_DEVICE,
++		            "(%s) hardware address is wrong length (got %d max %zd)",
++		            nm_device_get_iface (dev),
++		            nl_addr_get_len (addr),
++		            sizeof (priv->hw_addr));
++	} else {
++		priv->hw_addr_len = nl_addr_get_len (addr);
++		memcpy (&priv->hw_addr, nl_addr_get_binary_addr (addr), priv->hw_addr_len);
++		g_object_notify (G_OBJECT (self), NM_DEVICE_VLAN_HW_ADDRESS);
++	}
++
++out:
++	rtnl_link_put (rtnl);
++}
++
++static gboolean
++real_can_interrupt_activation (NMDevice *dev)
++{
++	/* Can interrupt activation if the carrier drops while activating */
++	return NM_DEVICE_VLAN_GET_PRIVATE (dev)->carrier ? FALSE : TRUE;
++}
++
++static gboolean
++real_is_available (NMDevice *dev)
++{
++	return NM_DEVICE_VLAN_GET_PRIVATE (dev)->carrier ? TRUE : FALSE;
++}
++
++/******************************************************************/
++
++static gboolean
++match_parent (NMDeviceVlan *self, const char *parent, GError **error)
++{
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (self);
++
++	g_return_val_if_fail (parent != NULL, FALSE);
++
++	if (nm_utils_is_uuid (parent)) {
++		NMActRequest *parent_req;
++		NMConnection *parent_connection;
++
++		/* If the parent is a UUID, the connection matches if our parent
++		 * device has that connection activated.
++		 */
++
++		parent_req = nm_device_get_act_request (priv->parent);
++		if (!parent_req) {
++			g_set_error_literal (error, NM_VLAN_ERROR, NM_VLAN_ERROR_CONNECTION_INVALID,
++			                     "Parent interface not active; could not match UUID");
++			return FALSE;
++		}
++
++		parent_connection = nm_act_request_get_connection (parent_req);
++		if (!parent_connection) {
++			g_set_error_literal (error, NM_VLAN_ERROR, NM_VLAN_ERROR_CONNECTION_INVALID,
++			                     "Parent interface had no connection; could not match UUID");
++			return FALSE;
++		}
++		if (g_strcmp0 (parent, nm_connection_get_uuid (parent_connection)) != 0) {
++			g_set_error_literal (error, NM_VLAN_ERROR, NM_VLAN_ERROR_CONNECTION_INVALID,
++			                     "Parent interface UUID did not match connection UUID");
++			return FALSE;
++		}
++	} else {
++		/* interface name */
++		if (g_strcmp0 (parent, nm_device_get_ip_iface (priv->parent)) != 0) {
++			g_set_error_literal (error, NM_VLAN_ERROR, NM_VLAN_ERROR_CONNECTION_INVALID,
++			                     "Parent interface name did not match connection");
++			return FALSE;
++		}
++	}
++
++	return TRUE;
++}
++
++static gboolean
++match_vlan_connection (NMDeviceVlan *self, NMConnection *connection, GError **error)
++{
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (self);
++	NMSettingVlan *s_vlan;
++	const char *parent, *iface = NULL;
++
++	s_vlan = nm_connection_get_setting_vlan (connection);
++	if (!s_vlan) {
++		g_set_error (error, NM_VLAN_ERROR, NM_VLAN_ERROR_CONNECTION_INVALID,
++				     "The connection was not a VLAN connection.");
++		return FALSE;
++	}
++
++	if (nm_setting_vlan_get_id (s_vlan) != priv->vlan_id) {
++		g_set_error (error, NM_VLAN_ERROR, NM_VLAN_ERROR_CONNECTION_INVALID,
++		             "The connection's VLAN ID did not match the device's VLAN ID.");
++		return FALSE;
++	}
++
++	/* Check parent interface; could be an interface name or a UUID */
++	parent = nm_setting_vlan_get_parent (s_vlan);
++	if (parent) {
++		if (!match_parent (self, parent, error))
++			return FALSE;
++	} else {
++		/* Parent could be a MAC address in a hardware-specific setting */
++		if (!nm_device_hwaddr_matches (priv->parent, connection, NULL, 0, TRUE)) {
++			g_set_error (error, NM_VLAN_ERROR, NM_VLAN_ERROR_CONNECTION_INVALID,
++					     "Failed to match the VLAN parent interface via hardware address.");
++			return FALSE;
++		}
++	}
++
++	/* Ensure the interface name matches.  If not specified we assume a match
++	 * since both the parent interface and the VLAN ID matched by the time we
++	 * get here.
++	 */
++	iface = nm_connection_get_virtual_iface_name (connection);
++	if (iface) {
++		if (g_strcmp0 (nm_device_get_ip_iface (NM_DEVICE (self)), iface) != 0) {
++			g_set_error (error, NM_VLAN_ERROR, NM_VLAN_ERROR_CONNECTION_INVALID,
++					     "The VLAN connection virtual interface name did not match.");
++			return FALSE;
++		}
++	}
++
++	return TRUE;
++}
++
++static NMConnection *
++real_get_best_auto_connection (NMDevice *dev,
++                               GSList *connections,
++                               char **specific_object)
++{
++	GSList *iter;
++
++	for (iter = connections; iter; iter = g_slist_next (iter)) {
++		NMConnection *connection = NM_CONNECTION (iter->data);
++		NMSettingConnection *s_con;
++
++		s_con = nm_connection_get_setting_connection (connection);
++		g_assert (s_con);
++		if (   nm_setting_connection_get_autoconnect (s_con)
++		    && match_vlan_connection (NM_DEVICE_VLAN (dev), connection, NULL))
++			return connection;
++	}
++	return NULL;
++}
++
++static gboolean
++real_check_connection_compatible (NMDevice *device,
++                                  NMConnection *connection,
++                                  GError **error)
++{
++	return match_vlan_connection (NM_DEVICE_VLAN (device), connection, error);
++}
++
++static gboolean
++spec_match_list (NMDevice *device, const GSList *specs)
++{
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (device);
++	char *hwaddr;
++	gboolean matched;
++	int itype = nm_utils_hwaddr_type (priv->hw_addr_len);
++
++	hwaddr = nm_utils_hwaddr_ntoa (priv->hw_addr, itype);
++	matched = nm_match_spec_hwaddr (specs, hwaddr);
++	g_free (hwaddr);
++
++	return matched;
++}
++
++static gboolean
++vlan_match_config (NMDevice *device, NMConnection *connection)
++{
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (device);
++	NMSettingVlan *s_vlan;
++	const char *ifname, *parent;
++	gboolean fail_if_no_hwaddr = FALSE;
++
++	s_vlan = nm_connection_get_setting_vlan (connection);
++	if (!s_vlan)
++		return FALSE;
++
++	/* Interface name */
++	ifname = nm_setting_vlan_get_interface_name (s_vlan);
++	if (g_strcmp0 (ifname, nm_device_get_ip_iface (device)) != 0)
++		return FALSE;
++
++	if (nm_setting_vlan_get_id (s_vlan) != priv->vlan_id)
++		return FALSE;
++
++	parent = nm_setting_vlan_get_parent (s_vlan);
++	if (parent) {
++		if (!match_parent (NM_DEVICE_VLAN (device), parent, NULL))
++			return FALSE;
++	} else {
++		/* If there's no parent and no interface name given, then the only way
++		 * we have to identify the VLAN interface the connection matches is
++		 * a hardware-specific setting's hardware address property, so we want
++		 * to fail the match below if we there is none.
++		 */
++		 if (ifname == NULL)
++		 	fail_if_no_hwaddr = TRUE;
++	}
++
++	/* MAC address check; we ask the parent to check our own MAC address,
++	 * because only the parent knows what kind of NMSetting the MAC
++	 * address will be in.  The VLAN device shouldn't have to know what kind
++	 * of interface the parent is.
++	 */
++	if (!nm_device_hwaddr_matches (priv->parent, connection, priv->hw_addr, priv->hw_addr_len, fail_if_no_hwaddr))
++		return FALSE;
++
++	return TRUE;
++}
++
++static NMConnection *
++connection_match_config (NMDevice *self, const GSList *connections)
++{
++	const GSList *iter;
++
++	/* First narrow @connections down to those that match in their
++	 * NMSettingVlan configuration.
++	 */
++	for (iter = connections; iter; iter = iter->next) {
++		NMConnection *candidate = iter->data;
++
++		if (!nm_connection_is_type (candidate, NM_SETTING_VLAN_SETTING_NAME))
++			continue;
++		if (!vlan_match_config (self, candidate))
++			continue;
++		if (!nm_device_match_ip_config (self, candidate))
++			continue;
++
++		return candidate;
++	}
++	return NULL;
++}
++
++/******************************************************************/
++
++static void
++carrier_action_defer_clear (NMDeviceVlan *self)
++{
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (self);
++
++	if (priv->carrier_action_defer_id) {
++		g_source_remove (priv->carrier_action_defer_id);
++		priv->carrier_action_defer_id = 0;
++	}
++}
++
++static gboolean
++carrier_action_defer_cb (gpointer user_data)
++{
++	NMDeviceVlan *self = NM_DEVICE_VLAN (user_data);
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (self);
++	NMDeviceState state;
++
++	priv->carrier_action_defer_id = 0;
++
++	state = nm_device_get_state (NM_DEVICE (self));
++	if (state == NM_DEVICE_STATE_UNAVAILABLE) {
++		if (priv->carrier)
++			nm_device_queue_state (NM_DEVICE (self), NM_DEVICE_STATE_DISCONNECTED, NM_DEVICE_STATE_REASON_CARRIER);
++	} else if (state >= NM_DEVICE_STATE_DISCONNECTED) {
++		if (!priv->carrier)
++			nm_device_queue_state (NM_DEVICE (self), NM_DEVICE_STATE_UNAVAILABLE, NM_DEVICE_STATE_REASON_CARRIER);
++	}
++	return FALSE;
++}
++
++static void
++set_carrier (NMDeviceVlan *self,
++             const gboolean carrier,
++             const gboolean defer_action)
++{
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (self);
++	NMDeviceState state;
++
++	if (priv->carrier == carrier)
++		return;
++
++	/* Clear any previous deferred action */
++	carrier_action_defer_clear (self);
++
++	priv->carrier = carrier;
++	g_object_notify (G_OBJECT (self), NM_DEVICE_VLAN_CARRIER);
++
++	state = nm_device_get_state (NM_DEVICE (self));
++	nm_log_info (LOGD_HW | LOGD_DEVICE,
++	             "(%s): carrier now %s (device state %d%s)",
++	             nm_device_get_iface (NM_DEVICE (self)),
++	             carrier ? "ON" : "OFF",
++	             state,
++	             defer_action ? ", deferring action for 4 seconds" : "");
++
++	if (defer_action)
++		priv->carrier_action_defer_id = g_timeout_add_seconds (4, carrier_action_defer_cb, self);
++	else
++		carrier_action_defer_cb (self);
++}
++
++static void
++carrier_on (NMNetlinkMonitor *monitor, int idx, NMDevice *device)
++{
++	/* Make sure signal is for us */
++	if (idx == nm_device_get_ifindex (device))
++		set_carrier (NM_DEVICE_VLAN (device), TRUE, FALSE);
++}
++
++static void
++carrier_off (NMNetlinkMonitor *monitor, int idx, NMDevice *device)
++{
++	NMDeviceState state;
++	gboolean defer = FALSE;
++
++	/* Make sure signal is for us */
++	if (idx == nm_device_get_ifindex (device)) {
++		/* Defer carrier-off event actions while connected by a few seconds
++		 * so that tripping over a cable, power-cycling a switch, or breaking
++		 * off the RJ45 locking tab isn't so catastrophic.
++		 */
++		state = nm_device_get_state (device);
++		if (state > NM_DEVICE_STATE_DISCONNECTED)
++			defer = TRUE;
++
++		set_carrier (NM_DEVICE_VLAN (device), FALSE, defer);
++	}
++}
++
++static void
++carrier_watch_init (NMDeviceVlan *self)
++{
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (self);
++
++	priv->monitor = nm_netlink_monitor_get ();
++	priv->link_connected_id = g_signal_connect (priv->monitor, "carrier-on",
++	                                            G_CALLBACK (carrier_on),
++	                                            self);
++	priv->link_disconnected_id = g_signal_connect (priv->monitor, "carrier-off",
++	                                               G_CALLBACK (carrier_off),
++	                                               self);
++
++	priv->carrier = get_carrier_sync (NM_DEVICE_VLAN (self));
++
++	nm_log_info (LOGD_HW | LOGD_DEVICE, "(%s): carrier is %s",
++	             nm_device_get_iface (NM_DEVICE (self)),
++	             priv->carrier ? "ON" : "OFF");
++
++	/* Request link state again just in case an error occurred getting the
++	 * initial link state.
++	 */
++	nm_netlink_monitor_request_status (priv->monitor, NULL);
++}
++
++/******************************************************************/
++
++static void
++parent_state_changed (NMDevice *parent,
++                      NMDeviceState new_state,
++                      NMDeviceState old_state,
++                      NMDeviceStateReason reason,
++                      gpointer user_data)
++{
++	NMDeviceVlan *self = NM_DEVICE_VLAN (user_data);
++
++	if (new_state < NM_DEVICE_STATE_DISCONNECTED) {
++		/* If the parent becomes unavailable or unmanaged so does the VLAN */
++		nm_device_state_changed (NM_DEVICE (self), new_state, reason);
++	} else if (   new_state == NM_DEVICE_STATE_DISCONNECTED
++	           && old_state < NM_DEVICE_STATE_DISCONNECTED) {
++		/* Mark VLAN interface as available/disconnected when the parent
++		 * becomes available as a result of carrier changes or becoming
++		 * initialized.
++		 */
++		nm_device_state_changed (NM_DEVICE (self), new_state, reason);
++	}
++}
++
++/******************************************************************/
++
++NMDevice *
++nm_device_vlan_new (const char *udi, const char *iface, NMDevice *parent)
++{
++	NMDevice *device;
++
++	g_return_val_if_fail (udi != NULL, NULL);
++	g_return_val_if_fail (iface != NULL, NULL);
++	g_return_val_if_fail (parent != NULL, NULL);
++
++	device = (NMDevice *) g_object_new (NM_TYPE_DEVICE_VLAN,
++	                                    NM_DEVICE_INTERFACE_UDI, udi,
++	                                    NM_DEVICE_INTERFACE_IFACE, iface,
++	                                    NM_DEVICE_INTERFACE_DRIVER, "8021q",
++	                                    NM_DEVICE_INTERFACE_TYPE_DESC, "VLAN",
++	                                    NM_DEVICE_INTERFACE_DEVICE_TYPE, NM_DEVICE_TYPE_VLAN,
++	                                    NULL);
++	if (device) {
++		NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (device);
++		int ifindex = nm_device_get_ifindex (device);
++		int parent_ifindex = -1, itype;
++		int vlan_id;
++
++		itype = nm_system_get_iface_type (ifindex, iface);
++		g_assert (itype == NM_IFACE_TYPE_VLAN);
++
++		if (!nm_system_get_iface_vlan_info (ifindex, &parent_ifindex, &vlan_id)) {
++			nm_log_warn (LOGD_DEVICE, "(%s): failed to get VLAN interface info.", iface);
++			g_object_unref (device);
++			return NULL;
++		}
++		priv->vlan_id = vlan_id;
++
++		if (   parent_ifindex < 0
++		    || parent_ifindex != nm_device_get_ip_ifindex (parent)
++		    || priv->vlan_id < 0) {
++			nm_log_warn (LOGD_DEVICE, "(%s): VLAN parent ifindex (%d) or VLAN ID (%d) invalid.",
++			             iface, parent_ifindex, priv->vlan_id);
++			g_object_unref (device);
++			return NULL;
++		}
++
++		priv->parent = g_object_ref (parent);
++		priv->parent_state_id = g_signal_connect (priv->parent,
++		                                          "state-changed",
++		                                          G_CALLBACK (parent_state_changed),
++		                                          device);
++
++		carrier_watch_init (NM_DEVICE_VLAN (device));
++
++		nm_log_dbg (LOGD_HW | LOGD_ETHER, "(%s): kernel ifindex %d", iface, ifindex);
++		nm_log_info (LOGD_HW | LOGD_ETHER, "(%s): VLAN ID %d with parent %s",
++		             iface, priv->vlan_id, nm_device_get_iface (parent));
++	}
++
++	return device;
++}
++
++static void
++nm_device_vlan_init (NMDeviceVlan * self)
++{
++}
++
++static void
++get_property (GObject *object, guint prop_id,
++              GValue *value, GParamSpec *pspec)
++{
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (object);
++	char *hwaddr;
++
++	switch (prop_id) {
++	case PROP_HW_ADDRESS:
++		hwaddr = nm_utils_hwaddr_ntoa (priv->hw_addr, nm_utils_hwaddr_type (priv->hw_addr_len));
++		g_value_take_string (value, hwaddr);
++		break;
++	case PROP_CARRIER:
++		g_value_set_boolean (value, priv->carrier);
++		break;
++	case PROP_VLAN_ID:
++		g_value_set_uint (value, priv->vlan_id);
++		break;
++	default:
++		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++		break;
++	}
++}
++
++static void
++set_property (GObject *object, guint prop_id,
++			  const GValue *value, GParamSpec *pspec)
++{
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (object);
++
++	switch (prop_id) {
++	case PROP_VLAN_ID:
++		priv->vlan_id = g_value_get_uint (value);
++		break;
++	default:
++		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++		break;
++	}
++}
++
++static void
++dispose (GObject *object)
++{
++	NMDeviceVlan *self = NM_DEVICE_VLAN (object);
++	NMDeviceVlanPrivate *priv = NM_DEVICE_VLAN_GET_PRIVATE (self);
++
++	if (priv->disposed) {
++		G_OBJECT_CLASS (nm_device_vlan_parent_class)->dispose (object);
++		return;
++	}
++	priv->disposed = TRUE;
++
++	if (priv->link_connected_id)
++		g_signal_handler_disconnect (priv->monitor, priv->link_connected_id);
++	if (priv->link_disconnected_id)
++		g_signal_handler_disconnect (priv->monitor, priv->link_disconnected_id);
++	carrier_action_defer_clear (self);
++
++	g_object_unref (priv->monitor);
++
++	g_signal_handler_disconnect (priv->parent, priv->parent_state_id);
++	g_object_unref (priv->parent);
++}
++
++static void
++nm_device_vlan_class_init (NMDeviceVlanClass *klass)
++{
++	GObjectClass *object_class = G_OBJECT_CLASS (klass);
++	NMDeviceClass *parent_class = NM_DEVICE_CLASS (klass);
++
++	g_type_class_add_private (object_class, sizeof (NMDeviceVlanPrivate));
++
++	/* virtual methods */
++	object_class->get_property = get_property;
++	object_class->set_property = set_property;
++	object_class->dispose = dispose;
++
++	parent_class->get_generic_capabilities = real_get_generic_capabilities;
++	parent_class->update_hw_address = real_update_hw_address;
++	parent_class->hw_is_up = real_hw_is_up;
++	parent_class->hw_bring_up = real_hw_bring_up;
++	parent_class->hw_take_down = real_hw_take_down;
++	parent_class->can_interrupt_activation = real_can_interrupt_activation;
++	parent_class->is_available = real_is_available;
++
++	parent_class->get_best_auto_connection = real_get_best_auto_connection;
++	parent_class->check_connection_compatible = real_check_connection_compatible;
++	parent_class->spec_match_list = spec_match_list;
++	parent_class->connection_match_config = connection_match_config;
++
++	/* properties */
++	g_object_class_install_property
++		(object_class, PROP_HW_ADDRESS,
++		 g_param_spec_string (NM_DEVICE_VLAN_HW_ADDRESS,
++							  "Active MAC Address",
++							  "Currently set hardware MAC address",
++							  NULL,
++							  G_PARAM_READABLE));
++
++	g_object_class_install_property
++		(object_class, PROP_CARRIER,
++		 g_param_spec_boolean (NM_DEVICE_VLAN_CARRIER,
++							   "Carrier",
++							   "Carrier",
++							   FALSE,
++							   G_PARAM_READABLE));
++
++	g_object_class_install_property
++		(object_class, PROP_VLAN_ID,
++		 g_param_spec_uint (NM_DEVICE_VLAN_ID,
++		                    "VLAN ID",
++		                    "VLAN ID",
++		                    0, 4095, 0,
++		                    G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY));
++
++	/* Signals */
++	signals[PROPERTIES_CHANGED] =
++		nm_properties_changed_signal_new (object_class,
++										  G_STRUCT_OFFSET (NMDeviceVlanClass, properties_changed));
++
++	dbus_g_object_type_install_info (G_TYPE_FROM_CLASS (klass),
++									 &dbus_glib_nm_device_vlan_object_info);
++
++	dbus_g_error_domain_register (NM_VLAN_ERROR, NULL, NM_TYPE_VLAN_ERROR);
++}
+diff --git a/src/nm-device-vlan.h b/src/nm-device-vlan.h
+new file mode 100644
+index 0000000..9bf1e6f
+--- /dev/null
++++ b/src/nm-device-vlan.h
+@@ -0,0 +1,61 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager -- Network link manager
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Copyright 2012 Red Hat, Inc.
++ */
++
++#ifndef NM_DEVICE_VLAN_H
++#define NM_DEVICE_VLAN_H
++
++#include <glib-object.h>
++
++#include "nm-device-wired.h"
++
++G_BEGIN_DECLS
++
++#define NM_TYPE_DEVICE_VLAN            (nm_device_vlan_get_type ())
++#define NM_DEVICE_VLAN(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), NM_TYPE_DEVICE_VLAN, NMDeviceVlan))
++#define NM_DEVICE_VLAN_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST ((klass),  NM_TYPE_DEVICE_VLAN, NMDeviceVlanClass))
++#define NM_IS_DEVICE_VLAN(obj)         (G_TYPE_CHECK_INSTANCE_TYPE ((obj), NM_TYPE_DEVICE_VLAN))
++#define NM_IS_DEVICE_VLAN_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE ((klass),  NM_TYPE_DEVICE_VLAN))
++#define NM_DEVICE_VLAN_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS ((obj),  NM_TYPE_DEVICE_VLAN, NMDeviceVlanClass))
++
++#define NM_DEVICE_VLAN_HW_ADDRESS "hw-address"
++#define NM_DEVICE_VLAN_CARRIER    "carrier"
++#define NM_DEVICE_VLAN_ID         "vlan-id"
++
++typedef struct {
++	NMDevice parent;
++} NMDeviceVlan;
++
++typedef struct {
++	NMDeviceClass parent;
++
++	/* Signals */
++	void (*properties_changed) (NMDeviceVlan *device, GHashTable *properties);
++} NMDeviceVlanClass;
++
++
++GType nm_device_vlan_get_type (void);
++
++NMDevice *nm_device_vlan_new (const char *udi,
++                              const char *iface,
++                              NMDevice *parent);
++
++G_END_DECLS
++
++#endif	/* NM_DEVICE_VLAN_H */
+diff --git a/src/nm-device-wifi.c b/src/nm-device-wifi.c
+index 2854eff..4e09026 100644
+--- a/src/nm-device-wifi.c
++++ b/src/nm-device-wifi.c
+@@ -3659,6 +3659,35 @@ spec_match_list (NMDevice *device, const GSList *specs)
+ 	return matched;
+ }
+ 
++static gboolean
++hwaddr_matches (NMDevice *device,
++                NMConnection *connection,
++                const guint8 *other_hwaddr,
++                guint other_hwaddr_len,
++                gboolean fail_if_no_hwaddr)
++{
++	NMDeviceWifiPrivate *priv = NM_DEVICE_WIFI_GET_PRIVATE (device);
++	NMSettingWireless *s_wifi;
++	const GByteArray *mac = NULL;
++
++	s_wifi = (NMSettingWireless *) nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS);
++	if (s_wifi)
++		mac = nm_setting_wireless_get_mac_address (s_wifi);
++
++	if (mac) {
++		g_return_val_if_fail (mac->len == ETH_ALEN, FALSE);
++		if (other_hwaddr) {
++			g_return_val_if_fail (other_hwaddr_len == ETH_ALEN, FALSE);
++			if (memcmp (mac->data, other_hwaddr, mac->len) == 0)
++				return TRUE;
++		} else if (memcmp (mac->data, priv->hw_addr, mac->len) == 0)
++			return TRUE;
++	} else if (fail_if_no_hwaddr == FALSE)
++		return TRUE;
++
++	return FALSE;
++}
++
+ static void
+ device_state_changed (NMDevice *device,
+                       NMDeviceState new_state,
+@@ -4008,6 +4037,7 @@ nm_device_wifi_class_init (NMDeviceWifiClass *klass)
+ 	parent_class->deactivate_quickly = real_deactivate_quickly;
+ 	parent_class->can_interrupt_activation = real_can_interrupt_activation;
+ 	parent_class->spec_match_list = spec_match_list;
++	parent_class->hwaddr_matches = hwaddr_matches;
+ 
+ 	klass->scanning_allowed = scanning_allowed;
+ 
+diff --git a/src/nm-device.c b/src/nm-device.c
+index 3ca7d50..ecffd8e 100644
+--- a/src/nm-device.c
++++ b/src/nm-device.c
+@@ -4182,6 +4182,46 @@ connection_match_config (NMDeviceInterface *device, const GSList *connections)
+ 	return NULL;
+ }
+ 
++/**
++ * nm_device_hwaddr_matches:
++ * @device: the device to use when matching the hardware address
++ * @connection: the connection which supplies the hardware address
++ * @other_hwaddr: if given, use this address instead of the device's actual
++ *   hardware address
++ * @other_hwaddr_len: length in bytes of @other_hwaddr
++ * @fail_if_no_hwaddr: whether to fail the match if @connection does not contain
++ *   a hardware address
++ *
++ * Matches a the devices hardware address (or @other_hwaddr if given) against
++ * the hardware-specific setting in @connection.  Allows for device-agnostic
++ * hardware address matching without having to know the internal details of
++ * the connection and which settings are used by each device subclass.
++ *
++ * Returns: %TRUE if the @device 's hardware address or @other_hwaddr matches
++ *  a hardware address in a hardware-specific setting in @connection
++ */
++gboolean
++nm_device_hwaddr_matches (NMDevice *device,
++                          NMConnection *connection,
++                          const guint8 *other_hwaddr,
++                          guint other_hwaddr_len,
++                          gboolean fail_if_no_hwaddr)
++{
++	g_return_val_if_fail (device != NULL, FALSE);
++	g_return_val_if_fail (NM_IS_DEVICE (device), FALSE);
++	if (other_hwaddr)
++		g_return_val_if_fail (other_hwaddr_len > 0, FALSE);
++
++	if (NM_DEVICE_GET_CLASS (device)->hwaddr_matches) {
++		return NM_DEVICE_GET_CLASS (device)->hwaddr_matches (device,
++		                                                     connection,
++		                                                     other_hwaddr,
++		                                                     other_hwaddr_len,
++		                                                     fail_if_no_hwaddr);
++	}
++	return FALSE;
++}
++
+ void
+ nm_device_set_dhcp_timeout (NMDevice *device, guint32 timeout)
+ {
+diff --git a/src/nm-device.h b/src/nm-device.h
+index 84b4750..673333d 100644
+--- a/src/nm-device.h
++++ b/src/nm-device.h
+@@ -121,6 +121,12 @@ typedef struct {
+ 
+ 	NMConnection *  (* connection_match_config) (NMDevice *self, const GSList *connections);
+ 
++	gboolean        (* hwaddr_matches) (NMDevice *self,
++	                                    NMConnection *connection,
++	                                    const guint8 *other_hwaddr,
++	                                    guint other_hwaddr_len,
++	                                    gboolean fail_if_no_hwaddr);
++
+ 	gboolean        (* enslave_slave) (NMDevice *self,
+ 	                                   NMDevice *slave);
+ 
+@@ -198,6 +204,12 @@ void nm_device_set_dhcp_anycast_address (NMDevice *device, guint8 *addr);
+ 
+ void nm_device_clear_autoconnect_inhibit (NMDevice *device);
+ 
++gboolean nm_device_hwaddr_matches (NMDevice *device,
++                                   NMConnection *connection,
++                                   const guint8 *other_hwaddr,
++                                   guint other_hwaddr_len,
++                                   gboolean fail_if_no_hwaddr);
++
+ G_END_DECLS
+ 
+ #endif	/* NM_DEVICE_H */
+diff --git a/src/nm-manager.c b/src/nm-manager.c
+index 4d03af7..d0e4b56 100644
+--- a/src/nm-manager.c
++++ b/src/nm-manager.c
+@@ -19,10 +19,16 @@
+  * Copyright (C) 2007 - 2011 Red Hat, Inc.
+  */
+ 
++#include <config.h>
+ #include <netinet/ether.h>
+ #include <string.h>
+ #include <dbus/dbus-glib-lowlevel.h>
+ #include <dbus/dbus-glib.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <sys/ioctl.h>
++
++#include "wireless-helper.h"
+ 
+ #include "nm-glib-compat.h"
+ #include "nm-manager.h"
+@@ -38,7 +44,9 @@
+ #include "nm-device-olpc-mesh.h"
+ #include "nm-device-cdma.h"
+ #include "nm-device-gsm.h"
++#include "nm-device-infiniband.h"
+ #include "nm-device-bond.h"
++#include "nm-device-vlan.h"
+ #include "nm-system.h"
+ #include "nm-properties-changed-signal.h"
+ #include "nm-setting-bluetooth.h"
+@@ -56,6 +64,7 @@
+ #include "nm-settings-interface.h"
+ #include "nm-settings-system-interface.h"
+ #include "nm-manager-auth.h"
++#include "NetworkManagerUtils.h"
+ 
+ #define NM_AUTOIP_DBUS_SERVICE "org.freedesktop.nm_avahi_autoipd"
+ #define NM_AUTOIP_DBUS_IFACE   "org.freedesktop.nm_avahi_autoipd"
+@@ -100,15 +109,6 @@ static void connection_added_default_handler (NMManager *manager,
+ 									 NMConnection *connection,
+ 									 NMConnectionScope scope);
+ 
+-static void udev_device_added_cb (NMUdevManager *udev_mgr,
+-                                  GUdevDevice *device,
+-                                  NMDeviceCreatorFn creator_fn,
+-                                  gpointer user_data);
+-
+-static void udev_device_removed_cb (NMUdevManager *udev_mgr,
+-                                    GUdevDevice *device,
+-                                    gpointer user_data);
+-
+ static void bluez_manager_bdaddr_added_cb (NMBluezManager *bluez_mgr,
+ 					   const char *bdaddr,
+ 					   const char *name,
+@@ -146,6 +146,8 @@ static GSList * remove_one_device (NMManager *manager,
+ 
+ static NMDevice *nm_manager_get_device_by_udi (NMManager *manager, const char *udi);
+ 
++static NMConnection *get_connection_by_uuid (NMManager *self, const char *uuid);
++
+ #define SSD_POKE_INTERVAL 120
+ #define ORIGDEV_TAG "originating-device"
+ 
+@@ -1461,6 +1463,76 @@ user_proxy_init (NMManager *self)
+ /* System settings stuff via NMSysconfigSettings                   */
+ /*******************************************************************/
+ 
++static NMDevice *
++get_device_from_hwaddr (NMManager *self, NMConnection *connection)
++{
++	NMManagerPrivate *priv = NM_MANAGER_GET_PRIVATE (self);
++	GSList *iter;
++
++	for (iter = priv->devices; iter; iter = g_slist_next (iter)) {
++		if (nm_device_hwaddr_matches (NM_DEVICE (iter->data), connection, NULL, 0, TRUE))
++			return iter->data;
++	}
++	return NULL;
++}
++
++static NMDevice*
++find_vlan_parent (NMManager *self,
++                  NMConnection *connection,
++                  gboolean check_hwaddr)
++{
++	NMManagerPrivate *priv = NM_MANAGER_GET_PRIVATE (self);
++	NMSettingVlan *s_vlan;
++	NMConnection *parent_connection;
++	const char *parent_iface;
++	NMDevice *parent = NULL;
++	GSList *iter;
++
++	/* The 'parent' property could be either an interface name, a connection
++	 * UUID, or even given by the MAC address of the connection's ethernet,
++	 * Infiniband, or WiFi setting.
++	 */
++	s_vlan = nm_connection_get_setting_vlan (connection);
++	g_return_val_if_fail (s_vlan != NULL, NULL);
++
++	parent_iface = nm_setting_vlan_get_parent (s_vlan);
++	if (parent_iface) {
++		parent = find_device_by_iface (self, parent_iface);
++		if (parent)
++			return parent;
++
++		if (nm_utils_is_uuid (parent_iface)) {
++			/* Try as a connection UUID */
++			parent_connection = get_connection_by_uuid (self, parent_iface);
++			if (parent_connection) {
++				/* Check if the parent connection is activated on some device already */
++				for (iter = priv->devices; iter; iter = g_slist_next (iter)) {
++					NMActRequest *req;
++					NMConnection *candidate;
++
++					req = nm_device_get_act_request (NM_DEVICE (iter->data));
++					if (req) {
++						candidate = nm_act_request_get_connection (req);
++						if (candidate == parent_connection)
++							return parent;
++					}
++				}
++
++				/* Check the hardware address of the parent connection */
++				if (check_hwaddr)
++					return get_device_from_hwaddr (self, parent_connection);
++			}
++			return NULL;
++		}
++	}
++
++	/* Try the hardware address from the VLAN connection's hardware setting */
++	if (check_hwaddr)
++		return get_device_from_hwaddr (self, connection);
++
++	return NULL;
++}
++
+ /**
+  * get_virtual_iface_name:
+  * @self: the #NMManager
+@@ -1480,6 +1552,7 @@ get_virtual_iface_name (NMManager *self,
+                         NMDevice **out_parent)
+ {
+ 	char *vname = NULL;
++	NMDevice *parent = NULL;
+ 
+ 	if (out_parent)
+ 		*out_parent = NULL;
+@@ -1487,6 +1560,31 @@ get_virtual_iface_name (NMManager *self,
+ 	if (nm_connection_is_type (connection, NM_SETTING_BOND_SETTING_NAME))
+ 		return g_strdup (nm_connection_get_virtual_iface_name (connection));
+ 
++	if (nm_connection_is_type (connection, NM_SETTING_VLAN_SETTING_NAME)) {
++		NMSettingVlan *s_vlan;
++		const char *ifname;
++
++		s_vlan = nm_connection_get_setting_vlan (connection);
++		g_return_val_if_fail (s_vlan != NULL, NULL);
++
++		parent = find_vlan_parent (self, connection, TRUE);
++		if (parent) {
++			/* If the connection doesn't specify the interface name for the VLAN
++			 * device, we create one for it using the VLAN ID and the parent
++			 * interface's name.
++			 */
++			ifname = nm_connection_get_virtual_iface_name (connection);
++			if (ifname)
++				vname = g_strdup (ifname);
++			else {
++				vname = nm_utils_new_vlan_name (nm_device_get_ip_iface (parent),
++				                                nm_setting_vlan_get_id (s_vlan));
++			}
++			if (out_parent)
++				*out_parent = parent;
++		}
++	}
++
+ 	return vname;
+ }
+ 
+@@ -1495,6 +1593,8 @@ connection_needs_virtual_device (NMConnection *connection)
+ {
+ 	if (nm_connection_is_type (connection, NM_SETTING_BOND_SETTING_NAME))
+ 		return TRUE;
++	if (nm_connection_is_type (connection, NM_SETTING_VLAN_SETTING_NAME))
++		return TRUE;
+ 
+ 	return FALSE;
+ }
+@@ -1555,6 +1655,17 @@ system_create_virtual_device (NMManager *self, NMConnection *connection)
+ 		udi = get_virtual_iface_placeholder_udi ();
+ 		device = nm_device_bond_new (udi, iface);
+ 		g_free (udi);
++	} else if (nm_connection_is_type (connection, NM_SETTING_VLAN_SETTING_NAME)) {
++		g_return_val_if_fail (parent != NULL, FALSE);
++
++		if (!nm_system_add_vlan_iface (connection, iface, nm_device_get_ip_ifindex (parent))) {
++			nm_log_warn (LOGD_DEVICE, "(%s): failed to add VLAN interface for '%s'",
++			             iface, nm_connection_get_id (connection));
++			goto out;
++		}
++		udi = get_virtual_iface_placeholder_udi ();
++		device = nm_device_vlan_new (udi, iface, parent);
++		g_free (udi);
+ 	}
+ 
+ 	if (device)
+@@ -2636,21 +2747,115 @@ find_device_by_ifindex (NMManager *self, guint32 ifindex)
+ 	return NULL;
+ }
+ 
++static gboolean
++is_wireless (GUdevDevice *device)
++{
++	char phy80211_path[255];
++	struct stat s;
++	int fd;
++	struct iwreq iwr;
++	const char *ifname, *path;
++	gboolean is_wifi = FALSE;
++
++	ifname = g_udev_device_get_name (device);
++	g_assert (ifname);
++
++	fd = socket (PF_INET, SOCK_DGRAM, 0);
++	strncpy (iwr.ifr_ifrn.ifrn_name, ifname, IFNAMSIZ);
++
++	path = g_udev_device_get_sysfs_path (device);
++	snprintf (phy80211_path, sizeof (phy80211_path), "%s/phy80211", path);
++
++	if (   (ioctl (fd, SIOCGIWNAME, &iwr) == 0)
++	    || (stat (phy80211_path, &s) == 0 && (s.st_mode & S_IFDIR)))
++		is_wifi = TRUE;
++
++	close (fd);
++	return is_wifi;
++}
++
++static gboolean
++is_olpc_mesh (GUdevDevice *device)
++{
++	const gchar *prop = g_udev_device_get_property (device, "ID_NM_OLPC_MESH");
++	return (prop != NULL);
++}
++
++static gboolean
++is_infiniband (GUdevDevice *device)
++{
++	gint etype = g_udev_device_get_sysfs_attr_as_int (device, "type");
++	return etype == ARPHRD_INFINIBAND;
++}
++
++static gboolean
++is_bond (int ifindex)
++{
++	return (nm_system_get_iface_type (ifindex, NULL) == NM_IFACE_TYPE_BOND);
++}
++
++static gboolean
++is_vlan (int ifindex)
++{
++	return (nm_system_get_iface_type (ifindex, NULL) == NM_IFACE_TYPE_VLAN);
++}
++
+ static void
+ udev_device_added_cb (NMUdevManager *udev_mgr,
+                       GUdevDevice *udev_device,
+-                      NMDeviceCreatorFn creator_fn,
++                      const char *iface,
++                      const char *sysfs_path,
++                      const char *driver,
++                      int ifindex,
+                       gpointer user_data)
+ {
+ 	NMManager *self = NM_MANAGER (user_data);
+-	GObject *device;
+-	guint32 ifindex;
++	NMDevice *device;
+ 
+-	ifindex = g_udev_device_get_property_as_int (udev_device, "IFINDEX");
+-	if (find_device_by_ifindex (self, ifindex))
++	g_return_if_fail (udev_device != NULL);
++	g_return_if_fail (iface != NULL);
++	g_return_if_fail (sysfs_path != NULL);
++	g_return_if_fail (driver != NULL);
++	g_return_if_fail (ifindex >= 0);
++
++	device = find_device_by_ifindex (self, ifindex);
++	if (device) {
++		/* If it's a virtual device we may need to update its UDI */
++		if (nm_system_get_iface_type (ifindex, iface) != NM_IFACE_TYPE_UNSPEC)
++			g_object_set (G_OBJECT (device), NM_DEVICE_INTERFACE_UDI, sysfs_path, NULL);
+ 		return;
++	}
++
++	if (is_olpc_mesh (udev_device)) /* must be before is_wireless */
++		device = nm_device_olpc_mesh_new (sysfs_path, iface, driver);
++	else if (is_wireless (udev_device))
++		device = nm_device_wifi_new (sysfs_path, iface, driver);
++	else if (is_infiniband (udev_device))
++		device = nm_device_infiniband_new (sysfs_path, iface, driver);
++	else if (is_bond (ifindex))
++		device = nm_device_bond_new (sysfs_path, iface);
++	else if (is_vlan (ifindex)) {
++		int parent_ifindex = -1;
++		NMDevice *parent;
++
++		/* Have to find the parent device */
++		if (nm_system_get_iface_vlan_info (ifindex, &parent_ifindex, NULL)) {
++			parent = find_device_by_ifindex (self, parent_ifindex);
++			if (parent)
++				device = nm_device_vlan_new (sysfs_path, iface, parent);
++			else {
++				/* If udev signaled the VLAN interface before it signaled
++				 * the VLAN's parent at startup we may not know about the
++				 * parent device yet.  But we'll find it on the second pass
++				 * from nm_manager_start().
++				 */
++				nm_log_dbg (LOGD_HW, "(%s): VLAN parent interface unknown", iface);
++			}
++		} else
++			nm_log_err (LOGD_HW, "(%s): failed to get VLAN parent ifindex", iface);
++	} else
++		device = nm_device_ethernet_new (sysfs_path, iface, driver);
+ 
+-	device = creator_fn (udev_mgr, udev_device, manager_sleeping (self));
+ 	if (device)
+ 		add_device (self, NM_DEVICE (device));
+ }
+@@ -4631,6 +4836,14 @@ nm_manager_start (NMManager *self)
+ 	nm_udev_manager_query_devices (priv->udev_mgr);
+ 	bluez_manager_resync_devices (self);
+ 
++	/* Query devices again to ensure that we catch all virtual interfaces (like
++	 * VLANs) that require a parent.  If during the first pass the VLAN
++	 * interface was detected first, the parent wouldn't exist yet and creating
++	 * the VLAN would fail.  The second query ensures that we'll have a valid
++	 * parent for the VLAN during the second pass.
++	 */
++	nm_udev_manager_query_devices (priv->udev_mgr);
++
+ 	/*
+ 	 * Connections added before the manager is started do not emit
+ 	 * connection-added signals thus devices have to be created manually.
+diff --git a/src/nm-netlink-compat.c b/src/nm-netlink-compat.c
+new file mode 100644
+index 0000000..974121a
+--- /dev/null
++++ b/src/nm-netlink-compat.c
+@@ -0,0 +1,242 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager -- Network link manager
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Copyright (C) 2011 Caixa Magica Software.
++ */
++
++#include <config.h>
++#include <glib.h>
++#include <unistd.h>
++#include <sys/ioctl.h>
++#include <sys/socket.h>
++#include <linux/if_vlan.h>
++#include <linux/sockios.h>
++
++#include "nm-logging.h"
++#include "nm-netlink-compat.h"
++
++#ifndef HAVE_LIBNL1
++struct rtnl_nexthop *
++nm_netlink_get_nh (struct rtnl_route * route)
++{
++	int hops;
++
++	hops = rtnl_route_get_nnexthops (route);
++	g_return_val_if_fail(hops > 0, NULL);
++	return rtnl_route_nexthop_n (route, 0);
++}
++
++int
++rtnl_route_get_oif (struct rtnl_route * route)
++{
++	struct rtnl_nexthop * nh;
++
++	nh = nm_netlink_get_nh(route);
++	g_return_val_if_fail(nh, -NLE_OBJ_NOTFOUND);
++	return rtnl_route_nh_get_ifindex (nh);
++}
++
++int
++rtnl_route_set_oif (struct rtnl_route * route, int ifindex)
++{
++	struct rtnl_nexthop * nh;
++
++	nh = rtnl_route_nh_alloc();
++	rtnl_route_nh_set_ifindex(nh, ifindex);
++	rtnl_route_add_nexthop(route, nh);
++	return 0;
++}
++
++struct nl_addr *
++rtnl_route_get_gateway (struct rtnl_route * route)
++{
++	struct rtnl_nexthop * nh;
++
++	nh = nm_netlink_get_nh(route);
++	g_return_val_if_fail(nh, NULL);
++	return rtnl_route_nh_get_gateway(nh);
++}
++
++int
++rtnl_route_set_gateway (struct rtnl_route * route, struct nl_addr * gw_addr)
++{
++	struct rtnl_nexthop * nh;
++
++	nh = nm_netlink_get_nh(route);
++	g_return_val_if_fail(nh, -NLE_OBJ_NOTFOUND);
++
++	rtnl_route_nh_set_gateway(nh, gw_addr);
++	return 0;
++}
++
++int
++rtnl_route_get_dst_len(struct rtnl_route * rtnlroute)
++{
++	struct nl_addr * dst;
++
++	dst = rtnl_route_get_dst(rtnlroute);
++	return nl_addr_get_prefixlen(dst);
++}
++#endif
++
++#ifdef HAVE_LIBNL1
++int
++nl_compat_error (int err)
++{
++	err = abs (err);
++
++	if (err == EEXIST)
++		err = NLE_EXIST;
++	else if (err == ENOENT || err == ESRCH)
++		err = NLE_OBJ_NOTFOUND;
++	else if (err == ERANGE)
++		err = NLE_RANGE;
++
++	return -err;
++}
++
++int
++rtnl_link_vlan_get_id (struct rtnl_link *l)
++{
++	int fd;
++	struct vlan_ioctl_args if_request;
++	char *if_name = NULL;
++
++	memset (&if_request, 0, sizeof (struct vlan_ioctl_args));
++
++	if ((if_name = rtnl_link_get_name (l)) == NULL)
++		return -1;
++
++	strcpy (if_request.device1, if_name);
++
++	if ((fd = socket (AF_INET, SOCK_STREAM, 0)) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't open control socket.");
++		return -1;
++	}
++
++	if_request.cmd = GET_VLAN_VID_CMD;
++	if (ioctl (fd, SIOCSIFVLAN, &if_request) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't get vlan id for %s.", if_name);
++		goto err_out;
++	}
++
++	close(fd);
++	return if_request.u.VID;
++err_out:
++	close(fd);
++	return -1;
++}
++
++int
++rtnl_link_vlan_set_flags (struct rtnl_link *l, unsigned int flags)
++{
++	int fd;
++	struct vlan_ioctl_args if_request;
++	char *if_name = NULL;
++
++
++	if ((if_name = rtnl_link_get_name (l)) == NULL)
++		return -1;
++
++	if ((fd = socket (AF_INET, SOCK_STREAM, 0)) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't open control socket.");
++		return -1;
++	}
++
++	memset (&if_request, 0, sizeof (struct vlan_ioctl_args));
++	strcpy (if_request.device1, if_name);
++	if_request.cmd = SET_VLAN_FLAG_CMD;
++	if_request.u.flag = flags;
++
++	if (ioctl (fd, SIOCSIFVLAN, &if_request) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't set flag in device %s.", if_name);
++		goto err_out;
++	}
++
++	close(fd);
++	return 0;
++err_out:
++	close(fd);
++	return -1;
++}
++
++int
++rtnl_link_vlan_set_ingress_map (struct rtnl_link *l, int from, uint32_t to)
++{
++	int fd;
++	struct vlan_ioctl_args if_request;
++	char *if_name = NULL;
++
++	if ((if_name = rtnl_link_get_name (l)) == NULL)
++		return -1;
++
++	if ((fd = socket (AF_INET, SOCK_STREAM, 0)) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't open control socket.");
++		return -1;
++	}
++
++	memset (&if_request, 0, sizeof (struct vlan_ioctl_args));
++	strcpy (if_request.device1, if_name);
++	if_request.cmd = SET_VLAN_INGRESS_PRIORITY_CMD;
++	if_request.u.skb_priority = from;
++	if_request.vlan_qos = to;
++
++	if (ioctl (fd, SIOCSIFVLAN, &if_request) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't set ingress map on device %s.", if_name);
++		goto err_out;
++	}
++
++	close(fd);
++	return 0;
++err_out:
++	close(fd);
++	return -1;
++}
++
++int
++rtnl_link_vlan_set_egress_map (struct rtnl_link *l, int from, uint32_t to)
++{
++	int fd;
++	struct vlan_ioctl_args if_request;
++	char *if_name = NULL;
++
++	if ((if_name = rtnl_link_get_name (l)) == NULL)
++		return -1;
++
++	if ((fd = socket (AF_INET, SOCK_STREAM, 0)) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't open control socket.");
++		return -1;
++	}
++
++	memset (&if_request, 0, sizeof (struct vlan_ioctl_args));
++	strcpy (if_request.device1, if_name);
++	if_request.cmd = SET_VLAN_EGRESS_PRIORITY_CMD;
++	if_request.u.skb_priority = from;
++	if_request.vlan_qos = to;
++
++	if (ioctl (fd, SIOCSIFVLAN, &if_request) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't set egress map on device %s.", if_name);
++		goto err_out;
++	}
++
++	close(fd);
++	return 0;
++err_out:
++	close(fd);
++	return -1;
++}
++#endif
+diff --git a/src/nm-netlink-compat.h b/src/nm-netlink-compat.h
+new file mode 100644
+index 0000000..dfd3039
+--- /dev/null
++++ b/src/nm-netlink-compat.h
+@@ -0,0 +1,252 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager -- Network link manager
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Copyright (C) 2011 Caixa Magica Software.
++ * Copyright (C) 2011 - 2012 Red Hat, Inc.
++ */
++
++#ifndef NM_NETLINK_COMPAT_H
++#define NM_NETLINK_COMPAT_H
++
++#include <errno.h>
++
++#include <netlink/netlink.h>
++#include <netlink/route/rtnl.h>
++#include <netlink/route/link.h>
++#include <netlink/route/route.h>
++#include <netlink/route/addr.h>
++
++
++#include <netlink/netlink.h>
++#include <netlink/cache.h>
++#include <netlink/utils.h>
++#include <netlink/data.h>
++#include <netlink/route/rtnl.h>
++#include <netlink/route/route.h>
++#include <netlink/route/link.h>
++#include <netlink/route/nexthop.h>
++
++#include <config.h>
++
++/* libnl-1 API compatibility for libnl-2/3*/
++#ifndef HAVE_LIBNL1
++
++struct rtnl_nexthop * nm_netlink_get_nh(struct rtnl_route *);
++int rtnl_route_get_oif(struct rtnl_route *);
++int rtnl_route_set_oif(struct rtnl_route *, int);
++int rtnl_route_set_gateway(struct rtnl_route *, struct nl_addr *);
++int rtnl_route_get_dst_len(struct rtnl_route *);
++struct nl_addr * rtnl_route_get_gateway(struct rtnl_route *);
++#endif
++
++/* libnl-2 API compatibility for libnl-3 */
++#ifdef HAVE_LIBNL3
++static inline int
++__rtnl_link_alloc_cache (struct nl_sock *h, struct nl_cache **cache)
++{
++       return rtnl_link_alloc_cache (h, AF_UNSPEC, cache);
++}
++#define rtnl_link_alloc_cache __rtnl_link_alloc_cache
++#endif
++
++
++/* libnl-2.0 compat functions */
++#ifdef HAVE_LIBNL2
++
++/* functions with similar prototypes */
++#define nlmsg_datalen nlmsg_len
++#endif  /* HAVE_LIBNL2 */
++
++
++/* libnl-1.0 compat functions */
++#ifdef HAVE_LIBNL1
++
++#define nl_sock nl_handle
++
++/* libnl-1.0 functions with similar prototypes */
++#define nl_socket_alloc nl_handle_alloc
++#define nl_socket_alloc_cb nl_handle_alloc_cb
++#define nl_socket_free nl_handle_destroy
++#define nl_socket_set_passcred nl_set_passcred
++#define nl_socket_disable_seq_check nl_disable_sequence_check
++#define rtnl_route_set_priority rtnl_route_set_prio
++#define nlmsg_datalen nlmsg_len
++
++/* auxiliary functions */
++int nl_compat_error (int);
++
++static inline int
++__rtnl_link_alloc_cache (struct nl_sock *h, struct nl_cache **cache)
++{
++	g_return_val_if_fail (cache != NULL, -EINVAL);
++
++	*cache = rtnl_link_alloc_cache (h);
++	return *cache ? 0 : -ENOMEM;
++}
++#define rtnl_link_alloc_cache __rtnl_link_alloc_cache
++
++static inline int
++__rtnl_route_get_metric (struct rtnl_route *route, int metric, unsigned int *value)
++{
++	g_return_val_if_fail (value != NULL, -EINVAL);
++
++	*value = rtnl_route_get_metric (route, metric);
++	return 0;
++}
++#define rtnl_route_get_metric __rtnl_route_get_metric
++
++static inline int
++__rtnl_addr_add (struct nl_sock *h, struct rtnl_addr *addr, int flags)
++{
++	return nl_compat_error (rtnl_addr_add (h, addr, flags));
++}
++#define rtnl_addr_add __rtnl_addr_add
++
++static inline int
++__rtnl_route_add (struct nl_sock *sk, struct rtnl_route *route, int flags)
++{
++	return nl_compat_error (rtnl_route_add (sk, route, flags));
++}
++#define rtnl_route_add __rtnl_route_add
++
++static inline int
++rtnl_route_delete (struct nl_sock *h, struct rtnl_route *route, int flags)
++{
++	return nl_compat_error (rtnl_route_del (h, route, flags));
++}
++#define rtnl_route_del rtnl_route_delete
++
++static inline int
++__rtnl_link_change (struct nl_sock *h, struct rtnl_link *old, struct rtnl_link *tmpl, int flags)
++{
++	return nl_compat_error (rtnl_link_change (h, old, tmpl,flags));
++}
++#define rtnl_link_change __rtnl_link_change
++
++static inline int
++__nl_cache_include (struct nl_cache *cache, struct nl_object *obj, change_func_t cb, void *data)
++{
++	return nl_cache_include (cache, obj, cb);
++}
++#define nl_cache_include __nl_cache_include
++
++#define NLE_SUCCESS             0
++#define NLE_FAILURE             1
++#define NLE_INTR                2
++#define NLE_BAD_SOCK            3
++#define NLE_AGAIN               4
++#define NLE_NOMEM               5
++#define NLE_EXIST               6
++#define NLE_INVAL               7
++#define NLE_RANGE               8
++#define NLE_MSGSIZE             9
++#define NLE_OPNOTSUPP           10
++#define NLE_AF_NOSUPPORT        11
++#define NLE_OBJ_NOTFOUND        12
++#define NLE_NOATTR              13
++#define NLE_MISSING_ATTR        14
++#define NLE_AF_MISMATCH         15
++#define NLE_SEQ_MISMATCH        16
++#define NLE_MSG_OVERFLOW        17
++#define NLE_MSG_TRUNC           18
++#define NLE_NOADDR              19
++#define NLE_SRCRT_NOSUPPORT     20
++#define NLE_MSG_TOOSHORT        21
++#define NLE_MSGTYPE_NOSUPPORT   22
++#define NLE_OBJ_MISMATCH        23
++#define NLE_NOCACHE             24
++#define NLE_BUSY                25
++#define NLE_PROTO_MISMATCH      26
++#define NLE_NOACCESS            27
++#define NLE_PERM                28
++#define NLE_PKTLOC_FILE         29
++
++#endif  /* HAVE_LIBNL1 */
++
++/* Stuff that only libnl3 has */
++#if defined(HAVE_LIBNL1) || defined(HAVE_LIBNL2)
++
++static inline int
++rtnl_link_bond_add (struct nl_sock *h, const char *name, void *data)
++{
++	/* Bonding only in libnl3 */
++	return -NLE_OPNOTSUPP;
++}
++
++static inline int
++rtnl_link_get_kernel (struct nl_sock *h, int f, const char *name, struct rtnl_link **out_link)
++{
++	/* Bonding only in libnl3 */
++	return -NLE_OPNOTSUPP;
++}
++
++static inline char *
++rtnl_link_get_type (struct rtnl_link *rtnl_link)
++{
++	/* Bonding only in libnl3 */
++	return NULL;
++}
++
++static inline int
++rtnl_link_bond_enslave_ifindex (struct nl_sock *h, int master_ifidx, int slave_ifidx)
++{
++	/* Bonding only in libnl3 */
++	return -NLE_OPNOTSUPP;
++}
++
++static inline int
++rtnl_link_bond_release_ifindex (struct nl_sock *h, int slave_ifidx)
++{
++	/* Bonding only in libnl3 */
++	return -NLE_OPNOTSUPP;
++}
++
++static inline int
++rtnl_link_vlan_set_id (struct rtnl_link *l, int id)
++{
++	/* VLAN only in libnl3 */
++	return -NLE_OPNOTSUPP;
++}
++
++int rtnl_link_vlan_get_id (struct rtnl_link *l);
++int rtnl_link_vlan_set_flags (struct rtnl_link *l, unsigned int flags);
++int rtnl_link_vlan_set_ingress_map (struct rtnl_link *l, int from, uint32_t to);
++int rtnl_link_vlan_set_egress_map (struct rtnl_link *l, int from, uint32_t to);
++
++static inline int
++rtnl_link_set_type (struct rtnl_link *l, const char *type)
++{
++	/* Operation only in libnl3 */
++	return -NLE_OPNOTSUPP;
++}
++
++static inline int
++rtnl_link_add (struct nl_sock *sk, struct rtnl_link *l, int flags)
++{
++	/* Operation only in libnl3 */
++	return -NLE_OPNOTSUPP;
++}
++
++static inline int
++rtnl_link_delete(struct nl_sock *sk, const struct rtnl_link *l)
++{
++	/* Operation only in libnl3 */
++	return -NLE_OPNOTSUPP;
++}
++#endif  /* HAVE_LIBNL1 || HAVE_LIBNL2 */
++
++#endif /* NM_NETLINK_COMPAT_H */
+diff --git a/src/nm-system.c b/src/nm-system.c
+index 5574cef..ebb5c23 100644
+--- a/src/nm-system.c
++++ b/src/nm-system.c
+@@ -21,6 +21,7 @@
+  * Copyright (C) January, 1998 Sergei Viznyuk <sv@phystech.com>
+  */
+ 
++#include <config.h>
+ #include <sys/types.h>
+ #include <sys/socket.h>
+ #include <sys/ioctl.h>
+@@ -51,6 +52,7 @@
+ #include "nm-utils.h"
+ #include "nm-logging.h"
+ #include "nm-netlink-monitor.h"
++#include "nm-netlink-compat.h"
+ 
+ /* Because of a bug in libnl, rtnl.h should be included before route.h */
+ #include <netlink/route/rtnl.h>
+@@ -1778,3 +1780,401 @@ nm_system_get_iface_type (int ifindex, const char *name)
+ {
+ 	return nm_netlink_get_iface_type (ifindex, name);
+ }
++
++/**
++ * nm_system_get_iface_vlan_info:
++ * @ifindex: the VLAN interface index
++ * @out_parent_ifindex: on success, the interface index of the parent interface of
++ *   @iface
++ * @out_vlan_id: on success, the VLAN ID of @iface
++ *
++ * Gets the VLAN parent interface name and VLAN ID.
++ *
++ * Returns: %TRUE if the interface is a VLAN device and no error occurred;
++ *   %FALSE if the interface was not a VLAN interface or an error occurred
++ **/
++gboolean
++nm_system_get_iface_vlan_info (int ifindex,
++                               int *out_parent_ifindex,
++                               int *out_vlan_id)
++{
++	struct nl_sock *nlh;
++	struct rtnl_link *lk;
++	struct nl_cache *cache = NULL;
++	gboolean success = FALSE;
++	int ret;
++
++	if (nm_system_get_iface_type (ifindex, NULL) != NM_IFACE_TYPE_VLAN)
++		return FALSE;
++
++	nlh = nm_netlink_get_default_handle ();
++	if (!nlh)
++		return FALSE;
++
++	ret = rtnl_link_alloc_cache (nlh, &cache);
++	g_return_val_if_fail (ret == 0, FALSE);
++	g_return_val_if_fail (cache != NULL, FALSE);
++
++	lk = rtnl_link_get (cache, ifindex);
++	if (lk) {
++		if (out_parent_ifindex)
++			*out_parent_ifindex = rtnl_link_get_link (lk);
++		if (out_vlan_id)
++			*out_vlan_id = rtnl_link_vlan_get_id (lk);
++
++		rtnl_link_put (lk);
++		success = TRUE;
++	}
++
++	nl_cache_free (cache);
++	return success;
++}
++
++static gboolean
++nm_system_iface_compat_set_name (const char *old_name, const char *new_name)
++{
++	int fd;
++	struct ifreq ifr;
++
++	if ((fd = socket (AF_INET, SOCK_STREAM, 0)) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't open control socket.");
++		return -1;
++	}
++
++	memset (&ifr, 0, sizeof (struct ifreq));
++	strncpy (ifr.ifr_name, old_name, sizeof (ifr.ifr_name));
++	strncpy (ifr.ifr_newname, new_name, sizeof (ifr.ifr_newname));
++
++	if (ioctl (fd, SIOCSIFNAME, &ifr) < 0) {
++		nm_log_err (LOGD_DEVICE, "cann't change %s with %s.", old_name, new_name);
++		close (fd);
++		return FALSE;
++	}
++
++	close (fd);
++	return TRUE;
++}
++
++static gboolean
++nm_system_iface_compat_set_vlan_name_type (int name_type)
++{
++	int fd;
++	struct vlan_ioctl_args if_request;
++
++	if ((fd = socket (AF_INET, SOCK_STREAM, 0)) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't open control socket.");
++		return -1;
++	}
++
++	memset (&if_request, 0, sizeof (struct vlan_ioctl_args));
++	if_request.cmd = SET_VLAN_NAME_TYPE_CMD;
++	if_request.u.name_type = name_type;
++
++	if (ioctl (fd, SIOCSIFVLAN, &if_request) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't set name type.");
++		close (fd);
++		return FALSE;
++	}
++
++	close (fd);
++	return TRUE;
++}
++
++static gboolean
++nm_system_iface_compat_add_vlan_device (const char *master, int vid)
++{
++	int fd;
++	struct vlan_ioctl_args if_request;
++
++	g_return_val_if_fail (master, FALSE);
++	g_return_val_if_fail (vid < 4096, FALSE);
++
++	/*
++	 * use VLAN_NAME_TYPE_RAW_PLUS_VID_NO_PAD as default,
++	 * we will overwrite it with rtnl_link_set_name() later.
++	 */
++	if (!nm_system_iface_compat_set_vlan_name_type (VLAN_NAME_TYPE_RAW_PLUS_VID_NO_PAD))
++		return FALSE;
++
++	if ((fd = socket (AF_INET, SOCK_STREAM, 0)) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't open control socket.");
++		return -1;
++	}
++
++	memset (&if_request, 0, sizeof (struct vlan_ioctl_args));
++	strcpy (if_request.device1, master);
++	if_request.cmd = ADD_VLAN_CMD;
++	if_request.u.VID = vid;
++
++	if (ioctl (fd, SIOCSIFVLAN, &if_request) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't add vlan device %s vid %d.", master, vid);
++		close (fd);
++		return FALSE;
++	}
++
++	close (fd);
++	return TRUE;
++}
++
++static gboolean
++nm_system_iface_compat_rem_vlan_device (const char *iface)
++{
++	int fd;
++	struct vlan_ioctl_args if_request;
++
++	if ((fd = socket (AF_INET, SOCK_STREAM, 0)) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't open control socket.");
++		return -1;
++	}
++
++	memset (&if_request, 0, sizeof (struct vlan_ioctl_args));
++        strcpy (if_request.device1, iface);
++	if_request.cmd = DEL_VLAN_CMD;
++
++	if (ioctl (fd, SIOCSIFVLAN, &if_request) < 0) {
++		nm_log_err (LOGD_DEVICE, "couldn't rem vlan device %s.", iface);
++		close (fd);
++		return FALSE;
++	}
++
++	close (fd);
++	return TRUE;
++}
++
++static gboolean
++nm_system_iface_compat_add_vlan (NMConnection *connection,
++				const char *iface,
++				int master_ifindex)
++{
++	NMSettingVlan *s_vlan;
++	int vlan_id;
++	guint32 vlan_flags = 0;
++	guint32 num, i, from, to;
++	int ifindex;
++	struct rtnl_link *new_link = NULL;
++	char *master = nm_netlink_index_to_iface (master_ifindex);
++	char *name = NULL;
++
++	s_vlan = nm_connection_get_setting_vlan (connection);
++	g_return_val_if_fail (s_vlan, FALSE);
++
++	vlan_id = nm_setting_vlan_get_id (s_vlan);
++
++	if (!iface) {
++		iface = nm_connection_get_virtual_iface_name (connection);
++		g_return_val_if_fail (iface != NULL, FALSE);
++	}
++
++	/*
++	 * Use VLAN_NAME_TYPE_RAW_PLUS_VID_NO_PAD as default,
++	 * we will overwrite it with rtnl_link_set_name() later.
++	 */
++	name = nm_utils_new_vlan_name(master, vlan_id);
++
++	/*
++	 * vconfig add
++	 */
++
++	if (!nm_system_iface_compat_add_vlan_device (master, vlan_id))
++		goto err_out;
++
++	/*
++	 * get corresponding rtnl_link
++	 */
++
++	if (!nm_system_iface_compat_set_name (name, iface))
++		goto err_out_delete_vlan_with_default_name;
++
++	ifindex = nm_netlink_iface_to_index (iface);
++	if (ifindex <= 0)
++		goto err_out;
++
++	new_link = nm_netlink_index_to_rtnl_link (ifindex);
++	if (!new_link)
++		goto err_out_delete_vlan_with_default_name;
++
++	/*
++	 * vconfig set_flag
++	 */
++	vlan_flags = nm_setting_vlan_get_flags (s_vlan);
++	if (vlan_flags)
++		if (rtnl_link_vlan_set_flags (new_link, vlan_flags))
++			goto err_out_delete_vlan_with_new_name;
++
++	/*
++	 * vconfig set_ingress_map
++	 */
++	num = nm_setting_vlan_get_num_priorities (s_vlan, NM_VLAN_INGRESS_MAP);
++	for (i = 0; i < num; i++) {
++		if (nm_setting_vlan_get_priority (s_vlan, NM_VLAN_INGRESS_MAP, i, &from, &to))
++			if (rtnl_link_vlan_set_ingress_map (new_link, from, to))
++				goto err_out_delete_vlan_with_new_name;
++	}
++
++	/*
++	 * vconfig set_egress_map
++	 */
++	num = nm_setting_vlan_get_num_priorities (s_vlan, NM_VLAN_EGRESS_MAP);
++	for (i = 0; i < num; i++) {
++		if (nm_setting_vlan_get_priority (s_vlan, NM_VLAN_EGRESS_MAP, i, &from, &to))
++			if (rtnl_link_vlan_set_egress_map (new_link, from, to))
++				goto err_out_delete_vlan_with_new_name;
++	}
++
++	rtnl_link_put (new_link);
++	return TRUE;
++
++err_out:
++	g_free (name);
++	return FALSE;
++
++err_out_delete_vlan_with_default_name:
++	nm_system_iface_compat_rem_vlan_device (name);
++	g_free (name);
++	return FALSE;
++
++err_out_delete_vlan_with_new_name:
++	rtnl_link_put (new_link);
++	nm_system_iface_compat_rem_vlan_device (iface);
++	g_free (name);
++	return FALSE;
++}
++
++/**
++ * nm_system_add_vlan_iface:
++ * @connection: the #NMConnection that describes the VLAN interface
++ * @iface: the interface name of the new VLAN interface
++ * @parent_ifindex: the interface index of the new VLAN interface's master
++ *  interface
++ *
++ * Add a VLAN device named @iface and specified in @connection.
++ *
++ * Returns: %TRUE on success, %FALSE on failure
++ */
++gboolean
++nm_system_add_vlan_iface (NMConnection *connection,
++                          const char *iface,
++                          int parent_ifindex)
++{
++	NMSettingVlan *s_vlan;
++	int ret = -1;
++	struct rtnl_link *new_link = NULL;
++	struct nl_sock *nlh = NULL;
++	guint32 vlan_id = 0;
++	guint32 vlan_flags = 0;
++	guint32 num, i, from, to;
++
++	g_return_val_if_fail (parent_ifindex >= 0, FALSE);
++
++	nlh = nm_netlink_get_default_handle ();
++	g_return_val_if_fail (nlh != NULL, FALSE);
++
++	s_vlan = nm_connection_get_setting_vlan (connection);
++	g_return_val_if_fail (s_vlan, FALSE);
++
++	vlan_id = nm_setting_vlan_get_id (s_vlan);
++
++	if (!iface) {
++		iface = nm_connection_get_virtual_iface_name (connection);
++		g_return_val_if_fail (iface != NULL, FALSE);
++	}
++
++	new_link = rtnl_link_alloc ();
++	if (!new_link) {
++		g_warn_if_fail (new_link != NULL);
++		goto out;
++	}
++
++	ret = rtnl_link_set_type (new_link, "vlan");
++	if (ret == -NLE_OPNOTSUPP) {
++		/*
++		 * There is no linbl3, try ioctl.
++		 */
++		ret = -1;
++		if (nm_system_iface_compat_add_vlan (connection, iface, parent_ifindex))
++			ret = 0;
++		goto out;
++	}
++
++	rtnl_link_set_link (new_link, parent_ifindex);
++	rtnl_link_set_name (new_link, iface);
++	rtnl_link_vlan_set_id (new_link, vlan_id);
++
++	vlan_flags = nm_setting_vlan_get_flags (s_vlan);
++	if (vlan_flags) {
++		guint kernel_flags = 0;
++
++		if (vlan_flags & NM_VLAN_FLAG_REORDER_HEADERS)
++			kernel_flags |= VLAN_FLAG_REORDER_HDR;
++		if (vlan_flags & NM_VLAN_FLAG_GVRP)
++			kernel_flags |= VLAN_FLAG_GVRP;
++
++		rtnl_link_vlan_set_flags (new_link, kernel_flags);
++	}
++
++	num = nm_setting_vlan_get_num_priorities (s_vlan, NM_VLAN_INGRESS_MAP);
++	for (i = 0; i < num; i++) {
++		if (nm_setting_vlan_get_priority (s_vlan, NM_VLAN_INGRESS_MAP, i, &from, &to))
++			rtnl_link_vlan_set_ingress_map (new_link, (int) from, (int) to);
++	}
++
++	num = nm_setting_vlan_get_num_priorities (s_vlan, NM_VLAN_EGRESS_MAP);
++	for (i = 0; i < num; i++) {
++		if (nm_setting_vlan_get_priority (s_vlan, NM_VLAN_EGRESS_MAP, i, &from, &to))
++			rtnl_link_vlan_set_egress_map (new_link, (int) from, (int) to);
++	}
++
++	ret = rtnl_link_add (nlh, new_link, NLM_F_CREATE);
++
++out:
++	if (new_link)
++		rtnl_link_put (new_link);
++	return (ret == 0);
++}
++
++/**
++ * nm_system_del_vlan_iface:
++ * @iface: the interface name
++ *
++ * Delete a VLAN interface specified by @iface.
++ *
++ * Returns: %TRUE on success, or %FALSE
++ */
++gboolean
++nm_system_del_vlan_iface (const char *iface)
++{
++	int ret = 0;
++	struct nl_sock *nlh = NULL;
++	struct nl_cache *cache = NULL;
++	struct rtnl_link *new_link = NULL;
++	int itype;
++
++	g_return_val_if_fail (iface != NULL, FALSE);
++
++	itype = nm_system_get_iface_type (-1, iface);
++	g_return_val_if_fail (itype == NM_IFACE_TYPE_VLAN, FALSE);
++
++	nlh = nm_netlink_get_default_handle ();
++	g_return_val_if_fail (nlh != NULL, FALSE);
++
++	ret = rtnl_link_alloc_cache (nlh, &cache);
++	g_return_val_if_fail (ret == 0, FALSE);
++	g_return_val_if_fail (cache != NULL, FALSE);
++
++	new_link = rtnl_link_get_by_name (cache, iface);
++	if (new_link) {
++		ret = rtnl_link_delete (nlh, new_link);
++		if (ret == -NLE_OPNOTSUPP) {
++			/*
++			 * There is no linbl3, try ioctl.
++			 */
++			ret = -1;
++			if (nm_system_iface_compat_rem_vlan_device (iface))
++				ret = 0;
++		}
++	}
++
++	rtnl_link_put (new_link);
++	nl_cache_free (cache);
++	return (ret == 0) ? TRUE : FALSE;
++}
+diff --git a/src/nm-system.h b/src/nm-system.h
+index 76606c4..942435c 100644
+--- a/src/nm-system.h
++++ b/src/nm-system.h
+@@ -116,4 +116,14 @@ enum {
+ 
+ int             nm_system_get_iface_type      (int ifindex, const char *name);
+ 
++gboolean        nm_system_get_iface_vlan_info (int ifindex,
++                                               int *out_parent_ifindex,
++                                               int *out_vlan_id);
++
++gboolean        nm_system_add_vlan_iface (NMConnection *connection,
++                                          const char *iface,
++                                          int parent_ifindex);
++gboolean        nm_system_del_vlan_iface (const char *iface);
++
++
+ #endif
+diff --git a/src/nm-udev-manager.c b/src/nm-udev-manager.c
+index 84d2e3a..73cf4bd 100644
+--- a/src/nm-udev-manager.c
++++ b/src/nm-udev-manager.c
+@@ -27,8 +27,6 @@
+ #include <unistd.h>
+ #include <net/if_arp.h>
+ 
+-#include "wireless-helper.h"
+-
+ #define G_UDEV_API_IS_SUBJECT_TO_CHANGE
+ #include <gudev/gudev.h>
+ 
+@@ -36,11 +34,6 @@
+ #include "nm-marshal.h"
+ #include "nm-logging.h"
+ #include "NetworkManagerUtils.h"
+-#include "nm-device-wifi.h"
+-#include "nm-device-olpc-mesh.h"
+-#include "nm-device-infiniband.h"
+-#include "nm-device-ethernet.h"
+-#include "nm-device-bond.h"
+ #include "nm-system.h"
+ 
+ typedef struct {
+@@ -305,121 +298,14 @@ rfkill_remove (NMUdevManager *self,
+ 	}
+ }
+ 
+-static gboolean
+-is_wireless (GUdevDevice *device)
+-{
+-	char phy80211_path[255];
+-	struct stat s;
+-	int fd;
+-	struct iwreq iwr;
+-	const char *ifname, *path;
+-	gboolean is_wifi = FALSE;
+-
+-	ifname = g_udev_device_get_name (device);
+-	g_assert (ifname);
+-
+-	fd = socket (PF_INET, SOCK_DGRAM, 0);
+-	strncpy (iwr.ifr_ifrn.ifrn_name, ifname, IFNAMSIZ);
+-
+-	path = g_udev_device_get_sysfs_path (device);
+-	snprintf (phy80211_path, sizeof (phy80211_path), "%s/phy80211", path);
+-
+-	if (   (ioctl (fd, SIOCGIWNAME, &iwr) == 0)
+-	    || (stat (phy80211_path, &s) == 0 && (s.st_mode & S_IFDIR)))
+-		is_wifi = TRUE;
+-
+-	close (fd);
+-	return is_wifi;
+-}
+-
+-static gboolean
+-is_olpc_mesh (GUdevDevice *device)
+-{
+-	const gchar *prop = g_udev_device_get_property (device, "ID_NM_OLPC_MESH");
+-	return (prop != NULL);
+-}
+-
+-static gboolean
+-is_infiniband (GUdevDevice *device)
+-{
+-	gint etype = g_udev_device_get_sysfs_attr_as_int (device, "type");
+-	return etype == ARPHRD_INFINIBAND;
+-}
+-
+-static gboolean
+-is_bond (int ifindex)
+-{
+-	return (nm_system_get_iface_type (ifindex, NULL) == NM_IFACE_TYPE_BOND);
+-}
+-static GObject *
+-device_creator (NMUdevManager *manager,
+-                GUdevDevice *udev_device,
+-                gboolean sleeping)
+-{
+-	GObject *device = NULL;
+-	const char *ifname, *driver, *path, *subsys;
+-	GUdevDevice *parent = NULL, *grandparent = NULL;
+-	gint ifindex;
+-
+-	ifname = g_udev_device_get_name (udev_device);
+-	g_assert (ifname);
+-
+-	path = g_udev_device_get_sysfs_path (udev_device);
+-	if (!path) {
+-		nm_log_warn (LOGD_HW, "couldn't determine device path; ignoring...");
+-		return NULL;
+-	}
+-
+-	driver = g_udev_device_get_driver (udev_device);
+-	if (!driver) {
+-		/* Try the parent */
+-		parent = g_udev_device_get_parent (udev_device);
+-		if (parent) {
+-			driver = g_udev_device_get_driver (parent);
+-			if (!driver) {
+-				/* try the grandparent only if it's an ibmebus device */
+-				subsys = g_udev_device_get_subsystem (parent);
+-				if (subsys && !strcmp (subsys, "ibmebus")) {
+-					grandparent = g_udev_device_get_parent (parent);
+-					if (grandparent)
+-						driver = g_udev_device_get_driver (grandparent);
+-				}
+-			}
+-		}
+-	}
+-
+-	ifindex = g_udev_device_get_sysfs_attr_as_int (udev_device, "ifindex");
+-	if (ifindex <= 0) {
+-		nm_log_warn (LOGD_HW, "%s: device had invalid ifindex %d; ignoring...", path, (guint32) ifindex);
+-		goto out;
+-	}
+-
+-	if (is_olpc_mesh (udev_device)) /* must be before is_wireless */
+-		device = (GObject *) nm_device_olpc_mesh_new (path, ifname, driver);
+-	else if (is_wireless (udev_device))
+-		device = (GObject *) nm_device_wifi_new (path, ifname, driver);
+-	else if (is_infiniband (udev_device))
+-		device = (GObject *) nm_device_infiniband_new (path, ifname, driver);
+-	else if (is_bond (ifindex))
+-		device = (GObject *) nm_device_bond_new (path, ifname);
+-	else
+-		device = (GObject *) nm_device_ethernet_new (path, ifname, driver);
+-
+-out:
+-	if (grandparent)
+-		g_object_unref (grandparent);
+-	if (parent)
+-		g_object_unref (parent);
+-	return device;
+-}
+-
+ static void
+ net_add (NMUdevManager *self, GUdevDevice *device)
+ {
++	GUdevDevice *parent = NULL, *grandparent = NULL;
+ 	gint etype;
+-	const char *iface;
+-	const char *devtype;
++	const char *iface, *driver, *devtype, *path, *subsys;
+ 	gboolean is_ctc;
++	int ifindex;
+ 
+ 	g_return_if_fail (device != NULL);
+ 
+@@ -454,7 +340,63 @@ net_add (NMUdevManager *self, GUdevDevice *device)
+ 		return;
+ 	}
+ 
+-	g_signal_emit (self, signals[DEVICE_ADDED], 0, device, device_creator);
++	path = g_udev_device_get_sysfs_path (device);
++	if (!path) {
++		nm_log_warn (LOGD_HW, "couldn't determine device path; ignoring...");
++		return;
++	}
++
++	driver = g_udev_device_get_driver (device);
++	if (!driver) {
++		/* Try the parent */
++		parent = g_udev_device_get_parent (device);
++		if (parent) {
++			driver = g_udev_device_get_driver (parent);
++			if (!driver) {
++				/* try the grandparent only if it's an ibmebus device */
++				subsys = g_udev_device_get_subsystem (parent);
++				if (subsys && !strcmp (subsys, "ibmebus")) {
++					grandparent = g_udev_device_get_parent (parent);
++					if (grandparent)
++						driver = g_udev_device_get_driver (grandparent);
++				}
++			}
++		}
++	}
++
++	ifindex = g_udev_device_get_sysfs_attr_as_int (device, "ifindex");
++	if (ifindex <= 0) {
++		nm_log_warn (LOGD_HW, "%s: device had invalid ifindex %d; ignoring...", path, (guint32) ifindex);
++		goto out;
++	}
++
++	if (!driver) {
++		switch (nm_system_get_iface_type (ifindex, iface)) {
++		case NM_IFACE_TYPE_BOND:
++			driver = "bonding";
++			break;
++		case NM_IFACE_TYPE_VLAN:
++			driver = "8021q";
++			break;
++		default:
++			if (g_str_has_prefix (iface, "easytether"))
++				driver = "easytether";
++			break;
++		}
++		
++		if (!driver) {
++			nm_log_warn (LOGD_HW, "%s: couldn't determine device driver; ignoring...", path);
++			goto out;
++		}
++	}
++
++	g_signal_emit (self, signals[DEVICE_ADDED], 0, device, iface, path, driver, ifindex);
++
++out:
++	if (grandparent)
++		g_object_unref (grandparent);
++	if (parent)
++		g_object_unref (parent);
+ }
+ 
+ static void
+@@ -576,8 +518,8 @@ nm_udev_manager_class_init (NMUdevManagerClass *klass)
+ 					  G_SIGNAL_RUN_FIRST,
+ 					  G_STRUCT_OFFSET (NMUdevManagerClass, device_added),
+ 					  NULL, NULL,
+-					  _nm_marshal_VOID__POINTER_POINTER,
+-					  G_TYPE_NONE, 2, G_TYPE_POINTER, G_TYPE_POINTER);
++					  _nm_marshal_VOID__POINTER_POINTER_POINTER_POINTER_INT,
++					  G_TYPE_NONE, 5, G_TYPE_POINTER, G_TYPE_POINTER, G_TYPE_POINTER, G_TYPE_POINTER, G_TYPE_INT);
+ 
+ 	signals[DEVICE_REMOVED] =
+ 		g_signal_new ("device-removed",
+diff --git a/src/nm-udev-manager.h b/src/nm-udev-manager.h
+index 06a2d35..7fe7bdd 100644
+--- a/src/nm-udev-manager.h
++++ b/src/nm-udev-manager.h
+@@ -43,17 +43,16 @@ typedef struct {
+ 	GObject parent;
+ } NMUdevManager;
+ 
+-typedef GObject *(*NMDeviceCreatorFn) (NMUdevManager *manager,
+-                                       GUdevDevice *device,
+-                                       gboolean sleeping);
+-
+ typedef struct {
+ 	GObjectClass parent;
+ 
+ 	/* Virtual functions */
+ 	void (*device_added) (NMUdevManager *manager,
+ 	                      GUdevDevice *device,
+-	                      NMDeviceCreatorFn creator_fn);
++	                      const char *ifname,
++	                      const char *path,
++	                      const char *driver,
++	                      int ifindex);
+ 
+ 	void (*device_removed) (NMUdevManager *manager, GUdevDevice *device);
+ 
+diff --git a/system-settings/plugins/ifcfg-rh/common.h b/system-settings/plugins/ifcfg-rh/common.h
+index d4de95b..14d4893 100644
+--- a/system-settings/plugins/ifcfg-rh/common.h
++++ b/system-settings/plugins/ifcfg-rh/common.h
+@@ -46,6 +46,7 @@
+ #define TYPE_INFINIBAND "InfiniBand"
+ #define TYPE_BRIDGE     "Bridge"
+ #define TYPE_BOND       "Bond"
++#define TYPE_VLAN       "Vlan"
+ 
+ #define IFCFG_PLUGIN_ERROR (ifcfg_plugin_error_quark ())
+ GQuark ifcfg_plugin_error_quark (void);
+diff --git a/system-settings/plugins/ifcfg-rh/reader.c b/system-settings/plugins/ifcfg-rh/reader.c
+index f8574fa..dc52b82 100644
+--- a/system-settings/plugins/ifcfg-rh/reader.c
++++ b/system-settings/plugins/ifcfg-rh/reader.c
+@@ -46,6 +46,7 @@
+ #include <nm-setting-bond.h>
+ #include <nm-setting-connection.h>
+ #include <nm-setting-ip4-config.h>
++#include <nm-setting-vlan.h>
+ #include <nm-setting-ip6-config.h>
+ #include <nm-setting-wired.h>
+ #include <nm-setting-wireless.h>
+@@ -3454,7 +3455,6 @@ is_wireless_device (const char *iface)
+ enum {
+ 	IGNORE_REASON_NONE = 0x00,
+ 	IGNORE_REASON_BRIDGE = 0x01,
+-	IGNORE_REASON_VLAN = 0x02,
+ };
+ 
+ static void
+@@ -3605,6 +3605,229 @@ is_bond_device (const char *name, shvarFile *parsed)
+ 	return FALSE;
+ }
+ 
++static gboolean
++is_vlan_device (const char *name, shvarFile *parsed)
++{
++	g_return_val_if_fail (name != NULL, FALSE);
++	g_return_val_if_fail (parsed != NULL, FALSE);
++
++	if (svTrueValue (parsed, "VLAN", FALSE))
++		return TRUE;
++
++	return FALSE;
++}
++
++static void
++parse_prio_map_list (NMSettingVlan *s_vlan,
++                     shvarFile *ifcfg,
++                     const char *key,
++                     NMVlanPriorityMap map)
++{
++	char *value;
++	gchar **list = NULL, **iter;
++
++	value = svGetValue (ifcfg, key, FALSE);
++	if (!value)
++		return;
++
++	list = g_strsplit_set (value, ",", -1);
++	g_free (value);
++
++	for (iter = list; iter && *iter; iter++) {
++		if (!*iter || !strchr (*iter, ':'))
++			continue;
++
++		if (!nm_setting_vlan_add_priority_str (s_vlan, map, *iter)) {
++			PLUGIN_WARN (IFCFG_PLUGIN_NAME, "    warning: invalid %s priority map item '%s'",
++			             key, *iter);
++		}
++	}
++	g_strfreev (list);
++}
++
++static NMSetting *
++make_vlan_setting (shvarFile *ifcfg,
++                   const char *file,
++                   gboolean nm_controlled,
++                   char **out_master,
++                   char **unmanaged,
++                   NMSetting8021x **s_8021x,
++                   GError **error)
++{
++	NMSettingVlan *s_vlan = NULL;
++	char *value = NULL;
++	char *iface_name = NULL;
++	char *parent = NULL;
++	const char *p = NULL, *w;
++	gboolean has_numbers = FALSE;
++	gint vlan_id = -1;
++	guint32 vlan_flags = 0;
++
++	value = svGetValue (ifcfg, "VLAN_ID", FALSE);
++	if (value) {
++		errno = 0;
++		vlan_id = (gint) g_ascii_strtoll (value, NULL, 10);
++		if (vlan_id < 0 || vlan_id > 4096 || errno) {
++			g_set_error (error, IFCFG_PLUGIN_ERROR, 0, "Invalid VLAN_ID '%s'", value);
++			g_free (value);
++			return NULL;
++		}
++		g_free (value);
++	}
++
++	/* Need DEVICE if we don't have a separate VLAN_ID property */
++	iface_name = svGetValue (ifcfg, "DEVICE", FALSE);
++	if (!iface_name && vlan_id < 0) {
++		g_set_error_literal (error, IFCFG_PLUGIN_ERROR, 0,
++		                     "Missing DEVICE property; cannot determine VLAN ID.");
++		return NULL;
++	}
++
++	s_vlan = NM_SETTING_VLAN (nm_setting_vlan_new ());
++
++	if (iface_name) {
++		g_object_set (s_vlan, NM_SETTING_VLAN_INTERFACE_NAME, iface_name, NULL);
++
++		p = strchr (iface_name, '.');
++		if (p) {
++			/* eth0.43; PHYSDEV is assumed from it */
++			parent = g_strndup (iface_name, p - iface_name);
++			p++;
++		} else {
++			/* format like vlan43; PHYSDEV or MASTER must be set */
++			if (g_str_has_prefix (iface_name, "vlan"))
++				p = iface_name + 4;
++		}
++
++		w = p;
++		while (*w && !has_numbers)
++			has_numbers = g_ascii_isdigit (*w);
++
++		/* Grab VLAN ID from interface name; this takes precedence over the
++		 * separate VLAN_ID property for backwards compat.
++		 */
++		if (has_numbers) {
++			errno = 0;
++			vlan_id = (gint) g_ascii_strtoll (p, NULL, 10);
++			if (vlan_id < 0 || vlan_id > 4095 || errno) {
++				g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
++				             "Failed to determine VLAN ID from DEVICE '%s'",
++				             iface_name);
++				goto error;
++			}
++		}
++	}
++
++	if (vlan_id < 0) {
++		g_set_error_literal (error, IFCFG_PLUGIN_ERROR, 0,
++		                     "Failed to determine VLAN ID from DEVICE or VLAN_ID.");
++		goto error;
++	}
++	g_object_set (s_vlan, NM_SETTING_VLAN_ID, vlan_id, NULL);
++
++	if (!parent)
++		parent = svGetValue (ifcfg, "PHYSDEV", FALSE);
++	if (parent == NULL) {
++		g_set_error_literal (error, IFCFG_PLUGIN_ERROR, 0,
++		                     "Failed to determine VLAN parent from DEVICE or PHYSDEV");
++		goto error;
++	}
++	g_object_set (s_vlan, NM_SETTING_VLAN_PARENT, parent, NULL);
++
++	if (svTrueValue (ifcfg, "REORDER_HDR", FALSE))
++		vlan_flags |= NM_VLAN_FLAG_REORDER_HEADERS;
++
++	value = svGetValue (ifcfg, "VLAN_FLAGS", FALSE);
++	if (value) {
++		if (g_strstr_len (value, -1, "GVRP"))
++			vlan_flags |= NM_VLAN_FLAG_GVRP;
++		if (g_strstr_len (value, -1, "LOOSE_BINDING"))
++			vlan_flags |= NM_VLAN_FLAG_LOOSE_BINDING;
++	}
++
++	g_object_set (s_vlan, NM_SETTING_VLAN_FLAGS, vlan_flags, NULL);
++	g_free (value);
++
++	parse_prio_map_list (s_vlan, ifcfg, "VLAN_INGRESS_PRIORITY_MAP", NM_VLAN_INGRESS_MAP);
++	parse_prio_map_list (s_vlan, ifcfg, "VLAN_EGRESS_PRIORITY_MAP", NM_VLAN_EGRESS_MAP);
++
++	if (out_master)
++		*out_master = svGetValue (ifcfg, "MASTER", FALSE);
++	return (NMSetting *) s_vlan;
++
++error:
++	g_free (parent);
++	g_free (iface_name);
++	g_object_unref (s_vlan);
++	return NULL;
++}
++
++static NMConnection *
++vlan_connection_from_ifcfg (const char *file,
++                            shvarFile *ifcfg,
++                            gboolean nm_controlled,
++                            char **unmanaged,
++                            GError **error)
++{
++	NMConnection *connection = NULL;
++	NMSetting *con_setting = NULL;
++	NMSetting *wired_setting = NULL;
++	NMSetting *vlan_setting = NULL;
++	NMSetting8021x *s_8021x = NULL;
++	char *master = NULL;
++
++	g_return_val_if_fail (file != NULL, NULL);
++	g_return_val_if_fail (ifcfg != NULL, NULL);
++
++	connection = nm_connection_new ();
++	if (!connection) {
++		g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
++			     "Failed to allocate new connection for %s.", file);
++		return NULL;
++	}
++
++	con_setting = make_connection_setting (file, ifcfg, NM_SETTING_VLAN_SETTING_NAME, NULL, "Vlan");
++	if (!con_setting) {
++		g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
++			     "Failed to create connection setting.");
++		g_object_unref (connection);
++		return NULL;
++	}
++	nm_connection_add_setting (connection, con_setting);
++
++	vlan_setting = make_vlan_setting (ifcfg, file, nm_controlled, &master, unmanaged, &s_8021x, error);
++	if (!vlan_setting) {
++		g_object_unref (connection);
++		return NULL;
++	}
++	nm_connection_add_setting (connection, vlan_setting);
++
++	/* Handle master interface or connection */
++	if (master) {
++		g_object_set (con_setting, NM_SETTING_CONNECTION_MASTER, master, NULL);
++		g_object_set (con_setting,
++		              NM_SETTING_CONNECTION_SLAVE_TYPE, NM_SETTING_VLAN_SETTING_NAME,
++		              NULL);
++		g_free (master);
++	}
++
++	wired_setting = make_wired_setting (ifcfg, file, nm_controlled, unmanaged, &s_8021x, error);
++	if (!wired_setting) {
++		g_object_unref (connection);
++		return NULL;
++	}
++	nm_connection_add_setting (connection, wired_setting);
++
++	if (s_8021x)
++		nm_connection_add_setting (connection, NM_SETTING (s_8021x));
++	if (!nm_connection_verify (connection, error)) {
++		g_object_unref (connection);
++		return NULL;
++	}
++
++	return connection;
++}
++
+ NMConnection *
+ connection_from_file (const char *filename,
+                       const char *network_file,  /* for unit tests only */
+@@ -3684,6 +3907,8 @@ connection_from_file (const char *filename,
+ 		if (!test_type) {
+ 			if (is_bond_device (device, parsed))
+ 				type = g_strdup (TYPE_BOND);
++			else if (is_vlan_device (device, parsed))
++				type = g_strdup (TYPE_VLAN);
+ 			/* Test wireless extensions */
+ 			else if (is_wireless_device (device))
+ 				type = g_strdup (TYPE_WIRELESS);
+@@ -3718,7 +3943,7 @@ connection_from_file (const char *filename,
+ 		g_free (lower);
+ 	}
+ 
+-	/* Ignore BRIDGE= and VLAN= connections for now too (rh #619863) */
++	/* Ignore BRIDGE= connections for now too (rh #619863) */
+ 	tmp = svGetValue (parsed, "BRIDGE", FALSE);
+ 	if (tmp) {
+ 		g_free (tmp);
+@@ -3726,15 +3951,6 @@ connection_from_file (const char *filename,
+ 		ignore_reason = IGNORE_REASON_BRIDGE;
+ 	}
+ 
+-	if (nm_controlled) {
+-		tmp = svGetValue (parsed, "VLAN", FALSE);
+-		if (tmp) {
+-			g_free (tmp);
+-			nm_controlled = FALSE;
+-			ignore_reason = IGNORE_REASON_VLAN;
+-		}
+-	}
+-
+ 	/* Construct the connection */
+ 	if (!strcasecmp (type, TYPE_ETHERNET))
+ 		connection = wired_connection_from_ifcfg (filename, parsed, nm_controlled, unmanaged, &error);
+@@ -3744,6 +3960,8 @@ connection_from_file (const char *filename,
+ 		connection = infiniband_connection_from_ifcfg (filename, parsed, nm_controlled, unmanaged, &error);
+ 	else if (!strcasecmp (type, TYPE_BOND))
+ 		connection = bond_connection_from_ifcfg (filename, parsed, nm_controlled, unmanaged, &error);
++	else if (!strcasecmp (type, TYPE_VLAN))
++		connection = vlan_connection_from_ifcfg (filename, parsed, nm_controlled, unmanaged, &error);
+ 	else if (!strcasecmp (type, TYPE_BRIDGE)) {
+ 		g_set_error (&error, IFCFG_PLUGIN_ERROR, 0,
+ 		             "Bridge connections are not yet supported");
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am b/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
+index b219219..1231317 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
+@@ -71,6 +71,8 @@ EXTRA_DIST = \
+ 	ifcfg-test-bridge-main \
+ 	ifcfg-test-bridge-component \
+ 	ifcfg-test-vlan-interface \
++	ifcfg-test-vlan-only-vlanid \
++	ifcfg-test-vlan-only-device \
+ 	ifcfg-test-infiniband
+ 
+ check-local:
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-vlan-interface b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-vlan-interface
+index 6c84185..ccd75d7 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-vlan-interface
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-vlan-interface
+@@ -1,7 +1,12 @@
+-DEVICE=eth1.43
+ VLAN=yes
++TYPE=Vlan
++DEVICE=vlan43
++PHYSDEV=eth9
++REORDER_HDR=0
++VLAN_FLAGS=GVRP,LOOSE_BINDING
++VLAN_INGRESS_PRIORITY_MAP=0:1,2:5
++VLAN_EGRESS_PRIORITY_MAP=12:3,14:7,3:1
+ ONBOOT=yes
+-BOOTPROTO=none
++BOOTPROTO=static
+ IPADDR=192.168.43.149
+ NETMASK=255.255.255.0
+-
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-vlan-only-device b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-vlan-only-device
+new file mode 100644
+index 0000000..4ba06f2
+--- /dev/null
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-vlan-only-device
+@@ -0,0 +1,4 @@
++VLAN=yes
++TYPE=Vlan
++DEVICE=eth0.9
++
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-vlan-only-vlanid b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-vlan-only-vlanid
+new file mode 100644
+index 0000000..622d41e
+--- /dev/null
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-vlan-only-vlanid
+@@ -0,0 +1,6 @@
++VLAN=yes
++TYPE=Vlan
++PHYSDEV=eth9
++VLAN_ID=43
++ONBOOT=yes
++
+diff --git a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+index 0907b70..128b4cf 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
++++ b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+@@ -48,6 +48,7 @@
+ #include <nm-setting-gsm.h>
+ #include <nm-setting-cdma.h>
+ #include <nm-setting-serial.h>
++#include <nm-setting-vlan.h>
+ 
+ #include "nm-test-helpers.h"
+ 
+@@ -9648,33 +9649,6 @@ test_read_bridge_component (void)
+ 	g_free (unmanaged);
+ }
+ 
+-#define TEST_IFCFG_VLAN_INTERFACE TEST_IFCFG_DIR"/network-scripts/ifcfg-test-vlan-interface"
+-
+-static void
+-test_read_vlan_interface (void)
+-{
+-	NMConnection *connection;
+-	char *unmanaged = NULL;
+-	char *keyfile = NULL;
+-	char *routefile = NULL;
+-	char *route6file = NULL;
+-	gboolean ignore_error = FALSE;
+-	GError *error = NULL;
+-
+-	connection = connection_from_file (TEST_IFCFG_VLAN_INTERFACE,
+-	                                   NULL,
+-	                                   TYPE_ETHERNET,
+-	                                   NULL,
+-	                                   &unmanaged,
+-	                                   &keyfile,
+-	                                   &routefile,
+-	                                   &route6file,
+-	                                   &error,
+-	                                   &ignore_error);
+-	ASSERT (connection == NULL,
+-	        "vlan-interface-read", "unexpected success reading %s", TEST_IFCFG_VLAN_INTERFACE);
+-}
+-
+ #define TEST_IFCFG_INFINIBAND TEST_IFCFG_DIR"/network-scripts/ifcfg-test-infiniband"
+ 
+ static void
+@@ -9897,6 +9871,274 @@ test_write_infiniband (void)
+ 	g_object_unref (reread);
+ }
+ 
++#define TEST_IFCFG_VLAN_INTERFACE TEST_IFCFG_DIR"/network-scripts/ifcfg-test-vlan-interface"
++
++static void
++test_read_vlan_interface (void)
++{
++	NMConnection *connection;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE;
++	GError *error = NULL;
++	NMSettingVlan *s_vlan;
++	guint32 from = 0, to = 0;
++
++	connection = connection_from_file (TEST_IFCFG_VLAN_INTERFACE,
++	                                   NULL,
++	                                   TYPE_ETHERNET,
++	                                   NULL,
++	                                   &unmanaged,
++	                                   &keyfile,
++	                                   &routefile,
++	                                   &route6file,
++	                                   &error,
++	                                   &ignore_error);
++	g_assert_no_error (error);
++	g_assert (connection != NULL);
++
++	g_free (unmanaged);
++	g_free (keyfile);
++	g_free (routefile);
++	g_free (route6file);
++
++	s_vlan = nm_connection_get_setting_vlan (connection);
++	g_assert (s_vlan);
++
++	g_assert_cmpstr (nm_setting_vlan_get_interface_name (s_vlan), ==, "vlan43");
++	g_assert_cmpstr (nm_setting_vlan_get_parent (s_vlan), ==, "eth9");
++	g_assert_cmpint (nm_setting_vlan_get_id (s_vlan), ==, 43);
++	g_assert_cmpint (nm_setting_vlan_get_flags (s_vlan), ==,
++	                 NM_VLAN_FLAG_GVRP | NM_VLAN_FLAG_LOOSE_BINDING);
++
++	/* Ingress map */
++	g_assert_cmpint (nm_setting_vlan_get_num_priorities (s_vlan, NM_VLAN_INGRESS_MAP), ==, 2);
++
++	g_assert (nm_setting_vlan_get_priority (s_vlan, NM_VLAN_INGRESS_MAP, 0, &from, &to));
++	g_assert_cmpint (from, ==, 0);
++	g_assert_cmpint (to, ==, 1);
++
++	g_assert (nm_setting_vlan_get_priority (s_vlan, NM_VLAN_INGRESS_MAP, 1, &from, &to));
++	g_assert_cmpint (from, ==, 2);
++	g_assert_cmpint (to, ==, 5);
++
++	/* Egress map */
++	g_assert_cmpint (nm_setting_vlan_get_num_priorities (s_vlan, NM_VLAN_EGRESS_MAP), ==, 3);
++
++	g_assert (nm_setting_vlan_get_priority (s_vlan, NM_VLAN_EGRESS_MAP, 0, &from, &to));
++	g_assert_cmpint (from, ==, 12);
++	g_assert_cmpint (to, ==, 3);
++
++	g_assert (nm_setting_vlan_get_priority (s_vlan, NM_VLAN_EGRESS_MAP, 1, &from, &to));
++	g_assert_cmpint (from, ==, 14);
++	g_assert_cmpint (to, ==, 7);
++
++	g_assert (nm_setting_vlan_get_priority (s_vlan, NM_VLAN_EGRESS_MAP, 2, &from, &to));
++	g_assert_cmpint (from, ==, 3);
++	g_assert_cmpint (to, ==, 1);
++
++	g_object_unref (connection);
++}
++
++#define TEST_IFCFG_VLAN_ONLY_VLANID TEST_IFCFG_DIR"/network-scripts/ifcfg-test-vlan-only-vlanid"
++
++static void
++test_read_vlan_only_vlan_id (void)
++{
++	NMConnection *connection;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE;
++	GError *error = NULL;
++	NMSettingVlan *s_vlan;
++
++	connection = connection_from_file (TEST_IFCFG_VLAN_ONLY_VLANID,
++	                                   NULL,
++	                                   TYPE_ETHERNET,
++	                                   NULL,
++	                                   &unmanaged,
++	                                   &keyfile,
++	                                   &routefile,
++	                                   &route6file,
++	                                   &error,
++	                                   &ignore_error);
++	g_assert_no_error (error);
++	g_assert (connection != NULL);
++
++	g_free (unmanaged);
++	g_free (keyfile);
++	g_free (routefile);
++	g_free (route6file);
++
++	s_vlan = nm_connection_get_setting_vlan (connection);
++	g_assert (s_vlan);
++
++	g_assert (nm_setting_vlan_get_interface_name (s_vlan) == NULL);
++	g_assert_cmpstr (nm_setting_vlan_get_parent (s_vlan), ==, "eth9");
++	g_assert_cmpint (nm_setting_vlan_get_id (s_vlan), ==, 43);
++
++	g_object_unref (connection);
++}
++
++#define TEST_IFCFG_VLAN_ONLY_DEVICE TEST_IFCFG_DIR"/network-scripts/ifcfg-test-vlan-only-device"
++
++static void
++test_read_vlan_only_device (void)
++{
++	NMConnection *connection;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE;
++	GError *error = NULL;
++	NMSettingVlan *s_vlan;
++
++	connection = connection_from_file (TEST_IFCFG_VLAN_ONLY_DEVICE,
++	                                   NULL,
++	                                   TYPE_ETHERNET,
++	                                   NULL,
++	                                   &unmanaged,
++	                                   &keyfile,
++	                                   &routefile,
++	                                   &route6file,
++	                                   &error,
++	                                   &ignore_error);
++	g_assert_no_error (error);
++	g_assert (connection != NULL);
++
++	g_free (unmanaged);
++	g_free (keyfile);
++	g_free (routefile);
++	g_free (route6file);
++
++	s_vlan = nm_connection_get_setting_vlan (connection);
++	g_assert (s_vlan);
++
++	g_assert_cmpstr (nm_setting_vlan_get_interface_name (s_vlan), ==, "eth0.9");
++	g_assert_cmpstr (nm_setting_vlan_get_parent (s_vlan), ==, "eth0");
++	g_assert_cmpint (nm_setting_vlan_get_id (s_vlan), ==, 9);
++
++	g_object_unref (connection);
++}
++
++static void
++test_write_vlan (void)
++{
++	NMConnection *connection;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	char *written = NULL;
++	gboolean ignore_error = FALSE;
++	GError *error = NULL;
++	gboolean success = FALSE;
++
++	connection = connection_from_file (TEST_IFCFG_VLAN_INTERFACE,
++	                                   NULL,
++	                                   TYPE_VLAN,
++	                                   NULL,
++	                                   &unmanaged,
++	                                   &keyfile,
++	                                   &routefile,
++	                                   &route6file,
++	                                   &error,
++	                                   &ignore_error);
++	g_assert (connection != NULL);
++
++	success = writer_new_connection (connection,
++	                                 TEST_SCRATCH_DIR "/network-scripts/",
++	                                 &written,
++	                                 &error);
++	g_assert (success);
++
++	unlink (written);
++	g_free (written);
++
++	g_free (unmanaged);
++	g_free (keyfile);
++	g_free (routefile);
++	g_free (route6file);
++}
++
++static void
++test_write_vlan_only_vlanid (void)
++{
++	NMConnection *connection, *reread;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	char *written = NULL;
++	gboolean ignore_error = FALSE;
++	GError *error = NULL;
++	gboolean success = FALSE;
++
++	connection = connection_from_file (TEST_IFCFG_VLAN_ONLY_VLANID,
++	                                   NULL,
++	                                   TYPE_VLAN,
++	                                   NULL,
++	                                   &unmanaged,
++	                                   &keyfile,
++	                                   &routefile,
++	                                   &route6file,
++	                                   &error,
++	                                   &ignore_error);
++	g_assert_no_error (error);
++	g_assert (connection != NULL);
++
++	g_free (unmanaged);
++	unmanaged = NULL;
++	g_free (keyfile);
++	keyfile = NULL;
++	g_free (routefile);
++	routefile = NULL;
++	g_free (route6file);
++	route6file = NULL;
++
++	success = writer_new_connection (connection,
++	                                 TEST_SCRATCH_DIR "/network-scripts/",
++	                                 &written,
++	                                 &error);
++	g_assert (success);
++
++	/* re-read the connection for comparison */
++	reread = connection_from_file (written,
++	                               NULL,
++	                               TYPE_ETHERNET,
++	                               NULL,
++	                               &unmanaged,
++	                               &keyfile,
++	                               &routefile,
++	                               &route6file,
++	                               &error,
++	                               &ignore_error);
++	unlink (written);
++	g_free (written);
++	g_free (unmanaged);
++	g_free (keyfile);
++	g_free (routefile);
++	g_free (route6file);
++
++	g_assert_no_error (error);
++	g_assert (reread != NULL);
++
++	success = nm_connection_verify (reread, &error);
++	g_assert_no_error (error);
++	g_assert (success);
++
++	success = nm_connection_compare (connection, reread, NM_SETTING_COMPARE_FLAG_EXACT);
++	g_assert (success);
++
++	g_object_unref (connection);
++	g_object_unref (reread);
++}
++
+ #define TEST_IFCFG_BOND_MAIN TEST_IFCFG_DIR"/network-scripts/ifcfg-test-bond-main"
+ 
+ static void
+@@ -10338,6 +10580,9 @@ int main (int argc, char **argv)
+ 	test_read_wired_qeth_static ();
+ 	test_read_wired_ctc_static ();
+ 	test_read_infiniband ();
++	test_read_vlan_interface ();
++	test_read_vlan_only_vlan_id ();
++	test_read_vlan_only_device ();
+ 
+ 	test_write_wired_static ();
+ 	test_write_wired_static_ip6_only ();
+@@ -10390,6 +10635,8 @@ int main (int argc, char **argv)
+ 	test_write_wired_qeth_dhcp ();
+ 	test_write_wired_ctc_dhcp ();
+ 	test_write_infiniband ();
++	test_write_vlan ();
++	test_write_vlan_only_vlanid ();
+ 
+ 	/* iSCSI / ibft */
+ 	test_read_ibft_dhcp ();
+@@ -10414,7 +10661,6 @@ int main (int argc, char **argv)
+ 	test_write_mobile_broadband (FALSE);
+ 	test_read_bridge_main ();
+ 	test_read_bridge_component ();
+-	test_read_vlan_interface ();
+ 
+ 	base = g_path_get_basename (argv[0]);
+ 	fprintf (stdout, "%s: SUCCESS\n", base);
+diff --git a/system-settings/plugins/ifcfg-rh/writer.c b/system-settings/plugins/ifcfg-rh/writer.c
+index 4097caf..c07f944 100644
+--- a/system-settings/plugins/ifcfg-rh/writer.c
++++ b/system-settings/plugins/ifcfg-rh/writer.c
+@@ -39,6 +39,7 @@
+ #include <nm-setting-ip4-config.h>
+ #include <nm-setting-ip6-config.h>
+ #include <nm-setting-pppoe.h>
++#include <nm-setting-vlan.h>
+ #include <nm-utils.h>
+ 
+ #include "common.h"
+@@ -1001,6 +1002,86 @@ write_wired_setting (NMConnection *connection, shvarFile *ifcfg, GError **error)
+ 	return TRUE;
+ }
+ 
++static GString *vlan_priority_maplist_to_stringlist (NMSettingVlan *s_vlan, NMVlanPriorityMap map)
++{
++	GSList *strlist = NULL, *iter;
++	GString *value = NULL;
++
++	if (map == NM_VLAN_INGRESS_MAP)
++		g_object_get (G_OBJECT (s_vlan), NM_SETTING_VLAN_INGRESS_PRIORITY_MAP, &strlist, NULL);
++	else if (map == NM_VLAN_EGRESS_MAP)
++		g_object_get (G_OBJECT (s_vlan), NM_SETTING_VLAN_EGRESS_PRIORITY_MAP, &strlist, NULL);
++	else
++		return NULL;
++
++	value = g_string_new ("");
++	for (iter = strlist; iter; iter = g_slist_next (iter))
++		g_string_append_printf (value, "%s%s", value->len ? "," : "", (const char *) iter->data);
++
++	nm_utils_slist_free (strlist, g_free);
++
++	return value;
++}
++
++static gboolean
++write_vlan_setting (NMConnection *connection, shvarFile *ifcfg, GError **error)
++{
++	NMSettingVlan *s_vlan;
++	NMSettingConnection *s_con;
++	char *tmp;
++	guint32 vlan_flags = 0;
++	GString *text = NULL;
++
++	s_con = nm_connection_get_setting_connection (connection);
++	if (!s_con) {
++		g_set_error_literal (error, IFCFG_PLUGIN_ERROR, 0, "Missing connection setting");
++		return FALSE;
++	}
++
++	s_vlan = nm_connection_get_setting_vlan (connection);
++	if (!s_vlan) {
++		g_set_error_literal (error, IFCFG_PLUGIN_ERROR, 0, "Missing VLAN setting");
++		return FALSE;
++	}
++
++	svSetValue (ifcfg, "VLAN", "yes", FALSE);
++	svSetValue (ifcfg, "TYPE", TYPE_VLAN, FALSE);
++	svSetValue (ifcfg, "DEVICE", nm_setting_vlan_get_interface_name (s_vlan), FALSE);
++	svSetValue (ifcfg, "PHYSDEV", nm_setting_vlan_get_parent (s_vlan), FALSE);
++	svSetValue (ifcfg, "MASTER", nm_setting_connection_get_master (s_con), FALSE);
++
++	tmp = g_strdup_printf ("%d", nm_setting_vlan_get_id (s_vlan));
++	svSetValue (ifcfg, "VLAN_ID", tmp, FALSE);
++	g_free (tmp);
++
++	vlan_flags = nm_setting_vlan_get_flags (s_vlan);
++	if (vlan_flags & NM_VLAN_FLAG_REORDER_HEADERS)
++		svSetValue (ifcfg, "REORDER_HDR", "1", FALSE);
++	else
++		svSetValue (ifcfg, "REORDER_HDR", "0", FALSE);
++
++	svSetValue (ifcfg, "VLAN_FLAGS", NULL, FALSE);
++	if (vlan_flags & NM_VLAN_FLAG_GVRP) {
++		if (vlan_flags & NM_VLAN_FLAG_LOOSE_BINDING)
++			svSetValue (ifcfg, "VLAN_FLAGS", "GVRP,LOOSE_BINDING", FALSE);
++		else
++			svSetValue (ifcfg, "VLAN_FLAGS", "GVRP", FALSE);
++	} else if (vlan_flags & NM_VLAN_FLAG_LOOSE_BINDING)
++		svSetValue (ifcfg, "VLAN_FLAGS", "LOOSE_BINDING", FALSE);
++
++	text = vlan_priority_maplist_to_stringlist (s_vlan, NM_VLAN_INGRESS_MAP);
++	svSetValue (ifcfg, "VLAN_INGRESS_PRIORITY_MAP", text ? text->str : NULL, FALSE);
++	if (text)
++		g_string_free (text, TRUE);
++
++	text = vlan_priority_maplist_to_stringlist (s_vlan, NM_VLAN_EGRESS_MAP);
++	svSetValue (ifcfg, "VLAN_EGRESS_PRIORITY_MAP", text ? text->str : NULL, FALSE);
++	if (text)
++		g_string_free (text, TRUE);
++
++	return TRUE;
++}
++
+ static gboolean
+ write_bonding_setting (NMConnection *connection, shvarFile *ifcfg, GError **error)
+ {
+@@ -1702,6 +1783,9 @@ write_connection (NMConnection *connection,
+ 		if (!write_wired_setting (connection, ifcfg, error))
+ 			goto out;
+ 		wired = TRUE;
++	} else if (!strcmp (type, NM_SETTING_VLAN_SETTING_NAME)) {
++		if (!write_vlan_setting (connection, ifcfg, error))
++			goto out;
+ 	} else if (!strcmp (type, NM_SETTING_WIRELESS_SETTING_NAME)) {
+ 		if (!write_wireless_setting (connection, ifcfg, &no_8021x, error))
+ 			goto out;
+
+----------
+Due to using libnl compatibility layer and nl_compat_error() we need to adjust
+several error code checks. Without that adding routes may fail as in rh #806486.
+The changes are based on the following upstream commit with some other changes:
+
+commit 2e32003fd21e35f5e194508452c6e5c17ce42fc0
+Author: Alfredo Matos <alfredo.matos@caixamagica.pt>
+Date:   Thu Aug 4 10:26:21 2011 +0100
+
+    libnl3: Fix ESRCH return types
+    
+      ESRCH becomes NLE_OBJ_NOTFOUND. Includes workaround for libnl
+      aliased return value where ESRCH is being converted to a generic
+      unspecified error by libnl [1].
+    
+      [1] http://git.kernel.org/?p=libs/netlink/libnl.git;a=commit;h=7e9d5f
+
+diff --git a/src/nm-system.c b/src/nm-system.c
+index 11e9ad0..d74e0c8 100644
+--- a/src/nm-system.c
++++ b/src/nm-system.c
+@@ -159,7 +159,7 @@ nm_system_device_set_ip4_route (const ch
+ 
+ 	/* Add the route */
+ 	err = rtnl_route_add (nlh, route, 0);
+-	if (err == -ESRCH && ip4_gateway) {
++	if (((err == -NLE_OBJ_NOTFOUND) || (err == -NLE_FAILURE)) && ip4_gateway) {
+ 		/* Gateway might be over a bridge; try adding a route to gateway first */
+ 		struct rtnl_route *route2;
+ 
+@@ -543,7 +543,7 @@ nm_system_set_ip6_route (int ifindex,
+ 
+ 	/* Add the route */
+ 	err = rtnl_route_add (nlh, route, 0);
+-	if (err == -ESRCH && ip6_gateway) {
++	if (((err == -NLE_OBJ_NOTFOUND) || (err == -NLE_FAILURE)) && ip6_gateway) {
+ 		/* Gateway might be over a bridge; try adding a route to gateway first */
+ 		struct rtnl_route *route2;
+ 
+@@ -732,10 +732,14 @@ nm_system_device_set_up_down_with_iface
+ 	if (old) {
+ 		nlh = nm_netlink_get_default_handle ();
+ 		if (nlh) {
+-			if (rtnl_link_change (nlh, old, request, 0) == 0)
++			int err;
++			err = rtnl_link_change (nlh, old, request, 0);
++			if (err == 0) {
+ 				success = TRUE;
+-			else if ((nl_get_errno () == ENOENT) && no_firmware && up)
+-				*no_firmware = TRUE;
++			} else {
++				if ((err == -NLE_OBJ_NOTFOUND) && no_firmware && up)
++					*no_firmware = TRUE;
++			}
+ 		}
+ 	}
+ 
+@@ -998,7 +1002,7 @@ nm_system_replace_default_ip4_route_vpn
+ 	err = replace_default_ip4_route (iface, int_gw, mss);
+ 	if (err == 0) {
+ 		return TRUE;
+-	} else if (err != -ESRCH) {
++	} else if ((err != -NLE_OBJ_NOTFOUND) && (err != -NLE_FAILURE)) {
+ 		nm_log_err (LOGD_DEVICE | LOGD_IP4,
+ 		            "(%s): failed to set IPv4 default route: %d",
+ 		            iface, err);
+@@ -1044,7 +1048,7 @@ nm_system_replace_default_ip4_route (con
+ 	err = replace_default_ip4_route (iface, gw, mss);
+ 	if (err == 0) {
+ 		return TRUE;
+-	} else if (err != -ESRCH) {
++	} else if ((err != -NLE_OBJ_NOTFOUND) && (err != -NLE_FAILURE)) {
+ 		nm_log_err (LOGD_DEVICE | LOGD_IP4,
+ 		            "(%s): failed to set IPv4 default route: %d",
+ 		            iface, err);
+@@ -1156,7 +1160,7 @@ replace_default_ip6_route (const char *i
+ 
+ 	/* Add the new default route */
+ 	err = rtnl_route_add (nlh, route, NLM_F_REPLACE);
+-	if (err == -EEXIST) {
++	if (err == -NLE_EXIST) {
+ 		/* FIXME: even though we use NLM_F_REPLACE the kernel won't replace
+ 		 * the route if it's the same.  Should try to remove it first, then
+ 		 * add the new one again here.
+@@ -1191,7 +1195,7 @@ nm_system_replace_default_ip6_route (con
+ 	err = replace_default_ip6_route (iface, gw);
+ 	if (err == 0) {
+ 		return TRUE;
+-	} else if (err != -ESRCH) {
++	} else if ((err != -NLE_OBJ_NOTFOUND) && (err != -NLE_FAILURE)) {
+ 		nm_log_err (LOGD_DEVICE | LOGD_IP6,
+ 		            "(%s): failed to set IPv6 default route: %d",
+ 		            iface, err);
+@@ -1359,7 +1363,7 @@ check_one_route (struct nl_object *objec
+ 	nm_log_dbg (log_level, "   deleting route");
+ 
+ 	err = rtnl_route_del (nm_netlink_get_default_handle (), route, 0);
+-	if (err < 0 && (err != -ERANGE)) {
++	if (err < 0 && (err != -NLE_RANGE)) {
+ 		nm_log_err (LOGD_DEVICE,
+ 		            "(%s): error %d returned from rtnl_route_del(): %s",
+ 		            data->iface, err, nl_geterror ());

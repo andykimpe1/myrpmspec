@@ -1,0 +1,145 @@
+--- NetworkManager-0.8.1/cli/src/settings.c.coverity	2012-04-26 09:43:31.085773409 -0400
++++ NetworkManager-0.8.1/cli/src/settings.c	2012-04-26 09:44:45.598521874 -0400
+@@ -569,10 +569,11 @@
+ 	for (i = 0; i < nm_setting_vlan_get_num_priorities (s_vlan, map); i++) {
+ 		guint32 from, to;
+ 
+-		nm_setting_vlan_get_priority (s_vlan, map, i, &from, &to);
+-		g_string_append_printf (priorities, "%d:%d,", from, to);
++		if (nm_setting_vlan_get_priority (s_vlan, map, i, &from, &to))
++			g_string_append_printf (priorities, "%d:%d,", from, to);
+ 	}
+-	g_string_truncate (priorities, priorities->len-1);  /* chop off trailing ',' */
++	if (priorities->len)
++		g_string_truncate (priorities, priorities->len-1);  /* chop off trailing ',' */
+ 
+ 	return g_string_free (priorities, FALSE);
+ }
+--- NetworkManager-0.8.1/libnm-util/nm-setting-vlan.c.coverity	2012-04-26 09:43:31.093773596 -0400
++++ NetworkManager-0.8.1/libnm-util/nm-setting-vlan.c	2012-04-26 09:44:45.599521890 -0400
+@@ -483,7 +483,7 @@
+ 		return FALSE;
+ 	}
+ 
+-	if (priv->flags & !(NM_VLAN_FLAG_REORDER_HEADERS |
++	if (priv->flags & ~(NM_VLAN_FLAG_REORDER_HEADERS |
+ 	                    NM_VLAN_FLAG_GVRP |
+ 	                    NM_VLAN_FLAG_LOOSE_BINDING)) {
+ 		g_set_error (error,
+--- NetworkManager-0.8.1/src/nm-device-vlan.c.coverity	2012-04-26 09:43:31.098773713 -0400
++++ NetworkManager-0.8.1/src/nm-device-vlan.c	2012-04-26 09:44:45.600521908 -0400
+@@ -635,17 +635,17 @@
+ 			g_object_unref (device);
+ 			return NULL;
+ 		}
+-		priv->vlan_id = vlan_id;
+ 
+ 		if (   parent_ifindex < 0
+ 		    || parent_ifindex != nm_device_get_ip_ifindex (parent)
+-		    || priv->vlan_id < 0) {
++		    || vlan_id < 0) {
+ 			nm_log_warn (LOGD_DEVICE, "(%s): VLAN parent ifindex (%d) or VLAN ID (%d) invalid.",
+ 			             iface, parent_ifindex, priv->vlan_id);
+ 			g_object_unref (device);
+ 			return NULL;
+ 		}
+ 
++		priv->vlan_id = vlan_id;
+ 		priv->parent = g_object_ref (parent);
+ 		priv->parent_state_id = g_signal_connect (priv->parent,
+ 		                                          "state-changed",
+--- NetworkManager-0.8.1/system-settings/plugins/ifcfg-rh/reader.c.coverity	2012-04-26 09:43:31.109773972 -0400
++++ NetworkManager-0.8.1/system-settings/plugins/ifcfg-rh/reader.c	2012-04-26 09:46:57.720620365 -0400
+@@ -3658,8 +3658,8 @@
+ 	char *value = NULL;
+ 	char *iface_name = NULL;
+ 	char *parent = NULL;
+-	const char *p = NULL, *w;
+-	gboolean has_numbers = FALSE;
++	const char *p = NULL;
++	char *end = NULL;
+ 	gint vlan_id = -1;
+ 	guint32 vlan_flags = 0;
+ 
+@@ -3699,17 +3699,12 @@
+ 				p = iface_name + 4;
+ 		}
+ 
+-		w = p;
+-		while (*w && !has_numbers)
+-			has_numbers = g_ascii_isdigit (*w);
+-
+-		/* Grab VLAN ID from interface name; this takes precedence over the
+-		 * separate VLAN_ID property for backwards compat.
+-		 */
+-		if (has_numbers) {
+-			errno = 0;
+-			vlan_id = (gint) g_ascii_strtoll (p, NULL, 10);
+-			if (vlan_id < 0 || vlan_id > 4095 || errno) {
++		if (p) {
++			/* Grab VLAN ID from interface name; this takes precedence over the
++			 * separate VLAN_ID property for backwards compat.
++			 */
++			vlan_id = (gint) g_ascii_strtoll (p, &end, 10);
++			if (vlan_id < 0 || vlan_id > 4095 || end == p || *end) {
+ 				g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
+ 				             "Failed to determine VLAN ID from DEVICE '%s'",
+ 				             iface_name);
+--- NetworkManager-0.8.1/src/nm-netlink-compat.c.coverity	2012-04-26 09:43:31.105773877 -0400
++++ NetworkManager-0.8.1/src/nm-netlink-compat.c	2012-04-26 09:47:26.218288443 -0400
+@@ -121,7 +121,7 @@
+ 	if ((if_name = rtnl_link_get_name (l)) == NULL)
+ 		return -1;
+ 
+-	strcpy (if_request.device1, if_name);
++	g_strlcpy (if_request.device1, if_name, sizeof (if_request.device1));
+ 
+ 	if ((fd = socket (AF_INET, SOCK_STREAM, 0)) < 0) {
+ 		nm_log_err (LOGD_DEVICE, "couldn't open control socket.");
+@@ -158,7 +158,7 @@
+ 	}
+ 
+ 	memset (&if_request, 0, sizeof (struct vlan_ioctl_args));
+-	strcpy (if_request.device1, if_name);
++	g_strlcpy (if_request.device1, if_name, sizeof (if_request.device1));
+ 	if_request.cmd = SET_VLAN_FLAG_CMD;
+ 	if_request.u.flag = flags;
+ 
+@@ -190,7 +190,7 @@
+ 	}
+ 
+ 	memset (&if_request, 0, sizeof (struct vlan_ioctl_args));
+-	strcpy (if_request.device1, if_name);
++	g_strlcpy (if_request.device1, if_name, sizeof (if_request.device1));
+ 	if_request.cmd = SET_VLAN_INGRESS_PRIORITY_CMD;
+ 	if_request.u.skb_priority = from;
+ 	if_request.vlan_qos = to;
+@@ -223,7 +223,7 @@
+ 	}
+ 
+ 	memset (&if_request, 0, sizeof (struct vlan_ioctl_args));
+-	strcpy (if_request.device1, if_name);
++	g_strlcpy (if_request.device1, if_name, sizeof (if_request.device1));
+ 	if_request.cmd = SET_VLAN_EGRESS_PRIORITY_CMD;
+ 	if_request.u.skb_priority = from;
+ 	if_request.vlan_qos = to;
+--- NetworkManager-0.8.1/src/nm-system.c.coverity	2012-04-26 09:43:31.117774159 -0400
++++ NetworkManager-0.8.1/src/nm-system.c	2012-04-26 09:47:26.219288465 -0400
+@@ -1906,7 +1906,7 @@
+ 	}
+ 
+ 	memset (&if_request, 0, sizeof (struct vlan_ioctl_args));
+-	strcpy (if_request.device1, master);
++	g_strlcpy (if_request.device1, master, sizeof (if_request.device1));
+ 	if_request.cmd = ADD_VLAN_CMD;
+ 	if_request.u.VID = vid;
+ 
+@@ -1932,7 +1932,7 @@
+ 	}
+ 
+ 	memset (&if_request, 0, sizeof (struct vlan_ioctl_args));
+-        strcpy (if_request.device1, iface);
++	g_strlcpy (if_request.device1, iface, sizeof (if_request.device1));
+ 	if_request.cmd = DEL_VLAN_CMD;
+ 
+ 	if (ioctl (fd, SIOCSIFVLAN, &if_request) < 0) {

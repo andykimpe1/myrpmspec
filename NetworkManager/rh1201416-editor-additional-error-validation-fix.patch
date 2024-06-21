@@ -1,0 +1,156 @@
+From 497c41adfad54774d91a8a6acdb2efa9fb4da74a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Wed, 18 Mar 2015 11:52:10 +0100
+Subject: [PATCH] editor: fix on-the-fly color validation for 0.0.0.0/:: (rh
+ #1201416)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+https://bugzilla.redhat.com/show_bug.cgi?id=1201416
+
+(based on upstream commit 9d30807fe26282f682732f930900361aedcaf59e)
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ .../src/connection-editor/ip4-routes-dialog.c              |  8 +++++++-
+ .../src/connection-editor/ip6-routes-dialog.c              |  6 ++++++
+ .../src/connection-editor/page-ip4.c                       | 14 ++++++++++++--
+ .../src/connection-editor/page-ip6.c                       | 14 ++++++++++++--
+ 4 files changed, 37 insertions(+), 5 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/ip4-routes-dialog.c b/network-manager-applet-0.8.1/src/connection-editor/ip4-routes-dialog.c
+index 240d851..1476b3d 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/ip4-routes-dialog.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/ip4-routes-dialog.c
+@@ -156,6 +156,9 @@ get_one_addr (GtkTreeModel *model,
+ 		success = TRUE;
+ 	}
+ 
++	if (tmp_addr.s_addr == 0 && fail_if_missing)
++		success = FALSE;
++
+ 	if (!out_raw)
+ 		g_free (item);
+ 	return success;
+@@ -487,11 +490,14 @@ cell_changed_cb (GtkEditable *editable,
+ 		else
+ 			value_valid = TRUE;
+ 	} else {
+-		struct in_addr tmp_addr;
++		struct in_addr tmp_addr = { 0 };
+ 
+ 		if (inet_pton (AF_INET, cell_text, &tmp_addr) > 0)
+ 			value_valid = TRUE;
+ 
++		/* 0.0.0.0 is not accepted for address */
++		if (column == COL_ADDRESS && tmp_addr.s_addr == 0)
++			value_valid = FALSE;
+ 		/* Consider empty next_hop as valid */
+ 		if (!*cell_text && column == COL_NEXT_HOP)
+ 			value_valid = TRUE;
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/ip6-routes-dialog.c b/network-manager-applet-0.8.1/src/connection-editor/ip6-routes-dialog.c
+index e482eb9..d96ea5d 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/ip6-routes-dialog.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/ip6-routes-dialog.c
+@@ -107,6 +107,9 @@ get_one_addr (GtkTreeModel *model,
+ 	if (inet_pton (AF_INET6, item, out) > 0)
+ 		success = TRUE;
+ 
++	if (IN6_IS_ADDR_UNSPECIFIED (out) && fail_if_missing)
++		success = FALSE;
++
+ 	if (!out_raw)
+ 		g_free (item);
+ 	return success;
+@@ -429,6 +432,9 @@ cell_changed_cb (GtkEditable *editable,
+ 		if (inet_pton (AF_INET6, cell_text, &tmp_addr) > 0)
+ 			value_valid = TRUE;
+ 
++		/* :: is not accepted for address */
++		if (column == COL_ADDRESS && IN6_IS_ADDR_UNSPECIFIED (&tmp_addr))
++			value_valid = FALSE;
+ 		/* Consider empty next_hop as valid */
+ 		if (!*cell_text && column == COL_NEXT_HOP)
+ 			value_valid = TRUE;
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/page-ip4.c b/network-manager-applet-0.8.1/src/connection-editor/page-ip4.c
+index b204baa..b501a75 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/page-ip4.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/page-ip4.c
+@@ -723,6 +723,13 @@ cell_changed_cb (GtkEditable *editable,
+ 
+ 		if (inet_pton (AF_INET, cell_text, &tmp_addr) > 0)
+ 			value_valid = TRUE;
++
++		 /* 0.0.0.0 is not accepted for address */
++		if (column == COL_ADDRESS && tmp_addr.s_addr == 0)
++			value_valid = FALSE;
++		/* Consider empty gateway as valid */
++		if (!*cell_text && column == COL_GATEWAY)
++			value_valid = TRUE;
+ 	}
+ 
+ 	/* Change cell's background color while editing */
+@@ -927,7 +934,8 @@ cell_error_data_func (GtkTreeViewColumn *tree_column,
+ 	gtk_tree_model_get (tree_model, iter, col, &value, -1);
+ 
+ 	if (col == COL_ADDRESS)
+-		invalid = !value || !*value || !inet_pton (AF_INET, value, &tmp_addr);
++		invalid =    !value || !*value || !inet_pton (AF_INET, value, &tmp_addr)
++		          || tmp_addr.s_addr == 0;
+ 	else if (col == COL_PREFIX)
+ 		invalid = !parse_netmask (value, &prefix);
+ 	else if (col == COL_GATEWAY)
+@@ -1165,7 +1173,9 @@ ui_to_setting (CEPageIP4 *self)
+ 		guint32 empty_val = 0, prefix;
+ 
+ 		gtk_tree_model_get (model, &tree_iter, COL_ADDRESS, &item, -1);
+-		if (!item || inet_pton (AF_INET, item, &tmp_addr) <= 0) {
++		if (   !item
++		    || inet_pton (AF_INET, item, &tmp_addr) <= 0
++		    || tmp_addr.s_addr == 0) {
+ 			g_warning ("%s: IPv4 address '%s' missing or invalid!",
+ 			           __func__, item ? item : "<none>");
+ 			g_free (item);
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/page-ip6.c b/network-manager-applet-0.8.1/src/connection-editor/page-ip6.c
+index 575f6e9..3bfb681 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/page-ip6.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/page-ip6.c
+@@ -691,6 +691,13 @@ cell_changed_cb (GtkEditable *editable,
+ 
+ 		if (inet_pton (AF_INET6, cell_text, &tmp_addr))
+ 			value_valid = TRUE;
++
++		/* :: is not accepted for address */
++		if (column == COL_ADDRESS && IN6_IS_ADDR_UNSPECIFIED (&tmp_addr))
++                        value_valid = FALSE;
++		/* Consider empty gateway as valid */
++		if (!*cell_text && column == COL_GATEWAY)
++			value_valid = TRUE;
+ 	}
+ 
+ 	/* Change cell's background color while editing */
+@@ -899,7 +906,8 @@ cell_error_data_func (GtkTreeViewColumn *tree_column,
+ 	gtk_tree_model_get (tree_model, iter, col, &value, -1);
+ 
+ 	if (col == COL_ADDRESS)
+-		invalid = !value || !*value || !inet_pton (AF_INET6, value, &tmp_addr);
++		invalid =    !value || !*value || !inet_pton (AF_INET6, value, &tmp_addr)
++		          || IN6_IS_ADDR_UNSPECIFIED (&tmp_addr);
+ 	else if (col == COL_PREFIX)
+ 		invalid = !is_prefix_valid (value, NULL);
+ 	else if (col == COL_GATEWAY)
+@@ -1135,7 +1143,9 @@ ui_to_setting (CEPageIP6 *self)
+ 
+ 		/* IP address */
+ 		gtk_tree_model_get (model, &tree_iter, COL_ADDRESS, &item, -1);
+-		if (!item || !inet_pton (AF_INET6, item, &tmp_addr)) {
++		if (   !item
++		    || !inet_pton (AF_INET6, item, &tmp_addr)
++		    || IN6_IS_ADDR_UNSPECIFIED (&tmp_addr)) {
+ 			g_warning ("%s: IPv6 address '%s' missing or invalid!",
+ 			           __func__, item ? item : "<none>");
+ 			g_free (item);
+-- 
+2.1.0
+

@@ -1,0 +1,87 @@
+From 4c2dd31b7f75cdf4e555f307539423dafd4c1853 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Tue, 29 Jan 2013 15:38:48 -0600
+Subject: [PATCH 2/2] core: don't allow auto-activation of a master that has been disconnected
+
+The master-activation code was ignoring whether or not the master device
+was inhibiting automatic connections.
+---
+ src/nm-manager.c |   27 +++++++++++++++++++++++++++
+ 1 files changed, 27 insertions(+), 0 deletions(-)
+
+diff --git a/src/nm-manager.c b/src/nm-manager.c
+index ddf0fc3..8300b9b 100644
+--- a/src/nm-manager.c
++++ b/src/nm-manager.c
+@@ -303,6 +303,7 @@ typedef enum
+ 	NM_MANAGER_ERROR_ALREADY_ASLEEP_OR_AWAKE,
+ 	NM_MANAGER_ERROR_ALREADY_ENABLED_OR_DISABLED,
+ 	NM_MANAGER_ERROR_DEPENDENCY_FAILED,
++	NM_MANAGER_ERROR_AUTOCONNECT_NOT_ALLOWED,
+ } NMManagerError;
+ 
+ #define NM_MANAGER_ERROR (nm_manager_error_quark ())
+@@ -349,6 +350,8 @@ nm_manager_error_get_type (void)
+ 			ENUM_ENTRY (NM_MANAGER_ERROR_ALREADY_ENABLED_OR_DISABLED, "AlreadyEnabledOrDisabled"),
+ 			/* A dependency of this connection failed. */
+ 			ENUM_ENTRY (NM_MANAGER_ERROR_DEPENDENCY_FAILED, "DependencyFailed"),
++			/* Autoconnect is not allowed. */
++			ENUM_ENTRY (NM_MANAGER_ERROR_AUTOCONNECT_NOT_ALLOWED, "AutoconnectNotAllowed"),
+ 			{ 0, 0, 0 },
+ 		};
+ 		etype = g_enum_register_static ("NMManagerError", values);
+@@ -3588,6 +3591,10 @@ ensure_master_active_connection (NMManager *self,
+ 					                                            nm_device_get_path (master_device),
+ 					                                            user_requested,
+ 					                                            error);
++					if (!ac_path) {
++						g_prefix_error (error, "Master device %s activation failed: ",
++						                nm_device_get_iface (master_device));
++					}
+ 					master_ac = ac_path ? nm_manager_get_act_request_by_path (self, ac_path, NULL) : NULL;
+ 					g_slist_free (connections);
+ 					return master_ac;
+@@ -3636,6 +3643,10 @@ ensure_master_active_connection (NMManager *self,
+ 			                                       nm_device_get_path (candidate),
+ 			                                       user_requested,
+ 			                                       error);
++			if (!ac_path) {
++				g_prefix_error (error, "Master device %s activation failed: ",
++				                nm_device_get_iface (candidate));
++			}
+ 			return ac_path ? nm_manager_get_act_request_by_path (self, ac_path, NULL) : NULL;
+ 		}
+ 
+@@ -3649,6 +3660,13 @@ ensure_master_active_connection (NMManager *self,
+ 			                                       NULL,
+ 			                                       user_requested,
+ 			                                       error);
++			if (!ac_path) {
++				char *vif_name;
++
++				vif_name = get_virtual_iface_name (self, connection, NULL);
++				g_prefix_error (error, "Master device %s activation failed: ", vif_name);
++				g_free (vif_name);
++			}
+ 			return ac_path ? nm_manager_get_act_request_by_path (self, ac_path, NULL) : NULL;
+ 		}
+ 
+@@ -3845,6 +3863,15 @@ nm_manager_activate_connection (NMManager *manager,
+ 		return NULL;
+ 	}
+ 
++	/* If this is an autoconnect request, but the device isn't allowing autoconnect
++	 * right now, we reject it.
++	 */
++	if (!user_requested && !nm_device_autoconnect_allowed (device)) {
++		g_set_error_literal (error, NM_MANAGER_ERROR, NM_MANAGER_ERROR_AUTOCONNECT_NOT_ALLOWED,
++			                 "Device does not allow automatic connections at this time");
++		return NULL;
++	}
++
+ 	/* Try to find the master connection/device if the connection has a dependency */
+ 	if (!find_master (manager, connection, device, &master_connection, &master_device)) {
+ 		g_set_error_literal (error, NM_MANAGER_ERROR, NM_MANAGER_ERROR_UNKNOWN_DEVICE,
+-- 
+1.7.1
+

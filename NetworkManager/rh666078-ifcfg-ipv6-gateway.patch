@@ -1,0 +1,163 @@
+From 893b44a894dd76d40e185e94d948b25629828498 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Wed, 26 Jan 2011 16:27:32 +0100
+Subject: [PATCH] ifcfg-rh: read/write IPv6 gateway in manual mode (rh #604334, rh #666078)
+
+We only use IPV6_DEFAULTGW at the moment. That means we just support the
+gateway for the first IPv6 address/subnet. That should be changed later
+after we figure out what variables should be used.
+---
+ system-settings/plugins/ifcfg-rh/reader.c |   58 ++++++++++++++++++++++------
+ system-settings/plugins/ifcfg-rh/writer.c |   10 ++++-
+ 2 files changed, 54 insertions(+), 14 deletions(-)
+
+diff --git a/system-settings/plugins/ifcfg-rh/reader.c b/system-settings/plugins/ifcfg-rh/reader.c
+index a79db72..f1a170f 100644
+--- a/system-settings/plugins/ifcfg-rh/reader.c
++++ b/system-settings/plugins/ifcfg-rh/reader.c
+@@ -890,11 +890,17 @@ error:
+ }
+ 
+ static NMIP6Address *
+-parse_full_ip6_address (const char *addr_str, GError **error)
++parse_full_ip6_address (shvarFile *ifcfg,
++                        const char *network_file,
++                        const char *addr_str,
++                        int i,
++                        GError **error)
+ {
+-	NMIP6Address *addr;
++	NMIP6Address *addr = NULL;
+ 	char **list;
+-	char *ip_tag, *prefix_tag;
++	char *ip_val, *prefix_val;
++	shvarFile *network_ifcfg;
++	char *value = NULL;
+ 	struct in6_addr tmp = IN6ADDR_ANY_INIT;
+ 	gboolean success = FALSE;
+ 
+@@ -906,27 +912,26 @@ parse_full_ip6_address (const char *addr_str, GError **error)
+ 		goto error;
+ 	}
+ 
+-	ip_tag = list[0];
+-	prefix_tag = list[1];
++	ip_val = list[0];
++	prefix_val = list[1];
+ 
+ 	addr = nm_ip6_address_new ();
+ 	/* IP address */
+-	if (ip_tag) {
+-		if (!parse_ip6_address (ip_tag, &tmp, error))
++	if (ip_val) {
++		if (!parse_ip6_address (ip_val, &tmp, error))
+ 			goto error;
+ 	}
+-
+ 	nm_ip6_address_set_address (addr, &tmp);
+ 
+ 	/* Prefix */
+-	if (prefix_tag) {
++	if (prefix_val) {
+ 		long int prefix;
+ 
+ 		errno = 0;
+-		prefix = strtol (prefix_tag, NULL, 10);
++		prefix = strtol (prefix_val, NULL, 10);
+ 		if (errno || prefix <= 0 || prefix > 128) {
+ 			g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
+-			             "Invalid IP6 prefix '%s'", prefix_tag);
++			             "Invalid IP6 prefix '%s'", prefix_val);
+ 			goto error;
+ 		}
+ 		nm_ip6_address_set_prefix (addr, (guint32) prefix);
+@@ -935,6 +940,32 @@ parse_full_ip6_address (const char *addr_str, GError **error)
+ 		nm_ip6_address_set_prefix (addr, 64);
+ 	}
+ 
++	/* Gateway */
++	tmp = in6addr_any;
++	value = svGetValue (ifcfg, "IPV6_DEFAULTGW", FALSE);
++	if (i != 0) {
++		/* We don't support gateways for IPV6ADDR_SECONDARIES yet */
++		g_free (value);
++		value = NULL;
++	}
++	if (!value) {
++		/* If no gateway in the ifcfg, try global /etc/sysconfig/network instead */
++		network_ifcfg = svNewFile (network_file);
++		if (network_ifcfg) {
++			value = svGetValue (network_ifcfg, "IPV6_DEFAULTGW", FALSE);
++			svCloseFile (network_ifcfg);
++		}
++	}
++	if (value) {
++		char *ptr;
++
++		if ((ptr = strchr (value, '%')) != NULL)
++			*ptr = '\0';  /* remove %interface prefix if present */
++		if (!parse_ip6_address (value, &tmp, error))
++			goto error;
++		nm_ip6_address_set_gateway (addr, &tmp);
++	}
++
+ 	success = TRUE;
+ 
+ error:
+@@ -944,6 +975,7 @@ error:
+ 	}
+ 
+ 	g_strfreev (list);
++	g_free (value);
+ 	return addr;
+ }
+ 
+@@ -1507,8 +1539,8 @@ make_ip6_setting (shvarFile *ifcfg,
+ 
+ 		list = g_strsplit_set (val, " ", 0);
+ 		g_free (val);
+-		for (iter = list; iter && *iter; iter++, i++) {
+-			addr = parse_full_ip6_address (*iter, error);
++		for (iter = list, i = 0; iter && *iter; iter++, i++) {
++			addr = parse_full_ip6_address (ifcfg, network_file, *iter, i, error);
+ 			if (!addr) {
+ 				g_strfreev (list);
+ 				goto error;
+diff --git a/system-settings/plugins/ifcfg-rh/writer.c b/system-settings/plugins/ifcfg-rh/writer.c
+index e016d76..71f8958 100644
+--- a/system-settings/plugins/ifcfg-rh/writer.c
++++ b/system-settings/plugins/ifcfg-rh/writer.c
+@@ -15,7 +15,7 @@
+  * with this program; if not, write to the Free Software Foundation, Inc.,
+  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+  *
+- * Copyright (C) 2009 - 2010 Red Hat, Inc.
++ * Copyright (C) 2009 - 2011 Red Hat, Inc.
+  */
+ 
+ #include <ctype.h>
+@@ -1408,6 +1408,13 @@ write_ip6_setting (NMConnection *connection, shvarFile *ifcfg, GError **error)
+ 			g_string_append_c (ip_ptr, '/');
+ 			g_string_append (ip_ptr, prefix);
+ 			g_free (prefix);
++
++			/* We only support gateway for the first IP address for now */
++			if (i == 0) {
++				ip = nm_ip6_address_get_gateway (addr);
++				inet_ntop (AF_INET6, (const void *) ip, buf, sizeof (buf));
++				svSetValue (ifcfg, "IPV6_DEFAULTGW", buf, FALSE);
++			}
+ 		}
+ 
+ 		svSetValue (ifcfg, "IPV6ADDR", ip_str1->str, FALSE);
+@@ -1417,6 +1424,7 @@ write_ip6_setting (NMConnection *connection, shvarFile *ifcfg, GError **error)
+ 	} else {
+ 		svSetValue (ifcfg, "IPV6ADDR", NULL, FALSE);
+ 		svSetValue (ifcfg, "IPV6ADDR_SECONDARIES", NULL, FALSE);
++		svSetValue (ifcfg, "IPV6_DEFAULTGW", NULL, FALSE);
+ 	}
+ 
+ 	/* Write out DNS - 'DNS' key is used both for IPv4 and IPv6 */
+-- 
+1.7.1
+

@@ -1,0 +1,685 @@
+From d006adae4d9c6767aea148c18aa85b4379a3e75a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Tue, 26 Aug 2014 15:57:08 +0200
+Subject: [PATCH 1/2] core: add AddConnectionReturn() method to system settings
+ service (rh #1111664)
+
+It is the same as D-Bus call AddConnection(), but it also returns D-Bus path of
+the added connection.
+It is useful to get the object path right away by the adding method (it works
+this way in NM 0.9). A notable user of the new method will be OpenLMI that tries
+to work similarly both in RHEL6 and RHEL7.
+
+https://bugzilla.redhat.com/show_bug.cgi?id=1111664
+
+Resolves: #1111664
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ introspection/nm-settings.xml                    |  18 +++
+ libnm-glib/nm-settings-interface.h               |  19 ++-
+ libnm-glib/nm-settings-service.c                 |  83 +++++++++++++
+ libnm-glib/nm-settings-service.h                 |   7 +-
+ src/system-settings/nm-sysconfig-settings.c      | 147 ++++++++++++++++++++++-
+ src/system-settings/nm-system-config-interface.c |  18 +++
+ src/system-settings/nm-system-config-interface.h |  10 ++
+ system-settings/plugins/ifcfg-rh/plugin.c        |  18 +++
+ system-settings/plugins/keyfile/plugin.c         |  17 +++
+ 9 files changed, 331 insertions(+), 6 deletions(-)
+
+diff --git a/introspection/nm-settings.xml b/introspection/nm-settings.xml
+index a970719..d05901f 100644
+--- a/introspection/nm-settings.xml
++++ b/introspection/nm-settings.xml
+@@ -31,6 +31,24 @@
+       </arg>
+     </method>
+ 
++    <method name="AddConnectionReturn">
++      <tp:docstring>
++        Add new connection and return its object path.
++      </tp:docstring>
++      <annotation name="org.freedesktop.DBus.GLib.CSymbol" value="impl_settings_add_connection_return"/>
++      <annotation name="org.freedesktop.DBus.GLib.Async" value=""/>
++      <arg name="connection" type="a{sa{sv}}" direction="in">
++        <tp:docstring>
++          Connection settings and properties.
++        </tp:docstring>
++      </arg>
++      <arg name="path" type="o" direction="out">
++        <tp:docstring>
++          Object path of the new connection that was just added.
++        </tp:docstring>
++      </arg>
++    </method>
++
+     <signal name="NewConnection">
+       <tp:docstring>
+         Emitted when a new connection has been added.
+diff --git a/libnm-glib/nm-settings-interface.h b/libnm-glib/nm-settings-interface.h
+index 5920bd8..a68ae68 100644
+--- a/libnm-glib/nm-settings-interface.h
++++ b/libnm-glib/nm-settings-interface.h
+@@ -26,6 +26,7 @@
+ #include <glib-object.h>
+ 
+ #include "NetworkManager.h"
++#include <nm-exported-connection.h>
+ #include "nm-settings-connection-interface.h"
+ 
+ G_BEGIN_DECLS
+@@ -61,6 +62,11 @@ typedef void (*NMSettingsAddConnectionFunc) (NMSettingsInterface *settings,
+                                              GError *error,
+                                              gpointer user_data);
+ 
++typedef void (*NMSettingsAddConnectionReturnFunc) (NMSettingsInterface *settings,
++                                                   NMExportedConnection *connection,
++                                                   GError *error,
++                                                   gpointer user_data);
++
+ struct _NMSettingsInterface {
+ 	GTypeInterface g_iface;
+ 
+@@ -76,6 +82,11 @@ struct _NMSettingsInterface {
+ 	                            NMSettingsAddConnectionFunc callback,
+ 	                            gpointer user_data);
+ 
++	gboolean (*add_connection_return) (NMSettingsInterface *settings,
++	                                   NMConnection *connection,
++	                                   NMSettingsAddConnectionReturnFunc callback,
++	                                   gpointer user_data);
++
+ 	/* Signals */
+ 	void (*new_connection) (NMSettingsInterface *settings,
+ 	                        NMSettingsConnectionInterface *connection);
+@@ -88,7 +99,6 @@ struct _NMSettingsInterface {
+ 	void (*_reserved3) (void);
+ 	void (*_reserved4) (void);
+ 	void (*_reserved5) (void);
+-	void (*_reserved6) (void);
+ };
+ 
+ GType nm_settings_interface_get_type (void);
+@@ -104,6 +114,13 @@ gboolean nm_settings_interface_add_connection (NMSettingsInterface *settings,
+                                                NMSettingsAddConnectionFunc callback,
+                                                gpointer user_data);
+ 
++NMExportedConnection *nm_settings_interface_add_connection_return (NMSettingsInterface *settings,
++                                                                   NMConnection *connection,
++                                                                   NMSettingsAddConnectionReturnFunc callback,
++                                                                   gpointer user_data);
++
++
++
+ G_END_DECLS
+ 
+ #endif /* NM_SETTINGS_INTERFACE_H */
+diff --git a/libnm-glib/nm-settings-service.c b/libnm-glib/nm-settings-service.c
+index ffd33a5..7510594 100644
+--- a/libnm-glib/nm-settings-service.c
++++ b/libnm-glib/nm-settings-service.c
+@@ -36,6 +36,10 @@ static void impl_settings_add_connection (NMSettingsService *self,
+                                           GHashTable *settings,
+                                           DBusGMethodInvocation *context);
+ 
++static void impl_settings_add_connection_return (NMSettingsService *self,
++                                                 GHashTable *settings,
++                                                 DBusGMethodInvocation *context);
++
+ #include "nm-settings-glue.h"
+ 
+ static void settings_interface_init (NMSettingsInterface *class);
+@@ -251,6 +255,84 @@ impl_settings_add_connection (NMSettingsService *self,
+ 	g_object_unref (tmp);
+ }
+ 
++static gboolean
++add_connection_return (NMSettingsInterface *settings,
++                       NMConnection *connection,
++                       NMSettingsAddConnectionReturnFunc callback,
++                       gpointer user_data)
++{
++	NMSettingsService *self = NM_SETTINGS_SERVICE (settings);
++	GError *error = NULL;
++	gboolean success = FALSE;
++
++	if (NM_SETTINGS_SERVICE_GET_CLASS (self)->add_connection_return) {
++		NM_SETTINGS_SERVICE_GET_CLASS (self)->add_connection_return (NM_SETTINGS_SERVICE (self),
++		                                                             connection,
++		                                                             NULL,
++		                                                             callback,
++		                                                             user_data);
++		return TRUE;
++	} else {
++		error = g_error_new (NM_SETTINGS_INTERFACE_ERROR,
++		                     NM_SETTINGS_INTERFACE_ERROR_INTERNAL_ERROR,
++		                     "%s: %s:%d add_connection_return() not implemented",
++		                     __func__, __FILE__, __LINE__);
++		callback (settings, NULL, error, user_data);
++		g_error_free (error);
++	}
++
++	return success;
++}
++
++static void
++dbus_add_connection_return_cb (NMSettingsInterface *settings,
++                               NMExportedConnection *connection,
++                               GError *error,
++                               gpointer user_data)
++{
++	DBusGMethodInvocation *context = user_data;
++
++	if (error)
++		dbus_g_method_return_error (context, error);
++	else
++		dbus_g_method_return (context, nm_connection_get_path (NM_CONNECTION (connection)));
++}
++
++static void
++impl_settings_add_connection_return (NMSettingsService *self,
++                                     GHashTable *settings,
++                                     DBusGMethodInvocation *context)
++{
++	NMConnection *tmp;
++	GError *error = NULL;
++
++	/* Check if the settings are valid first */
++	tmp = nm_connection_new_from_hash (settings, &error);
++	if (!tmp) {
++		g_assert (error);
++		dbus_g_method_return_error (context, error);
++		g_error_free (error);
++		return;
++	}
++
++	if (NM_SETTINGS_SERVICE_GET_CLASS (self)->add_connection_return) {
++		NM_SETTINGS_SERVICE_GET_CLASS (self)->add_connection_return (NM_SETTINGS_SERVICE (self),
++		                                                             tmp,
++		                                                             context,
++		                                                             dbus_add_connection_return_cb,
++		                                                             context);
++	} else {
++		error = g_error_new (NM_SETTINGS_INTERFACE_ERROR,
++		                     NM_SETTINGS_INTERFACE_ERROR_INTERNAL_ERROR,
++		                     "%s: %s:%d add_connection_return() not implemented",
++		                     __func__, __FILE__, __LINE__);
++		dbus_g_method_return_error (context, error);
++		g_error_free (error);
++	}
++
++	g_object_unref (tmp);
++}
++
+ void
+ nm_settings_service_export_connection (NMSettingsService *self,
+                                        NMSettingsConnectionInterface *connection)
+@@ -283,6 +365,7 @@ settings_interface_init (NMSettingsInterface *iface)
+ 	iface->list_connections = list_connections;
+ 	iface->get_connection_by_path = get_connection_by_path;
+ 	iface->add_connection = add_connection;
++	iface->add_connection_return = add_connection_return;
+ 
+ 	dbus_g_object_type_install_info (G_TYPE_FROM_INTERFACE (iface),
+ 	                                 &dbus_glib_nm_settings_object_info);
+diff --git a/libnm-glib/nm-settings-service.h b/libnm-glib/nm-settings-service.h
+index 6ec1152..5f7419a 100644
+--- a/libnm-glib/nm-settings-service.h
++++ b/libnm-glib/nm-settings-service.h
+@@ -79,13 +79,18 @@ typedef struct {
+ 	                        NMSettingsAddConnectionFunc callback,
+ 	                        gpointer user_data);
+ 
++	void (*add_connection_return) (NMSettingsService *self,
++	                               NMConnection *connection,
++	                               DBusGMethodInvocation *context, /* Only present for D-Bus calls */
++	                               NMSettingsAddConnectionReturnFunc callback,
++	                               gpointer user_data);
++
+ 	/* Padding for future expansion */
+ 	void (*_reserved1) (void);
+ 	void (*_reserved2) (void);
+ 	void (*_reserved3) (void);
+ 	void (*_reserved4) (void);
+ 	void (*_reserved5) (void);
+-	void (*_reserved6) (void);
+ } NMSettingsServiceClass;
+ 
+ GType nm_settings_service_get_type (void);
+diff --git a/src/system-settings/nm-sysconfig-settings.c b/src/system-settings/nm-sysconfig-settings.c
+index c30992e..3e1ad20 100644
+--- a/src/system-settings/nm-sysconfig-settings.c
++++ b/src/system-settings/nm-sysconfig-settings.c
+@@ -617,6 +617,7 @@ typedef struct {
+ 
+ 	NMConnection *connection;
+ 	NMSettingsAddConnectionFunc callback;
++	NMSettingsAddConnectionReturnFunc callback2;
+ 	gpointer callback_data;
+ 
+ 	char *hostname;
+@@ -632,6 +633,7 @@ polkit_call_new (NMSysconfigSettings *self,
+                  DBusGMethodInvocation *context,
+                  NMConnection *connection,
+                  NMSettingsAddConnectionFunc callback,
++                 NMSettingsAddConnectionReturnFunc callback2,
+                  gpointer callback_data,
+                  const char *hostname)
+ {
+@@ -651,6 +653,10 @@ polkit_call_new (NMSysconfigSettings *self,
+ 		call->callback = callback;
+ 		call->callback_data = callback_data;
+ 	}
++	if (callback2) {
++		call->callback2 = callback2;
++		call->callback_data = callback_data;
++	}
+ 	if (hostname)
+ 		call->hostname = g_strdup (hostname);
+ 
+@@ -755,7 +761,7 @@ pk_add_cb (GObject *object, GAsyncResult *result, gpointer user_data)
+ 		                     "Saving connection failed: (%d) %s",
+ 		                     add_error ? add_error->code : -1,
+ 		                     (add_error && add_error->message) ? add_error->message : "(unknown)");
+-		g_error_free (add_error);
++		g_clear_error (&add_error);
+ 		call->callback (NM_SETTINGS_INTERFACE (self), error, call->callback_data);
+ 	}
+ 
+@@ -788,7 +794,7 @@ add_connection (NMSettingsService *service,
+ 		return;
+ 	}
+ 
+-	call = polkit_call_new (self, context, connection, callback, user_data, NULL);
++	call = polkit_call_new (self, context, connection, callback, NULL, user_data, NULL);
+ 	g_assert (call);
+ 	polkit_authority_check_authorization (priv->authority,
+ 	                                      call->subject,
+@@ -801,6 +807,138 @@ add_connection (NMSettingsService *service,
+ 	priv->pk_calls = g_slist_append (priv->pk_calls, call);
+ }
+ 
++static NMExportedConnection *
++add_new_connection_return (NMSysconfigSettings *self,
++                           NMConnection *connection,
++                           GError **error)
++{
++	NMSysconfigSettingsPrivate *priv = NM_SYSCONFIG_SETTINGS_GET_PRIVATE (self);
++	GError *tmp_error = NULL, *last_error = NULL;
++	GSList *iter;
++	NMExportedConnection *added = NULL;
++
++	/* Here's how it works:
++	   1) plugin writes a connection.
++	   2) plugin notices that a new connection is available for reading.
++	   3) plugin reads the new connection (the one it wrote in 1) and emits 'connection-added' signal.
++	   4) NMSysconfigSettings receives the signal and adds it to it's connection list.
++	*/
++
++	for (iter = priv->plugins; iter; iter = iter->next) {
++		added = nm_system_config_interface_add_connection_return (NM_SYSTEM_CONFIG_INTERFACE (iter->data),
++		                                                          connection,
++		                                                          &tmp_error);
++		if (added) {
++			claim_connection (self, NM_SETTINGS_CONNECTION_INTERFACE (added), TRUE);
++			return added;
++		}
++		g_clear_error (&last_error);
++		last_error = tmp_error;
++		tmp_error = NULL;
++	}
++
++	*error = last_error;
++	return NULL;
++}
++
++static void
++pk_add_return_cb (GObject *object, GAsyncResult *result, gpointer user_data)
++{
++	PolkitCall *call = user_data;
++	NMSysconfigSettings *self = call->self;
++	NMSysconfigSettingsPrivate *priv;
++	PolkitAuthorizationResult *pk_result;
++	GError *error = NULL, *add_error = NULL;
++	NMExportedConnection *added;
++
++	/* If NMSysconfigSettings is already gone, do nothing */
++	if (call->disposed) {
++		error = g_error_new_literal (NM_SYSCONFIG_SETTINGS_ERROR,
++		                             NM_SYSCONFIG_SETTINGS_ERROR_GENERAL,
++		                             "Request was canceled.");
++		dbus_g_method_return_error (call->context, error);
++		g_error_free (error);
++		polkit_call_free (call);
++		return;
++	}
++
++	priv = NM_SYSCONFIG_SETTINGS_GET_PRIVATE (self);
++
++	priv->pk_calls = g_slist_remove (priv->pk_calls, call);
++
++	pk_result = polkit_authority_check_authorization_finish (priv->authority,
++	                                                         result,
++	                                                         &error);
++	/* Some random error happened */
++	if (error) {
++		call->callback2 (NM_SETTINGS_INTERFACE (self), NULL, error, call->callback_data);
++		goto out;
++	}
++
++	/* Caller didn't successfully authenticate */
++	if (!polkit_authorization_result_get_is_authorized (pk_result)) {
++		error = g_error_new_literal (NM_SYSCONFIG_SETTINGS_ERROR,
++		                             NM_SYSCONFIG_SETTINGS_ERROR_NOT_PRIVILEGED,
++		                             "Insufficient privileges.");
++		call->callback2 (NM_SETTINGS_INTERFACE (self), NULL, error, call->callback_data);
++		goto out;
++	}
++
++	added = add_new_connection_return (self, call->connection, &add_error);
++	if (added)
++		call->callback2 (NM_SETTINGS_INTERFACE (self), added, NULL, call->callback_data);
++	else {
++		error = g_error_new (NM_SYSCONFIG_SETTINGS_ERROR,
++		                     NM_SYSCONFIG_SETTINGS_ERROR_ADD_FAILED,
++		                     "Saving connection failed: (%d) %s",
++		                     add_error ? add_error->code : -1,
++		                     (add_error && add_error->message) ? add_error->message : "(unknown)");
++		g_clear_error (&add_error);
++		call->callback2 (NM_SETTINGS_INTERFACE (self), NULL, error, call->callback_data);
++	}
++
++out:
++	g_clear_error (&error);
++	polkit_call_free (call);
++	if (pk_result)
++		g_object_unref (pk_result);
++}
++
++static void
++add_connection_return (NMSettingsService *service,
++                       NMConnection *connection,
++                       DBusGMethodInvocation *context, /* Only present for D-Bus calls */
++                       NMSettingsAddConnectionReturnFunc callback,
++                       gpointer user_data)
++{
++	NMSysconfigSettings *self = NM_SYSCONFIG_SETTINGS (service);
++	NMSysconfigSettingsPrivate *priv = NM_SYSCONFIG_SETTINGS_GET_PRIVATE (self);
++	PolkitCall *call;
++	GError *error = NULL;
++
++	/* Do any of the plugins support adding? */
++	if (!get_plugin (self, NM_SYSTEM_CONFIG_INTERFACE_CAP_MODIFY_CONNECTIONS)) {
++		error = g_error_new_literal (NM_SYSCONFIG_SETTINGS_ERROR,
++		                             NM_SYSCONFIG_SETTINGS_ERROR_ADD_NOT_SUPPORTED,
++		                             "None of the registered plugins support add.");
++		callback (NM_SETTINGS_INTERFACE (service), NULL, error, user_data);
++		g_error_free (error);
++		return;
++	}
++
++	call = polkit_call_new (self, context, connection, NULL, callback, user_data, NULL);
++	g_assert (call);
++	polkit_authority_check_authorization (priv->authority,
++	                                      call->subject,
++	                                      NM_SYSCONFIG_POLICY_ACTION_CONNECTION_MODIFY,
++	                                      NULL,
++	                                      POLKIT_CHECK_AUTHORIZATION_FLAGS_ALLOW_USER_INTERACTION,
++	                                      call->cancellable,
++	                                      pk_add_return_cb,
++	                                      call);
++	priv->pk_calls = g_slist_append (priv->pk_calls, call);
++}
++
+ static void
+ pk_hostname_cb (GObject *object, GAsyncResult *result, gpointer user_data)
+ {
+@@ -891,7 +1029,7 @@ impl_settings_save_hostname (NMSysconfigSettings *self,
+ 		return;
+ 	}
+ 
+-	call = polkit_call_new (self, context, NULL, NULL, NULL, hostname);
++	call = polkit_call_new (self, context, NULL, NULL, NULL, NULL, hostname);
+ 	g_assert (call);
+ 	polkit_authority_check_authorization (priv->authority,
+ 	                                      call->subject,
+@@ -1022,7 +1160,7 @@ impl_settings_get_permissions (NMSysconfigSettings *self,
+ {
+ 	PolkitCall *call;
+ 
+-	call = polkit_call_new (self, context, NULL, NULL, NULL, FALSE);
++	call = polkit_call_new (self, context, NULL, NULL, NULL, NULL, FALSE);
+ 	g_assert (call);
+ 
+ 	/* Start checks for the various permissions */
+@@ -1551,6 +1689,7 @@ nm_sysconfig_settings_class_init (NMSysconfigSettingsClass *class)
+ 	object_class->finalize = finalize;
+ 	ss_class->list_connections = list_connections;
+ 	ss_class->add_connection = add_connection;
++	ss_class->add_connection_return = add_connection_return;
+ 
+ 	/* properties */
+ 	g_object_class_install_property
+diff --git a/src/system-settings/nm-system-config-interface.c b/src/system-settings/nm-system-config-interface.c
+index 90fd93b..8446958 100644
+--- a/src/system-settings/nm-system-config-interface.c
++++ b/src/system-settings/nm-system-config-interface.c
+@@ -161,3 +161,21 @@ nm_system_config_interface_add_connection (NMSystemConfigInterface *config,
+ 
+ 	return success;
+ }
++
++NMExportedConnection *
++nm_system_config_interface_add_connection_return (NMSystemConfigInterface *config,
++                                                  NMConnection *connection,
++                                                  GError **error)
++{
++	g_return_val_if_fail (config != NULL, NULL);
++	g_return_val_if_fail (NM_IS_CONNECTION (connection), NULL);
++
++	if (NM_SYSTEM_CONFIG_INTERFACE_GET_INTERFACE (config)->add_connection_return)
++		return NM_SYSTEM_CONFIG_INTERFACE_GET_INTERFACE (config)->add_connection_return (config, connection, error);
++
++	g_set_error (error, 1, 0,
++	             "%s: %s:%d add_connection_return() not implemented",
++	             __func__, __FILE__, __LINE__);
++
++	return NULL;
++}
+diff --git a/src/system-settings/nm-system-config-interface.h b/src/system-settings/nm-system-config-interface.h
+index 3daceb8..5fe5b88 100644
+--- a/src/system-settings/nm-system-config-interface.h
++++ b/src/system-settings/nm-system-config-interface.h
+@@ -25,6 +25,7 @@
+ #include <glib.h>
+ #include <glib-object.h>
+ #include <nm-connection.h>
++#include <nm-exported-connection.h>
+ #include <nm-settings-connection-interface.h>
+ 
+ G_BEGIN_DECLS
+@@ -123,6 +124,10 @@ struct _NMSystemConfigInterface {
+ 	                            NMConnection *connection,
+ 	                            GError **error);
+ 
++	NMExportedConnection * (*add_connection_return) (NMSystemConfigInterface *config,
++	                                                 NMConnection *connection,
++	                                                 GError **error);
++
+ 	/* Signals */
+ 
+ 	/* Emitted when a new connection has been found by the plugin */
+@@ -146,6 +151,11 @@ gboolean nm_system_config_interface_add_connection (NMSystemConfigInterface *con
+                                                     NMConnection *connection,
+                                                     GError **error);
+ 
++NMExportedConnection *
++nm_system_config_interface_add_connection_return (NMSystemConfigInterface *config,
++                                                  NMConnection *connection,
++                                                  GError **error);
++
+ G_END_DECLS
+ 
+ #endif	/* NM_SYSTEM_CONFIG_INTERFACE_H */
+diff --git a/system-settings/plugins/ifcfg-rh/plugin.c b/system-settings/plugins/ifcfg-rh/plugin.c
+index 7bdc4c0..1c52b06 100644
+--- a/system-settings/plugins/ifcfg-rh/plugin.c
++++ b/system-settings/plugins/ifcfg-rh/plugin.c
+@@ -455,6 +455,23 @@ add_connection (NMSystemConfigInterface *config,
+ 	return writer_new_connection (connection, IFCFG_DIR, NULL, error);
+ }
+ 
++static NMExportedConnection *
++add_connection_return (NMSystemConfigInterface *config,
++                       NMConnection *connection,
++                       GError **error)
++{
++	SCPluginIfcfg *self = SC_PLUGIN_IFCFG (config);
++	NMIfcfgConnection *added = NULL;
++	char *path = NULL;
++
++	if (!writer_new_connection (connection, IFCFG_DIR, &path, error))
++		return NULL;
++
++	added = read_one_connection (self, path);
++	g_free (path);
++	return (NMExportedConnection *) added;
++}
++
+ #define SC_NETWORK_FILE SYSCONFDIR"/sysconfig/network"
+ 
+ static char *
+@@ -775,6 +792,7 @@ system_config_interface_init (NMSystemConfigInterface *system_config_interface_c
+ 	/* interface implementation */
+ 	system_config_interface_class->get_connections = get_connections;
+ 	system_config_interface_class->add_connection = add_connection;
++	system_config_interface_class->add_connection_return = add_connection_return;
+ 	system_config_interface_class->get_unmanaged_specs = get_unmanaged_specs;
+ 	system_config_interface_class->init = init;
+ }
+diff --git a/system-settings/plugins/keyfile/plugin.c b/system-settings/plugins/keyfile/plugin.c
+index 36f47cc..1417f17 100644
+--- a/system-settings/plugins/keyfile/plugin.c
++++ b/system-settings/plugins/keyfile/plugin.c
+@@ -343,6 +343,22 @@ add_connection (NMSystemConfigInterface *config,
+ 	return write_connection (connection, KEYFILE_DIR, 0, 0, NULL, error);
+ }
+ 
++static NMExportedConnection *
++add_connection_return (NMSystemConfigInterface *config,
++                       NMConnection *connection,
++                       GError **error)
++{
++	NMKeyfileConnection *added = NULL;
++	char *path = NULL;
++
++	if (!write_connection (connection, KEYFILE_DIR, 0, 0, &path, error))
++		return NULL;
++
++	added = nm_keyfile_connection_new (path);
++	g_free (path);
++	 return (NMExportedConnection *) added;
++}
++
+ static GSList *
+ get_unmanaged_specs (NMSystemConfigInterface *config)
+ {
+@@ -564,6 +580,7 @@ system_config_interface_init (NMSystemConfigInterface *system_config_interface_c
+ 	/* interface implementation */
+ 	system_config_interface_class->get_connections = get_connections;
+ 	system_config_interface_class->add_connection = add_connection;
++	system_config_interface_class->add_connection_return = add_connection_return;
+ 	system_config_interface_class->get_unmanaged_specs = get_unmanaged_specs;
+ }
+ 
+-- 
+1.8.2.1
+
+
+From ba822f8b5b4bf945b87aed9d27e805cc1d2d86ab Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Tue, 26 Aug 2014 16:37:29 +0200
+Subject: [PATCH 2/2] examples: add an python example for AddConnectionReturn()
+ D-Bus call
+
+The example shows you can get object path of newly created connection as return
+value of the method.
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ examples/python/Makefile.am                     |  1 +
+ examples/python/add-system-connection-return.py | 50 +++++++++++++++++++++++++
+ 2 files changed, 51 insertions(+)
+ create mode 100755 examples/python/add-system-connection-return.py
+
+diff --git a/examples/python/Makefile.am b/examples/python/Makefile.am
+index dec8b57..de0a224 100644
+--- a/examples/python/Makefile.am
++++ b/examples/python/Makefile.am
+@@ -1,6 +1,7 @@
+ EXTRA_DIST = \
+ 	nm-state.py \
+ 	add-system-connection.py \
++	add-system-connection-return.py \
+ 	vpn.py \
+ 	list-connections.py \
+ 	show-bssids.py \
+diff --git a/examples/python/add-system-connection-return.py b/examples/python/add-system-connection-return.py
+new file mode 100755
+index 0000000..252f720
+--- /dev/null
++++ b/examples/python/add-system-connection-return.py
+@@ -0,0 +1,50 @@
++#!/bin/env python
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License along
++# with this program; if not, write to the Free Software Foundation, Inc.,
++# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++#
++# Copyright 2014 Red Hat, Inc.
++#
++
++import dbus, uuid
++
++s_wired = dbus.Dictionary({'duplex': 'full'})
++s_con = dbus.Dictionary({
++            'type': '802-3-ethernet',
++            'uuid': str(uuid.uuid4()),
++            'id': '_TestingConnection_'})
++
++addr1 = dbus.Array([dbus.UInt32(50462986L), dbus.UInt32(8L), dbus.UInt32(16908554L)], signature=dbus.Signature('u'))
++s_ip4 = dbus.Dictionary({
++            'addresses': dbus.Array([addr1], signature=dbus.Signature('au')),
++            'method': 'manual'})
++
++s_ip6 = dbus.Dictionary({'method': 'ignore'})
++
++con = dbus.Dictionary({
++    '802-3-ethernet': s_wired,
++    'connection': s_con,
++    'ipv4': s_ip4,
++    'ipv6': s_ip6})
++
++
++bus = dbus.SystemBus()
++
++proxy = bus.get_object("org.freedesktop.NetworkManagerSystemSettings", "/org/freedesktop/NetworkManagerSettings")
++settings = dbus.Interface(proxy, "org.freedesktop.NetworkManagerSettings")
++
++path = settings.AddConnectionReturn(con)
++
++print "The connection has been added at D-Bus path %s" % path
++
+-- 
+1.8.2.1
+

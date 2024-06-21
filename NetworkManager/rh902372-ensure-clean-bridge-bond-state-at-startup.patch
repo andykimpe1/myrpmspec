@@ -1,0 +1,317 @@
+From f6692bb4146401da45cfcdaa91b027a63c2f67de Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Tue, 29 Jan 2013 15:10:58 -0600
+Subject: [PATCH 1/2] core: ensure clean bridge/bond state on startup (rh #902372)
+
+NetworkManager makes no attempt to seamlessly "take over" bridges
+and bonds at this time.  Thus, on startup, NetworkManager will
+deactivate the bridge/bond interface and clear its IP configuration.
+But ports or slaves added before NetworkManager started (eg, by the
+network service if the interface's config had ONBOOT=yes) are not
+removed, and thus are still attached to the bridge/bond when
+NetworkManager wants to auto-activate them with some different
+configuration, which fails.  Furthermore, if the bridge/bond was
+configured for DHCP before NetworkManager started, the dhclient
+process may still be running and may interfere with any later
+configuration.
+
+To resolve these issues, release all bridge ports and bond slaves
+and kill any dhclient process for the interface when the interface
+is managed by NM.  This only happens when the user has manually
+enabled bridging/bonding via NM_BOND_BRIDGE_VLAN_ENABLED, and does
+not happen for any interface except bridges and bonds.
+---
+ src/dhcp-manager/nm-dhcp-dhclient.c |   22 +++++++++++++++++++
+ src/dhcp-manager/nm-dhcp-dhclient.h |    2 +
+ src/dhcp-manager/nm-dhcp-dhcpcd.c   |   20 ++++++++++++++++++
+ src/dhcp-manager/nm-dhcp-dhcpcd.h   |    2 +
+ src/dhcp-manager/nm-dhcp-manager.c  |   22 +++++++++++++++++--
+ src/dhcp-manager/nm-dhcp-manager.h  |    4 +++
+ src/nm-device-bond.c                |   39 +++++++++++++++++++++++++++++++++++
+ src/nm-device-bridge.c              |   34 ++++++++++++++++++++++++++++++
+ 8 files changed, 142 insertions(+), 3 deletions(-)
+
+diff --git a/src/dhcp-manager/nm-dhcp-dhclient.c b/src/dhcp-manager/nm-dhcp-dhclient.c
+index 6770f59..10fa5c2 100644
+--- a/src/dhcp-manager/nm-dhcp-dhclient.c
++++ b/src/dhcp-manager/nm-dhcp-dhclient.c
+@@ -316,6 +316,28 @@ out:
+ 	return leases;
+ }
+ 
++void
++nm_dhcp_dhclient_stop_existing (const char *iface, gboolean ipv6)
++{
++	const char *path;
++	char *pid_file, *binary_name;
++
++	path = nm_dhcp_dhclient_get_path (DHCLIENT_PATH);
++	if (!g_file_test (path, G_FILE_TEST_EXISTS))
++		return;
++
++	pid_file = g_strdup_printf (LOCALSTATEDIR "/run/dhclient%s-%s.pid",
++	                            ipv6 ? "6" : "",
++	                            iface);
++	g_assert (pid_file);
++
++	/* Kill any existing dhclient from the pidfile */
++	binary_name = g_path_get_basename (path);
++	nm_dhcp_client_stop_existing (pid_file, binary_name);
++	g_free (binary_name);
++	g_free (pid_file);
++}
++
+ 
+ #define DHCP_CLIENT_ID_TAG "send dhcp-client-identifier"
+ #define DHCP_CLIENT_ID_FORMAT DHCP_CLIENT_ID_TAG " \"%s\"; # added by NetworkManager"
+diff --git a/src/dhcp-manager/nm-dhcp-dhclient.h b/src/dhcp-manager/nm-dhcp-dhclient.h
+index be242de..b55054b 100644
+--- a/src/dhcp-manager/nm-dhcp-dhclient.h
++++ b/src/dhcp-manager/nm-dhcp-dhclient.h
+@@ -43,6 +43,8 @@ GType nm_dhcp_dhclient_get_type (void);
+ 
+ GSList *nm_dhcp_dhclient_get_lease_config (const char *iface, const char *uuid);
+ 
++void nm_dhcp_dhclient_stop_existing (const char *iface, gboolean ipv6);
++
+ const char *nm_dhcp_dhclient_get_path (const char *try_first);
+ 
+ #endif /* NM_DHCP_DHCLIENT_H */
+diff --git a/src/dhcp-manager/nm-dhcp-dhcpcd.c b/src/dhcp-manager/nm-dhcp-dhcpcd.c
+index 378a97b..cfc9b7c 100644
+--- a/src/dhcp-manager/nm-dhcp-dhcpcd.c
++++ b/src/dhcp-manager/nm-dhcp-dhcpcd.c
+@@ -77,6 +77,26 @@ nm_dhcp_dhcpcd_get_lease_config (const char *iface, const char *uuid)
+ 	return NULL;
+ }
+ 
++void
++nm_dhcp_dhcpcd_stop_existing (const char *iface, gboolean ipv6)
++{
++	const char *path;
++	char *pid_file, *binary_name;
++
++	path = nm_dhcp_dhcpcd_get_path (DHCPCD_PATH);
++	if (!g_file_test (path, G_FILE_TEST_EXISTS))
++		return;
++
++	pid_file = g_strdup_printf (LOCALSTATEDIR "/run/dhcpcd-%s.pid", iface);
++	g_assert (pid_file);
++
++	/* Kill any existing dhclient from the pidfile */
++	binary_name = g_path_get_basename (path);
++	nm_dhcp_client_stop_existing (pid_file, binary_name);
++	g_free (binary_name);
++	g_free (pid_file);
++}
++
+ static void
+ dhcpcd_child_setup (gpointer user_data G_GNUC_UNUSED)
+ {
+diff --git a/src/dhcp-manager/nm-dhcp-dhcpcd.h b/src/dhcp-manager/nm-dhcp-dhcpcd.h
+index 586c569..8acb079 100644
+--- a/src/dhcp-manager/nm-dhcp-dhcpcd.h
++++ b/src/dhcp-manager/nm-dhcp-dhcpcd.h
+@@ -43,6 +43,8 @@ GType nm_dhcp_dhcpcd_get_type (void);
+ 
+ GSList *nm_dhcp_dhcpcd_get_lease_config (const char *iface, const char *uuid);
+ 
++void nm_dhcp_dhcpcd_stop_existing (const char *iface, gboolean ipv6);
++
+ const char *nm_dhcp_dhcpcd_get_path (const char *try_first);
+ 
+ #endif /* NM_DHCP_DHCPCD_H */
+diff --git a/src/dhcp-manager/nm-dhcp-manager.c b/src/dhcp-manager/nm-dhcp-manager.c
+index a1e3e5e..8fbeb5f 100644
+--- a/src/dhcp-manager/nm-dhcp-manager.c
++++ b/src/dhcp-manager/nm-dhcp-manager.c
+@@ -81,10 +81,12 @@ nm_dhcp_manager_error_get_type (void)
+ static NMDHCPManager *singleton = NULL;
+ 
+ typedef GSList * (*GetLeaseConfigFunc) (const char *iface, const char *uuid);
++typedef void     (*StopExistingFunc)   (const char *iface, gboolean ipv6);
+ 
+ typedef struct {
+ 	GType               client_type;
+ 	GetLeaseConfigFunc  get_lease_config_func;
++	StopExistingFunc    stop_existing_func;
+ 
+ 	NMDBusManager *     dbus_mgr;
+ 	GHashTable *        clients;
+@@ -330,11 +332,13 @@ nm_dhcp_manager_new (const char *client, GError **error)
+ 
+ 	/* Client-specific setup */
+ 	priv->client_type = client_type;
+-	if (priv->client_type == NM_TYPE_DHCP_DHCLIENT)
++	if (priv->client_type == NM_TYPE_DHCP_DHCLIENT) {
+ 		priv->get_lease_config_func = nm_dhcp_dhclient_get_lease_config;
+-	else if (priv->client_type == NM_TYPE_DHCP_DHCPCD)
++		priv->stop_existing_func = nm_dhcp_dhclient_stop_existing;
++	} else if (priv->client_type == NM_TYPE_DHCP_DHCPCD) {
+ 		priv->get_lease_config_func = nm_dhcp_dhcpcd_get_lease_config;
+-	else
++		priv->stop_existing_func = nm_dhcp_dhcpcd_stop_existing;
++	} else
+ 		g_assert_not_reached ();
+ 
+ 	priv->clients = g_hash_table_new_full (g_direct_hash, g_direct_equal,
+@@ -560,6 +564,18 @@ nm_dhcp_manager_get_lease_config (NMDHCPManager *self,
+ 	return NM_DHCP_MANAGER_GET_PRIVATE (self)->get_lease_config_func (iface, uuid);
+ }
+ 
++void
++nm_dhcp_manager_stop_existing (NMDHCPManager *self,
++                               const char *iface,
++                               gboolean ipv6)
++{
++	g_return_if_fail (self != NULL);
++	g_return_if_fail (NM_IS_DHCP_MANAGER (self));
++	g_return_if_fail (iface != NULL);
++
++	return NM_DHCP_MANAGER_GET_PRIVATE (self)->stop_existing_func (iface, ipv6);
++}
++
+ NMIP4Config *
+ nm_dhcp_manager_test_ip4_options_to_config (const char *dhcp_client,
+                                             const char *iface,
+diff --git a/src/dhcp-manager/nm-dhcp-manager.h b/src/dhcp-manager/nm-dhcp-manager.h
+index 9d83d09..f69f11a 100644
+--- a/src/dhcp-manager/nm-dhcp-manager.h
++++ b/src/dhcp-manager/nm-dhcp-manager.h
+@@ -86,6 +86,10 @@ GSList *       nm_dhcp_manager_get_lease_config (NMDHCPManager *self,
+                                                  const char *iface,
+                                                  const char *uuid);
+ 
++void           nm_dhcp_manager_stop_existing (NMDHCPManager *self,
++                                              const char *iface,
++                                              gboolean ipv6);
++
+ /* For testing only */
+ NMIP4Config *nm_dhcp_manager_test_ip4_options_to_config (const char *dhcp_client,
+                                                          const char *iface,
+diff --git a/src/nm-device-bond.c b/src/nm-device-bond.c
+index 2b6cbf0..99e8ca9 100644
+--- a/src/nm-device-bond.c
++++ b/src/nm-device-bond.c
+@@ -36,6 +36,7 @@
+ #include "nm-netlink-monitor.h"
+ #include "nm-dbus-glib-types.h"
+ #include "nm-system.h"
++#include "nm-dhcp-manager.h"
+ 
+ #include "nm-device-bond-glue.h"
+ 
+@@ -123,6 +124,7 @@ device_state_changed (NMDevice *device,
+                       gpointer user_data)
+ {
+ 	NMDeviceBondPrivate *priv = NM_DEVICE_BOND_GET_PRIVATE (device);
++	const char *iface = nm_device_get_ip_iface (device);
+ 
+ 	if (new_state != NM_DEVICE_STATE_IP_CONFIG) {
+ 		if (priv->ip_retry_id) {
+@@ -130,6 +132,43 @@ device_state_changed (NMDevice *device,
+ 			priv->ip_retry_id = 0;
+ 		}
+ 	}
++
++	/* Remove all bond slaves to ensure we start with a clear state */
++	if (new_state == NM_DEVICE_STATE_UNAVAILABLE) {
++		NMDHCPManager *dhcp_manager;
++		char *contents, *path;
++
++		path = g_strdup_printf ("/sys/class/net/%s/bonding/slaves", iface);
++		g_assert (path);
++		if (g_file_get_contents (path, &contents, 0, NULL)) {
++			char **items, **iter;
++			int slave_ifindex;
++
++			items = g_strsplit_set (contents, "\n\r", -1);
++			for (iter = items; iter && *iter; iter++) {
++				if (*iter[0]) {
++					slave_ifindex = nm_netlink_iface_to_index (*iter);
++					if (slave_ifindex > 0) {
++						nm_log_info (LOGD_DEVICE, "(%s): detaching slave %s",
++							        iface, *iter);
++						nm_system_bond_release (nm_device_get_ip_ifindex (device),
++							                    iface,
++							                    slave_ifindex,
++							                    *iter);
++					}
++				}
++			}
++			if (items)
++				g_strfreev (items);
++			g_free (contents);
++		}
++		g_free (path);
++
++		/* Stop any existing dhcp client */
++		dhcp_manager = nm_dhcp_manager_get ();
++		nm_dhcp_manager_stop_existing (dhcp_manager, iface, FALSE);
++		g_object_unref (dhcp_manager);
++	}
+ }
+ 
+ static void
+diff --git a/src/nm-device-bridge.c b/src/nm-device-bridge.c
+index 5dba0e5..8ce6f37 100644
+--- a/src/nm-device-bridge.c
++++ b/src/nm-device-bridge.c
+@@ -35,6 +35,7 @@
+ #include "nm-netlink-monitor.h"
+ #include "nm-dbus-glib-types.h"
+ #include "nm-system.h"
++#include "nm-dhcp-manager.h"
+ 
+ #include "nm-device-bridge-glue.h"
+ 
+@@ -123,6 +124,7 @@ device_state_changed (NMDevice *device,
+                       gpointer user_data)
+ {
+ 	NMDeviceBridgePrivate *priv = NM_DEVICE_BRIDGE_GET_PRIVATE (device);
++	const char *iface = nm_device_get_ip_iface (device);
+ 
+ 	if (new_state != NM_DEVICE_STATE_IP_CONFIG) {
+ 		if (priv->ip_retry_id) {
+@@ -130,6 +132,38 @@ device_state_changed (NMDevice *device,
+ 			priv->ip_retry_id = 0;
+ 		}
+ 	}
++
++	/* Remove all bridge ports to ensure we start with a clear state */
++	if (new_state == NM_DEVICE_STATE_UNAVAILABLE) {
++		NMDHCPManager *dhcp_manager;
++		GDir *dir;
++		char *path;
++		const char *port_name;
++		int port_ifindex;
++
++		path = g_strdup_printf ("/sys/class/net/%s/brif", iface);
++		dir = g_dir_open (path, 0, NULL);
++		if (dir) {
++			while ((port_name = g_dir_read_name (dir))) {
++				port_ifindex = nm_netlink_iface_to_index (port_name);
++				if (port_ifindex > 0) {
++					nm_log_info (LOGD_DEVICE, "(%s): detaching port %s",
++					            iface, port_name);
++					nm_system_bridge_detach (nm_device_get_ip_ifindex (device),
++					                         iface,
++					                         port_ifindex,
++					                         port_name);
++				}
++			}
++			g_dir_close (dir);
++		}
++		g_free (path);
++
++		/* Stop any existing dhcp client */
++		dhcp_manager = nm_dhcp_manager_get ();
++		nm_dhcp_manager_stop_existing (dhcp_manager, iface, FALSE);
++		g_object_unref (dhcp_manager);
++	}
+ }
+ 
+ static void
+-- 
+1.7.1
+

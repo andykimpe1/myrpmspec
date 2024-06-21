@@ -1,0 +1,310 @@
+wifi: use nl80211 supplicant driver and background scanning (rh #713283)
+
+* usage of 'nl80211,wext' or 'wext' according to 'wifi-wext-only' config option
+* patch for bgscan from NM master adjusted for 'wifi-wext-only' config option
+  wifi: enable background scanning for WPA Enterprise (a0fd14500e93173d61efad8927ee1ed503c5782d)
+* NetworkManager.conf man page updated for 'wifi-wext-only' option and fixing a few errors
+
+diff --git a/man/NetworkManager.conf.5.in b/man/NetworkManager.conf.5.in
+index acacb43..6a1c6e0 100644
+--- a/man/NetworkManager.conf.5.in
++++ b/man/NetworkManager.conf.5.in
+@@ -1,8 +1,8 @@
+ .\" NetworkManager.conf(5) manual page
+ .\"
+-.\" Copyright (C) 2010 Red Hat, Inc.
++.\" Copyright (C) 2010 - 2011 Red Hat, Inc.
+ .\"
+-.TH "NetworkManager.conf" "5" "1 February 2010" ""
++.TH "NetworkManager.conf" "5" "26 July 2011" ""
+ .SH NAME
+ NetworkManager.conf \- NetworkManager configuration file
+ .SH SYNOPSIS
+@@ -20,9 +20,6 @@ is a configuration file for NetworkManager. It is used to set up various
+ aspects of NetworkManager's behavior. The location of
+ the file may be changed through use of the "\-\-config=" argument for
+ \fBNetworkManager\fP (8).
+-
+-It is not necessary to restart NetworkManager when making changes, as the
+-configuration file is watched for changes and reloaded automatically when necessary.
+ .SH "FILE FORMAT"
+ .P
+ The configuration file format is so-called key file (sort of ini-style format).
+@@ -87,6 +84,31 @@ This key sets up what DHCP client NetworkManager will use. Presently
+ \fIdhclient\fP and \fIdhcpcd\fP are supported. The client configured here should
+ be available on your system too. If this key is missing, available DHCP clients
+ are looked for in this order: dhclient, dhcpcd.
++.TP
++.B no-auto-default=\fI<hwaddr>\fP,\fI<hwaddr>\fP,...
++Set devices for which NetworkManager shouldn't create default wired connection
++(Auto eth0). NetworkManager creates a default wired connection for any wired
++device that is managed and doesn't have a connection configured. List a device
++in this option to inhibit creating the default connection for the device.
++.br
++When the default wired connection is deleted or saved to a new persistent connection
++by a plugin, the MAC address of the wired device is automatically added to this list
++to prevent creating the default connection for that device again.
++Devices are specified by their MAC addresses, in lowercase. Multiple
++entries are separated by commas.
++.br
++Example:
++.nf
++no-auto-default=00:22:68:5c:5d:c4,00:1e:65:ff:aa:ee
++.fi
++.TP
++.B wifi-wext-only=\fIfalse\fP | \fItrue\fP
++This option controls NetworkManager's interaction with \fBwpa_supplicant\fP (8).
++When \fIfalse\fB (default), 'nl80211' supplicant driver and background scanning are
++used. This enables seamless connection and roaming in RSA token-enabled Wi-Fi networks.
++If you encounter any problems with 'nl80211' (e.g. due to bad drivers), you can
++switch back to 'wext' supplicant driver by setting this option to \fItrue\fP.
++Missing option or an unrecognized value is regarded as \fIfalse\fB.
+ .SS [keyfile]
+ This section contains keyfile-specific options and thus only has effect when using \fIkeyfile\fP plugin.
+ .TP
+@@ -125,7 +147,7 @@ from earlier levels; thus setting the log level to INFO also logs error and
+ warning messages.
+ .TP
+ .B domains=\fI<domain1>,<domain2>, ...\fP
+-The following log domains are available: [NONE, HW, RKILL, ETHER, WIFI, BT, MB,
++The following log domains are available: [NONE, HW, RFKILL, ETHER, WIFI, BT, MB,
+ DHCP4, DHCP6, PPP, WIFI_SCAN, IP4, IP6, AUTOIP4, DNS, VPN, SHARING, SUPPLICANT,
+ USER_SET, SYS_SET, SUSPEND, CORE, DEVICE, OLPC].  When "NONE" is given by itself,
+ logging is disabled.  MB = Mobile Broadband, USER_SET = user settings operations
+@@ -136,4 +158,5 @@ general interface operations.
+ .BR http://live.gnome.org/NetworkManager/SystemSettings
+ .sp
+ .BR NetworkManager (8),
+-.BR nm\-tool (1).
++.BR nm\-tool (1),
++.BR nmcli (1).
+diff --git a/src/main.c b/src/main.c
+index 79542b0..6d9dc4d 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -303,6 +303,7 @@ parse_config_file (const char *filename,
+                    char **dhcp_client,
+                    char **log_level,
+                    char **log_domains,
++                   gboolean *wifi_wext_only,
+                    GError **error)
+ {
+ 	GKeyFile *config;
+@@ -324,6 +325,8 @@ parse_config_file (const char *filename,
+
+ 	*dhcp_client = g_key_file_get_value (config, "main", "dhcp", NULL);
+ 
++	*wifi_wext_only = g_key_file_get_boolean (config, "main", "wifi-wext-only", NULL);
++
+ 	*log_level = g_key_file_get_value (config, "logging", "level", NULL);
+ 	*log_domains = g_key_file_get_value (config, "logging", "domains", NULL);
+ 
+@@ -454,6 +457,7 @@ main (int argc, char *argv[])
+ 	GError *error = NULL;
+ 	gboolean wrote_pidfile = FALSE;
+ 	char *cfg_log_level = NULL, *cfg_log_domains = NULL;
++	gboolean wifi_wext_only;  /* if TRUE only use 'wext' for wpa_supplicant, else use 'nl80211,wext' */
+ 
+ 	GOptionEntry options[] = {
+ 		{ "no-daemon", 0, 0, G_OPTION_ARG_NONE, &become_daemon, "Don't become a daemon", NULL },
+@@ -516,7 +520,7 @@ main (int argc, char *argv[])
+ 
+ 	/* Parse the config file */
+ 	if (config) {
+-		if (!parse_config_file (config, &conf_plugins, &dhcp, &cfg_log_level, &cfg_log_domains, &error)) {
++		if (!parse_config_file (config, &conf_plugins, &dhcp, &cfg_log_level, &cfg_log_domains, &wifi_wext_only, &error)) {
+ 			fprintf (stderr, "Config file %s invalid: (%d) %s\n",
+ 			         config,
+ 			         error ? error->code : -1,
+@@ -536,7 +540,7 @@ main (int argc, char *argv[])
+ 		/* Try deprecated nm-system-settings.conf first */
+ 		if (g_file_test (NM_OLD_SYSTEM_CONF_FILE, G_FILE_TEST_EXISTS)) {
+ 			config = g_strdup (NM_OLD_SYSTEM_CONF_FILE);
+-			parsed = parse_config_file (config, &conf_plugins, &dhcp, &cfg_log_level, &cfg_log_domains, &error);
++			parsed = parse_config_file (config, &conf_plugins, &dhcp, &cfg_log_level, &cfg_log_domains, &wifi_wext_only, &error);
+ 			if (!parsed) {
+ 				fprintf (stderr, "Default config file %s invalid: (%d) %s\n",
+ 				         config,
+@@ -551,7 +555,7 @@ main (int argc, char *argv[])
+ 		/* Try the preferred NetworkManager.conf last */
+ 		if (!parsed && g_file_test (NM_DEFAULT_SYSTEM_CONF_FILE, G_FILE_TEST_EXISTS)) {
+ 			config = g_strdup (NM_DEFAULT_SYSTEM_CONF_FILE);
+-			parsed = parse_config_file (config, &conf_plugins, &dhcp, &cfg_log_level, &cfg_log_domains, &error);
++			parsed = parse_config_file (config, &conf_plugins, &dhcp, &cfg_log_level, &cfg_log_domains, &wifi_wext_only, &error);
+ 			if (!parsed) {
+ 				fprintf (stderr, "Default config file %s invalid: (%d) %s\n",
+ 				         config,
+@@ -695,6 +699,7 @@ main (int argc, char *argv[])
+ 		nm_log_err (LOGD_CORE, "failed to initialize the supplicant manager.");
+ 		goto done;
+ 	}
++	nm_supplicant_manager_set_wifi_wext_only (sup_mgr, wifi_wext_only);
+ 
+ 	/* Initialize DHCP manager */
+ 	dhcp_mgr = nm_dhcp_manager_new (dhcp, &error);
+diff --git a/src/nm-device-wifi.c b/src/nm-device-wifi.c
+index 02eb483..986c8d9 100644
+--- a/src/nm-device-wifi.c
++++ b/src/nm-device-wifi.c
+@@ -3012,13 +3012,15 @@ build_supplicant_config (NMDeviceWifi *self,
+ 	if (s_wireless_sec) {
+ 		NMSetting8021x *s_8021x;
+ 		const char *con_path = nm_connection_get_path (connection);
++		gboolean wifi_wext_only = nm_supplicant_manager_get_wifi_wext_only (priv->supplicant.mgr);
+ 
+ 		g_assert (con_path);
+ 		s_8021x = (NMSetting8021x *) nm_connection_get_setting (connection, NM_TYPE_SETTING_802_1X);
+ 		if (!nm_supplicant_config_add_setting_wireless_security (config,
+ 		                                                         s_wireless_sec,
+ 		                                                         s_8021x,
+-		                                                         con_path)) {
++		                                                         con_path,
++		                                                         wifi_wext_only)) {
+ 			nm_log_err (LOGD_WIFI, "Couldn't add 802-11-wireless-security setting to "
+ 			            "supplicant config.");
+ 			goto error;
+diff --git a/src/supplicant-manager/nm-supplicant-config.c b/src/supplicant-manager/nm-supplicant-config.c
+index 6ee9c51..3976c6c 100644
+--- a/src/supplicant-manager/nm-supplicant-config.c
++++ b/src/supplicant-manager/nm-supplicant-config.c
+@@ -583,7 +583,8 @@ gboolean
+ nm_supplicant_config_add_setting_wireless_security (NMSupplicantConfig *self,
+                                                     NMSettingWirelessSecurity *setting,
+                                                     NMSetting8021x *setting_8021x,
+-                                                    const char *connection_uid)
++                                                    const char *connection_uid,
++                                                    gboolean wifi_wext_only)
+ {
+ 	char *value;
+ 	gboolean success;
+@@ -695,6 +696,14 @@ nm_supplicant_config_add_setting_wireless_security (NMSupplicantConfig *self,
+ 			if (!nm_supplicant_config_add_setting_8021x (self, setting_8021x, connection_uid, FALSE))
+ 				return FALSE;
+ 		}
++
++		if (!wifi_wext_only && !strcmp (key_mgmt, "wpa-eap")) {
++			/* If using WPA Enterprise, enable optimized background scanning
++			 * to ensure roaming within an ESS works well.
++			 */
++			if (!nm_supplicant_config_add_option (self, "bgscan", "simple:30:-45:300", -1, FALSE))
++				nm_log_warn (LOGD_SUPPLICANT, "Error enabling background scanning for ESS roaming");
++		}
+ 	}
+ 
+ 	return TRUE;
+diff --git a/src/supplicant-manager/nm-supplicant-config.h b/src/supplicant-manager/nm-supplicant-config.h
+index dad23e2..d190f41 100644
+--- a/src/supplicant-manager/nm-supplicant-config.h
++++ b/src/supplicant-manager/nm-supplicant-config.h
+@@ -70,7 +70,8 @@ gboolean nm_supplicant_config_add_setting_wireless (NMSupplicantConfig *self,
+ gboolean nm_supplicant_config_add_setting_wireless_security (NMSupplicantConfig *self,
+                                                              NMSettingWirelessSecurity *setting,
+                                                              NMSetting8021x *setting_8021x,
+-                                                             const char *connection_uid);
++                                                             const char *connection_uid,
++                                                             gboolean wifi_wext_only);
+ 
+ gboolean nm_supplicant_config_add_no_security (NMSupplicantConfig *self);
+ 
+diff --git a/src/supplicant-manager/nm-supplicant-interface.c b/src/supplicant-manager/nm-supplicant-interface.c
+index a65a458..11d188e 100644
+--- a/src/supplicant-manager/nm-supplicant-interface.c
++++ b/src/supplicant-manager/nm-supplicant-interface.c
+@@ -873,11 +873,12 @@ nm_supplicant_interface_add_to_supplicant (NMSupplicantInterface * self,
+ 		                                G_TYPE_INVALID);
+ 	} else {
+ 		GHashTable *hash = g_hash_table_new (g_str_hash, g_str_equal);
++		gboolean wifi_wext_only = nm_supplicant_manager_get_wifi_wext_only (priv->smgr);
+ 		GValue *driver;
+ 
+ 		driver = g_new0 (GValue, 1);
+ 		g_value_init (driver, G_TYPE_STRING);
+-		g_value_set_string (driver, priv->is_wireless ? "wext" : "wired");
++		g_value_set_string (driver, priv->is_wireless ? (wifi_wext_only ? "wext" : "nl80211,wext") : "wired");
+ 		g_hash_table_insert (hash, "driver", driver);
+ 
+ 		call = dbus_g_proxy_begin_call (proxy, "addInterface",
+diff --git a/src/supplicant-manager/nm-supplicant-manager.c b/src/supplicant-manager/nm-supplicant-manager.c
+index a2cf58e..a931f37 100644
+--- a/src/supplicant-manager/nm-supplicant-manager.c
++++ b/src/supplicant-manager/nm-supplicant-manager.c
+@@ -38,6 +38,7 @@ typedef struct {
+ 	GSList *        ifaces;
+ 	gboolean        dispose_has_run;
+ 	guint			poke_id;
++	gboolean        wifi_wext_only;
+ } NMSupplicantManagerPrivate;
+ 
+ #define NM_SUPPLICANT_MANAGER_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), \
+@@ -340,4 +341,21 @@ nm_supplicant_manager_state_to_string (guint32 state)
+ 	return "unknown";
+ }
+ 
++void
++nm_supplicant_manager_set_wifi_wext_only (NMSupplicantManager *self,
++                                          gboolean wifi_wext_only)
++{
++	NMSupplicantManagerPrivate *priv = NM_SUPPLICANT_MANAGER_GET_PRIVATE (self);
++
++	priv->wifi_wext_only = wifi_wext_only;
++}
++
++gboolean
++nm_supplicant_manager_get_wifi_wext_only (NMSupplicantManager *self)
++{
++	g_return_val_if_fail (self != NULL, FALSE);
++	g_return_val_if_fail (NM_IS_SUPPLICANT_MANAGER (self), FALSE);
++
++	return NM_SUPPLICANT_MANAGER_GET_PRIVATE (self)->wifi_wext_only;
++}
+ 
+diff --git a/src/supplicant-manager/nm-supplicant-manager.h b/src/supplicant-manager/nm-supplicant-manager.h
+index fef2a77..4d957b3 100644
+--- a/src/supplicant-manager/nm-supplicant-manager.h
++++ b/src/supplicant-manager/nm-supplicant-manager.h
+@@ -85,4 +85,9 @@ void nm_supplicant_manager_release_iface (NMSupplicantManager * mgr,
+ 
+ const char *nm_supplicant_manager_state_to_string (guint32 state);
+ 
++void nm_supplicant_manager_set_wifi_wext_only (NMSupplicantManager *mgr,
++                                               gboolean wifi_wext_only);
++
++gboolean nm_supplicant_manager_get_wifi_wext_only (NMSupplicantManager *mgr);
++
+ #endif /* NM_SUPPLICANT_MANAGER_H */
+diff --git a/src/supplicant-manager/nm-supplicant-settings-verify.c b/src/supplicant-manager/nm-supplicant-settings-verify.c
+index c65af4d..0372fd9 100644
+--- a/src/supplicant-manager/nm-supplicant-settings-verify.c
++++ b/src/supplicant-manager/nm-supplicant-settings-verify.c
+@@ -124,6 +124,7 @@ static const struct Opt opt_table[] = {
+ 	{ "key_id",             TYPE_BYTES,   0, 0, FALSE,  NULL },
+ 	{ "fragment_size",      TYPE_INT,     1, 2000, FALSE,  NULL },
+ 	{ "proactive_key_caching", TYPE_INT,  0, 1, FALSE,  NULL },
++	{ "bgscan",             TYPE_BYTES,   0, 0, FALSE,  NULL },
+ };
+ 
+ 
+diff --git a/src/supplicant-manager/tests/test-supplicant-config.c b/src/supplicant-manager/tests/test-supplicant-config.c
+index d0868b5..b74214e 100644
+--- a/src/supplicant-manager/tests/test-supplicant-config.c
++++ b/src/supplicant-manager/tests/test-supplicant-config.c
+@@ -309,7 +309,8 @@ test_wifi_wep_key (const char *detail,
+ 	success = nm_supplicant_config_add_setting_wireless_security (config,
+ 	                                                              s_wsec,
+ 	                                                              NULL,
+-	                                                              "376aced7-b28c-46be-9a62-fcdf072571da");
++	                                                              "376aced7-b28c-46be-9a62-fcdf072571da",
++	                                                              FALSE);
+ 	ASSERT (success == TRUE,
+ 	        detail, "failed to add wireless security to supplicant config.");
+ 
+@@ -459,7 +460,8 @@ test_wifi_wpa_psk (const char *detail,
+ 	success = nm_supplicant_config_add_setting_wireless_security (config,
+ 	                                                              s_wsec,
+ 	                                                              NULL,
+-	                                                              "376aced7-b28c-46be-9a62-fcdf072571da");
++	                                                              "376aced7-b28c-46be-9a62-fcdf072571da",
++	                                                              FALSE);
+ 	ASSERT (success == TRUE,
+ 	        detail, "failed to add wireless security to supplicant config.");
+ 

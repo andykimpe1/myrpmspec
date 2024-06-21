@@ -1,0 +1,1497 @@
+From 83d75798056d9dc772433e42856328786a03aa4e Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Wed, 11 Sep 2013 16:03:12 -0500
+Subject: [PATCH 1/1] wireless-security: clean up EAPMethod creation/destruction
+
+(partial backport from commit 0f4fedc5c1fff35724ea2275fe565c21575ee6e1)
+
+Let the EAPMethod superclass handle allocation/deallocation of the
+object so that subclasses can do stuff in their destructors with
+the parent's 'xml' and 'ui_widget' objects.
+---
+ .../src/wireless-security/eap-method-fast.c        |   47 ++++--------
+ .../src/wireless-security/eap-method-leap.c        |   66 ++++++-----------
+ .../src/wireless-security/eap-method-peap.c        |   59 ++++++---------
+ .../src/wireless-security/eap-method-simple.c      |   68 ++++++-----------
+ .../src/wireless-security/eap-method-tls.c         |   78 +++++++-------------
+ .../src/wireless-security/eap-method-ttls.c        |   55 +++++---------
+ .../src/wireless-security/eap-method.c             |   54 ++++++++++---
+ .../src/wireless-security/eap-method.h             |   20 +++--
+ .../src/wireless-security/wireless-security.c      |   53 ++++++++++---
+ .../src/wireless-security/wireless-security.h      |   19 +++--
+ .../src/wireless-security/ws-dynamic-wep.c         |   35 ++-------
+ .../src/wireless-security/ws-leap.c                |   53 ++++---------
+ .../src/wireless-security/ws-wep-key.c             |   51 +++++--------
+ .../src/wireless-security/ws-wpa-eap.c             |   48 ++++--------
+ .../src/wireless-security/ws-wpa-psk.c             |   48 ++++--------
+ 15 files changed, 311 insertions(+), 443 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-fast.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-fast.c
+index ab5665d..46f9b03 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-fast.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-fast.c
+@@ -50,7 +50,6 @@ destroy (EAPMethod *parent)
+ 
+ 	if (method->size_group)
+ 		g_object_unref (method->size_group);
+-	g_slice_free (EAPMethodFAST, method);
+ }
+ 
+ static gboolean
+@@ -329,9 +328,9 @@ eap_method_fast_new (const char *glade_file,
+                      NMConnection *connection,
+                      gboolean is_editor)
+ {
++	EAPMethod *parent;
+ 	EAPMethodFAST *method;
+ 	GtkWidget *widget;
+-	GladeXML *xml;
+ 	GtkFileFilter *filter;
+ 	NMSetting8021x *s_8021x = NULL;
+ 	const char *filename;
+@@ -339,40 +338,26 @@ eap_method_fast_new (const char *glade_file,
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+-	xml = glade_xml_new (glade_file, "eap_fast_notebook", NULL);
+-	if (xml == NULL) {
+-		g_warning ("Couldn't get eap_fast_widget from glade xml");
++	parent = eap_method_init (sizeof (EAPMethodFAST),
++	                          validate,
++	                          add_to_size_group,
++	                          fill_connection,
++	                          update_secrets,
++	                          destroy,
++	                          glade_file,
++	                          "eap_fast_notebook",
++	                          "eap_fast_anon_identity_entry");
++	if (!parent)
+ 		return NULL;
+-	}
+-
+-	widget = glade_xml_get_widget (xml, "eap_fast_notebook");
+-	g_assert (widget);
+-	g_object_ref_sink (widget);
+-
+-	method = g_slice_new0 (EAPMethodFAST);
+-	if (!method) {
+-		g_object_unref (xml);
+-		g_object_unref (widget);
+-		return NULL;
+-	}
+-
+-	eap_method_init (EAP_METHOD (method),
+-	                 validate,
+-	                 add_to_size_group,
+-	                 fill_connection,
+-	                 update_secrets,
+-	                 destroy,
+-	                 xml,
+-	                 widget,
+-	                 "eap_fast_anon_identity_entry");
+ 
++	method = (EAPMethodFAST *) parent;
+ 	method->sec_parent = ws_parent;
+ 	method->is_editor = is_editor;
+ 
+ 	if (connection)
+ 		s_8021x = NM_SETTING_802_1X (nm_connection_get_setting (connection, NM_TYPE_SETTING_802_1X));
+ 
+-	widget = glade_xml_get_widget (xml, "eap_fast_pac_provision_combo");
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_pac_provision_combo");
+ 	g_assert (widget);
+ 	gtk_combo_box_set_active (GTK_COMBO_BOX (widget), 0);
+ 	if (s_8021x) {
+@@ -395,18 +380,18 @@ eap_method_fast_new (const char *glade_file,
+ 	                  (GCallback) wireless_security_changed_cb,
+ 	                  ws_parent);
+ 
+-	widget = glade_xml_get_widget (xml, "eap_fast_pac_provision_checkbutton");
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_pac_provision_checkbutton");
+ 	gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (widget), provisioning_enabled);
+ 	g_signal_connect (G_OBJECT (widget), "toggled", G_CALLBACK (pac_toggled_cb), EAP_METHOD (method));
+ 
+-	widget = glade_xml_get_widget (xml, "eap_fast_anon_identity_entry");
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_anon_identity_entry");
+ 	if (s_8021x && nm_setting_802_1x_get_anonymous_identity (s_8021x))
+ 		gtk_entry_set_text (GTK_ENTRY (widget), nm_setting_802_1x_get_anonymous_identity (s_8021x));
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+ 	                  ws_parent);
+ 
+-	widget = glade_xml_get_widget (xml, "eap_fast_pac_file_button");
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_pac_file_button");
+ 	g_assert (widget);
+ 	gtk_file_chooser_set_local_only (GTK_FILE_CHOOSER (widget), TRUE);
+ 	gtk_file_chooser_button_set_title (GTK_FILE_CHOOSER_BUTTON (widget),
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c
+index 4814d3e..c671cee 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c
+@@ -39,14 +39,6 @@ show_toggled_cb (GtkToggleButton *button, EAPMethodLEAP *method)
+ 	gtk_entry_set_visibility (method->password_entry, visible);
+ }
+ 
+-static void
+-destroy (EAPMethod *parent)
+-{
+-	EAPMethodLEAP *method = (EAPMethodLEAP *) parent;
+-
+-	g_slice_free (EAPMethodLEAP, method);
+-}
+-
+ static gboolean
+ validate (EAPMethod *parent)
+ {
+@@ -131,56 +123,42 @@ widgets_unrealized (GtkWidget *widget, EAPMethodLEAP *method)
+ 
+ EAPMethodLEAP *
+ eap_method_leap_new (const char *glade_file,
+-                     WirelessSecurity *parent,
++                     WirelessSecurity *ws_parent,
+                      NMConnection *connection)
+ {
++	EAPMethod *parent;
+ 	EAPMethodLEAP *method;
+ 	GtkWidget *widget;
+-	GladeXML *xml;
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+-	xml = glade_xml_new (glade_file, "eap_leap_notebook", NULL);
+-	if (xml == NULL) {
+-		g_warning ("Couldn't get eap_leap_widget from glade xml");
++	parent = eap_method_init (sizeof (EAPMethodLEAP),
++	                          validate,
++	                          add_to_size_group,
++	                          fill_connection,
++	                          update_secrets,
++	                          NULL,
++	                          glade_file,
++	                          "eap_leap_notebook",
++	                          "eap_leap_username_entry");
++	if (!parent)
+ 		return NULL;
+-	}
+-
+-	widget = glade_xml_get_widget (xml, "eap_leap_notebook");
+-	g_assert (widget);
+-	g_object_ref_sink (widget);
+-
+-	method = g_slice_new0 (EAPMethodLEAP);
+-	if (!method) {
+-		g_object_unref (xml);
+-		g_object_unref (widget);
+-		return NULL;
+-	}
+ 
+-	eap_method_init (EAP_METHOD (method),
+-	                 validate,
+-	                 add_to_size_group,
+-	                 fill_connection,
+-	                 update_secrets,
+-	                 destroy,
+-	                 xml,
+-	                 widget,
+-	                 "eap_leap_username_entry");
+-
+-	method->ws_parent = parent;
+-	g_signal_connect (G_OBJECT (widget), "realize",
++	method = (EAPMethodLEAP *) parent;
++	method->ws_parent = ws_parent;
++	g_signal_connect (G_OBJECT (parent->ui_widget), "realize",
+ 	                  (GCallback) widgets_realized,
+ 	                  method);
+-	g_signal_connect (G_OBJECT (widget), "unrealize",
++	g_signal_connect (G_OBJECT (parent->ui_widget), "unrealize",
+ 	                  (GCallback) widgets_unrealized,
+ 	                  method);
+ 
+-	widget = glade_xml_get_widget (xml, "eap_leap_username_entry");
++	widget = glade_xml_get_widget (parent->xml, "eap_leap_username_entry");
+ 	g_assert (widget);
+ 	method->username_entry = GTK_ENTRY (widget);
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 	if (connection) {
+ 		NMSetting8021x *s_8021x;
+ 
+@@ -189,18 +167,18 @@ eap_method_leap_new (const char *glade_file,
+ 			gtk_entry_set_text (method->username_entry, nm_setting_802_1x_get_identity (s_8021x));
+ 	}
+ 
+-	widget = glade_xml_get_widget (xml, "eap_leap_password_entry");
++	widget = glade_xml_get_widget (parent->xml, "eap_leap_password_entry");
+ 	g_assert (widget);
+ 	method->password_entry = GTK_ENTRY (widget);
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 
+ 	/* Fill secrets, if any */
+ 	if (connection)
+-		update_secrets (EAP_METHOD (method), connection);
++		update_secrets (parent, connection);
+ 
+-	widget = glade_xml_get_widget (xml, "show_checkbutton");
++	widget = glade_xml_get_widget (parent->xml, "show_checkbutton");
+ 	g_assert (widget);
+ 	method->show_password = GTK_TOGGLE_BUTTON (widget);
+ 	g_signal_connect (G_OBJECT (widget), "toggled",
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-peap.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-peap.c
+index f6ef9e0..98eabdc 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-peap.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-peap.c
+@@ -42,7 +42,6 @@ destroy (EAPMethod *parent)
+ 
+ 	if (method->size_group)
+ 		g_object_unref (method->size_group);
+-	g_slice_free (EAPMethodPEAP, method);
+ }
+ 
+ static gboolean
+@@ -321,70 +320,56 @@ update_secrets (EAPMethod *parent, NMConnection *connection)
+ 
+ EAPMethodPEAP *
+ eap_method_peap_new (const char *glade_file,
+-                     WirelessSecurity *parent,
++                     WirelessSecurity *ws_parent,
+                      NMConnection *connection,
+                      gboolean is_editor)
+ {
++	EAPMethod *parent;
+ 	EAPMethodPEAP *method;
+ 	GtkWidget *widget, *widget_ca_not_required_checkbox;
+-	GladeXML *xml;
+ 	GtkFileFilter *filter;
+ 	NMSetting8021x *s_8021x = NULL;
+ 	const char *filename;
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+-	xml = glade_xml_new (glade_file, "eap_peap_notebook", NULL);
+-	if (xml == NULL) {
+-		g_warning ("Couldn't get eap_peap_widget from glade xml");
++	parent = eap_method_init (sizeof (EAPMethodPEAP),
++	                          validate,
++	                          add_to_size_group,
++	                          fill_connection,
++	                          update_secrets,
++	                          destroy,
++	                          glade_file,
++	                          "eap_peap_notebook",
++	                          "eap_peap_anon_identity_entry");
++	if (!parent)
+ 		return NULL;
+-	}
+-
+-	widget = glade_xml_get_widget (xml, "eap_peap_notebook");
+-	g_assert (widget);
+-	g_object_ref_sink (widget);
+-
+-	method = g_slice_new0 (EAPMethodPEAP);
+-	if (!method) {
+-		g_object_unref (xml);
+-		g_object_unref (widget);
+-		return NULL;
+-	}
+ 
+-	eap_method_init (EAP_METHOD (method),
+-	                 validate,
+-	                 add_to_size_group,
+-	                 fill_connection,
+-	                 update_secrets,
+-	                 destroy,
+-	                 xml,
+-	                 widget,
+-	                 "eap_peap_anon_identity_entry");
+-
+-	method->sec_parent = parent;
++	method = (EAPMethodPEAP *) parent;
++	method->sec_parent = ws_parent;
+ 	method->is_editor = is_editor;
+ 
+ 	if (connection)
+ 		s_8021x = NM_SETTING_802_1X (nm_connection_get_setting (connection, NM_TYPE_SETTING_802_1X));
+ 
+-	widget = glade_xml_get_widget (xml, "eap_peap_ca_cert_not_required_checkbox");
++	widget = glade_xml_get_widget (parent->xml, "eap_peap_ca_cert_not_required_checkbox");
+ 	g_assert (widget);
+ 	g_signal_connect (G_OBJECT (widget), "toggled",
+ 	                  (GCallback) ca_cert_not_required_toggled,
+ 	                  method);
+ 	g_signal_connect (G_OBJECT (widget), "toggled",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 	widget_ca_not_required_checkbox = widget;
+ 
+-	widget = glade_xml_get_widget (xml, "eap_peap_ca_cert_button");
++	widget = glade_xml_get_widget (parent->xml, "eap_peap_ca_cert_button");
+ 	g_assert (widget);
+ 	gtk_file_chooser_set_local_only (GTK_FILE_CHOOSER (widget), TRUE);
+ 	gtk_file_chooser_button_set_title (GTK_FILE_CHOOSER_BUTTON (widget),
+ 	                                   _("Choose a Certificate Authority certificate..."));
+ 	g_signal_connect (G_OBJECT (widget), "selection-changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 	filter = eap_method_default_file_chooser_filter_new (FALSE);
+ 	gtk_file_chooser_add_filter (GTK_FILE_CHOOSER (widget), filter);
+ 	if (connection && s_8021x) {
+@@ -401,7 +386,7 @@ eap_method_peap_new (const char *glade_file,
+ 	widget = inner_auth_combo_init (method, glade_file, connection, s_8021x);
+ 	inner_auth_combo_changed_cb (widget, (gpointer) method);
+ 
+-	widget = glade_xml_get_widget (xml, "eap_peap_version_combo");
++	widget = glade_xml_get_widget (parent->xml, "eap_peap_version_combo");
+ 	g_assert (widget);
+ 	gtk_combo_box_set_active (GTK_COMBO_BOX (widget), 0);
+ 	if (s_8021x) {
+@@ -418,14 +403,14 @@ eap_method_peap_new (const char *glade_file,
+ 	}
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 
+-	widget = glade_xml_get_widget (xml, "eap_peap_anon_identity_entry");
++	widget = glade_xml_get_widget (parent->xml, "eap_peap_anon_identity_entry");
+ 	if (s_8021x && nm_setting_802_1x_get_anonymous_identity (s_8021x))
+ 		gtk_entry_set_text (GTK_ENTRY (widget), nm_setting_802_1x_get_anonymous_identity (s_8021x));
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 
+ 	return method;
+ }
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c
+index c67305e..a8b5e32 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c
+@@ -40,14 +40,6 @@ show_toggled_cb (GtkToggleButton *button, EAPMethodSimple *method)
+ 	gtk_entry_set_visibility (method->password_entry, visible);
+ }
+ 
+-static void
+-destroy (EAPMethod *parent)
+-{
+-	EAPMethodSimple *method = (EAPMethodSimple *) parent;
+-
+-	g_slice_free (EAPMethodSimple, method);
+-}
+-
+ static gboolean
+ validate (EAPMethod *parent)
+ {
+@@ -205,62 +197,48 @@ widgets_unrealized (GtkWidget *widget, EAPMethodSimple *method)
+ 
+ EAPMethodSimple *
+ eap_method_simple_new (const char *glade_file,
+-                       WirelessSecurity *parent,
++                       WirelessSecurity *ws_parent,
+                        NMConnection *connection,
+                        EAPMethodSimpleType type,
+                        gboolean is_editor)
+ {
++	EAPMethod *parent;
+ 	EAPMethodSimple *method;
+ 	GtkWidget *widget;
+-	GladeXML *xml;
+ 	gboolean always_ask = FALSE;
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+-	xml = glade_xml_new (glade_file, "eap_simple_notebook", NULL);
+-	if (xml == NULL) {
+-		g_warning ("Couldn't get eap_simple_widget from glade xml");
++	parent = eap_method_init (sizeof (EAPMethodSimple),
++	                          validate,
++	                          add_to_size_group,
++	                          fill_connection,
++	                          update_secrets,
++	                          NULL,
++	                          glade_file,
++	                          "eap_simple_notebook",
++	                          "eap_simple_username_entry");
++	if (!parent)
+ 		return NULL;
+-	}
+-
+-	widget = glade_xml_get_widget (xml, "eap_simple_notebook");
+-	g_assert (widget);
+-	g_object_ref_sink (widget);
+-
+-	method = g_slice_new0 (EAPMethodSimple);
+-	if (!method) {
+-		g_object_unref (xml);
+-		g_object_unref (widget);
+-		return NULL;
+-	}
+-
+-	eap_method_init (EAP_METHOD (method),
+-	                 validate,
+-	                 add_to_size_group,
+-	                 fill_connection,
+-	                 update_secrets,
+-	                 destroy,
+-	                 xml,
+-	                 widget,
+-	                 "eap_simple_username_entry");
+ 
++	method = (EAPMethodSimple *) parent;
+ 	method->type = type;
+ 	method->is_editor = is_editor;
+-	method->ws_parent = parent;
++	method->ws_parent = ws_parent;
+ 
+-	g_signal_connect (G_OBJECT (widget), "realize",
++	g_signal_connect (G_OBJECT (parent->ui_widget), "realize",
+ 	                  (GCallback) widgets_realized,
+ 	                  method);
+-	g_signal_connect (G_OBJECT (widget), "unrealize",
++	g_signal_connect (G_OBJECT (parent->ui_widget), "unrealize",
+ 	                  (GCallback) widgets_unrealized,
+ 	                  method);
+ 
+-	widget = glade_xml_get_widget (xml, "eap_simple_username_entry");
++	widget = glade_xml_get_widget (parent->xml, "eap_simple_username_entry");
+ 	g_assert (widget);
+ 	method->username_entry = GTK_ENTRY (widget);
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 	if (connection) {
+ 		NMSetting8021x *s_8021x;
+ 
+@@ -269,19 +247,19 @@ eap_method_simple_new (const char *glade_file,
+ 			gtk_entry_set_text (method->username_entry, nm_setting_802_1x_get_identity (s_8021x));
+ 	}
+ 
+-	widget = glade_xml_get_widget (xml, "eap_simple_password_entry");
++	widget = glade_xml_get_widget (parent->xml, "eap_simple_password_entry");
+ 	g_assert (widget);
+ 	method->password_entry = GTK_ENTRY (widget);
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 
+-	widget = glade_xml_get_widget (xml, "eap_password_always_ask");
++	widget = glade_xml_get_widget (parent->xml, "eap_password_always_ask");
+ 	g_assert (widget);
+ 	method->always_ask = GTK_TOGGLE_BUTTON (widget);
+ 	g_signal_connect (G_OBJECT (widget), "toggled",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 	if (is_editor) {
+ 		/* We only desensitize the password entry from the editor, because
+ 		 * from nm-applet if the entry was desensitized, there'd be no way to
+@@ -311,7 +289,7 @@ eap_method_simple_new (const char *glade_file,
+ 	if (connection && !always_ask)
+ 		update_secrets (EAP_METHOD (method), connection);
+ 
+-	widget = glade_xml_get_widget (xml, "show_checkbutton");
++	widget = glade_xml_get_widget (parent->xml, "show_checkbutton");
+ 	g_assert (widget);
+ 	method->show_password = GTK_TOGGLE_BUTTON (widget);
+ 	g_signal_connect (G_OBJECT (widget), "toggled",
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-tls.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-tls.c
+index 92e8973..29a85f0 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-tls.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-tls.c
+@@ -47,14 +47,6 @@ show_toggled_cb (GtkCheckButton *button, EAPMethod *method)
+ 	gtk_entry_set_visibility (GTK_ENTRY (widget), visible);
+ }
+ 
+-static void
+-destroy (EAPMethod *parent)
+-{
+-	EAPMethodTLS *method = (EAPMethodTLS *) parent;
+-
+-	g_slice_free (EAPMethodTLS, method);
+-}
+-
+ static gboolean
+ validate (EAPMethod *parent)
+ {
+@@ -407,104 +399,90 @@ update_secrets (EAPMethod *parent, NMConnection *connection)
+ 
+ EAPMethodTLS *
+ eap_method_tls_new (const char *glade_file,
+-                    WirelessSecurity *parent,
++                    WirelessSecurity *ws_parent,
+                     NMConnection *connection,
+                     gboolean phase2)
+ {
++	EAPMethod *parent;
+ 	EAPMethodTLS *method;
+ 	GtkWidget *widget;
+-	GladeXML *xml;
+ 	NMSetting8021x *s_8021x = NULL;
+ 	gboolean ca_not_required = FALSE;
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+-	xml = glade_xml_new (glade_file, "eap_tls_notebook", NULL);
+-	if (xml == NULL) {
+-		g_warning ("Couldn't get eap_tls_widget from glade xml");
+-		return NULL;
+-	}
+-
+-	widget = glade_xml_get_widget (xml, "eap_tls_notebook");
+-	g_assert (widget);
+-	g_object_ref_sink (widget);
+-
+-	method = g_slice_new0 (EAPMethodTLS);
+-	if (!method) {
+-		g_object_unref (xml);
+-		g_object_unref (widget);
++	parent = eap_method_init (sizeof (EAPMethodTLS),
++	                          validate,
++	                          add_to_size_group,
++	                          fill_connection,
++	                          update_secrets,
++	                          NULL,
++	                          glade_file,
++	                          "eap_tls_notebook",
++	                          "eap_tls_identity_entry");
++	if (!parent)
+ 		return NULL;
+-	}
+-
+-	eap_method_init (EAP_METHOD (method),
+-	                 validate,
+-	                 add_to_size_group,
+-	                 fill_connection,
+-	                 update_secrets,
+-	                 destroy,
+-	                 xml,
+-	                 widget,
+-	                 "eap_tls_identity_entry");
+ 
++	method = (EAPMethodTLS *) parent;
+ 	method->phase2 = phase2;
+ 
+ 	if (connection)
+ 		s_8021x = NM_SETTING_802_1X (nm_connection_get_setting (connection, NM_TYPE_SETTING_802_1X));
+ 
+-	widget = glade_xml_get_widget (xml, "eap_tls_ca_cert_not_required_checkbox");
++	widget = glade_xml_get_widget (parent->xml, "eap_tls_ca_cert_not_required_checkbox");
+ 	g_assert (widget);
+ 	g_signal_connect (G_OBJECT (widget), "toggled",
+ 	                  (GCallback) ca_cert_not_required_toggled,
+ 	                  method);
+ 	g_signal_connect (G_OBJECT (widget), "toggled",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 
+-	widget = glade_xml_get_widget (xml, "eap_tls_identity_entry");
++	widget = glade_xml_get_widget (parent->xml, "eap_tls_identity_entry");
+ 	g_assert (widget);
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 	if (s_8021x && nm_setting_802_1x_get_identity (s_8021x))
+ 		gtk_entry_set_text (GTK_ENTRY (widget), nm_setting_802_1x_get_identity (s_8021x));
+ 
+-	setup_filepicker (xml, "eap_tls_user_cert_button",
++	setup_filepicker (parent->xml, "eap_tls_user_cert_button",
+ 	                  _("Choose your personal certificate..."),
+-	                  parent, method, s_8021x,
++	                  ws_parent, method, s_8021x,
+ 	                  phase2 ? nm_setting_802_1x_get_phase2_client_cert_scheme : nm_setting_802_1x_get_client_cert_scheme,
+ 	                  phase2 ? nm_setting_802_1x_get_phase2_client_cert_path : nm_setting_802_1x_get_client_cert_path,
+ 	                  FALSE, TRUE);
+-	setup_filepicker (xml, "eap_tls_ca_cert_button",
++	setup_filepicker (parent->xml, "eap_tls_ca_cert_button",
+ 	                  _("Choose a Certificate Authority certificate..."),
+-	                  parent, method, s_8021x,
++	                  ws_parent, method, s_8021x,
+ 	                  phase2 ? nm_setting_802_1x_get_phase2_ca_cert_scheme : nm_setting_802_1x_get_ca_cert_scheme,
+ 	                  phase2 ? nm_setting_802_1x_get_phase2_ca_cert_path : nm_setting_802_1x_get_ca_cert_path,
+ 	                  FALSE, FALSE);
+-	setup_filepicker (xml, "eap_tls_private_key_button",
++	setup_filepicker (parent->xml, "eap_tls_private_key_button",
+ 	                  _("Choose your private key..."),
+-	                  parent, method, s_8021x,
++	                  ws_parent, method, s_8021x,
+ 	                  phase2 ? nm_setting_802_1x_get_phase2_private_key_scheme : nm_setting_802_1x_get_private_key_scheme,
+ 	                  phase2 ? nm_setting_802_1x_get_phase2_private_key_path : nm_setting_802_1x_get_private_key_path,
+ 	                  TRUE, FALSE);
+ 
+ 	if (eap_method_ca_cert_ignore_get (EAP_METHOD (method), connection, method->phase2)) {
+-		widget = glade_xml_get_widget (xml, "eap_tls_ca_cert_button");
++		widget = glade_xml_get_widget (parent->xml, "eap_tls_ca_cert_button");
+ 		ca_not_required = !gtk_file_chooser_get_filename (GTK_FILE_CHOOSER (widget));
+ 	}
+-	widget = glade_xml_get_widget (xml, "eap_tls_ca_cert_not_required_checkbox");
++	widget = glade_xml_get_widget (parent->xml, "eap_tls_ca_cert_not_required_checkbox");
+ 	gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (widget), ca_not_required);
+ 
+ 	/* Fill secrets, if any */
+ 	if (connection)
+ 		update_secrets (EAP_METHOD (method), connection);
+ 
+-	widget = glade_xml_get_widget (xml, "eap_tls_private_key_password_entry");
++	widget = glade_xml_get_widget (parent->xml, "eap_tls_private_key_password_entry");
+ 	g_assert (widget);
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 
+-	widget = glade_xml_get_widget (xml, "show_checkbutton");
++	widget = glade_xml_get_widget (parent->xml, "show_checkbutton");
+ 	g_assert (widget);
+ 	g_signal_connect (G_OBJECT (widget), "toggled",
+ 	                  (GCallback) show_toggled_cb,
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-ttls.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-ttls.c
+index 6459639..0490669 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-ttls.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-ttls.c
+@@ -42,7 +42,6 @@ destroy (EAPMethod *parent)
+ 
+ 	if (method->size_group)
+ 		g_object_unref (method->size_group);
+-	g_slice_free (EAPMethodTTLS, method);
+ }
+ 
+ static gboolean
+@@ -320,70 +319,56 @@ update_secrets (EAPMethod *parent, NMConnection *connection)
+ 
+ EAPMethodTTLS *
+ eap_method_ttls_new (const char *glade_file,
+-                     WirelessSecurity *parent,
++                     WirelessSecurity *ws_parent,
+                      NMConnection *connection,
+                      gboolean is_editor)
+ {
++	EAPMethod *parent;
+ 	EAPMethodTTLS *method;
+ 	GtkWidget *widget, *widget_ca_not_required_checkbox;
+-	GladeXML *xml;
+ 	GtkFileFilter *filter;
+ 	NMSetting8021x *s_8021x = NULL;
+ 	const char *filename;
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+-	xml = glade_xml_new (glade_file, "eap_ttls_notebook", NULL);
+-	if (xml == NULL) {
+-		g_warning ("Couldn't get eap_ttls_widget from glade xml");
++	parent = eap_method_init (sizeof (EAPMethodTTLS),
++	                          validate,
++	                          add_to_size_group,
++	                          fill_connection,
++	                          update_secrets,
++	                          destroy,
++	                          glade_file,
++	                          "eap_ttls_notebook",
++	                          "eap_ttls_anon_identity_entry");
++	if (!parent)
+ 		return NULL;
+-	}
+-
+-	widget = glade_xml_get_widget (xml, "eap_ttls_notebook");
+-	g_assert (widget);
+-	g_object_ref_sink (widget);
+ 
+-	method = g_slice_new0 (EAPMethodTTLS);
+-	if (!method) {
+-		g_object_unref (xml);
+-		g_object_unref (widget);
+-		return NULL;
+-	}
+-
+-	eap_method_init (EAP_METHOD (method),
+-	                 validate,
+-	                 add_to_size_group,
+-	                 fill_connection,
+-	                 update_secrets,
+-	                 destroy,
+-	                 xml,
+-	                 widget,
+-	                 "eap_ttls_anon_identity_entry");
+-
+-	method->sec_parent = parent;
++	method = (EAPMethodTTLS *) parent;
++	method->sec_parent = ws_parent;
+ 	method->is_editor = is_editor;
+ 
+ 	if (connection)
+ 		s_8021x = NM_SETTING_802_1X (nm_connection_get_setting (connection, NM_TYPE_SETTING_802_1X));
+ 
+-	widget = glade_xml_get_widget (xml, "eap_ttls_ca_cert_not_required_checkbox");
++	widget = glade_xml_get_widget (parent->xml, "eap_ttls_ca_cert_not_required_checkbox");
+ 	g_assert (widget);
+ 	g_signal_connect (G_OBJECT (widget), "toggled",
+ 	                  (GCallback) ca_cert_not_required_toggled,
+ 	                  method);
+ 	g_signal_connect (G_OBJECT (widget), "toggled",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 	widget_ca_not_required_checkbox = widget;
+ 
+-	widget = glade_xml_get_widget (xml, "eap_ttls_ca_cert_button");
++	widget = glade_xml_get_widget (parent->xml, "eap_ttls_ca_cert_button");
+ 	g_assert (widget);
+ 	gtk_file_chooser_set_local_only (GTK_FILE_CHOOSER (widget), TRUE);
+ 	gtk_file_chooser_button_set_title (GTK_FILE_CHOOSER_BUTTON (widget),
+ 	                                   _("Choose a Certificate Authority certificate..."));
+ 	g_signal_connect (G_OBJECT (widget), "selection-changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 	filter = eap_method_default_file_chooser_filter_new (FALSE);
+ 	gtk_file_chooser_add_filter (GTK_FILE_CHOOSER (widget), filter);
+ 	if (connection && s_8021x) {
+@@ -397,12 +382,12 @@ eap_method_ttls_new (const char *glade_file,
+ 		                              !filename && eap_method_ca_cert_ignore_get (EAP_METHOD (method), connection, FALSE));
+ 	}
+ 
+-	widget = glade_xml_get_widget (xml, "eap_ttls_anon_identity_entry");
++	widget = glade_xml_get_widget (parent->xml, "eap_ttls_anon_identity_entry");
+ 	if (s_8021x && nm_setting_802_1x_get_anonymous_identity (s_8021x))
+ 		gtk_entry_set_text (GTK_ENTRY (widget), nm_setting_802_1x_get_anonymous_identity (s_8021x));
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+-	                  parent);
++	                  ws_parent);
+ 
+ 	widget = inner_auth_combo_init (method, glade_file, connection, s_8021x);
+ 	inner_auth_combo_changed_cb (widget, (gpointer) method);
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
+index 416ffc8..d9f6913 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
+@@ -145,28 +145,52 @@ eap_method_phase2_update_secrets_helper (EAPMethod *method,
+ 	}
+ }
+ 
+-void
+-eap_method_init (EAPMethod *method,
++EAPMethod *
++eap_method_init (gsize obj_size,
+                  EMValidateFunc validate,
+                  EMAddToSizeGroupFunc add_to_size_group,
+                  EMFillConnectionFunc fill_connection,
+                  EMUpdateSecretsFunc update_secrets,
+                  EMDestroyFunc destroy,
+-                 GladeXML *xml,
+-                 GtkWidget *ui_widget,
++                 const char *ui_file,
++                 const char *ui_widget_name,
+                  const char *default_field)
+ {                 
+-	method->refcount = 1;
++	EAPMethod *method;
++
++	g_return_val_if_fail (obj_size >= sizeof (EAPMethod), NULL);
++	g_return_val_if_fail (ui_file != NULL, NULL);
++	g_return_val_if_fail (ui_widget_name != NULL, NULL);
+ 
++	method = g_slice_alloc0 (obj_size);
++	g_assert (method);
++
++	method->refcount = 1;
++	method->obj_size = obj_size;
+ 	method->validate = validate;
+ 	method->add_to_size_group = add_to_size_group;
+ 	method->fill_connection = fill_connection;
+ 	method->update_secrets = update_secrets;
+ 	method->destroy = destroy;
+-
+-	method->xml = xml;
+-	method->ui_widget = ui_widget;
+ 	method->default_field = default_field;
++
++	method->xml = glade_xml_new (ui_file, ui_widget_name, NULL);
++	if (!method->xml) {
++		g_warning ("Couldn't load UI XML file %s", ui_file);
++		eap_method_unref (method);
++		return NULL;
++	}
++
++	method->ui_widget = glade_xml_get_widget (method->xml, ui_widget_name);
++	if (!method->ui_widget) {
++		g_warning ("Couldn't load widget '%s' from UI XML file %s",
++		           ui_file, ui_widget_name);
++		eap_method_unref (method);
++		return NULL;
++	}
++	g_object_ref_sink (method->ui_widget);
++
++	return method;
+ }
+ 
+ 
+@@ -186,14 +210,18 @@ eap_method_unref (EAPMethod *method)
+ 	g_return_if_fail (method != NULL);
+ 	g_return_if_fail (method->refcount > 0);
+ 
+-	g_assert (method->destroy);
+-
+ 	method->refcount--;
+ 	if (method->refcount == 0) {
++		if (method->destroy)
++			method->destroy (method);
++
+ 		g_free (method->ca_cert_chooser);
+-		g_object_unref (method->xml);
+-		g_object_unref (method->ui_widget);
+-		(*(method->destroy)) (method);
++		if (method->xml)
++			g_object_unref (method->xml);
++		if (method->ui_widget)
++			g_object_unref (method->ui_widget);
++
++		g_slice_free1 (method->obj_size, method);
+ 	}
+ }
+ 
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method.h b/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
+index acc6ef5..c7467bb 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
+@@ -40,6 +40,8 @@ typedef gboolean    (*EMValidateFunc)       (EAPMethod *method);
+ 
+ struct _EAPMethod {
+ 	guint32 refcount;
++	gsize obj_size;
++
+ 	GladeXML *xml;
+ 	GtkWidget *ui_widget;
+ 
+@@ -83,15 +85,15 @@ GType eap_method_get_g_type (void);
+ #include "eap-method-peap.h"
+ #include "eap-method-simple.h"
+ 
+-void eap_method_init (EAPMethod *method,
+-                      EMValidateFunc validate,
+-                      EMAddToSizeGroupFunc add_to_size_group,
+-                      EMFillConnectionFunc fill_connection,
+-                      EMUpdateSecretsFunc update_secrets,
+-                      EMDestroyFunc destroy,
+-                      GladeXML *xml,
+-                      GtkWidget *ui_widget,
+-                      const char *default_field);
++EAPMethod * eap_method_init (gsize obj_size,
++                             EMValidateFunc validate,
++                             EMAddToSizeGroupFunc add_to_size_group,
++                             EMFillConnectionFunc fill_connection,
++                             EMUpdateSecretsFunc update_secrets,
++                             EMDestroyFunc destroy,
++                             const char *ui_file,
++                             const char *ui_widget_name,
++                             const char *default_field);
+ 
+ GtkFileFilter * eap_method_default_file_chooser_filter_new (gboolean privkey);
+ 
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c b/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c
+index 95f2318..f531ce2 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c
+@@ -134,44 +134,73 @@ wireless_security_unref (WirelessSecurity *sec)
+ 	g_return_if_fail (sec != NULL);
+ 	g_return_if_fail (sec->refcount > 0);
+ 
+-	g_assert (sec->destroy);
+-
+ 	sec->refcount--;
+ 	if (sec->refcount == 0) {
+-		g_object_unref (sec->xml);
+-		g_object_unref (sec->ui_widget);
+-		(*(sec->destroy)) (sec);
++		if (sec->destroy)
++			sec->destroy (sec);
++
++		if (sec->xml)
++			g_object_unref (sec->xml);
++		if (sec->ui_widget)
++			g_object_unref (sec->ui_widget);
+ 
+ 		g_free (sec->username);
+ 		if (sec->password) {
+ 			memset (sec->password, 0, strlen (sec->password));
+ 			g_free (sec->password);
+ 		}
++
++		g_slice_free1 (sec->obj_size, sec);
+ 	}
+ }
+ 
+-void
+-wireless_security_init (WirelessSecurity *sec,
++WirelessSecurity *
++wireless_security_init (gsize obj_size,
+                         WSValidateFunc validate,
+                         WSAddToSizeGroupFunc add_to_size_group,
+                         WSFillConnectionFunc fill_connection,
+                         WSUpdateSecretsFunc update_secrets,
+                         WSDestroyFunc destroy,
+-                        GladeXML *xml,
+-                        GtkWidget *ui_widget,
++                        const char *ui_file,
++                        const char *ui_widget_name,
+                         const char *default_field)
+ {
++	WirelessSecurity *sec;
++
++	g_return_val_if_fail (obj_size >= sizeof (WirelessSecurity), NULL);
++	g_return_val_if_fail (ui_file != NULL, NULL);
++	g_return_val_if_fail (ui_widget_name != NULL, NULL);
++
++	sec = g_slice_alloc0 (obj_size);
++	g_assert (sec);
++
+ 	sec->refcount = 1;
++	sec->obj_size = obj_size;
+ 
+ 	sec->validate = validate;
+ 	sec->add_to_size_group = add_to_size_group;
+ 	sec->fill_connection = fill_connection;
+ 	sec->update_secrets = update_secrets;
+ 	sec->destroy = destroy;
+-
+-	sec->xml = xml;
+-	sec->ui_widget = ui_widget;
+ 	sec->default_field = default_field;
++
++	sec->xml = glade_xml_new (ui_file, ui_widget_name, NULL);
++	if (!sec->xml) {
++		g_warning ("Couldn't load UI XML file %s", ui_file);
++		wireless_security_unref (sec);
++		return NULL;
++	}
++
++	sec->ui_widget = glade_xml_get_widget (sec->xml, ui_widget_name);
++	if (!sec->ui_widget) {
++		g_warning ("Couldn't load widget '%s' from UI XML file %s",
++		           ui_file, ui_widget_name);
++		wireless_security_unref (sec);
++		return NULL;
++	}
++	g_object_ref_sink (sec->ui_widget);
++
++	return sec;
+ }
+ 
+ void
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h b/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h
+index 655d2d3..0aa20d3 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h
++++ b/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h
+@@ -43,6 +43,7 @@ typedef GtkWidget * (*WSNagUserFunc) (WirelessSecurity *sec);
+ 
+ struct _WirelessSecurity {
+ 	guint32 refcount;
++	gsize obj_size;
+ 	GladeXML *xml;
+ 	GtkWidget *ui_widget;
+ 	WSChangedFunc changed_notify;
+@@ -99,15 +100,15 @@ GType wireless_security_get_g_type (void);
+ #include "ws-wpa-eap.h"
+ #include "ws-dynamic-wep.h"
+ 
+-void wireless_security_init (WirelessSecurity *sec,
+-                             WSValidateFunc validate,
+-                             WSAddToSizeGroupFunc add_to_size_group,
+-                             WSFillConnectionFunc fill_connection,
+-                             WSUpdateSecretsFunc update_secrets,
+-                             WSDestroyFunc destroy,
+-                             GladeXML *xml,
+-                             GtkWidget *ui_widget,
+-                             const char *default_field);
++WirelessSecurity * wireless_security_init (gsize obj_size,
++                                           WSValidateFunc validate,
++                                           WSAddToSizeGroupFunc add_to_size_group,
++                                           WSFillConnectionFunc fill_connection,
++                                           WSUpdateSecretsFunc update_secrets,
++                                           WSDestroyFunc destroy,
++                                           const char *ui_file,
++                                           const char *ui_widget_name,
++                                           const char *default_field);
+ 
+ void wireless_security_changed_cb (GtkWidget *entry, gpointer user_data);
+ 
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/ws-dynamic-wep.c b/network-manager-applet-0.8.1/src/wireless-security/ws-dynamic-wep.c
+index f5c2d39..f6462fe 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/ws-dynamic-wep.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/ws-dynamic-wep.c
+@@ -36,7 +36,6 @@ destroy (WirelessSecurity *parent)
+ 
+ 	if (sec->size_group)
+ 		g_object_unref (sec->size_group);
+-	g_slice_free (WirelessSecurityDynamicWEP, sec);
+ }
+ 
+ static gboolean
+@@ -102,47 +101,31 @@ ws_dynamic_wep_new (const char *glade_file,
+                     NMConnection *connection,
+                     gboolean is_editor)
+ {
+-	WirelessSecurityDynamicWEP *sec;
++	WirelessSecurity *parent;
+ 	GtkWidget *widget;
+-	GladeXML *xml;
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+-	xml = glade_xml_new (glade_file, "dynamic_wep_notebook", NULL);
+-	if (xml == NULL) {
+-		g_warning ("Couldn't get dynamic_wep_widget from glade xml");
+-		return NULL;
+-	}
+-
+-	widget = glade_xml_get_widget (xml, "dynamic_wep_notebook");
+-	g_assert (widget);
+-	g_object_ref_sink (widget);
+-
+-	sec = g_slice_new0 (WirelessSecurityDynamicWEP);
+-	if (!sec) {
+-		g_object_unref (xml);
+-		g_object_unref (widget);
+-		return NULL;
+-	}
+-
+-	wireless_security_init (WIRELESS_SECURITY (sec),
++	parent = wireless_security_init (sizeof (WirelessSecurityDynamicWEP),
+ 	                        validate,
+ 	                        add_to_size_group,
+ 	                        fill_connection,
+ 	                        update_secrets,
+ 	                        destroy,
+-	                        xml,
+-	                        widget,
++	                        glade_file,
++	                        "dynamic_wep_notebook",
+ 	                        NULL);
++	if (!parent)
++		return NULL;
+ 
+-	widget = ws_802_1x_auth_combo_init (WIRELESS_SECURITY (sec),
++	widget = ws_802_1x_auth_combo_init (parent,
+ 	                                    glade_file,
+ 	                                    "dynamic_wep_auth_combo",
+ 	                                    (GCallback) auth_combo_changed_cb,
+ 	                                    connection,
+ 	                                    is_editor);
+-	auth_combo_changed_cb (widget, (gpointer) sec);
++	auth_combo_changed_cb (widget, (gpointer) parent);
+ 
+-	return sec;
++	return (WirelessSecurityDynamicWEP *) parent;
+ }
+ 
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/ws-leap.c b/network-manager-applet-0.8.1/src/wireless-security/ws-leap.c
+index aa2e320..de04118 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/ws-leap.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/ws-leap.c
+@@ -43,14 +43,6 @@ show_toggled_cb (GtkCheckButton *button, WirelessSecurity *sec)
+ 	gtk_entry_set_visibility (GTK_ENTRY (widget), visible);
+ }
+ 
+-static void
+-destroy (WirelessSecurity *parent)
+-{
+-	WirelessSecurityLEAP *sec = (WirelessSecurityLEAP *) parent;
+-
+-	g_slice_free (WirelessSecurityLEAP, sec);
+-}
+-
+ static gboolean
+ validate (WirelessSecurity *parent, const GByteArray *ssid)
+ {
+@@ -128,39 +120,24 @@ update_secrets (WirelessSecurity *parent, NMConnection *connection)
+ WirelessSecurityLEAP *
+ ws_leap_new (const char *glade_file, NMConnection *connection)
+ {
++	WirelessSecurity *parent;
+ 	WirelessSecurityLEAP *sec;
+ 	GtkWidget *widget;
+-	GladeXML *xml;
+ 	NMSettingWirelessSecurity *wsec = NULL;
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+-	xml = glade_xml_new (glade_file, "leap_notebook", NULL);
+-	if (xml == NULL) {
+-		g_warning ("Couldn't get leap_widget from glade xml");
++	parent = wireless_security_init (sizeof (WirelessSecurityLEAP),
++	                                 validate,
++	                                 add_to_size_group,
++	                                 fill_connection,
++	                                 update_secrets,
++	                                 NULL,
++	                                 glade_file,
++	                                 "leap_notebook",
++	                                 "leap_username_entry");
++	if (!parent)
+ 		return NULL;
+-	}
+-
+-	widget = glade_xml_get_widget (xml, "leap_notebook");
+-	g_assert (widget);
+-	g_object_ref_sink (widget);
+-
+-	sec = g_slice_new0 (WirelessSecurityLEAP);
+-	if (!sec) {
+-		g_object_unref (xml);
+-		g_object_unref (widget);
+-		return NULL;
+-	}
+-
+-	wireless_security_init (WIRELESS_SECURITY (sec),
+-	                        validate,
+-	                        add_to_size_group,
+-	                        fill_connection,
+-	                        update_secrets,
+-	                        destroy,
+-	                        xml,
+-	                        widget,
+-	                        "leap_username_entry");
+ 
+ 	if (connection) {
+ 		wsec = NM_SETTING_WIRELESS_SECURITY (nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS_SECURITY));
+@@ -174,7 +151,9 @@ ws_leap_new (const char *glade_file, NMConnection *connection)
+ 		}
+ 	}
+ 
+-	widget = glade_xml_get_widget (xml, "leap_password_entry");
++	sec = (WirelessSecurityLEAP *) parent;
++
++	widget = glade_xml_get_widget (parent->xml, "leap_password_entry");
+ 	g_assert (widget);
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+@@ -182,7 +161,7 @@ ws_leap_new (const char *glade_file, NMConnection *connection)
+ 	if (wsec)
+ 		update_secrets (WIRELESS_SECURITY (sec), connection);
+ 
+-	widget = glade_xml_get_widget (xml, "leap_username_entry");
++	widget = glade_xml_get_widget (parent->xml, "leap_username_entry");
+ 	g_assert (widget);
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+@@ -190,7 +169,7 @@ ws_leap_new (const char *glade_file, NMConnection *connection)
+ 	if (wsec)
+ 		gtk_entry_set_text (GTK_ENTRY (widget), nm_setting_wireless_security_get_leap_username (wsec));
+ 
+-	widget = glade_xml_get_widget (xml, "show_checkbutton");
++	widget = glade_xml_get_widget (parent->xml, "show_checkbutton");
+ 	g_assert (widget);
+ 	g_signal_connect (G_OBJECT (widget), "toggled",
+ 	                  (GCallback) show_toggled_cb,
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/ws-wep-key.c b/network-manager-applet-0.8.1/src/wireless-security/ws-wep-key.c
+index 60d9bfa..e13532b 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/ws-wep-key.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/ws-wep-key.c
+@@ -80,8 +80,6 @@ destroy (WirelessSecurity *parent)
+ 
+ 	for (i = 0; i < 4; i++)
+ 		memset (sec->keys[i], 0, sizeof (sec->keys[i]));
+-
+-	g_slice_free (WirelessSecurityWEPKey, sec);
+ }
+ 
+ static gboolean
+@@ -242,9 +240,9 @@ ws_wep_key_new (const char *glade_file,
+                 gboolean adhoc_create,
+                 gboolean simple)
+ {
++	WirelessSecurity *parent;
+ 	WirelessSecurityWEPKey *sec;
+ 	GtkWidget *widget;
+-	GladeXML *xml;
+ 	NMSettingWirelessSecurity *s_wsec = NULL;
+ 	guint8 default_key_idx = 0;
+ 	gboolean is_adhoc = adhoc_create;
+@@ -252,35 +250,22 @@ ws_wep_key_new (const char *glade_file,
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+-	xml = glade_xml_new (glade_file, "wep_key_notebook", NULL);
+-	if (xml == NULL) {
+-		g_warning ("Couldn't get wep_key_widget from glade xml");
++	parent = wireless_security_init (sizeof (WirelessSecurityWEPKey),
++	                                 validate,
++	                                 add_to_size_group,
++	                                 fill_connection,
++	                                 update_secrets,
++	                                 destroy,
++	                                 glade_file,
++	                                 "wep_key_notebook",
++	                                 "wep_key_entry");
++	if (!parent)
+ 		return NULL;
+-	}
+ 
+-	widget = glade_xml_get_widget (xml, "wep_key_notebook");
+-	g_assert (widget);
+-	g_object_ref_sink (widget);
+-
+-	sec = g_slice_new0 (WirelessSecurityWEPKey);
+-	if (!sec) {
+-		g_object_unref (xml);
+-		g_object_unref (widget);
+-		return NULL;
+-	}
+-
+-	wireless_security_init (WIRELESS_SECURITY (sec),
+-	                        validate,
+-	                        add_to_size_group,
+-	                        fill_connection,
+-	                        update_secrets,
+-	                        destroy,
+-	                        xml,
+-	                        widget,
+-	                        "wep_key_entry");
++	sec = (WirelessSecurityWEPKey *) parent;
+ 	sec->type = type;
+ 
+-	widget = glade_xml_get_widget (xml, "wep_key_entry");
++	widget = glade_xml_get_widget (parent->xml, "wep_key_entry");
+ 	g_assert (widget);
+ 	gtk_entry_set_width_chars (GTK_ENTRY (widget), 28);
+ 
+@@ -312,7 +297,7 @@ ws_wep_key_new (const char *glade_file,
+ 	else if (sec->type == NM_WEP_KEY_TYPE_PASSPHRASE)
+ 		gtk_entry_set_max_length (GTK_ENTRY (widget), 64);
+ 
+-	widget = glade_xml_get_widget (xml, "key_index_combo");
++	widget = glade_xml_get_widget (parent->xml, "key_index_combo");
+ 	if (connection && s_wsec)
+ 		default_key_idx = nm_setting_wireless_security_get_wep_tx_keyidx (s_wsec);
+ 
+@@ -325,7 +310,7 @@ ws_wep_key_new (const char *glade_file,
+ 	/* Key index is useless with adhoc networks */
+ 	if (is_adhoc || simple) {
+ 		gtk_widget_hide (widget);
+-		widget = glade_xml_get_widget (xml, "key_index_label");
++		widget = glade_xml_get_widget (parent->xml, "key_index_label");
+ 		gtk_widget_hide (widget);
+ 	}
+ 
+@@ -333,13 +318,13 @@ ws_wep_key_new (const char *glade_file,
+ 	if (connection)
+ 		update_secrets (WIRELESS_SECURITY (sec), connection);
+ 
+-	widget = glade_xml_get_widget (xml, "show_checkbutton");
++	widget = glade_xml_get_widget (parent->xml, "show_checkbutton");
+ 	g_assert (widget);
+ 	g_signal_connect (G_OBJECT (widget), "toggled",
+ 	                  (GCallback) show_toggled_cb,
+ 	                  sec);
+ 
+-	widget = glade_xml_get_widget (xml, "auth_method_combo");
++	widget = glade_xml_get_widget (parent->xml, "auth_method_combo");
+ 	gtk_combo_box_set_active (GTK_COMBO_BOX (widget), is_shared_key ? 1 : 0);
+ 
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+@@ -354,7 +339,7 @@ ws_wep_key_new (const char *glade_file,
+ 		if (is_adhoc)
+ 			gtk_combo_box_set_active (GTK_COMBO_BOX (widget), 0);
+ 		gtk_widget_hide (widget);
+-		widget = glade_xml_get_widget (xml, "auth_method_label");
++		widget = glade_xml_get_widget (parent->xml, "auth_method_label");
+ 		gtk_widget_hide (widget);
+ 	}
+ 
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.c b/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.c
+index 49a4ed4..9005ebd 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.c
+@@ -38,7 +38,6 @@ destroy (WirelessSecurity *parent)
+ 		g_object_unref (sec->size_group);
+ 	if (sec->orig_wsec)
+ 		g_object_unref (sec->orig_wsec);
+-	g_slice_free (WirelessSecurityWPAEAP, sec);
+ }
+ 
+ static gboolean
+@@ -102,59 +101,46 @@ ws_wpa_eap_new (const char *glade_file,
+                 NMConnection *connection,
+                 gboolean is_editor)
+ {
++	WirelessSecurity *parent;
+ 	WirelessSecurityWPAEAP *sec;
+ 	GtkWidget *widget;
+-	GladeXML *xml;
+ 	NMSettingWirelessSecurity *s_wsec;
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+-	xml = glade_xml_new (glade_file, "wpa_eap_notebook", NULL);
+-	if (xml == NULL) {
+-		g_warning ("Couldn't get wpa_eap_widget from glade xml");
++	parent = wireless_security_init (sizeof (WirelessSecurityWPAEAP),
++	                                 validate,
++	                                 add_to_size_group,
++	                                 fill_connection,
++	                                 update_secrets,
++	                                 destroy,
++	                                 glade_file,
++	                                 "wpa_eap_notebook",
++	                                 NULL);
++	if (!parent)
+ 		return NULL;
+-	}
+ 
+-	widget = glade_xml_get_widget (xml, "wpa_eap_notebook");
+-	g_assert (widget);
+-	g_object_ref_sink (widget);
++	sec = (WirelessSecurityWPAEAP *) parent;
+ 
+-	sec = g_slice_new0 (WirelessSecurityWPAEAP);
+-	if (!sec) {
+-		g_object_unref (xml);
+-		g_object_unref (widget);
+-		return NULL;
+-	}
+-
+-	wireless_security_init (WIRELESS_SECURITY (sec),
+-	                        validate,
+-	                        add_to_size_group,
+-	                        fill_connection,
+-	                        update_secrets,
+-	                        destroy,
+-	                        xml,
+-	                        widget,
+-	                        NULL);
+-
+-	widget = ws_802_1x_auth_combo_init (WIRELESS_SECURITY (sec),
++	widget = ws_802_1x_auth_combo_init (parent,
+ 	                                    glade_file,
+ 	                                    "wpa_eap_auth_combo",
+ 	                                    (GCallback) auth_combo_changed_cb,
+ 	                                    connection,
+ 	                                    is_editor);
+-	auth_combo_changed_cb (widget, (gpointer) sec);
++	auth_combo_changed_cb (widget, parent);
+ 
+ 	s_wsec = (NMSettingWirelessSecurity *) nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS_SECURITY);
+ 	if (s_wsec)
+ 		sec->orig_wsec = (NMSettingWirelessSecurity *) nm_setting_duplicate (NM_SETTING (s_wsec));
+ 
+-	widget = ws_wpa_proto_combo_init (WIRELESS_SECURITY (sec),
++	widget = ws_wpa_proto_combo_init (parent,
+ 	                                  "wpa_eap_proto_label",
+ 	                                  "wpa_eap_proto_combo",
+ 	                                  (GCallback) wireless_security_changed_cb,
+ 	                                  connection);
+-	wireless_security_changed_cb (widget, (gpointer) sec);
++	wireless_security_changed_cb (widget, parent);
+ 
+-	return sec;
++	return (WirelessSecurityWPAEAP *) parent;
+ }
+ 
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-psk.c b/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-psk.c
+index 544d4ff..cfc0712 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-psk.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-psk.c
+@@ -52,7 +52,6 @@ destroy (WirelessSecurity *parent)
+ 
+ 	if (sec->orig_wsec)
+ 		g_object_unref (sec->orig_wsec);
+-	g_slice_free (WirelessSecurityWPAPSK, sec);
+ }
+ 
+ static gboolean
+@@ -154,45 +153,32 @@ update_secrets (WirelessSecurity *parent, NMConnection *connection)
+ WirelessSecurityWPAPSK *
+ ws_wpa_psk_new (const char *glade_file, NMConnection *connection)
+ {
++	WirelessSecurity *parent;
+ 	WirelessSecurityWPAPSK *sec;
+ 	GtkWidget *widget;
+-	GladeXML *xml;
+ 	NMSettingWirelessSecurity *s_wsec;
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+-	xml = glade_xml_new (glade_file, "wpa_psk_notebook", NULL);
+-	if (xml == NULL) {
+-		g_warning ("Couldn't get wpa_psk_widget from glade xml");
++	parent = wireless_security_init (sizeof (WirelessSecurityWPAPSK),
++	                                 validate,
++	                                 add_to_size_group,
++	                                 fill_connection,
++	                                 update_secrets,
++	                                 destroy,
++	                                 glade_file,
++	                                 "wpa_psk_notebook",
++	                                 "wpa_psk_entry");
++	if (!parent)
+ 		return NULL;
+-	}
+ 
+-	widget = glade_xml_get_widget (xml, "wpa_psk_notebook");
+-	g_assert (widget);
+-	g_object_ref_sink (widget);
+-
+-	sec = g_slice_new0 (WirelessSecurityWPAPSK);
+-	if (!sec) {
+-		g_object_unref (xml);
+-		g_object_unref (widget);
+-		return NULL;
+-	}
+-
+-	wireless_security_init (WIRELESS_SECURITY (sec),
+-	                        validate,
+-	                        add_to_size_group,
+-	                        fill_connection,
+-	                        update_secrets,
+-	                        destroy,
+-	                        xml,
+-	                        widget,
+-	                        "wpa_psk_entry");
++	sec = (WirelessSecurityWPAPSK *) parent;
+ 
+ 	s_wsec = (NMSettingWirelessSecurity *) nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS_SECURITY);
+ 	if (s_wsec)
+ 		sec->orig_wsec = (NMSettingWirelessSecurity *) nm_setting_duplicate (NM_SETTING (s_wsec));
+ 
+-	widget = glade_xml_get_widget (xml, "wpa_psk_entry");
++	widget = glade_xml_get_widget (parent->xml, "wpa_psk_entry");
+ 	g_assert (widget);
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+@@ -201,20 +187,20 @@ ws_wpa_psk_new (const char *glade_file, NMConnection *connection)
+ 
+ 	/* Fill secrets, if any */
+ 	if (connection)
+-		update_secrets (WIRELESS_SECURITY (sec), connection);
++		update_secrets (parent, connection);
+ 
+-	widget = glade_xml_get_widget (xml, "show_checkbutton");
++	widget = glade_xml_get_widget (parent->xml, "show_checkbutton");
+ 	g_assert (widget);
+ 	g_signal_connect (G_OBJECT (widget), "toggled",
+ 	                  (GCallback) show_toggled_cb,
+ 	                  sec);
+ 
+-	widget = ws_wpa_proto_combo_init (WIRELESS_SECURITY (sec),
++	widget = ws_wpa_proto_combo_init (parent,
+ 	                                  "wpa_psk_proto_label",
+ 	                                  "wpa_psk_proto_combo",
+ 	                                  (GCallback) wireless_security_changed_cb,
+ 	                                  connection);
+-	wireless_security_changed_cb (widget, (gpointer) sec);
++	wireless_security_changed_cb (widget, parent);
+ 
+ 	return sec;
+ }
+-- 
+1.7.1
+

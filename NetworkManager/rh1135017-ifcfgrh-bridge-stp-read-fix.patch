@@ -1,0 +1,150 @@
+From 360a02fc13635f3d1ff44129ca9d5a8cf7cea2b9 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Fri, 22 Mar 2013 09:13:12 -0500
+Subject: [PATCH] ifcfg-rh: ensure missing STP property is interpreted as
+ "off" (rh #922702)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The initscripts interpreted it this way, so we do too.
+
+https://bugzilla.redhat.com/show_bug.cgi?id=922702
+https://bugzilla.redhat.com/show_bug.cgi?id=1135017
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+
+(cherry picked from commit 360a02fc13635f3d1ff44129ca9d5a8cf7cea2b9)
+---
+ system-settings/plugins/ifcfg-rh/reader.c          | 12 +++++--
+ .../ifcfg-rh/tests/network-scripts/Makefile.am     |  1 +
+ .../network-scripts/ifcfg-test-bridge-missing-stp  |  5 +++
+ .../plugins/ifcfg-rh/tests/test-ifcfg-rh.c         | 42 ++++++++++++++++++++++
+ 4 files changed, 58 insertions(+), 2 deletions(-)
+ create mode 100644 system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-bridge-missing-stp
+
+diff --git a/system-settings/plugins/ifcfg-rh/reader.c b/system-settings/plugins/ifcfg-rh/reader.c
+index bca1818..333f162 100644
+--- a/system-settings/plugins/ifcfg-rh/reader.c
++++ b/system-settings/plugins/ifcfg-rh/reader.c
+@@ -3840,6 +3840,7 @@ make_bridge_setting (shvarFile *ifcfg,
+ 	char *value;
+ 	guint32 u;
+ 	gboolean stp = FALSE;
++	gboolean stp_set = FALSE;
+ 
+ 	s_bridge = NM_SETTING_BRIDGE (nm_setting_bridge_new ());
+ 
+@@ -3857,13 +3858,20 @@ make_bridge_setting (shvarFile *ifcfg,
+ 		if (!strcasecmp (value, "on") || !strcasecmp (value, "yes")) {
+ 			g_object_set (s_bridge, NM_SETTING_BRIDGE_STP, TRUE, NULL);
+ 			stp = TRUE;
+-		} else if (!strcasecmp (value, "off") || !strcasecmp (value, "no"))
++			stp_set = TRUE;
++		} else if (!strcasecmp (value, "off") || !strcasecmp (value, "no")) {
+ 			g_object_set (s_bridge, NM_SETTING_BRIDGE_STP, FALSE, NULL);
+-		else
++			stp_set = TRUE;
++		} else
+ 			PLUGIN_WARN (IFCFG_PLUGIN_NAME, "    warning: invalid STP value '%s'", value);
+ 		g_free (value);
+ 	}
+ 
++	if (!stp_set) {
++		/* Missing or invalid STP property means "no" */
++		g_object_set (s_bridge, NM_SETTING_BRIDGE_STP, FALSE, NULL);
++	}
++
+ 	value = svGetValue (ifcfg, "DELAY", FALSE);
+ 	if (value) {
+ 		if (stp) {
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am b/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
+index f1a9538..0362ce3 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
+@@ -70,6 +70,7 @@ EXTRA_DIST = \
+ 	ifcfg-test-wired-ctc-static \
+ 	ifcfg-test-bridge-main \
+ 	ifcfg-test-bridge-component \
++	ifcfg-test-bridge-missing-stp \
+ 	ifcfg-test-vlan-interface \
+ 	ifcfg-test-vlan-only-vlanid \
+ 	ifcfg-test-vlan-only-device \
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-bridge-missing-stp b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-bridge-missing-stp
+new file mode 100644
+index 0000000..7135cd4
+--- /dev/null
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-bridge-missing-stp
+@@ -0,0 +1,5 @@
++DEVICE=br0
++ONBOOT=no
++TYPE=Bridge
++BOOTPROTO=dhcp
++
+diff --git a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+index e7f7e2f..106db94 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
++++ b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+@@ -10806,6 +10806,46 @@ test_write_infiniband (void)
+ 	g_object_unref (reread);
+ }
+ 
++static void
++test_read_bridge_missing_stp (void)
++{
++	NMConnection *connection;
++	NMSettingBridge *s_bridge;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE;
++	GError *error = NULL;
++
++	connection = connection_from_file (TEST_IFCFG_DIR"/network-scripts/ifcfg-test-bridge-missing-stp",
++	                                   NULL,
++	                                   TYPE_BRIDGE,
++	                                   NULL,
++	                                   &unmanaged,
++	                                   &keyfile,
++	                                   &routefile,
++	                                   &route6file,
++	                                   &error,
++	                                   &ignore_error);
++	g_assert (connection);
++	g_assert (nm_connection_verify (connection, &error));
++	g_assert_no_error (error);
++
++	/* ===== Bridging SETTING ===== */
++
++	s_bridge = nm_connection_get_setting_bridge (connection);
++	g_assert (s_bridge);
++	g_assert_cmpstr (nm_setting_bridge_get_interface_name (s_bridge), ==, "br0");
++	g_assert_cmpuint (nm_setting_bridge_get_stp (s_bridge), ==, FALSE);
++
++	g_free (unmanaged);
++	g_free (keyfile);
++	g_free (routefile);
++	g_free (route6file);
++	g_object_unref (connection);
++}
++
+ #define TEST_IFCFG_VLAN_INTERFACE TEST_IFCFG_DIR"/network-scripts/ifcfg-test-vlan-interface"
+ 
+ static void
+@@ -11569,10 +11609,12 @@ int main (int argc, char **argv)
+ 	test_write_bond_main ();
+ 	test_write_bond_slave ();
+ 
++	/* bridging */
+ 	test_read_bridge_main ();
+ 	test_write_bridge_main ();
+ 	test_read_bridge_component ();
+ 	test_write_bridge_component ();
++	test_read_bridge_missing_stp ();
+ 
+ 	/* Stuff we expect to fail for now */
+ 	test_write_wired_pppoe ();
+-- 
+1.7.11.7
+

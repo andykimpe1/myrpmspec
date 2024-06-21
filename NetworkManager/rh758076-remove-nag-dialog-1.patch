@@ -1,0 +1,748 @@
+From 56c9f66f5d8b7da9dd1b4daaa95759d606c2b7c2 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Tue, 10 Sep 2013 12:51:09 +0200
+Subject: [PATCH 1/1] applet: extend ui to ignore ca cert instead of nag dialog.
+
+(backported from commit 9d1a379a2a8ffd758e5d6fbeecbcd021bb001759)
+
+This applies to EAP methods PEAP, TLS, TTLS.
+
+When the user configures a connection without CA certificate,
+previously a warning dialog was shown where the user could
+either return to the connection configuration or proceed.
+
+Change the UI so that the configuration mask has a checkbox
+"No CA is required" and enable the "Connect" button only when
+either a certificate is selected or the user choose to ignore
+it.
+
+The flag no_ca_required is saved in the gsettings of the user.
+When creating a new connection, the checkbox is always unchecked, so
+that the user must make an active decision. When editing connections,
+the flag is only set, if there is no ca cert filename and the
+ca_cert_ignored flag is not set.
+
+The nag dialog is still here and active. The next commit will
+remove it.
+
+https://bugzilla.redhat.com/show_bug.cgi?id=758076
+https://bugzilla.redhat.com/show_bug.cgi?id=809489
+
+Signed-off-by: Thomas Haller <thaller@redhat.com>
+---
+ network-manager-applet-0.8.1/src/applet.glade      |  113 +++++++++++++++-----
+ .../src/gconf-helpers/gconf-helpers.c              |    8 --
+ .../src/wireless-security/eap-method-peap.c        |   37 ++++++-
+ .../src/wireless-security/eap-method-tls.c         |   40 +++++++-
+ .../src/wireless-security/eap-method-ttls.c        |   37 ++++++-
+ .../src/wireless-security/eap-method.c             |   99 +++++++++++++++++
+ .../src/wireless-security/eap-method.h             |   14 +++
+ 7 files changed, 299 insertions(+), 49 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/src/applet.glade b/network-manager-applet-0.8.1/src/applet.glade
+index 13e2eda..21c0ede 100644
+--- a/network-manager-applet-0.8.1/src/applet.glade
++++ b/network-manager-applet-0.8.1/src/applet.glade
+@@ -1113,6 +1113,25 @@ Both</property>
+               </packing>
+             </child>
+             <child>
++              <widget class="GtkCheckButton" id="eap_tls_ca_cert_not_required_checkbox">
++                <property name="label" translatable="yes">No CA certificate is _required</property>
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="receives_default">False</property>
++                <property name="use_underline">True</property>
++                <property name="xalign">0</property>
++                <property name="draw_indicator">True</property>
++              </widget>
++              <packing>
++                <property name="left_attach">1</property>
++                <property name="right_attach">2</property>
++                <property name="top_attach">3</property>
++                <property name="bottom_attach">4</property>
++                <property name="x_options">GTK_FILL</property>
++                <property name="y_options"/>
++              </packing>
++            </child>
++            <child>
+               <widget class="GtkLabel" id="eap_tls_private_key_label">
+                 <property name="visible">True</property>
+                 <property name="xalign">0</property>
+@@ -1121,8 +1140,8 @@ Both</property>
+                 <property name="mnemonic_widget">eap_tls_private_key_button</property>
+               </widget>
+               <packing>
+-                <property name="top_attach">3</property>
+-                <property name="bottom_attach">4</property>
++                <property name="top_attach">4</property>
++                <property name="bottom_attach">5</property>
+                 <property name="x_options">GTK_FILL</property>
+                 <property name="y_options"></property>
+               </packing>
+@@ -1134,8 +1153,8 @@ Both</property>
+               <packing>
+                 <property name="left_attach">1</property>
+                 <property name="right_attach">2</property>
+-                <property name="top_attach">3</property>
+-                <property name="bottom_attach">4</property>
++                <property name="top_attach">4</property>
++                <property name="bottom_attach">5</property>
+                 <property name="x_options">GTK_FILL</property>
+                 <property name="y_options">GTK_FILL</property>
+               </packing>
+@@ -1149,8 +1168,8 @@ Both</property>
+                 <property name="mnemonic_widget">eap_tls_private_key_password_entry</property>
+               </widget>
+               <packing>
+-                <property name="top_attach">4</property>
+-                <property name="bottom_attach">5</property>
++                <property name="top_attach">5</property>
++                <property name="bottom_attach">6</property>
+                 <property name="x_options">GTK_FILL</property>
+                 <property name="y_options"></property>
+               </packing>
+@@ -1165,8 +1184,8 @@ Both</property>
+               <packing>
+                 <property name="left_attach">1</property>
+                 <property name="right_attach">2</property>
+-                <property name="top_attach">4</property>
+-                <property name="bottom_attach">5</property>
++                <property name="top_attach">5</property>
++                <property name="bottom_attach">6</property>
+                 <property name="y_options"></property>
+               </packing>
+             </child>
+@@ -1182,8 +1201,8 @@ Both</property>
+               <packing>
+                 <property name="left_attach">1</property>
+                 <property name="right_attach">2</property>
+-                <property name="top_attach">5</property>
+-                <property name="bottom_attach">6</property>
++                <property name="top_attach">6</property>
++                <property name="bottom_attach">7</property>
+                 <property name="x_options">GTK_FILL</property>
+                 <property name="y_options"></property>
+               </packing>
+@@ -1206,8 +1225,8 @@ Both</property>
+                 <property name="visible">True</property>
+               </widget>
+               <packing>
+-                <property name="top_attach">5</property>
+-                <property name="bottom_attach">6</property>
++                <property name="top_attach">6</property>
++                <property name="bottom_attach">7</property>
+                 <property name="x_options">GTK_FILL</property>
+                 <property name="y_options">GTK_FILL</property>
+               </packing>
+@@ -1407,6 +1426,25 @@ Both</property>
+               </packing>
+             </child>
+             <child>
++              <widget class="GtkCheckButton" id="eap_ttls_ca_cert_not_required_checkbox">
++                <property name="label" translatable="yes">No CA certificate is _required</property>
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="receives_default">False</property>
++                <property name="use_underline">True</property>
++                <property name="xalign">0</property>
++                <property name="draw_indicator">True</property>
++              </widget>
++              <packing>
++                <property name="left_attach">1</property>
++                <property name="right_attach">2</property>
++                <property name="top_attach">2</property>
++                <property name="bottom_attach">3</property>
++                <property name="x_options">GTK_FILL</property>
++                <property name="y_options"/>
++              </packing>
++            </child>
++            <child>
+               <widget class="GtkLabel" id="eap_ttls_inner_auth_label">
+                 <property name="visible">True</property>
+                 <property name="xalign">0</property>
+@@ -1415,8 +1453,8 @@ Both</property>
+                 <property name="mnemonic_widget">eap_ttls_inner_auth_combo</property>
+               </widget>
+               <packing>
+-                <property name="top_attach">2</property>
+-                <property name="bottom_attach">3</property>
++                <property name="top_attach">3</property>
++                <property name="bottom_attach">4</property>
+                 <property name="x_options">GTK_FILL</property>
+                 <property name="y_options"></property>
+               </packing>
+@@ -1429,8 +1467,8 @@ Both</property>
+               <packing>
+                 <property name="left_attach">1</property>
+                 <property name="right_attach">2</property>
+-                <property name="top_attach">2</property>
+-                <property name="bottom_attach">3</property>
++                <property name="top_attach">3</property>
++                <property name="bottom_attach">4</property>
+                 <property name="x_options">GTK_FILL</property>
+                 <property name="y_options">GTK_FILL</property>
+               </packing>
+@@ -1446,8 +1484,8 @@ Both</property>
+               </widget>
+               <packing>
+                 <property name="right_attach">2</property>
+-                <property name="top_attach">3</property>
+-                <property name="bottom_attach">4</property>
++                <property name="top_attach">4</property>
++                <property name="bottom_attach">5</property>
+                 <property name="x_options">GTK_FILL</property>
+               </packing>
+             </child>
+@@ -1936,6 +1974,25 @@ Both</property>
+               </packing>
+             </child>
+             <child>
++              <widget class="GtkCheckButton" id="eap_peap_ca_cert_not_required_checkbox">
++                <property name="label" translatable="yes">No CA certificate is _required</property>
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="receives_default">False</property>
++                <property name="use_underline">True</property>
++                <property name="xalign">0</property>
++                <property name="draw_indicator">True</property>
++              </widget>
++              <packing>
++                <property name="left_attach">1</property>
++                <property name="right_attach">2</property>
++                <property name="top_attach">2</property>
++                <property name="bottom_attach">3</property>
++                <property name="x_options">GTK_FILL</property>
++                <property name="y_options"/>
++              </packing>
++            </child>
++            <child>
+               <widget class="GtkVBox" id="eap_peap_inner_auth_vbox">
+                 <property name="visible">True</property>
+                 <property name="orientation">vertical</property>
+@@ -1945,8 +2002,8 @@ Both</property>
+               </widget>
+               <packing>
+                 <property name="right_attach">2</property>
+-                <property name="top_attach">4</property>
+-                <property name="bottom_attach">5</property>
++                <property name="top_attach">5</property>
++                <property name="bottom_attach">6</property>
+                 <property name="x_options">GTK_FILL</property>
+               </packing>
+             </child>
+@@ -1959,8 +2016,8 @@ Both</property>
+                 <property name="mnemonic_widget">eap_peap_inner_auth_combo</property>
+               </widget>
+               <packing>
+-                <property name="top_attach">3</property>
+-                <property name="bottom_attach">4</property>
++                <property name="top_attach">4</property>
++                <property name="bottom_attach">5</property>
+                 <property name="x_options">GTK_FILL</property>
+                 <property name="y_options"></property>
+               </packing>
+@@ -1973,8 +2030,8 @@ Both</property>
+               <packing>
+                 <property name="left_attach">1</property>
+                 <property name="right_attach">2</property>
+-                <property name="top_attach">3</property>
+-                <property name="bottom_attach">4</property>
++                <property name="top_attach">4</property>
++                <property name="bottom_attach">5</property>
+                 <property name="x_options">GTK_FILL</property>
+                 <property name="y_options">GTK_FILL</property>
+               </packing>
+@@ -1988,8 +2045,8 @@ Both</property>
+                 <property name="mnemonic_widget">eap_peap_version_combo</property>
+               </widget>
+               <packing>
+-                <property name="top_attach">2</property>
+-                <property name="bottom_attach">3</property>
++                <property name="top_attach">3</property>
++                <property name="bottom_attach">4</property>
+                 <property name="x_options">GTK_FILL</property>
+                 <property name="y_options"></property>
+               </packing>
+@@ -2004,8 +2061,8 @@ Version 1</property>
+               <packing>
+                 <property name="left_attach">1</property>
+                 <property name="right_attach">2</property>
+-                <property name="top_attach">2</property>
+-                <property name="bottom_attach">3</property>
++                <property name="top_attach">3</property>
++                <property name="bottom_attach">4</property>
+                 <property name="x_options">GTK_FILL</property>
+                 <property name="y_options">GTK_FILL</property>
+               </packing>
+diff --git a/network-manager-applet-0.8.1/src/gconf-helpers/gconf-helpers.c b/network-manager-applet-0.8.1/src/gconf-helpers/gconf-helpers.c
+index 70e5a7c..9163bde 100644
+--- a/network-manager-applet-0.8.1/src/gconf-helpers/gconf-helpers.c
++++ b/network-manager-applet-0.8.1/src/gconf-helpers/gconf-helpers.c
+@@ -2681,7 +2681,6 @@ nm_gconf_write_connection (NMConnection *connection,
+ {
+ 	NMSettingConnection *s_con;
+ 	CopyOneSettingValueInfo info;
+-	gboolean ignore;
+ 
+ 	g_return_if_fail (NM_IS_CONNECTION (connection));
+ 	g_return_if_fail (client != NULL);
+@@ -2714,13 +2713,6 @@ nm_gconf_write_connection (NMConnection *connection,
+ 		                                      write_one_secret_to_keyring,
+ 		                                      &info);
+ 	}
+-
+-	/* Update ignore CA cert status */
+-	ignore = GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (connection), IGNORE_CA_CERT_TAG));
+-	nm_gconf_set_ignore_ca_cert (info.connection_uuid, FALSE, ignore);
+-
+-	ignore = GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (connection), IGNORE_PHASE2_CA_CERT_TAG));
+-	nm_gconf_set_ignore_ca_cert (info.connection_uuid, TRUE, ignore);
+ }
+ 
+ static char *
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-peap.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-peap.c
+index 49faf12..0208247 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-peap.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-peap.c
+@@ -56,6 +56,8 @@ validate (EAPMethod *parent)
+ 
+ 	if (!eap_method_validate_filepicker (parent->xml, "eap_peap_ca_cert_button", TYPE_CA_CERT, NULL, NULL))
+ 		return FALSE;
++	if (eap_method_ca_cert_required (parent->xml, "eap_peap_ca_cert_not_required_checkbox", "eap_peap_ca_cert_button") )
++		return FALSE;
+ 
+ 	widget = glade_xml_get_widget (parent->xml, "eap_peap_inner_auth_combo");
+ 	g_assert (widget);
+@@ -70,6 +72,14 @@ validate (EAPMethod *parent)
+ }
+ 
+ static void
++ca_cert_not_required_toggled (GtkWidget *ignored, gpointer user_data)
++{
++	EAPMethod *parent = user_data;
++
++	eap_method_ca_cert_not_required_toggled (parent->xml, "eap_peap_ca_cert_not_required_checkbox", "eap_peap_ca_cert_button");
++}
++
++static void
+ add_to_size_group (EAPMethod *parent, GtkSizeGroup *group)
+ {
+ 	EAPMethodPEAP *method = (EAPMethodPEAP *) parent;
+@@ -82,6 +92,10 @@ add_to_size_group (EAPMethod *parent, GtkSizeGroup *group)
+ 		g_object_unref (method->size_group);
+ 	method->size_group = g_object_ref (group);
+ 
++	widget = glade_xml_get_widget (parent->xml, "eap_peap_ca_cert_not_required_checkbox");
++	g_assert (widget);
++	gtk_size_group_add_widget (group, widget);
++
+ 	widget = glade_xml_get_widget (parent->xml, "eap_peap_anon_identity_label");
+ 	g_assert (widget);
+ 	gtk_size_group_add_widget (group, widget);
+@@ -123,6 +137,7 @@ fill_connection (EAPMethod *parent, NMConnection *connection)
+ 	GtkTreeIter iter;
+ 	int peapver_active = 0;
+ 	GError *error = NULL;
++	gboolean ca_cert_error = FALSE;
+ 
+ 	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+ 	g_assert (s_con);
+@@ -144,11 +159,10 @@ fill_connection (EAPMethod *parent, NMConnection *connection)
+ 	if (!nm_setting_802_1x_set_ca_cert (s_8021x, filename, NM_SETTING_802_1X_CK_SCHEME_PATH, &format, &error)) {
+ 		g_warning ("Couldn't read CA certificate '%s': %s", filename, error ? error->message : "(unknown)");
+ 		g_clear_error (&error);
++		ca_cert_error = TRUE;
+ 	}
+-
+-	nm_gconf_set_ignore_ca_cert (nm_setting_connection_get_uuid (s_con),
+-	                             FALSE,
+-	                             eap_method_get_ignore_ca_cert (parent));
++	eap_method_ca_cert_ignore_set (parent, connection, filename, ca_cert_error, FALSE, "eap_peap_ca_cert_not_required_checkbox");
++	g_free (filename);
+ 
+ 	widget = glade_xml_get_widget (parent->xml, "eap_peap_version_combo");
+ 	peapver_active = gtk_combo_box_get_active (GTK_COMBO_BOX (widget));
+@@ -312,7 +326,7 @@ eap_method_peap_new (const char *glade_file,
+                      gboolean is_editor)
+ {
+ 	EAPMethodPEAP *method;
+-	GtkWidget *widget;
++	GtkWidget *widget, *widget_ca_not_required_checkbox;
+ 	GladeXML *xml;
+ 	GtkFileFilter *filter;
+ 	NMSetting8021x *s_8021x = NULL;
+@@ -359,6 +373,16 @@ eap_method_peap_new (const char *glade_file,
+ 	if (connection)
+ 		s_8021x = NM_SETTING_802_1X (nm_connection_get_setting (connection, NM_TYPE_SETTING_802_1X));
+ 
++	widget = glade_xml_get_widget (xml, "eap_peap_ca_cert_not_required_checkbox");
++	g_assert (widget);
++	g_signal_connect (G_OBJECT (widget), "toggled",
++	                  (GCallback) ca_cert_not_required_toggled,
++	                  method);
++	g_signal_connect (G_OBJECT (widget), "toggled",
++	                  (GCallback) wireless_security_changed_cb,
++	                  parent);
++	widget_ca_not_required_checkbox = widget;
++
+ 	widget = glade_xml_get_widget (xml, "eap_peap_ca_cert_button");
+ 	g_assert (widget);
+ 	gtk_file_chooser_set_local_only (GTK_FILE_CHOOSER (widget), TRUE);
+@@ -370,11 +394,14 @@ eap_method_peap_new (const char *glade_file,
+ 	filter = eap_method_default_file_chooser_filter_new (FALSE);
+ 	gtk_file_chooser_add_filter (GTK_FILE_CHOOSER (widget), filter);
+ 	if (connection && s_8021x) {
++		filename = NULL;
+ 		if (nm_setting_802_1x_get_ca_cert_scheme (s_8021x) == NM_SETTING_802_1X_CK_SCHEME_PATH) {
+ 			filename = nm_setting_802_1x_get_ca_cert_path (s_8021x);
+ 			if (filename)
+ 				gtk_file_chooser_set_filename (GTK_FILE_CHOOSER (widget), filename);
+ 		}
++		gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (widget_ca_not_required_checkbox),
++		                              !filename && eap_method_ca_cert_ignore_get (EAP_METHOD (method), connection, FALSE));
+ 	}
+ 
+ 	widget = inner_auth_combo_init (method, glade_file, connection, s_8021x);
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-tls.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-tls.c
+index c0950b9..68c66bd 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-tls.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-tls.c
+@@ -67,6 +67,9 @@ validate (EAPMethod *parent)
+ 	identity = gtk_entry_get_text (GTK_ENTRY (widget));
+ 	if (!identity || !strlen (identity))
+ 		return FALSE;
++	if (eap_method_ca_cert_required (parent->xml, "eap_tls_ca_cert_not_required_checkbox", "eap_tls_ca_cert_button") )
++		return FALSE;
++
+ 
+ 	if (!eap_method_validate_filepicker (parent->xml, "eap_tls_ca_cert_button", TYPE_CA_CERT, NULL, NULL))
+ 		return FALSE;
+@@ -93,10 +96,22 @@ validate (EAPMethod *parent)
+ }
+ 
+ static void
++ca_cert_not_required_toggled (GtkWidget *ignored, gpointer user_data)
++{
++	EAPMethod *parent = user_data;
++
++	eap_method_ca_cert_not_required_toggled (parent->xml, "eap_tls_ca_cert_not_required_checkbox", "eap_tls_ca_cert_button");
++}
++
++static void
+ add_to_size_group (EAPMethod *parent, GtkSizeGroup *group)
+ {
+ 	GtkWidget *widget;
+ 
++	widget = glade_xml_get_widget (parent->xml, "eap_tls_ca_cert_not_required_checkbox");
++	g_assert (widget);
++	gtk_size_group_add_widget (group, widget);
++
+ 	widget = glade_xml_get_widget (parent->xml, "eap_tls_identity_label");
+ 	g_assert (widget);
+ 	gtk_size_group_add_widget (group, widget);
+@@ -129,6 +144,7 @@ fill_connection (EAPMethod *parent, NMConnection *connection)
+ 	char *ca_filename, *pk_filename, *cc_filename;
+ 	const char *password = NULL;
+ 	GError *error = NULL;
++	gboolean ca_cert_error = FALSE;
+ 
+ 	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+ 	g_assert (s_con);
+@@ -204,17 +220,18 @@ fill_connection (EAPMethod *parent, NMConnection *connection)
+ 		if (!nm_setting_802_1x_set_phase2_ca_cert (s_8021x, ca_filename, NM_SETTING_802_1X_CK_SCHEME_PATH, &format, &error)) {
+ 			g_warning ("Couldn't read phase2 CA certificate '%s': %s", ca_filename, error ? error->message : "(unknown)");
+ 			g_clear_error (&error);
++			ca_cert_error = TRUE;
+ 		}
+ 	} else {
+ 		if (!nm_setting_802_1x_set_ca_cert (s_8021x, ca_filename, NM_SETTING_802_1X_CK_SCHEME_PATH, &format, &error)) {
+ 			g_warning ("Couldn't read CA certificate '%s': %s", ca_filename, error ? error->message : "(unknown)");
+ 			g_clear_error (&error);
++			ca_cert_error = TRUE;
+ 		}
+ 	}
+ 
+-	nm_gconf_set_ignore_ca_cert (nm_setting_connection_get_uuid (s_con),
+-	                             method->phase2,
+-	                             eap_method_get_ignore_ca_cert (parent));
++	eap_method_ca_cert_ignore_set (parent, connection, ca_filename, ca_cert_error, method->phase2, "eap_tls_ca_cert_not_required_checkbox");
++	g_free (ca_filename);
+ }
+ 
+ static void
+@@ -398,6 +415,7 @@ eap_method_tls_new (const char *glade_file,
+ 	GtkWidget *widget;
+ 	GladeXML *xml;
+ 	NMSetting8021x *s_8021x = NULL;
++	gboolean ca_not_required = FALSE;
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+@@ -439,6 +457,15 @@ eap_method_tls_new (const char *glade_file,
+ 	if (connection)
+ 		s_8021x = NM_SETTING_802_1X (nm_connection_get_setting (connection, NM_TYPE_SETTING_802_1X));
+ 
++	widget = glade_xml_get_widget (xml, "eap_tls_ca_cert_not_required_checkbox");
++	g_assert (widget);
++	g_signal_connect (G_OBJECT (widget), "toggled",
++	                  (GCallback) ca_cert_not_required_toggled,
++	                  method);
++	g_signal_connect (G_OBJECT (widget), "toggled",
++	                  (GCallback) wireless_security_changed_cb,
++	                  parent);
++
+ 	widget = glade_xml_get_widget (xml, "eap_tls_identity_entry");
+ 	g_assert (widget);
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+@@ -466,6 +493,13 @@ eap_method_tls_new (const char *glade_file,
+ 	                  phase2 ? nm_setting_802_1x_get_phase2_private_key_path : nm_setting_802_1x_get_private_key_path,
+ 	                  TRUE, FALSE);
+ 
++	if (eap_method_ca_cert_ignore_get (EAP_METHOD (method), connection, method->phase2)) {
++		widget = glade_xml_get_widget (xml, "eap_tls_ca_cert_button");
++		ca_not_required = !gtk_file_chooser_get_filename (GTK_FILE_CHOOSER (widget));
++	}
++	widget = glade_xml_get_widget (xml, "eap_tls_ca_cert_not_required_checkbox");
++	gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (widget), ca_not_required);
++
+ 	/* Fill secrets, if any */
+ 	if (connection)
+ 		update_secrets (EAP_METHOD (method), connection);
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-ttls.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-ttls.c
+index 4d9b9bc..80d94e5 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-ttls.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-ttls.c
+@@ -56,6 +56,8 @@ validate (EAPMethod *parent)
+ 
+ 	if (!eap_method_validate_filepicker (parent->xml, "eap_ttls_ca_cert_button", TYPE_CA_CERT, NULL, NULL))
+ 		return FALSE;
++	if (eap_method_ca_cert_required (parent->xml, "eap_ttls_ca_cert_not_required_checkbox", "eap_ttls_ca_cert_button") )
++		return FALSE;
+ 
+ 	widget = glade_xml_get_widget (parent->xml, "eap_ttls_inner_auth_combo");
+ 	g_assert (widget);
+@@ -70,6 +72,14 @@ validate (EAPMethod *parent)
+ }
+ 
+ static void
++ca_cert_not_required_toggled (GtkWidget *ignored, gpointer user_data)
++{
++	EAPMethod *parent = user_data;
++
++	eap_method_ca_cert_not_required_toggled (parent->xml, "eap_ttls_ca_cert_not_required_checkbox", "eap_ttls_ca_cert_button");
++}
++
++static void
+ add_to_size_group (EAPMethod *parent, GtkSizeGroup *group)
+ {
+ 	EAPMethodTTLS *method = (EAPMethodTTLS *) parent;
+@@ -82,6 +92,10 @@ add_to_size_group (EAPMethod *parent, GtkSizeGroup *group)
+ 		g_object_unref (method->size_group);
+ 	method->size_group = g_object_ref (group);
+ 
++	widget = glade_xml_get_widget (parent->xml, "eap_ttls_ca_cert_not_required_checkbox");
++	g_assert (widget);
++	gtk_size_group_add_widget (group, widget);
++
+ 	widget = glade_xml_get_widget (parent->xml, "eap_ttls_anon_identity_label");
+ 	g_assert (widget);
+ 	gtk_size_group_add_widget (group, widget);
+@@ -118,6 +132,7 @@ fill_connection (EAPMethod *parent, NMConnection *connection)
+ 	GtkTreeModel *model;
+ 	GtkTreeIter iter;
+ 	GError *error = NULL;
++	gboolean ca_cert_error = FALSE;
+ 
+ 	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+ 	g_assert (s_con);
+@@ -139,11 +154,10 @@ fill_connection (EAPMethod *parent, NMConnection *connection)
+ 	if (!nm_setting_802_1x_set_ca_cert (s_8021x, filename, NM_SETTING_802_1X_CK_SCHEME_PATH, &format, &error)) {
+ 		g_warning ("Couldn't read CA certificate '%s': %s", filename, error ? error->message : "(unknown)");
+ 		g_clear_error (&error);
++		ca_cert_error = TRUE;
+ 	}
+-
+-	nm_gconf_set_ignore_ca_cert (nm_setting_connection_get_uuid (s_con),
+-	                             FALSE,
+-	                             eap_method_get_ignore_ca_cert (parent));
++	eap_method_ca_cert_ignore_set (parent, connection, filename, ca_cert_error, FALSE, "eap_ttls_ca_cert_not_required_checkbox");
++	g_free (filename);
+ 
+ 	widget = glade_xml_get_widget (parent->xml, "eap_ttls_inner_auth_combo");
+ 	model = gtk_combo_box_get_model (GTK_COMBO_BOX (widget));
+@@ -311,7 +325,7 @@ eap_method_ttls_new (const char *glade_file,
+                      gboolean is_editor)
+ {
+ 	EAPMethodTTLS *method;
+-	GtkWidget *widget;
++	GtkWidget *widget, *widget_ca_not_required_checkbox;
+ 	GladeXML *xml;
+ 	GtkFileFilter *filter;
+ 	NMSetting8021x *s_8021x = NULL;
+@@ -358,6 +372,16 @@ eap_method_ttls_new (const char *glade_file,
+ 	if (connection)
+ 		s_8021x = NM_SETTING_802_1X (nm_connection_get_setting (connection, NM_TYPE_SETTING_802_1X));
+ 
++	widget = glade_xml_get_widget (xml, "eap_ttls_ca_cert_not_required_checkbox");
++	g_assert (widget);
++	g_signal_connect (G_OBJECT (widget), "toggled",
++	                  (GCallback) ca_cert_not_required_toggled,
++	                  method);
++	g_signal_connect (G_OBJECT (widget), "toggled",
++	                  (GCallback) wireless_security_changed_cb,
++	                  parent);
++	widget_ca_not_required_checkbox = widget;
++
+ 	widget = glade_xml_get_widget (xml, "eap_ttls_ca_cert_button");
+ 	g_assert (widget);
+ 	gtk_file_chooser_set_local_only (GTK_FILE_CHOOSER (widget), TRUE);
+@@ -369,11 +393,14 @@ eap_method_ttls_new (const char *glade_file,
+ 	filter = eap_method_default_file_chooser_filter_new (FALSE);
+ 	gtk_file_chooser_add_filter (GTK_FILE_CHOOSER (widget), filter);
+ 	if (connection && s_8021x) {
++		filename = NULL;
+ 		if (nm_setting_802_1x_get_ca_cert_scheme (s_8021x) == NM_SETTING_802_1X_CK_SCHEME_PATH) {
+ 			filename = nm_setting_802_1x_get_ca_cert_path (s_8021x);
+ 			if (filename)
+ 				gtk_file_chooser_set_filename (GTK_FILE_CHOOSER (widget), filename);
+ 		}
++		gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (widget_ca_not_required_checkbox),
++		                              !filename && eap_method_ca_cert_ignore_get (EAP_METHOD (method), connection, FALSE));
+ 	}
+ 
+ 	widget = glade_xml_get_widget (xml, "eap_ttls_anon_identity_entry");
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
+index 784bad5..d901201 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
+@@ -565,3 +565,102 @@ eap_method_is_encrypted_private_key (const char *path)
+ 	return default_filter_privkey (&info, (gpointer) TRUE);
+ }
+ 
++/* Some methods (PEAP, TLS, TTLS) require a CA certificate. The user can choose
++ * not to provide such a certificate. This method whether the checkbox
++ * id_ca_cert_not_required_checkbutton is checked or id_ca_cert_chooser has a certificate
++ * selected.
++ */
++gboolean
++eap_method_ca_cert_required (GladeXML *xml, const char *id_ca_cert_not_required_checkbutton, const char *id_ca_cert_chooser)
++{
++	char *filename;
++	GtkWidget *widget;
++
++	g_assert (xml && id_ca_cert_not_required_checkbutton && id_ca_cert_chooser);
++
++	widget = glade_xml_get_widget (xml, id_ca_cert_not_required_checkbutton);
++	g_assert (widget && GTK_IS_TOGGLE_BUTTON (widget));
++
++	if (!gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (widget))) {
++		widget = glade_xml_get_widget (xml, id_ca_cert_chooser);
++		g_assert (widget && GTK_IS_FILE_CHOOSER (widget));
++
++		filename = gtk_file_chooser_get_filename (GTK_FILE_CHOOSER (widget));
++		if (!filename)
++			return TRUE;
++		g_free (filename);
++	}
++	return FALSE;
++}
++
++
++void
++eap_method_ca_cert_not_required_toggled (GladeXML *xml, const char *id_ca_cert_not_required_checkbutton, const char *id_ca_cert_chooser)
++{
++	char *filename, *filename_old;
++	gboolean is_not_required;
++	GtkWidget *widget;
++
++	g_assert (xml && id_ca_cert_not_required_checkbutton && id_ca_cert_chooser);
++
++	widget = glade_xml_get_widget (xml, id_ca_cert_not_required_checkbutton);
++	g_assert (widget && GTK_IS_TOGGLE_BUTTON (widget));
++	is_not_required = gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (widget));
++
++	widget = glade_xml_get_widget (xml, id_ca_cert_chooser);
++	g_assert (widget && GTK_IS_FILE_CHOOSER (widget));
++
++	filename = gtk_file_chooser_get_filename (GTK_FILE_CHOOSER (widget));
++	filename_old = g_object_steal_data (G_OBJECT (widget), "filename-old");
++	if (is_not_required) {
++		g_free (filename_old);
++		filename_old = filename;
++		filename = NULL;
++	} else {
++		g_free (filename);
++		filename = filename_old;
++		filename_old = NULL;
++	}
++	gtk_widget_set_sensitive (widget, !is_not_required);
++	if (filename)
++		gtk_file_chooser_set_filename (GTK_FILE_CHOOSER (widget), filename);
++	else
++		gtk_file_chooser_unselect_all (GTK_FILE_CHOOSER (widget));
++	g_free (filename);
++	g_object_set_data_full (G_OBJECT (widget), "filename-old", filename_old, g_free);
++}
++
++void
++eap_method_ca_cert_ignore_set (EAPMethod *method,
++                               NMConnection *connection,
++                               const char *filename,
++                               gboolean ca_cert_error,
++                               gboolean phase2,
++                               const char *id_ca_cert_is_not_required_checkbox)
++{
++	GtkWidget *widget;
++
++	/* We don't really need the checkbox value here. Just assert that it is set as expected. */
++	widget = glade_xml_get_widget (method->xml, id_ca_cert_is_not_required_checkbox);
++	g_assert (widget && (ca_cert_error || !filename == gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (widget))));
++
++	nm_gconf_set_ignore_ca_cert (nm_connection_get_uuid (connection),
++	                             phase2, !ca_cert_error && filename==NULL);
++}
++
++gboolean
++eap_method_ca_cert_ignore_get (EAPMethod *method, NMConnection *connection, gboolean phase2)
++{
++	NMSettingConnection *s_con;
++	const char *uuid;
++
++	s_con = nm_connection_get_setting_connection (connection);
++	g_assert (s_con);
++	uuid = nm_setting_connection_get_uuid (s_con);
++	g_assert (uuid);
++
++	/* Figure out if the user wants to ignore missing CA cert */
++	return nm_gconf_get_ignore_ca_cert (uuid, phase2);
++}
++
++
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method.h b/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
+index 3f69189..5c0cf8f 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
+@@ -124,5 +124,19 @@ void eap_method_phase2_update_secrets_helper (EAPMethod *method,
+                                               const char *combo_name,
+                                               guint32 column);
+ 
++gboolean eap_method_ca_cert_required (GladeXML *xml,
++                                      const char *id_ca_cert_is_not_required_checkbox,
++                                      const char *id_ca_cert_chooser);
++void eap_method_ca_cert_not_required_toggled (GladeXML *xml,
++                                              const char *id_ca_cert_is_not_required_checkbox,
++                                              const char *id_ca_cert_chooser);
++void eap_method_ca_cert_ignore_set (EAPMethod *method,
++                                    NMConnection *connection,
++                                    const char *filename,
++                                    gboolean ca_cert_error,
++                                    gboolean phase2,
++                                    const char *id_ca_cert_is_not_required_checkbox);
++gboolean eap_method_ca_cert_ignore_get (EAPMethod *method, NMConnection *connection, gboolean phase2);
++
+ #endif /* EAP_METHOD_H */
+ 
+-- 
+1.7.1
+

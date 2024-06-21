@@ -1,0 +1,421 @@
+From af7e26b39af6598556eee2bcba23505cb6709ad9 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Mon, 14 Mar 2011 00:25:14 -0500
+Subject: [PATCH] ifcfg-rh: fix reading and writing of Dynamic WEP with EAP-LEAP connections
+
+These are distinct from old-school LEAP (ie, Network EAP) in that
+they are standard Dynamic WEP with LEAP as an EAP method and use
+open-system authentication.  Old LEAP uses the non-standard LEAP
+authentication algorithm.  The config for each is different and thus
+we need to make sure we handle both cases.
+---
+ system-settings/plugins/ifcfg-rh/reader.c             |   18 +-
+ .../ifcfg-rh/tests/network-scripts/Makefile.am     |    4 +-
+ .../ifcfg-test-wifi-dynamic-wep-leap               |   17 ++
+ .../keys-test-wifi-dynamic-wep-leap                |    2 +
+ .../plugins/ifcfg-rh/tests/test-ifcfg-rh.c         |  218 ++++++++++++++++++++
+ system-settings/plugins/ifcfg-rh/writer.c             |   19 ++-
+ 6 files changed, 265 insertions(+), 13 deletions(-)
+ create mode 100644 system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-dynamic-wep-leap
+ create mode 100644 system-settings/plugins/ifcfg-rh/tests/network-scripts/keys-test-wifi-dynamic-wep-leap
+
+diff --git a/system-settings/plugins/ifcfg-rh/reader.c b/system-settings/plugins/ifcfg-rh/reader.c
+index 1f48377..c366dd4 100644
+--- a/system-settings/plugins/ifcfg-rh/reader.c
++++ b/system-settings/plugins/ifcfg-rh/reader.c
+@@ -2401,7 +2401,7 @@ static EAPReader eap_readers[] = {
+ 	{ "chap", eap_simple_reader, TRUE },
+ 	{ "mschap", eap_simple_reader, TRUE },
+ 	{ "mschapv2", eap_simple_reader, TRUE },
+-	{ "leap", eap_simple_reader, TRUE },
++	{ "leap", eap_simple_reader, FALSE },
+ 	{ "tls", eap_tls_reader, FALSE },
+ 	{ "peap", eap_peap_reader, FALSE },
+ 	{ "ttls", eap_ttls_reader, FALSE },
+@@ -2506,16 +2506,22 @@ make_wpa_setting (shvarFile *ifcfg,
+ {
+ 	NMSettingWirelessSecurity *wsec;
+ 	char *value, *psk, *lower;
++	gboolean wpa_psk = FALSE, wpa_eap = FALSE, ieee8021x = FALSE;
+ 
+ 	wsec = NM_SETTING_WIRELESS_SECURITY (nm_setting_wireless_security_new ());
+ 
+ 	value = svGetValue (ifcfg, "KEY_MGMT", FALSE);
+-	if (!value)
++	wpa_psk = !g_strcmp0 (value, "WPA-PSK");
++	wpa_eap = !g_strcmp0 (value, "WPA-EAP");
++	ieee8021x = !g_strcmp0 (value, "IEEE8021X");
++	if (!wpa_psk && !wpa_eap && !ieee8021x)
+ 		goto error; /* Not WPA or Dynamic WEP */
+ 
+-	/* Pairwise and Group ciphers */
+-	fill_wpa_ciphers (ifcfg, wsec, FALSE, adhoc);
+-	fill_wpa_ciphers (ifcfg, wsec, TRUE, adhoc);
++	/* Pairwise and Group ciphers (only relevant for WPA/RSN) */
++	if (wpa_psk || wpa_eap) {
++		fill_wpa_ciphers (ifcfg, wsec, FALSE, adhoc);
++		fill_wpa_ciphers (ifcfg, wsec, TRUE, adhoc);
++	}
+ 
+ 	/* WPA and/or RSN */
+ 	if (adhoc) {
+@@ -2535,7 +2541,7 @@ make_wpa_setting (shvarFile *ifcfg,
+ 		/* If neither WPA_ALLOW_WPA or WPA_ALLOW_WPA2 were present, default
+ 		 * to both WPA and RSN allowed.
+ 		 */
+-		if (!allow_wpa && !allow_rsn) {
++		if (!allow_wpa && !allow_rsn && !ieee8021x) {
+ 			nm_setting_wireless_security_add_proto (wsec, "wpa");
+ 			nm_setting_wireless_security_add_proto (wsec, "rsn");
+ 		}
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am b/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
+index 89760d8..22d1b4a 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
+@@ -76,7 +76,9 @@ EXTRA_DIST = \
+ 	ifcfg-test-vlan-interface \
+ 	ifcfg-test-vlan-only-vlanid \
+ 	ifcfg-test-vlan-only-device \
+-	ifcfg-test-infiniband
++	ifcfg-test-infiniband \
++	ifcfg-test-wifi-dynamic-wep-leap \
++	keys-test-wifi-dynamic-wep-leap
+ 
+ check-local:
+ 	@for f in $(EXTRA_DIST); do \
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-dynamic-wep-leap b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-dynamic-wep-leap
+new file mode 100644
+index 0000000..d9c95cc
+--- /dev/null
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-dynamic-wep-leap
+@@ -0,0 +1,17 @@
++ESSID="sdasdsdg"
++MODE=Managed
++KEY_MGMT=IEEE8021X
++CIPHER_GROUP="WEP40 WEP104"
++TYPE=Wireless
++IEEE_8021X_EAP_METHODS=LEAP
++IEEE_8021X_IDENTITY="bill smith"
++BOOTPROTO=dhcp
++DEFROUTE=yes
++PEERDNS=yes
++PEERROUTES=yes
++IPV4_FAILURE_FATAL=yes
++IPV6INIT=no
++NAME="Test Dynamic WEP LEAP"
++UUID=aca7a23c-d934-49a3-8bfb-ad66f846c57b
++ONBOOT=yes
++USERS=dcbw
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/keys-test-wifi-dynamic-wep-leap b/system-settings/plugins/ifcfg-rh/tests/network-scripts/keys-test-wifi-dynamic-wep-leap
+new file mode 100644
+index 0000000..6936f2e
+--- /dev/null
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/keys-test-wifi-dynamic-wep-leap
+@@ -0,0 +1,2 @@
++IEEE_8021X_PASSWORD="foobar baz"
++
+diff --git a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+index ceec12f..5f518f9 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
++++ b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+@@ -5428,6 +5428,77 @@ test_read_wifi_wpa_eap_ttls_tls (void)
+ 	g_object_unref (connection);
+ }
+ 
++#define TEST_IFCFG_WIFI_DYNAMIC_WEP_LEAP TEST_IFCFG_DIR"/network-scripts/ifcfg-test-wifi-dynamic-wep-leap"
++
++static void
++test_read_wifi_dynamic_wep_leap (void)
++{
++	NMConnection *connection;
++	NMSettingWireless *s_wifi;
++	NMSettingWirelessSecurity *s_wsec;
++	NMSetting8021x *s_8021x;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE, success;
++	GError *error = NULL;
++
++	connection = connection_from_file (TEST_IFCFG_WIFI_DYNAMIC_WEP_LEAP,
++	                                   NULL,
++	                                   TYPE_WIRELESS,
++	                                   NULL,
++	                                   &unmanaged,
++	                                   &keyfile,
++	                                   &routefile,
++	                                   &route6file,
++	                                   &error,
++	                                   &ignore_error);
++	g_assert_no_error (error);
++	g_assert (connection);
++
++	success = nm_connection_verify (connection, &error);
++	g_assert_no_error (error);
++	g_assert (success);
++
++	/* ===== WIRELESS SETTING ===== */
++
++	s_wifi = (NMSettingWireless *) nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS);
++	g_assert (s_wifi);
++
++	g_assert_cmpstr (nm_setting_wireless_get_security (s_wifi), ==, NM_SETTING_WIRELESS_SECURITY_SETTING_NAME);
++
++	/* ===== WiFi SECURITY SETTING ===== */
++	s_wsec = (NMSettingWirelessSecurity *) nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS_SECURITY);
++	g_assert (s_wsec);
++
++	/* Key management */
++	g_assert_cmpstr (nm_setting_wireless_security_get_key_mgmt (s_wsec), ==, "ieee8021x");
++
++	/* Auth alg should be NULL (open) for dynamic WEP with LEAP as the EAP method;
++	 * only "old-school" LEAP uses 'leap' for the auth alg.
++	 */
++	g_assert_cmpstr (nm_setting_wireless_security_get_auth_alg (s_wsec), ==, NULL);
++
++	/* Expect no old-school LEAP username/password, that'll be in the 802.1x setting */
++	g_assert_cmpstr (nm_setting_wireless_security_get_leap_username (s_wsec), ==, NULL);
++	g_assert_cmpstr (nm_setting_wireless_security_get_leap_password (s_wsec), ==, NULL);
++
++	/* ===== 802.1x SETTING ===== */
++	s_8021x = (NMSetting8021x *) nm_connection_get_setting (connection, NM_TYPE_SETTING_802_1X);
++	g_assert (s_8021x);
++
++	/* EAP method should be "leap" */
++	g_assert_cmpint (nm_setting_802_1x_get_num_eap_methods (s_8021x), ==, 1);
++	g_assert_cmpstr (nm_setting_802_1x_get_eap_method (s_8021x, 0), ==, "leap");
++
++	/* username & password */
++	g_assert_cmpstr (nm_setting_802_1x_get_identity (s_8021x), ==, "bill smith");
++	g_assert_cmpstr (nm_setting_802_1x_get_password (s_8021x), ==, "foobar baz");
++
++	g_object_unref (connection);
++}
++
+ #define TEST_IFCFG_WIFI_WEP_EAP_TTLS_CHAP TEST_IFCFG_DIR"/network-scripts/ifcfg-test-wifi-wep-eap-ttls-chap"
+ #define TEST_IFCFG_WIFI_WEP_EAP_TTLS_CHAP_CA_CERT TEST_IFCFG_DIR"/network-scripts/test_ca_cert.pem"
+ 
+@@ -9361,6 +9432,151 @@ test_write_wifi_wpa_eap_ttls_mschapv2 (void)
+ 	g_object_unref (reread);
+ }
+ 
++static void
++test_write_wifi_dynamic_wep_leap (void)
++{
++	NMConnection *connection;
++	NMConnection *reread;
++	NMSettingConnection *s_con;
++	NMSettingWireless *s_wifi;
++	NMSettingWirelessSecurity *s_wsec;
++	NMSetting8021x *s_8021x;
++	NMSettingIP4Config *s_ip4;
++	NMSettingIP6Config *s_ip6;
++	char *uuid;
++	gboolean success;
++	GError *error = NULL;
++	char *testfile = NULL;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE;
++	GByteArray *ssid;
++	const char *ssid_data = "blahblah";
++	shvarFile *ifcfg;
++	char *tmp;
++
++	connection = nm_connection_new ();
++	g_assert (connection);
++
++	/* Connection setting */
++	s_con = (NMSettingConnection *) nm_setting_connection_new ();
++	g_assert (s_con);
++	nm_connection_add_setting (connection, NM_SETTING (s_con));
++
++	uuid = nm_utils_uuid_generate ();
++	g_object_set (s_con,
++	              NM_SETTING_CONNECTION_ID, "Test Write Wifi Dynamic WEP LEAP",
++	              NM_SETTING_CONNECTION_UUID, uuid,
++	              NM_SETTING_CONNECTION_TYPE, NM_SETTING_WIRELESS_SETTING_NAME,
++	              NULL);
++	g_free (uuid);
++
++	/* Wifi setting */
++	s_wifi = (NMSettingWireless *) nm_setting_wireless_new ();
++	g_assert (s_wifi);
++	nm_connection_add_setting (connection, NM_SETTING (s_wifi));
++
++	ssid = g_byte_array_sized_new (strlen (ssid_data));
++	g_byte_array_append (ssid, (const unsigned char *) ssid_data, strlen (ssid_data));
++
++	g_object_set (s_wifi,
++	              NM_SETTING_WIRELESS_SSID, ssid,
++	              NM_SETTING_WIRELESS_MODE, "infrastructure",
++	              NM_SETTING_WIRELESS_SEC, NM_SETTING_WIRELESS_SECURITY_SETTING_NAME,
++	              NULL);
++
++	g_byte_array_free (ssid, TRUE);
++
++	/* Wireless security setting */
++	s_wsec = (NMSettingWirelessSecurity *) nm_setting_wireless_security_new ();
++	g_assert (s_wsec);
++	nm_connection_add_setting (connection, NM_SETTING (s_wsec));
++
++	g_object_set (s_wsec, NM_SETTING_WIRELESS_SECURITY_KEY_MGMT, "ieee8021x", NULL);
++
++	/* Wireless security setting */
++	s_8021x = (NMSetting8021x *) nm_setting_802_1x_new ();
++	g_assert (s_8021x);
++	nm_connection_add_setting (connection, NM_SETTING (s_8021x));
++
++	nm_setting_802_1x_add_eap_method (s_8021x, "leap");
++
++	g_object_set (s_8021x,
++	              NM_SETTING_802_1X_IDENTITY, "Bill Smith",
++	              NM_SETTING_802_1X_PASSWORD, ";alkdfja;dslkfjsad;lkfjsadf",
++	              NULL);
++
++	/* IP4 setting */
++	s_ip4 = (NMSettingIP4Config *) nm_setting_ip4_config_new ();
++	g_assert (s_ip4);
++	g_object_set (s_ip4, NM_SETTING_IP4_CONFIG_METHOD, NM_SETTING_IP4_CONFIG_METHOD_AUTO, NULL);
++	nm_connection_add_setting (connection, NM_SETTING (s_ip4));
++
++	/* IP6 setting */
++	s_ip6 = (NMSettingIP6Config *) nm_setting_ip6_config_new ();
++	g_assert (s_ip6);
++	g_object_set (s_ip6, NM_SETTING_IP6_CONFIG_METHOD, NM_SETTING_IP6_CONFIG_METHOD_IGNORE, NULL);
++	nm_connection_add_setting (connection, NM_SETTING (s_ip6));
++
++	success = nm_connection_verify (connection, &error);
++	g_assert_no_error (error);
++	g_assert (success);
++
++	/* Save the ifcfg */
++	success = writer_new_connection (connection,
++	                                 TEST_SCRATCH_DIR "/network-scripts/",
++	                                 &testfile,
++	                                 &error);
++	g_assert_no_error (error);
++	g_assert (success);
++	g_assert (testfile);
++
++	/* re-read the connection for comparison */
++	reread = connection_from_file (testfile,
++	                               NULL,
++	                               TYPE_WIRELESS,
++	                               NULL,
++	                               &unmanaged,
++	                               &keyfile,
++	                               &routefile,
++	                               &route6file,
++	                               &error,
++	                               &ignore_error);
++	g_assert_no_error (error);
++	g_assert (reread);
++	g_assert (keyfile);
++	unlink (keyfile);
++
++	success = nm_connection_verify (reread, &error);
++	g_assert_no_error (error);
++	g_assert (success);
++
++	success = nm_connection_compare (connection, reread, NM_SETTING_COMPARE_FLAG_EXACT);
++	g_assert (success);
++
++	/* Check and make sure that an "old-school" LEAP (Network EAP) connection
++	 * did not get written.  Check first that the auth alg is not set to "LEAP"
++	 * and next that the only IEEE 802.1x EAP method is "LEAP".
++	 */
++	ifcfg = svNewFile (testfile);
++	g_assert (ifcfg);
++	tmp = svGetValue (ifcfg, "SECURITYMODE", FALSE);
++	g_assert_cmpstr (tmp, ==, NULL);
++	g_free (tmp);
++
++	tmp = svGetValue (ifcfg, "IEEE_8021X_EAP_METHODS", FALSE);
++	g_assert_cmpstr (tmp, ==, "LEAP");
++
++	svCloseFile (ifcfg);
++	unlink (testfile);
++
++	g_free (testfile);
++	g_object_unref (connection);
++	g_object_unref (reread);
++}
++
+ #define TEST_IFCFG_IBFT_DHCP TEST_IFCFG_DIR"/network-scripts/ifcfg-test-ibft-dhcp"
+ 
+ static void
+@@ -10535,6 +10751,7 @@ int main (int argc, char **argv)
+ 	test_read_wifi_wpa_psk_unquoted2 ();
+ 	test_read_wifi_wpa_psk_adhoc ();
+ 	test_read_wifi_wpa_psk_hex ();
++	test_read_wifi_dynamic_wep_leap ();
+ 	test_read_wifi_wpa_eap_tls ();
+ 	test_read_wifi_wpa_eap_ttls_tls ();
+ 	test_read_wifi_wep_eap_ttls_chap ();
+@@ -10598,6 +10815,7 @@ int main (int argc, char **argv)
+ 	test_write_wifi_wpa_eap_tls ();
+ 	test_write_wifi_wpa_eap_ttls_tls ();
+ 	test_write_wifi_wpa_eap_ttls_mschapv2 ();
++	test_write_wifi_dynamic_wep_leap ();
+ 	test_write_wired_qeth_dhcp ();
+ 	test_write_wired_ctc_dhcp ();
+ 	test_write_infiniband ();
+diff --git a/system-settings/plugins/ifcfg-rh/writer.c b/system-settings/plugins/ifcfg-rh/writer.c
+index 747f818..6924262 100644
+--- a/system-settings/plugins/ifcfg-rh/writer.c
++++ b/system-settings/plugins/ifcfg-rh/writer.c
+@@ -548,7 +548,7 @@ write_wireless_security_setting (NMConnection *connection,
+ {
+ 	NMSettingWirelessSecurity *s_wsec;
+ 	const char *key_mgmt, *auth_alg, *key, *proto, *cipher, *psk;
+-	gboolean wep = FALSE, wpa = FALSE;
++	gboolean wep = FALSE, wpa = FALSE, dynamic_wep = FALSE;
+ 	char *tmp;
+ 	guint32 i, num;
+ 	GString *str;
+@@ -576,6 +576,7 @@ write_wireless_security_setting (NMConnection *connection,
+ 		*no_8021x = TRUE;
+ 	} else if (!strcmp (key_mgmt, "ieee8021x")) {
+ 		svSetValue (ifcfg, "KEY_MGMT", "IEEE8021X", FALSE);
++		dynamic_wep = TRUE;
+ 	} else if (!strcmp (key_mgmt, "wpa-eap")) {
+ 		svSetValue (ifcfg, "KEY_MGMT", "WPA-EAP", FALSE);
+ 		wpa = TRUE;
+@@ -681,11 +682,17 @@ write_wireless_security_setting (NMConnection *connection,
+ 		if (i > 0)
+ 			g_string_append_c (str, ' ');
+ 		cipher = nm_setting_wireless_security_get_pairwise (s_wsec, i);
+-		tmp = g_ascii_strup (cipher, -1);
+-		g_string_append (str, tmp);
+-		g_free (tmp);
++
++		/* Don't write out WEP40 or WEP104 if for some reason they are set; they
++		 * are not valid pairwise ciphers.
++		 */
++		if (strcmp (cipher, "wep40") && strcmp (cipher, "wep104")) {
++			tmp = g_ascii_strup (cipher, -1);
++			g_string_append (str, tmp);
++			g_free (tmp);
++		}
+ 	}
+-	if (strlen (str->str))
++	if (strlen (str->str) && (dynamic_wep == FALSE))
+ 		svSetValue (ifcfg, "CIPHER_PAIRWISE", str->str, FALSE);
+ 	g_string_free (str, TRUE);
+ 
+@@ -701,7 +708,7 @@ write_wireless_security_setting (NMConnection *connection,
+ 		g_string_append (str, tmp);
+ 		g_free (tmp);
+ 	}
+-	if (strlen (str->str))
++	if (strlen (str->str) && (dynamic_wep == FALSE))
+ 		svSetValue (ifcfg, "CIPHER_GROUP", str->str, FALSE);
+ 	g_string_free (str, TRUE);
+ 
+-- 
+1.7.1
+

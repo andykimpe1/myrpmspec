@@ -1,0 +1,112 @@
+From 048743017bb9210a6d59a5b0e68d98fef4f6050d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Fri, 8 Mar 2013 15:05:14 +0100
+Subject: [PATCH] editor: hide BSSID for Ad-Hoc connections (rh #906133)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+BSSID is also cleared when saving the Ad-Hoc connection so that it is not sent
+to wpa_supplicant.
+
+BSSID is random for Ad-Hoc networks. It is generated in kernel mac80211 subsystem
+or driver (when Ad-Hoc network is created). So, there's no need to specify the
+BSSID at all. Actually, wpa_supplicant fails to associate with bssid provided.
+The code for generating BSSID for IBSS (Ad-Hoc) is here:
+http://lxr.linux.no/linux+v3.7.6/net/mac80211/ibss.c#L685
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ src/connection-editor/page-wifi.c | 53 ++++++++++++++++++++++++---------------
+ 1 file changed, 33 insertions(+), 20 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/page-wireless.c b/network-manager-applet-0.8.1/src/connection-editor/page-wireless.c
+index aa26a82..fe92a8b 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/page-wireless.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/page-wireless.c
+@@ -261,40 +261,52 @@ mode_combo_changed_cb (GtkComboBox *combo,
+ 	CEPageWireless *self = CE_PAGE_WIRELESS (user_data);
+ 	CEPageWirelessPrivate *priv = CE_PAGE_WIRELESS_GET_PRIVATE (self);
+ 	CEPage *parent = CE_PAGE (self);
+-	GtkWidget *widget;
+-	gboolean show;
++	GtkWidget *widget_band_label, *widget_chan_label, *widget_bssid_label;
++	gboolean adhoc;
+ 
+  	switch (gtk_combo_box_get_active (GTK_COMBO_BOX (combo))) {
+  	case 1: /* adhoc */
+-		show = TRUE;
++		adhoc = TRUE;
+  		break;
+  	default: /* infrastructure */
+-		show = FALSE;
++		adhoc = FALSE;
+  		break;
+  	}
+ 
+-	if (show) {
+-		widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "wireless_band_label"));
+-		gtk_widget_show (widget);
++	widget_band_label = GTK_WIDGET (gtk_builder_get_object (parent->builder, "wireless_band_label"));
++	widget_chan_label = GTK_WIDGET (gtk_builder_get_object (parent->builder, "wireless_channel_label"));
++	widget_bssid_label = GTK_WIDGET (gtk_builder_get_object (parent->builder, "wireless_bssid_label"));
++
++	if (adhoc) {
++		/* For Ad-Hoc show Band and Channel */
++		gtk_widget_show (widget_band_label);
+ 		gtk_widget_show (GTK_WIDGET (priv->band));
+-		widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "wireless_channel_label"));
+-		gtk_widget_show (widget);
++		gtk_widget_show (widget_chan_label);
+ 		gtk_widget_show (GTK_WIDGET (priv->channel));
++
++		/* and hide BSSID
++		 * BSSID is random and is created by kernel for Ad-Hoc networks
++		 * http://lxr.linux.no/linux+v3.7.6/net/mac80211/ibss.c#L685
++		 */
++		gtk_widget_hide (widget_bssid_label);
++		gtk_widget_hide (GTK_WIDGET (priv->bssid));
+ 	} else {
+-		widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "wireless_band_label"));
+-		gtk_widget_hide (widget);
++		/* Do opposite for Infrastructure mode */
++		gtk_widget_hide (widget_band_label);
+ 		gtk_widget_hide (GTK_WIDGET (priv->band));
+-		widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "wireless_channel_label"));
+-		gtk_widget_hide (widget);
++		gtk_widget_hide (widget_chan_label);
+ 		gtk_widget_hide (GTK_WIDGET (priv->channel));
++
++		gtk_widget_show (widget_bssid_label);
++		gtk_widget_show (GTK_WIDGET (priv->bssid));
+ 	}
+ 
+-	widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "wireless_band_label"));
+-	gtk_widget_set_sensitive (GTK_WIDGET (widget), show);
+-	gtk_widget_set_sensitive (GTK_WIDGET (priv->band), show);
+-	widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "wireless_channel_label"));
+-	gtk_widget_set_sensitive (GTK_WIDGET (widget), show);
+-	gtk_widget_set_sensitive (GTK_WIDGET (priv->channel), show);
++	gtk_widget_set_sensitive (widget_band_label, adhoc);
++	gtk_widget_set_sensitive (GTK_WIDGET (priv->band), adhoc);
++	gtk_widget_set_sensitive (widget_chan_label, adhoc);
++	gtk_widget_set_sensitive (GTK_WIDGET (priv->channel), adhoc);
++	gtk_widget_set_sensitive (widget_bssid_label, !adhoc);
++	gtk_widget_set_sensitive (GTK_WIDGET (priv->bssid), !adhoc);
+ 
+ 	ce_page_changed (CE_PAGE (self));
+ }
+@@ -499,7 +499,9 @@ ui_to_setting (CEPageWireless *self)
+ 		break;
+ 	}
+ 
+-	bssid = ce_page_entry_to_mac (priv->bssid, ARPHRD_ETHER, NULL);
++	/* BSSID is only valid for infrastructure not for adhoc */
++	if (mode && strcmp (mode, "adhoc") != 0)
++		bssid = ce_page_entry_to_mac (priv->bssid, ARPHRD_ETHER, NULL);
+ 	device_mac = ce_page_entry_to_mac (priv->device_mac, ARPHRD_ETHER, NULL);
+ 	cloned_mac = ce_page_entry_to_mac (priv->cloned_mac, ARPHRD_ETHER, NULL);
+ 
+-- 
+1.7.11.7
+

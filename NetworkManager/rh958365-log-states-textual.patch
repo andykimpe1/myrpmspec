@@ -1,0 +1,419 @@
+From 69ca2c4089a961eee5f1660fde1c846a74e55a88 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Tue, 3 May 2011 11:57:26 -0500
+Subject: [PATCH] Log textual description for devices/vpn in addition to codes
+ (rh #958365)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Device state/reason code is mainly based on these 3 upstream commits, but
+there are a fewa other changes too.
+c4b922e core: emit textual descriptions of device state changes
+60ed383 core: print textual description for reason codes on device deactivation too
+c1d3d3f device: queuing two transitions to the same state is not an error
+
+VPN code translation is based on these upstream commits:
+bd1648b vpn: print VPN plugin states as strings
+3cebf96 vpn: add code2string translation for NMVPNConnectionState and fix its logging
+c72d2eb vpn: print VPN plugin failures and VPN connection reason changes as strings
+
+https://bugzilla.redhat.com/show_bug.cgi?id=958365
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ src/nm-device.c                     | 169 +++++++++++++++++++++++++++++++++---
+ src/vpn-manager/nm-vpn-connection.c | 111 +++++++++++++++++++++--
+ 2 files changed, 263 insertions(+), 17 deletions(-)
+
+diff --git a/src/nm-device.c b/src/nm-device.c
+index 6ff6bf5..9e60aa5 100644
+--- a/src/nm-device.c
++++ b/src/nm-device.c
+@@ -216,6 +216,9 @@ static void dhcp4_cleanup (NMDevice *self, gboolean stop);
+ static void nm_device_start_ip_check (NMDevice *self);
+ static void ip_check_gw_ping_cleanup (NMDevice *self);
+ 
++static const char *state_to_string (NMDeviceState state);
++static const char *reason_to_string (NMDeviceStateReason reason);
++
+ 
+ static void
+ device_interface_init (NMDeviceInterface *device_interface_class)
+@@ -646,11 +649,13 @@ slave_state_changed (NMDevice *slave,
+ 	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
+ 	gboolean release = FALSE;
+ 
+-	nm_log_dbg (LOGD_DEVICE, "(%s): slave %s state change %d -> %d",
++	nm_log_dbg (LOGD_DEVICE, "(%s): slave %s state change %d (%s) -> %d (%s)",
+ 	            nm_device_get_iface (self),
+ 	            nm_device_get_iface (slave),
+ 	            slave_old_state,
+-	            slave_new_state);
++	            state_to_string (slave_old_state),
++	            slave_new_state,
++	            state_to_string (slave_new_state));
+ 
+ 	g_assert (priv->state > NM_DEVICE_STATE_DISCONNECTED);
+ 	g_assert (priv->state <= NM_DEVICE_STATE_ACTIVATED);
+@@ -3227,8 +3232,8 @@ nm_device_deactivate (NMDeviceInterface *device, NMDeviceStateReason reason)
+ 
+ 	g_return_if_fail (self != NULL);
+ 
+-	nm_log_info (LOGD_DEVICE, "(%s): deactivating device (reason: %d).",
+-	             nm_device_get_iface (self), reason);
++	nm_log_info (LOGD_DEVICE, "(%s): deactivating device (reason '%s') [%d]",
++	             nm_device_get_iface (self), reason_to_string (reason), reason);
+ 
+ 	nm_device_deactivate_quickly (self);
+ 
+@@ -4275,6 +4280,136 @@ nm_device_get_firmware_missing (NMDevice *self)
+ 	return NM_DEVICE_GET_PRIVATE (self)->firmware_missing;
+ }
+ 
++static const char *
++state_to_string (NMDeviceState state)
++{
++	switch (state) {
++	case NM_DEVICE_STATE_UNMANAGED:
++		return "unmanaged";
++	case NM_DEVICE_STATE_UNAVAILABLE:
++		return "unavailable";
++	case NM_DEVICE_STATE_DISCONNECTED:
++		return "disconnected";
++	case NM_DEVICE_STATE_PREPARE:
++		return "prepare";
++	case NM_DEVICE_STATE_CONFIG:
++		return "config";
++	case NM_DEVICE_STATE_NEED_AUTH:
++		return "need-auth";
++	case NM_DEVICE_STATE_IP_CONFIG:
++		return "ip-config";
++	case NM_DEVICE_STATE_ACTIVATED:
++		return "activated";
++	case NM_DEVICE_STATE_FAILED:
++		return "failed";
++	default:
++		break;
++	}
++	return "unknown";
++}
++
++static const char *
++reason_to_string (NMDeviceStateReason reason)
++{
++	switch (reason) {
++	case NM_DEVICE_STATE_REASON_NONE:
++		return "none";
++	case NM_DEVICE_STATE_REASON_NOW_MANAGED:
++		return "managed";
++	case NM_DEVICE_STATE_REASON_NOW_UNMANAGED:
++		return "unmanaged";
++	case NM_DEVICE_STATE_REASON_CONFIG_FAILED:
++		return "config-failed";
++	case NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE:
++		return "ip-config-unavailable";
++	case NM_DEVICE_STATE_REASON_IP_CONFIG_EXPIRED:
++		return "ip-config-expired";
++	case NM_DEVICE_STATE_REASON_NO_SECRETS:
++		return "no-secrets";
++	case NM_DEVICE_STATE_REASON_SUPPLICANT_DISCONNECT:
++		return "supplicant-disconnect";
++	case NM_DEVICE_STATE_REASON_SUPPLICANT_CONFIG_FAILED:
++		return "supplicant-config-failed";
++	case NM_DEVICE_STATE_REASON_SUPPLICANT_FAILED:
++		return "supplicant-failed";
++	case NM_DEVICE_STATE_REASON_SUPPLICANT_TIMEOUT:
++		return "supplicant-timeout";
++	case NM_DEVICE_STATE_REASON_PPP_START_FAILED:
++		return "ppp-start-failed";
++	case NM_DEVICE_STATE_REASON_PPP_DISCONNECT:
++		return "ppp-disconnect";
++	case NM_DEVICE_STATE_REASON_PPP_FAILED:
++		return "ppp-failed";
++	case NM_DEVICE_STATE_REASON_DHCP_START_FAILED:
++		return "dhcp-start-failed";
++	case NM_DEVICE_STATE_REASON_DHCP_ERROR:
++		return "dhcp-error";
++	case NM_DEVICE_STATE_REASON_DHCP_FAILED:
++		return "dhcp-failed";
++	case NM_DEVICE_STATE_REASON_SHARED_START_FAILED:
++		return "sharing-start-failed";
++	case NM_DEVICE_STATE_REASON_SHARED_FAILED:
++		return "sharing-failed";
++	case NM_DEVICE_STATE_REASON_AUTOIP_START_FAILED:
++		return "autoip-start-failed";
++	case NM_DEVICE_STATE_REASON_AUTOIP_ERROR:
++		return "autoip-error";
++	case NM_DEVICE_STATE_REASON_AUTOIP_FAILED:
++		return "autoip-failed";
++	case NM_DEVICE_STATE_REASON_MODEM_BUSY:
++		return "modem-busy";
++	case NM_DEVICE_STATE_REASON_MODEM_NO_DIAL_TONE:
++		return "modem-no-dialtone";
++	case NM_DEVICE_STATE_REASON_MODEM_NO_CARRIER:
++		return "modem-no-carrier";
++	case NM_DEVICE_STATE_REASON_MODEM_DIAL_TIMEOUT:
++		return "modem-dial-timeout";
++	case NM_DEVICE_STATE_REASON_MODEM_DIAL_FAILED:
++		return "modem-dial-failed";
++	case NM_DEVICE_STATE_REASON_MODEM_INIT_FAILED:
++		return "modem-init-failed";
++	case NM_DEVICE_STATE_REASON_GSM_APN_FAILED:
++		return "gsm-apn-failed";
++	case NM_DEVICE_STATE_REASON_GSM_REGISTRATION_NOT_SEARCHING:
++		return "gsm-registration-idle";
++	case NM_DEVICE_STATE_REASON_GSM_REGISTRATION_DENIED:
++		return "gsm-registration-denied";
++	case NM_DEVICE_STATE_REASON_GSM_REGISTRATION_TIMEOUT:
++		return "gsm-registration-timeout";
++	case NM_DEVICE_STATE_REASON_GSM_REGISTRATION_FAILED:
++		return "gsm-registration-failed";
++	case NM_DEVICE_STATE_REASON_GSM_PIN_CHECK_FAILED:
++		return "gsm-pin-check-failed";
++	case NM_DEVICE_STATE_REASON_FIRMWARE_MISSING:
++		return "firmware-missing";
++	case NM_DEVICE_STATE_REASON_REMOVED:
++		return "removed";
++	case NM_DEVICE_STATE_REASON_SLEEPING:
++		return "sleeping";
++	case NM_DEVICE_STATE_REASON_CONNECTION_REMOVED:
++		return "connection-removed";
++	case NM_DEVICE_STATE_REASON_USER_REQUESTED:
++		return "user-requested";
++	case NM_DEVICE_STATE_REASON_CARRIER:
++		return "carrier-chagned";
++	case NM_DEVICE_STATE_REASON_CONNECTION_ASSUMED:
++		return "connection-assumed";
++	case NM_DEVICE_STATE_REASON_SUPPLICANT_AVAILABLE:
++		return "supplicant-available";
++	case NM_DEVICE_STATE_REASON_MODEM_NOT_FOUND:
++		return "modem-not-found";
++	case NM_DEVICE_STATE_REASON_BT_FAILED:
++		return "bluetooth-failed";
++	case NM_DEVICE_STATE_REASON_INFINIBAND_MODE:
++		return "infiniband-mode";
++	case NM_DEVICE_STATE_REASON_DEPENDENCY_FAILED:
++		return "dependency-failed";
++	default:
++		break;
++	}
++	return "unknown";
++}
++
+ void
+ nm_device_state_changed (NMDevice *device,
+                          NMDeviceState state,
+@@ -4298,8 +4433,14 @@ nm_device_state_changed (NMDevice *device,
+ 	old_state = priv->state;
+ 	priv->state = state;
+ 
+-	nm_log_info (LOGD_DEVICE, "(%s): device state change: %d -> %d (reason %d)",
+-	             nm_device_get_iface (device), old_state, state, reason);
++	nm_log_info (LOGD_DEVICE, "(%s): device state change: %s -> %s (reason '%s') [%d %d %d]",
++	             nm_device_get_iface (device),
++	             state_to_string (old_state),
++	             state_to_string (state),
++	             reason_to_string (reason),
++	             old_state,
++	             state,
++	             reason);
+ 
+ 	/* Clear any queued transitions */
+ 	queued_state_clear (device);
+@@ -4409,9 +4550,9 @@ queued_set_state (gpointer user_data)
+ 	NMDeviceStateReason new_reason;
+ 
+ 	if (priv->queued_state.id) {
+-		nm_log_dbg (LOGD_DEVICE, "(%s): running queued state change to %d (id %d)",
++		nm_log_dbg (LOGD_DEVICE, "(%s): running queued state change to %s (id %d)",
+ 		            nm_device_get_iface (self),
+-		            priv->queued_state.state,
++		            state_to_string (priv->queued_state.state),
+ 		            priv->queued_state.id);
+ 
+ 		/* Clear queued state struct before triggering state change, since
+@@ -4444,9 +4581,10 @@ nm_device_queue_state (NMDevice *self,
+ 	if (priv->queued_state.id) {
+ 		if (priv->queued_state.state == state)
+ 			return;
+-		nm_log_warn (LOGD_DEVICE, "(%s): overwriting previously queued state change to %d",
+-		             nm_device_get_iface (self),
+-		             priv->queued_state.state);
++		nm_log_warn (LOGD_DEVICE, "(%s): overwriting previously queued state change to %s (%s)",
++		             nm_device_get_iface (self),
++		             state_to_string (priv->queued_state.state),
++		             reason_to_string (priv->queued_state.reason));
+ 		queued_state_clear (self);
+ 	}
+ 
+@@ -4452,8 +4598,9 @@ nm_device_queue_state (NMDevice *self,
+ 	priv->queued_state.reason = reason;
+ 	priv->queued_state.id = g_idle_add (queued_set_state, self);
+ 
+-	nm_log_dbg (LOGD_DEVICE, "(%s): queued state change to %d (id %d)",
+-	            nm_device_get_iface (self), priv->queued_state.state, priv->queued_state.id);
++	nm_log_dbg (LOGD_DEVICE, "(%s): queued state change to %s due to %s (id %d)",
++	            nm_device_get_iface (self), state_to_string (state), reason_to_string (reason),
++ 	            priv->queued_state.id);
+ }
+ 
+ NMDeviceState
+diff --git a/src/vpn-manager/nm-vpn-connection.c b/src/vpn-manager/nm-vpn-connection.c
+index 64b8744..ce94093 100644
+--- a/src/vpn-manager/nm-vpn-connection.c
++++ b/src/vpn-manager/nm-vpn-connection.c
+@@ -260,14 +260,31 @@ nm_vpn_connection_get_service (NMVPNConnection *connection)
+ 	return nm_setting_vpn_get_service_type (setting);
+ }
+ 
++static const char *
++vpn_plugin_failure_to_string (NMVPNPluginFailure failure)
++{
++	switch (failure) {
++	case NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED:
++		return "login-failed";
++	case NM_VPN_PLUGIN_FAILURE_CONNECT_FAILED:
++		return "connect-failed";
++	case NM_VPN_PLUGIN_FAILURE_BAD_IP_CONFIG:
++		return "bad-ip-config";
++	default:
++		break;
++	}
++	return "unknown";
++}
++
+ static void
+ plugin_failed (DBusGProxy *proxy,
+-			   NMVPNPluginFailure plugin_failure,
+-			   gpointer user_data)
++               NMVPNPluginFailure plugin_failure,
++               gpointer user_data)
+ {
+ 	NMVPNConnectionPrivate *priv = NM_VPN_CONNECTION_GET_PRIVATE (user_data);
+ 
+-	nm_log_warn (LOGD_VPN, "VPN plugin failed: %d", plugin_failure);
++	nm_log_warn (LOGD_VPN, "VPN plugin failed: %s (%d)",
++	             vpn_plugin_failure_to_string (plugin_failure), plugin_failure);
+ 
+ 	switch (plugin_failure) {
+ 	case NM_VPN_PLUGIN_FAILURE_LOGIN_FAILED:
+@@ -281,6 +298,84 @@ plugin_failed (DBusGProxy *proxy,
+ 	}
+ }
+ 
++static const char *
++vpn_service_state_to_string (NMVPNServiceState state)
++{
++	switch (state) {
++	case NM_VPN_SERVICE_STATE_INIT:
++		return "init";
++	case NM_VPN_SERVICE_STATE_SHUTDOWN:
++		return "shutdown";
++	case NM_VPN_SERVICE_STATE_STARTING:
++		return "starting";
++	case NM_VPN_SERVICE_STATE_STARTED:
++		return "started";
++	case NM_VPN_SERVICE_STATE_STOPPING:
++		return "stopping";
++	case NM_VPN_SERVICE_STATE_STOPPED:
++		return "stopped";
++	default:
++		break;
++	}
++	return "unknown";
++}
++
++static const char *
++vpn_state_to_string (NMVPNConnectionState state)
++{
++	switch (state) {
++	case NM_VPN_CONNECTION_STATE_PREPARE:
++		return "prepare";
++	case NM_VPN_CONNECTION_STATE_NEED_AUTH:
++		return "need-auth";
++	case NM_VPN_CONNECTION_STATE_CONNECT:
++		return "connect";
++	case NM_VPN_CONNECTION_STATE_IP_CONFIG_GET:
++		return "ip-config-get";
++	case NM_VPN_CONNECTION_STATE_ACTIVATED:
++		return "activated";
++	case NM_VPN_CONNECTION_STATE_FAILED:
++		return "failed";
++	case NM_VPN_CONNECTION_STATE_DISCONNECTED:
++		return "disconnected";
++	default:
++		break;
++	}
++	return "unknown";
++}
++
++static const char *
++vpn_reason_to_string (NMVPNConnectionStateReason reason)
++{
++	switch (reason) {
++	case NM_VPN_CONNECTION_STATE_REASON_NONE:
++		return "none";
++	case NM_VPN_CONNECTION_STATE_REASON_USER_DISCONNECTED:
++		return "user-disconnected";
++	case NM_VPN_CONNECTION_STATE_REASON_DEVICE_DISCONNECTED:
++		return "device-disconnected";
++	case NM_VPN_CONNECTION_STATE_REASON_SERVICE_STOPPED:
++		return "service-stopped";
++	case NM_VPN_CONNECTION_STATE_REASON_IP_CONFIG_INVALID:
++		return "ip-config-invalid";
++	case NM_VPN_CONNECTION_STATE_REASON_CONNECT_TIMEOUT:
++		return "connect-timeout";
++	case NM_VPN_CONNECTION_STATE_REASON_SERVICE_START_TIMEOUT:
++		return "service-start-timeout";
++	case NM_VPN_CONNECTION_STATE_REASON_SERVICE_START_FAILED:
++		return "service-start-failed";
++	case NM_VPN_CONNECTION_STATE_REASON_NO_SECRETS:
++		return "no-secrets";
++	case NM_VPN_CONNECTION_STATE_REASON_LOGIN_FAILED:
++		return "login-failed";
++	case NM_VPN_CONNECTION_STATE_REASON_CONNECTION_REMOVED:
++		return "connection-removed";
++	default:
++		break;
++	}
++	return "unknown";
++}
++
+ static void
+ plugin_state_changed (DBusGProxy *proxy,
+                       NMVPNServiceState state,
+@@ -289,7 +384,8 @@ plugin_state_changed (DBusGProxy *proxy,
+ 	NMVPNConnection *connection = NM_VPN_CONNECTION (user_data);
+ 	NMVPNConnectionPrivate *priv = NM_VPN_CONNECTION_GET_PRIVATE (connection);
+ 
+-	nm_log_info (LOGD_VPN, "VPN plugin state changed: %d", state);
++	nm_log_info (LOGD_VPN, "VPN plugin state changed: %s (%d)",
++	             vpn_service_state_to_string (state), state);
+ 
+ 	if (state == NM_VPN_SERVICE_STATE_STOPPED) {
+ 		/* Clear connection secrets to ensure secrets get requested each time the
+@@ -303,7 +399,8 @@ plugin_state_changed (DBusGProxy *proxy,
+ 		case NM_VPN_CONNECTION_STATE_CONNECT:
+ 		case NM_VPN_CONNECTION_STATE_IP_CONFIG_GET:
+ 		case NM_VPN_CONNECTION_STATE_ACTIVATED:
+-			nm_log_info (LOGD_VPN, "VPN plugin state change reason: %d", priv->failure_reason);
++			nm_log_info (LOGD_VPN, "VPN plugin state change reason: %s (%d)",
++			             vpn_reason_to_string (priv->failure_reason), priv->failure_reason);
+ 			nm_vpn_connection_set_vpn_state (connection,
+ 			                                 NM_VPN_CONNECTION_STATE_FAILED,
+ 											 priv->failure_reason);
+@@ -1074,7 +1171,9 @@ plugin_interactive_secrets_required (DBusGProxy *proxy,
+ 
+ 	g_warn_if_fail (priv->interactive_used == TRUE);
+ 
+-	nm_log_info (LOGD_VPN, "VPN plugin requested secrets; state %d", priv->vpn_state);
++	nm_log_info (LOGD_VPN, "VPN plugin requested secrets; state %s (%d)",
++	             vpn_state_to_string (priv->vpn_state), priv->vpn_state);
++
+ 
+ 	g_return_if_fail (priv->vpn_state == NM_VPN_CONNECTION_STATE_CONNECT ||
+ 	                  priv->vpn_state == NM_VPN_CONNECTION_STATE_NEED_AUTH);
+-- 
+1.7.11.7
+

@@ -1,0 +1,470 @@
+--- NetworkManager-0.8.1/network-manager-applet-0.8.1/src/Makefile.am.orig	2013-01-28 22:09:28.467903394 +0100
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/Makefile.am	2013-01-28 22:10:22.801224134 +0100
+@@ -58,6 +58,8 @@ nm_applet_SOURCES =			\
+ 	applet-device-bond.c \
+ 	applet-device-bridge.h \
+ 	applet-device-bridge.c \
++	applet-device-infiniband.h \
++	applet-device-infiniband.c \
+ 	mobile-helpers.c \
+ 	mobile-helpers.h \
+ 	applet-device-bt.h \
+--- NetworkManager-0.8.1/network-manager-applet-0.8.1/po/POTFILES.in.orig	2013-01-29 09:18:58.913703713 +0100
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/po/POTFILES.in	2013-01-29 09:19:40.197187598 +0100
+@@ -10,6 +10,7 @@ src/applet-device-bridge.c
+ src/applet-device-bt.c
+ src/applet-device-cdma.c
+ src/applet-device-gsm.c
++src/applet-device-infiniband.c
+ src/applet-device-vlan.c
+ src/applet-device-wifi.c
+ src/applet-device-wired.c
+--- NetworkManager-0.8.1/network-manager-applet-0.8.1/src/applet.h.orig	2013-01-28 22:14:16.184306444 +0100
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/applet.h	2013-01-28 22:15:43.581213832 +0100
+@@ -105,6 +105,7 @@ typedef struct
+ 	NMADeviceClass *vlan_class;
+ 	NMADeviceClass *bond_class;
+ 	NMADeviceClass *bridge_class;
++	NMADeviceClass *infiniband_class;
+ 
+ 	/* Data model elements */
+ 	guint			update_icon_id;
+--- NetworkManager-0.8.1/network-manager-applet-0.8.1/src/applet.c.orig	2013-01-28 22:17:50.346629046 +0100
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/applet.c	2013-01-28 22:21:22.487976914 +0100
+@@ -48,6 +48,7 @@
+ #include <nm-gsm-device.h>
+ #include <nm-cdma-device.h>
+ #include <nm-device-bt.h>
++#include <nm-device-infiniband.h>
+ #include <nm-utils.h>
+ #include <nm-connection.h>
+ #include <nm-vpn-connection.h>
+@@ -70,6 +70,7 @@
+ #include "applet-device-cdma.h"
+ #include "applet-device-bt.h"
+ #include "applet-device-vlan.h"
++#include "applet-device-infiniband.h"
+ #include "applet-dialogs.h"
+ #include "vpn-password-dialog.h"
+ #include "applet-dbus-manager.h"
+@@ -275,6 +276,8 @@ get_device_class (NMDevice *device, NMAp
+ 		return applet->bond_class;
+ 	else if (NM_IS_DEVICE_BRIDGE (device))
+ 		return applet->bridge_class;
++	else if (NM_IS_DEVICE_INFINIBAND (device))
++		return applet->infiniband_class;
+ 	else
+ 		g_message ("%s: Unknown device type '%s'", __func__, G_OBJECT_TYPE_NAME (device));
+ 	return NULL;
+@@ -1526,6 +1526,8 @@
+ 	                              all_devices, all_connections, menu, applet);
+ 	n_items += add_device_items  (NM_TYPE_DEVICE_ETHERNET,
+ 	                              all_devices, all_connections, menu, applet);
++	n_items += add_device_items  (NM_TYPE_DEVICE_INFINIBAND,
++	                              all_devices, all_connections, menu, applet);
+ 	n_items += add_virtual_items (NM_SETTING_VLAN_SETTING_NAME,
+ 	                              all_devices, all_connections, menu, applet);
+ 	n_items += add_device_items  (NM_TYPE_DEVICE_WIFI,
+@@ -3086,6 +3089,9 @@ constructor (GType type,
+ 	applet->bridge_class = applet_device_bridge_get_class (applet);
+ 	g_assert (applet->bridge_class);
+ 
++	applet->infiniband_class = applet_device_infiniband_get_class (applet);
++	g_assert (applet->infiniband_class);
++
+ 	foo_client_setup (applet);
+ 
+ 	/* timeout to update connection timestamps every 5 minutes */
+@@ -3123,6 +3129,7 @@ static void finalize (GObject *object)
+ 	g_slice_free (NMADeviceClass, applet->vlan_class);
+ 	g_slice_free (NMADeviceClass, applet->bond_class);
+ 	g_slice_free (NMADeviceClass, applet->bridge_class);
++	g_slice_free (NMADeviceClass, applet->infiniband_class);
+ 
+ 	if (applet->update_icon_id)
+ 		g_source_remove (applet->update_icon_id);
+--- /dev/null	2013-01-28 08:31:02.505812401 +0100
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/applet-device-infiniband.h	2013-01-28 21:10:04.216462669 +0100
+@@ -0,0 +1,30 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager Wireless Applet -- Display wireless access points and allow user control
++ *
++ * Dan Williams <dcbw@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2013 Red Hat, Inc.
++ */
++
++#ifndef __APPLET_DEVICE_INFINIBAND_H__
++#define __APPLET_DEVICE_INFINIBAND_H__
++
++#include "applet.h"
++
++NMADeviceClass *applet_device_infiniband_get_class (NMApplet *applet);
++
++#endif /* __APPLET_DEVICE_INFINIBAND_H__ */
+--- /dev/null	2013-01-28 08:31:02.505812401 +0100
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/applet-device-infiniband.c	2013-01-28 23:41:41.991724826 +0100
+@@ -0,0 +1,225 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager Wireless Applet -- Display wireless access points and allow user control
++ *
++ * Dan Williams <dcbw@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2013 Red Hat, Inc.
++ */
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <glib/gi18n.h>
++#include <gtk/gtk.h>
++
++#include <nm-device.h>
++#include <nm-setting-connection.h>
++#include <nm-setting-infiniband.h>
++#include <nm-device-infiniband.h>
++#include <nm-utils.h>
++
++#include "applet.h"
++#include "applet-device-infiniband.h"
++#include "utils.h"
++#include "gconf-helpers.h"
++
++#define DEFAULT_INFINIBAND_NAME _("Auto InfiniBand")
++
++static gboolean
++infiniband_new_auto_connection (NMDevice *device,
++                                gpointer dclass_data,
++                                AppletNewAutoConnectionCallback callback,
++                                gpointer callback_data)
++{
++	NMConnection *connection;
++	NMSettingInfiniband *s_infiniband = NULL;
++	NMSettingConnection *s_con;
++	char *uuid;
++
++	connection = nm_connection_new ();
++
++	s_infiniband = NM_SETTING_INFINIBAND (nm_setting_infiniband_new ());
++	nm_connection_add_setting (connection, NM_SETTING (s_infiniband));
++
++	s_con = NM_SETTING_CONNECTION (nm_setting_connection_new ());
++	uuid = nm_utils_uuid_generate ();
++	g_object_set (s_con,
++	              NM_SETTING_CONNECTION_ID, DEFAULT_INFINIBAND_NAME,
++	              NM_SETTING_CONNECTION_TYPE, nm_setting_get_name (NM_SETTING (s_infiniband)),
++	              NM_SETTING_CONNECTION_AUTOCONNECT, TRUE,
++	              NM_SETTING_CONNECTION_UUID, uuid,
++	              NULL);
++	g_free (uuid);
++
++	nm_connection_add_setting (connection, NM_SETTING (s_con));
++
++	(*callback) (connection, TRUE, FALSE, callback_data);
++	return TRUE;
++}
++
++static void
++infiniband_add_menu_item (NMDevice *device,
++                          gboolean multiple_devices,
++                          GSList *connections,
++                          NMConnection *active,
++                          GtkWidget *menu,
++                          NMApplet *applet)
++{
++	char *text;
++	GtkWidget *item;
++	gboolean carrier = TRUE;
++
++	if (multiple_devices) {
++		char *desc = NULL;
++
++		desc = (char *) utils_get_device_description (device);
++		if (!desc)
++			desc = (char *) nm_device_get_iface (device);
++		g_assert (desc);
++
++		if (g_slist_length (connections) > 1)
++			text = g_strdup_printf (_("InfiniBand Networks (%s)"), desc);
++		else
++			text = g_strdup_printf (_("InfiniBand Network (%s)"), desc);
++	} else {
++		if (g_slist_length (connections) > 1)
++			text = g_strdup (_("InfiniBand Networks"));
++		else
++			text = g_strdup (_("InfiniBand Network"));
++	}
++
++	item = applet_menu_item_create_device_item_helper (device, applet, text);
++	g_free (text);
++
++	/* Only dim the item if the device supports carrier detection AND
++	 * we know it doesn't have a link.
++	 */
++ 	if (nm_device_get_capabilities (device) & NM_DEVICE_CAP_CARRIER_DETECT)
++		carrier = nm_device_infiniband_get_carrier (NM_DEVICE_INFINIBAND (device));
++
++	gtk_widget_set_sensitive (item, FALSE);
++	gtk_menu_shell_append (GTK_MENU_SHELL (menu), item);
++	gtk_widget_show (item);
++
++	if (g_slist_length (connections))
++		applet_add_connection_items (device, connections, carrier, active, NMA_ADD_ACTIVE, menu, applet);
++
++	/* Notify user of unmanaged or unavailable device */
++	item = nma_menu_device_get_menu_item (device, applet, carrier ? NULL : _("disconnected"));
++	if (item) {
++		gtk_menu_shell_append (GTK_MENU_SHELL (menu), item);
++		gtk_widget_show (item);
++	}
++
++	if (!nma_menu_device_check_unusable (device)) {
++		if ((!active && g_slist_length (connections)) || (active && g_slist_length (connections) > 1))
++			applet_menu_item_add_complex_separator_helper (menu, applet, _("Available"), -1);
++
++		if (g_slist_length (connections))
++			applet_add_connection_items (device, connections, carrier, active, NMA_ADD_INACTIVE, menu, applet);
++		else
++			applet_add_default_connection_item (device, DEFAULT_INFINIBAND_NAME, carrier, menu, applet);
++	}
++}
++
++static void
++infiniband_notified_connected (NMDevice *device,
++                               const char *msg,
++                               NMApplet *applet)
++{
++	applet_do_notify_with_pref (applet,
++	                            _("Connection Established"),
++	                            msg ? msg : _("You are now connected to the InfiniBand network."),
++	                            "nm-device-wired",
++	                            PREF_DISABLE_CONNECTED_NOTIFICATIONS);
++}
++
++static GdkPixbuf *
++infiniband_get_icon (NMDevice *device,
++                     NMDeviceState state,
++                     NMConnection *connection,
++                     char **tip,
++                     NMApplet *applet)
++{
++	NMSettingConnection *s_con;
++	GdkPixbuf *pixbuf = NULL;
++	const char *id;
++
++	id = nm_device_get_iface (NM_DEVICE (device));
++	if (connection) {
++		s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
++		id = nm_setting_connection_get_id (s_con);
++	}
++
++	switch (state) {
++	case NM_DEVICE_STATE_PREPARE:
++		*tip = g_strdup_printf (_("Preparing InfiniBand connection '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_CONFIG:
++		*tip = g_strdup_printf (_("Configuring InfiniBand connection '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_NEED_AUTH:
++		*tip = g_strdup_printf (_("User authentication required for InfiniBand connection '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_IP_CONFIG:
++		*tip = g_strdup_printf (_("Requesting address for '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_ACTIVATED:
++		pixbuf = nma_icon_check_and_load ("nm-device-wired", &applet->wired_icon, applet);
++		*tip = g_strdup_printf (_("InfiniBand connection '%s' active"), id);
++		break;
++	default:
++		break;
++	}
++
++	return pixbuf;
++}
++
++
++static gboolean
++infiniband_get_secrets (NMDevice *device,
++                        NMSettingsConnectionInterface *connection,
++                        NMActiveConnection *active_connection,
++                        const char *setting_name,
++                        const char **hints,
++                        NMANewSecretsRequestedFunc callback,
++                        gpointer callback_data,
++                        NMApplet *applet,
++                        GError **error)
++{
++	/* No 802.1X possible yet on InfiniBand */
++	return FALSE;
++}
++
++NMADeviceClass *
++applet_device_infiniband_get_class (NMApplet *applet)
++{
++	NMADeviceClass *dclass;
++
++	dclass = g_slice_new0 (NMADeviceClass);
++	if (!dclass)
++		return NULL;
++
++	dclass->new_auto_connection = infiniband_new_auto_connection;
++	dclass->add_menu_item = infiniband_add_menu_item;
++	dclass->notify_connected = infiniband_notified_connected;
++	dclass->get_icon = infiniband_get_icon;
++	dclass->get_secrets = infiniband_get_secrets;
++
++	return dclass;
++}
+--- NetworkManager-0.8.1/network-manager-applet-0.8.1/src/utils/utils.c.orig	2013-01-29 00:52:16.680783928 +0100
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/utils/utils.c	2013-01-29 01:41:51.172597663 +0100
+@@ -31,6 +31,7 @@
+ #include <nm-device-ethernet.h>
+ #include <nm-device-wifi.h>
+ #include <nm-device-bt.h>
++#include <nm-device-infiniband.h>
+ #include <nm-gsm-device.h>
+ #include <nm-cdma-device.h>
+ #include <nm-access-point.h>
+@@ -44,6 +45,7 @@
+ #include <nm-setting-cdma.h>
+ #include <nm-setting-pppoe.h>
+ #include <nm-setting-bluetooth.h>
++#include <nm-setting-infiniband.h>
+ #include <nm-utils.h>
+ 
+ #include "utils.h"
+@@ -567,6 +569,42 @@ connection_valid_for_bt (NMConnection *connection,
+ 	return addr_match;
+ }
+ 
++static gboolean
++connection_valid_for_infiniband (NMConnection *connection,
++                                 NMSettingConnection *s_con,
++                                 NMDevice *device,
++                                 gpointer specific_object)
++{
++	NMDeviceInfiniband *ibdev = NM_DEVICE_INFINIBAND (device);
++	NMSettingInfiniband *s_infiniband;
++	const GByteArray *mac;
++	const char *device_mac_str;
++	GByteArray *device_mac;
++
++	s_infiniband = nm_connection_get_setting_infiniband (connection);
++	if (!s_infiniband)
++		return FALSE;
++
++	/* Match MAC address */
++	mac = nm_setting_infiniband_get_mac_address (s_infiniband);
++	if (!mac)
++		return TRUE;
++
++	device_mac_str = nm_device_infiniband_get_hw_address (ibdev);
++	g_return_val_if_fail (device_mac_str != NULL, FALSE);
++
++	device_mac = nm_utils_hwaddr_atoba (device_mac_str, ARPHRD_INFINIBAND);
++	g_return_val_if_fail (device_mac != NULL, FALSE);
++
++	if (memcmp (mac->data, device_mac->data, mac->len) != 0) {
++		g_byte_array_unref (device_mac);
++		return FALSE;
++	}
++	g_byte_array_unref (device_mac);
++
++	return TRUE;
++}
++
+ gboolean
+ utils_connection_valid_for_device (NMConnection *connection,
+                                    NMDevice *device,
+@@ -636,6 +674,8 @@ utils_connection_valid_for_device (NMCon
+ 		return connection_valid_for_cdma (connection, s_con, device, specific_object);
+ 	else if (NM_IS_DEVICE_BT (device))
+ 		return connection_valid_for_bt (connection, s_con, device, specific_object);
++	else if (NM_IS_DEVICE_INFINIBAND (device))
++		return connection_valid_for_infiniband (connection, s_con, device, specific_object);
+ 	else
+ 		g_warning ("Unknown device type '%s'", g_type_name (G_OBJECT_TYPE(device)));
+ 
+--- NetworkManager-0.8.1/libnm-util/libnm-util.ver.orig	2013-01-29 01:56:21.972711163 +0100
++++ NetworkManager-0.8.1/libnm-util/libnm-util.ver	2013-01-29 01:55:41.629215526 +0100
+@@ -20,6 +20,7 @@ global:
+ 	nm_connection_get_setting_bridge_port;
+ 	nm_connection_get_setting_by_name;
+ 	nm_connection_get_setting_connection;
++	nm_connection_get_setting_infiniband;
+ 	nm_connection_get_setting_ip4_config;
+ 	nm_connection_get_setting_bond;
+ 	nm_connection_get_setting_vlan;
+--- NetworkManager-0.8.1/libnm-util/nm-connection.h.orig	2013-01-29 01:57:25.239920214 +0100
++++ NetworkManager-0.8.1/libnm-util/nm-connection.h	2013-01-29 01:54:31.207095924 +0100
+@@ -35,6 +35,7 @@
+ #include <nm-setting-bond.h>
+ #include <nm-setting-bridge.h>
+ #include <nm-setting-bridge-port.h>
++#include <nm-setting-infiniband.h>
+ #include <nm-setting-wired.h>
+ #include <nm-setting-vlan.h>
+ 
+@@ -185,6 +186,7 @@ NMSettingBridge *          nm_connection
+ NMSettingBridgePort *      nm_connection_get_setting_bridge_port       (NMConnection *connection);
+ NMSettingWired *           nm_connection_get_setting_wired             (NMConnection *connection);
+ NMSettingVlan *            nm_connection_get_setting_vlan              (NMConnection *connection);
++NMSettingInfiniband *      nm_connection_get_setting_infiniband        (NMConnection *connection);
+ 
+ G_END_DECLS
+ 
+--- NetworkManager-0.8.1/libnm-util/nm-connection.c.orig	2013-01-29 01:57:36.254782510 +0100
++++ NetworkManager-0.8.1/libnm-util/nm-connection.c	2013-01-29 02:00:05.783913138 +0100
+@@ -643,6 +643,23 @@ nm_connection_get_setting_wired (NMConne
+ }
+ 
+ /**
++ * nm_connection_get_setting_infiniband:
++ * @connection: the #NMConnection
++ *
++ * A shortcut to return any #NMSettingInfiniband the connection might contain.
++ *
++ * Returns: (transfer none): an #NMSettingInfiniband if the connection contains one, otherwise NULL
++ **/
++NMSettingInfiniband *
++nm_connection_get_setting_infiniband (NMConnection *connection)
++{
++	g_return_val_if_fail (connection != NULL, NULL);
++	g_return_val_if_fail (NM_IS_CONNECTION (connection), NULL);
++
++	return (NMSettingInfiniband *) nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND);
++}
++
++/**
+  * nm_connection_replace_settings:
+  * @connection: a #NMConnection
+  * @new_settings: a #GHashTable of settings

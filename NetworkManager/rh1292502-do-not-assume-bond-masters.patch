@@ -1,0 +1,64 @@
+From 93ff3d52fdff3a031ea31f52aa8ce547e875c297 Mon Sep 17 00:00:00 2001
+From: Lubomir Rintel <lkundrak@v3.sk>
+Date: Fri, 8 Jan 2016 21:39:47 +0100
+Subject: [PATCH 1/2] bond: avoid assuming bonds that are down
+
+Without this, we'd match the newly created masters with connection that
+have no Layer 3 configuration (but may have VLANs).
+
+It would be better if we also did a full match of the vlan configuration
+in the connection to what's really configured, but that'a a different
+story (a bug, really, but does anyone care?)
+
+https://bugzilla.redhat.com/show_bug.cgi?id=1292502
+---
+ src/nm-device-bond.c |    6 ++++++
+ 1 files changed, 6 insertions(+), 0 deletions(-)
+
+diff --git a/src/nm-device-bond.c b/src/nm-device-bond.c
+index 351704e..d880ec8 100644
+--- a/src/nm-device-bond.c
++++ b/src/nm-device-bond.c
+@@ -302,6 +302,12 @@ bond_match_config (NMDevice *self, NMConnection *connection)
+ 	NMSettingBond *s_bond;
+ 	const char *ifname;
+ 
++	/* If the device is down it's possible it's a bond master we just created.
++	 * Don't assume a connection here, since that would make us skip stage1
++	 * where the bonding options get set. */
++	if (!is_available (self))
++		return FALSE;
++
+ 	s_bond = nm_connection_get_setting_bond (connection);
+ 	if (!s_bond)
+ 		return FALSE;
+-- 
+1.7.1
+
+From f7c3c37e9afcef91d46fd2bacaaa5798af5f38fe Mon Sep 17 00:00:00 2001
+From: Lubomir Rintel <lkundrak@v3.sk>
+Date: Fri, 8 Jan 2016 21:40:08 +0100
+Subject: [PATCH 2/2] system: avoid creating bond0 when loading the bonding module
+
+It's entirely unnecessary and confusing in case our bonding device
+is not really called bond0.
+---
+ src/nm-system.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/nm-system.c b/src/nm-system.c
+index a7ded60..b9a036b 100644
+--- a/src/nm-system.c
++++ b/src/nm-system.c
+@@ -1548,7 +1548,7 @@ nm_system_add_bonding_master (const char *iface)
+ 
+ 	/* Make sure bonding module is loaded */
+ 	if (stat ("/sys/class/net/bonding_masters", &st) || !S_ISREG (st.st_mode))
+-		ignored = system ("/sbin/modprobe bonding");
++		ignored = system ("/sbin/modprobe bonding max_bonds=0");
+ 
+ 	snprintf (cmd, sizeof (cmd), "+%s", iface);
+ 	success = nm_utils_do_sysctl ("/sys/class/net/bonding_masters", cmd);
+-- 
+1.7.1
+

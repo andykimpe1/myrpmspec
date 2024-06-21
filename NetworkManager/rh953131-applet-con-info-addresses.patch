@@ -1,0 +1,166 @@
+From 60a2381fda47df0a41f9098302895bf2b57522ca Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Thu, 19 Mar 2015 16:15:55 +0100
+Subject: [PATCH] applet: display all addresses in "Connection Information"
+ dialog (rh #953131)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The first IP address is shown as before. But when there are more addresses,
+they can be displayed in GtkExpander "> More Addresses".
+
+https://bugzilla.redhat.com/show_bug.cgi?id=953131
+
+(based on upstream commit 074ce78d8403a82a74f43eb7ae046ceb4089c262)
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ network-manager-applet-0.8.1/src/applet-dialogs.c | 96 ++++++++++++++++++++++-
+ 1 file changed, 94 insertions(+), 2 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/src/applet-dialogs.c b/network-manager-applet-0.8.1/src/applet-dialogs.c
+index 4ee5bf7..12a0137 100644
+--- a/network-manager-applet-0.8.1/src/applet-dialogs.c
++++ b/network-manager-applet-0.8.1/src/applet-dialogs.c
+@@ -271,6 +271,81 @@ create_info_notebook_label (NMConnection *connection, gboolean is_default)
+ 	return label;
+ }
+ 
++static char *
++format_ipv4_address (NMIP4Address *addr)
++{
++	char *tmp_addr, *addr_text;
++	guint32 prefix;
++
++	tmp_addr = ip4_address_as_string (nm_ip4_address_get_address (addr));
++	prefix = nm_ip4_address_get_prefix (addr);
++	addr_text = g_strdup_printf ("%s / %d", tmp_addr, prefix);
++	g_free (tmp_addr);
++
++	return addr_text;
++}
++
++static char *
++format_ipv6_address (NMIP6Address *addr)
++{
++	char *tmp_addr, *addr_text;
++	guint32 prefix;
++
++	tmp_addr = ip6_address_as_string (nm_ip6_address_get_address (addr));
++	prefix = nm_ip6_address_get_prefix (addr);
++	addr_text = g_strdup_printf ("%s / %d", tmp_addr, prefix);
++	g_free (tmp_addr);
++
++	return addr_text;
++}
++
++static GtkWidget *
++create_more_addresses_widget (const GSList *addresses, int family)
++{
++	GtkWidget *expander, *text_view, *child;
++	GtkTextBuffer *buffer;
++	GtkWidget *scrolled_window;
++	GSList *iter, *start;
++	char *addr_text;
++
++	/* Create the expander */
++	expander = gtk_expander_new (_("More addresses"));
++
++	/* Create the text view widget and add additional addresses to it */
++	text_view = gtk_text_view_new ();
++	gtk_text_view_set_editable (GTK_TEXT_VIEW (text_view), FALSE);
++	gtk_text_view_set_left_margin (GTK_TEXT_VIEW (text_view), 20);
++	gtk_expander_set_spacing (GTK_EXPANDER (expander), 4);
++	child = text_view;
++
++	buffer = gtk_text_view_get_buffer (GTK_TEXT_VIEW (text_view));
++	start = g_slist_next (addresses);
++	for (iter = start; iter; iter = g_slist_next (iter)) {
++		if (family == AF_INET)
++			addr_text = format_ipv4_address (iter->data);
++		else
++			addr_text = format_ipv6_address (iter->data);
++
++		if (iter != start)
++			gtk_text_buffer_insert_at_cursor (buffer, "\n", -1);
++		gtk_text_buffer_insert_at_cursor (buffer, addr_text, -1);
++		g_free (addr_text);
++	}
++
++	if (g_slist_length ((GSList *) addresses) > 5) {
++		scrolled_window = gtk_scrolled_window_new (NULL, NULL);
++		gtk_widget_set_size_request (scrolled_window, -1, 80);
++		gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scrolled_window),
++		                                GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
++		gtk_container_add (GTK_CONTAINER (scrolled_window), text_view);
++		child = scrolled_window;
++	}
++
++	gtk_container_add (GTK_CONTAINER (expander), child);
++
++	return expander;
++}
++
+ typedef struct {
+ 	NMDevice *device;
+ 	GtkWidget *label;
+@@ -342,6 +417,7 @@ info_dialog_add_page (GtkNotebook *notebook,
+ 	SpeedInfo* info = NULL;
+ 	GtkWidget* speed_label;
+ 	const GSList *addresses;
++	guint addr_num;
+ 
+ 	table = GTK_TABLE (gtk_table_new (12, 2, FALSE));
+ 	gtk_table_set_col_spacings (table, 12);
+@@ -450,7 +526,8 @@ info_dialog_add_page (GtkNotebook *notebook,
+ 
+ 	ip4_config = nm_device_get_ip4_config (device);
+ 	addresses = nm_ip4_config_get_addresses (ip4_config);
+-	if (g_slist_length ((GSList *) addresses))
++	addr_num = g_slist_length ((GSList *) addresses);
++	if (addr_num)
+ 		def_addr = addresses->data;
+ 
+ 	/* Address */
+@@ -498,6 +575,13 @@ info_dialog_add_page (GtkNotebook *notebook,
+ 		row++;
+ 	}
+ 
++	/* More Addresses */
++	if (addresses && addr_num > 1) {
++		gtk_table_attach (table, create_more_addresses_widget (addresses, AF_INET),
++		                 0, 1, row, row + 1, GTK_FILL, GTK_FILL, 0, 0);
++		row++;
++	}
++
+ 	/* DNS */
+ 	dns = def_addr ? nm_ip4_config_get_nameservers (ip4_config) : NULL;
+ 	if (dns && dns->len) {
+@@ -551,7 +635,8 @@ info_dialog_add_page (GtkNotebook *notebook,
+ 
+ 	ip6_config = nm_device_get_ip6_config (device);
+ 	addresses = nm_ip6_config_get_addresses (ip6_config);
+-	if (g_slist_length ((GSList *) addresses))
++	addr_num = g_slist_length ((GSList *) addresses);
++	if (addr_num)
+ 		def6_addr = addresses->data;
+ 
+ 	/* Address */
+@@ -583,6 +668,13 @@ info_dialog_add_page (GtkNotebook *notebook,
+ 		row++;
+ 	}
+ 
++	/* More Addresses */
++	if (addresses && addr_num > 1) {
++		gtk_table_attach (table, create_more_addresses_widget (addresses, AF_INET6),
++		                 0, 1, row, row + 1, GTK_FILL, GTK_FILL, 0, 0);
++		row++;
++	}
++
+ 	/* DNS */
+ 	dns6 = def6_addr ? nm_ip6_config_get_nameservers (ip6_config) : NULL;
+ 
+-- 
+2.1.0
+

@@ -1,0 +1,314 @@
+From 851fa781ca47105e41e64067b4757904a2af697c Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Tue, 1 Oct 2013 12:07:46 +0200
+Subject: [PATCH 1/1] dns: handle link-local IPv6 DNS server addresses in NM
+ and nm-applet (rh #962449)
+
+NetworkManager:
+  This is a backport of the upstream commits
+  - c3893b5325ca61261be1749490352f26b41bd479
+    dns: append %interface to link-local IPv6 addresses in resolv.conf (rh #720001)
+  - 74d8d374b344a3b1810fddccf3df747a856bec6d
+    trivial: remove unnecessary check
+
+network-manager-applet:
+  This is a partial backport of the upstream commits
+  - bbbdb09bca3a03652cb1e4630b39979226b96349
+    editor: fix mem leak when calling gtk_editable_get_chars
+  - c3d8011ef52a22321feecd6dd3ba23b0b364c970
+    editor: refactor filtering of characters for GtkEntry
+  - bcf4d100c52144748de0ec58ea096a47a2398b49
+    editor: disallow unexpected characters for DNS servers
+  - dbcf7a147b934692ddea013f31215ab632065890
+    editor: extend tooltip for IPv6 DNS servers in ce-page-ip6 (scope of link-local)
+
+Signed-off-by: Thomas Haller <thaller@redhat.com>
+---
+ .../src/connection-editor/ce-page-ip6.ui           |  2 +-
+ .../src/connection-editor/page-ip4.c               | 26 +++++++-
+ .../src/connection-editor/page-ip6.c               | 25 ++++++-
+ network-manager-applet-0.8.1/src/utils/utils.c     | 78 ++++++++++++++++++++++
+ network-manager-applet-0.8.1/src/utils/utils.h     | 15 +++++
+ src/named-manager/nm-named-manager.c               | 19 ++++--
+ 6 files changed, 156 insertions(+), 9 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/ce-page-ip6.ui b/network-manager-applet-0.8.1/src/connection-editor/ce-page-ip6.ui
+index eecd1dd..b5d5878 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/ce-page-ip6.ui
++++ b/network-manager-applet-0.8.1/src/connection-editor/ce-page-ip6.ui
+@@ -228,7 +228,7 @@
+                           <object class="GtkEntry" id="ip6_dns_servers_entry">
+                             <property name="visible">True</property>
+                             <property name="can_focus">True</property>
+-                            <property name="tooltip_text" translatable="yes">IP addresses of domain name servers used to resolve host names. Use commas to separate multiple domain name server addresses.</property>
++                            <property name="tooltip_text" translatable="yes">IP addresses of domain name servers used to resolve host names. Use commas to separate multiple domain name server addresses. Link-local addresses will be automatically scoped to the connecting interface.</property>
+                             <property name="invisible_char">&#x25CF;</property>
+                           </object>
+                           <packing>
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/page-ip4.c b/network-manager-applet-0.8.1/src/connection-editor/page-ip4.c
+index f6a315f..aab5c1c 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/page-ip4.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/page-ip4.c
+@@ -620,7 +620,7 @@ ip_address_filter_cb (GtkEntry *   entry,
+ 	result = g_malloc0 (length + 1);
+ 
+ 	for (i = 0; i < length; i++) {
+-		if ((text[i] >= '0' && text[i] <= '9') || (text[i] == '.'))
++		if (utils_char_is_ascii_ip4_address (text[i]))
+ 			result[count++] = text[i];
+ 	}
+ 
+@@ -640,6 +640,29 @@ ip_address_filter_cb (GtkEntry *   entry,
+ 	g_free (result);
+ }
+ 
++static gboolean
++_char_is_ascii_dns_servers (char character)
++{
++	return utils_char_is_ascii_ip4_address (character) ||
++	       character == ' ' ||
++	       character == ',' ||
++	       character == ':' ||
++	       character == ';';
++}
++
++static void
++dns_servers_filter_cb (GtkEditable *entry,
++                       gchar *text,
++                       gint length,
++                       gint *position,
++                       gpointer user_data)
++{
++	utils_filter_editable_on_insert_text (entry,
++	                                      text, length, position, user_data,
++	                                      _char_is_ascii_dns_servers,
++	                                      dns_servers_filter_cb);
++}
++
+ static void
+ delete_text_cb (GtkEditable *editable,
+                     gint start_pos,
+@@ -1007,6 +1030,7 @@ finish_setup (CEPageIP4 *self, gpointer unused, GError *error, gpointer user_dat
+ 	g_signal_connect (selection, "changed", G_CALLBACK (list_selection_changed), priv->addr_delete);
+ 
+ 	g_signal_connect_swapped (priv->dns_servers, "changed", G_CALLBACK (ce_page_changed), self);
++	g_signal_connect (priv->dns_servers, "insert-text", G_CALLBACK (dns_servers_filter_cb), self);
+ 	g_signal_connect_swapped (priv->dns_searches, "changed", G_CALLBACK (ce_page_changed), self);
+ 
+ 	method_changed (priv->method, self);
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/page-ip6.c b/network-manager-applet-0.8.1/src/connection-editor/page-ip6.c
+index 788416c..97b14a5 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/page-ip6.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/page-ip6.c
+@@ -619,7 +619,7 @@ ip_address_filter_cb (GtkEntry *   entry,
+ 
+ 	for (i = 0; i < length; i++) {
+ 		if ((numeric && g_ascii_isdigit (text[i])) ||
+-			(!numeric && (g_ascii_isxdigit(text[i]) || (text[i] == ':'))))
++			(!numeric && utils_char_is_ascii_ip6_address (text[i])))
+ 			result[count++] = text[i];
+ 	}
+ 
+@@ -639,6 +639,28 @@ ip_address_filter_cb (GtkEntry *   entry,
+ 	g_free (result);
+ }
+ 
++static gboolean
++_char_is_ascii_dns_servers (char character)
++{
++	return utils_char_is_ascii_ip6_address (character) ||
++	       character == ' ' ||
++	       character == ',' ||
++	       character == ';';
++}
++
++static void
++dns_servers_filter_cb (GtkEditable *entry,
++                       gchar *text,
++                       gint length,
++                       gint *position,
++                       gpointer user_data)
++{
++	utils_filter_editable_on_insert_text (entry,
++	                                      text, length, position, user_data,
++	                                      _char_is_ascii_dns_servers,
++	                                      dns_servers_filter_cb);
++}
++
+ static void
+ delete_text_cb (GtkEditable *editable,
+                     gint start_pos,
+@@ -979,6 +1001,7 @@ finish_setup (CEPageIP6 *self, gpointer unused, GError *error, gpointer user_dat
+ 	g_signal_connect (selection, "changed", G_CALLBACK (list_selection_changed), priv->addr_delete);
+ 
+ 	g_signal_connect_swapped (priv->dns_servers, "changed", G_CALLBACK (ce_page_changed), self);
++	g_signal_connect (priv->dns_servers, "insert-text", G_CALLBACK (dns_servers_filter_cb), self);
+ 	g_signal_connect_swapped (priv->dns_searches, "changed", G_CALLBACK (ce_page_changed), self);
+ 
+ 	method_changed (priv->method, self);
+diff --git a/network-manager-applet-0.8.1/src/utils/utils.c b/network-manager-applet-0.8.1/src/utils/utils.c
+index 0bc3090..c9ab564 100644
+--- a/network-manager-applet-0.8.1/src/utils/utils.c
++++ b/network-manager-applet-0.8.1/src/utils/utils.c
+@@ -855,3 +855,81 @@ utils_set_cell_background (GtkCellRenderer *cell,
+ 	} else
+ 		g_object_set (G_OBJECT (cell), "cell-background-set", FALSE, NULL);
+ }
++
++
++gboolean
++utils_char_is_ascii_print (char character)
++{
++	return g_ascii_isprint (character);
++}
++
++gboolean
++utils_char_is_ascii_digit (char character)
++{
++	return g_ascii_isdigit (character);
++}
++
++gboolean
++utils_char_is_ascii_ip4_address (char character)
++{
++	return g_ascii_isdigit (character) || character == '.';
++}
++
++gboolean
++utils_char_is_ascii_ip6_address (char character)
++{
++	return g_ascii_isxdigit (character) || character == ':';
++}
++
++gboolean
++utils_char_is_ascii_apn (char character)
++{
++	return g_ascii_isalnum (character)
++	       || character == '.'
++	       || character == '_'
++	       || character == '-';
++}
++
++/**
++ * Filters the characters from a text that was just input into GtkEditable.
++ * Returns FALSE, if after filtering no characters were left. TRUE means,
++ * that valid characters were added and the content of the GtkEditable changed.
++ **/
++gboolean
++utils_filter_editable_on_insert_text (GtkEditable *editable,
++                                      const gchar *text,
++                                      gint length,
++                                      gint *position,
++                                      void *user_data,
++                                      UtilsFilterGtkEditableFunc validate_character,
++                                      gpointer block_func)
++{
++	int i, count = 0;
++	gchar *result = g_new (gchar, length+1);
++
++	for (i = 0; i < length; i++) {
++		if (validate_character (text[i]))
++			result[count++] = text[i];
++	}
++	result[count] = 0;
++
++	if (count > 0) {
++		if (block_func) {
++			g_signal_handlers_block_by_func (G_OBJECT (editable),
++			                                 G_CALLBACK (block_func),
++			                                 user_data);
++		}
++		gtk_editable_insert_text (editable, result, count, position);
++		if (block_func) {
++			g_signal_handlers_unblock_by_func (G_OBJECT (editable),
++			                                   G_CALLBACK (block_func),
++			                                   user_data);
++		}
++	}
++	g_signal_stop_emission_by_name (G_OBJECT (editable), "insert-text");
++
++	g_free (result);
++
++	return count > 0;
++}
++
+diff --git a/network-manager-applet-0.8.1/src/utils/utils.h b/network-manager-applet-0.8.1/src/utils/utils.h
+index 750d139..df0e180 100644
+--- a/network-manager-applet-0.8.1/src/utils/utils.h
++++ b/network-manager-applet-0.8.1/src/utils/utils.h
+@@ -69,5 +69,20 @@ void utils_set_cell_background (GtkCellRenderer *cell,
+                                 const char *color,
+                                 const char *value);
+ 
++gboolean utils_char_is_ascii_print (char character);
++gboolean utils_char_is_ascii_digit (char character);
++gboolean utils_char_is_ascii_ip4_address (char character);
++gboolean utils_char_is_ascii_ip6_address (char character);
++gboolean utils_char_is_ascii_apn (char character);
++
++typedef gboolean (*UtilsFilterGtkEditableFunc) (char character);
++gboolean utils_filter_editable_on_insert_text (GtkEditable *editable,
++                                               const gchar *text,
++                                               gint length,
++                                               gint *position,
++                                               void *user_data,
++                                               UtilsFilterGtkEditableFunc validate_character,
++                                               gpointer block_func);
++
+ #endif /* UTILS_H */
+ 
+diff --git a/src/named-manager/nm-named-manager.c b/src/named-manager/nm-named-manager.c
+index 9749caf..db34406 100644
+--- a/src/named-manager/nm-named-manager.c
++++ b/src/named-manager/nm-named-manager.c
+@@ -177,7 +177,7 @@ merge_one_ip4_config (NMResolvConfData *rc, NMIP4Config *src)
+ }
+ 
+ static void
+-merge_one_ip6_config (NMResolvConfData *rc, NMIP6Config *src)
++merge_one_ip6_config (NMResolvConfData *rc, NMIP6Config *src, const char *iface)
+ {
+ 	guint32 num, i;
+ 
+@@ -193,8 +193,15 @@ merge_one_ip6_config (NMResolvConfData *rc, NMIP6Config *src)
+ 			if (inet_ntop (AF_INET, &(addr->s6_addr32[3]), buf, INET_ADDRSTRLEN) > 0)
+ 				add_string_item (rc->nameservers, buf);
+ 		} else {
+-			if (inet_ntop (AF_INET6, addr, buf, INET6_ADDRSTRLEN) > 0)
+-				add_string_item (rc->nameservers, buf);
++			if (inet_ntop (AF_INET6, addr, buf, INET6_ADDRSTRLEN) > 0) {
++				if (iface && iface[0] && IN6_IS_ADDR_LINKLOCAL (addr)) {
++					char *tmp;
++					tmp = g_strdup_printf ("%s%%%s", buf, iface);
++					add_string_item (rc->nameservers, tmp);
++					g_free (tmp);
++				} else
++					add_string_item (rc->nameservers, buf);
++			}
+ 		}
+ 	}
+ 
+@@ -579,9 +586,9 @@ rewrite_resolv_conf (NMNamedManager *mgr, const char *iface, GError **error)
+ 		merge_one_ip4_config (&rc, priv->ip4_device_config);
+ 
+ 	if (priv->ip6_vpn_config)
+-		merge_one_ip6_config (&rc, priv->ip6_vpn_config);
++		merge_one_ip6_config (&rc, priv->ip6_vpn_config, iface);
+ 	if (priv->ip6_device_config)
+-		merge_one_ip6_config (&rc, priv->ip6_device_config);
++		merge_one_ip6_config (&rc, priv->ip6_device_config, iface);
+ 
+ 	for (iter = priv->configs; iter; iter = g_slist_next (iter)) {
+ 		if (   (iter->data == priv->ip4_vpn_config)
+@@ -597,7 +604,7 @@ rewrite_resolv_conf (NMNamedManager *mgr, const char *iface, GError **error)
+ 		} else if (NM_IS_IP6_CONFIG (iter->data)) {
+ 			NMIP6Config *config = NM_IP6_CONFIG (iter->data);
+ 
+-			merge_one_ip6_config (&rc, config);
++			merge_one_ip6_config (&rc, config, iface);
+ 		} else
+ 			g_assert_not_reached ();
+ 	}
+-- 
+1.9.3
+

@@ -1,0 +1,407 @@
+diff -up NetworkManager-0.8.1/src/nm-device.c.wol NetworkManager-0.8.1/src/nm-device.c
+--- NetworkManager-0.8.1/src/nm-device.c.wol	2014-06-13 16:49:19.788271342 -0400
++++ NetworkManager-0.8.1/src/nm-device.c	2014-06-13 16:49:19.821271344 -0400
+@@ -859,6 +859,14 @@ nm_device_is_available (NMDevice *self)
+ 	return TRUE;
+ }
+ 
++gboolean
++nm_device_get_wake_on_lan (NMDevice *self)
++{
++	if (NM_DEVICE_GET_CLASS (self)->get_wake_on_lan)
++		return NM_DEVICE_GET_CLASS (self)->get_wake_on_lan (self);
++	return FALSE;
++}
++
+ RfKillType
+ nm_device_get_rfkill_type (NMDevice *self)
+ {
+diff -up NetworkManager-0.8.1/src/nm-device-ethernet.c.wol NetworkManager-0.8.1/src/nm-device-ethernet.c
+--- NetworkManager-0.8.1/src/nm-device-ethernet.c.wol	2014-06-13 16:49:19.784271342 -0400
++++ NetworkManager-0.8.1/src/nm-device-ethernet.c	2014-06-13 16:49:19.821271344 -0400
+@@ -1721,6 +1721,39 @@ hwaddr_matches (NMDevice *device,
+ 	return FALSE;
+ }
+ 
++static gboolean
++get_wake_on_lan (NMDevice *dev)
++{
++	int fd, ret;
++	struct ifreq req;
++	struct ethtool_wolinfo wol;
++	gboolean is_wol = FALSE;
++
++	fd = socket (PF_INET, SOCK_DGRAM, 0);
++	if (fd < 0) {
++		nm_log_warn (LOGD_HW | LOGD_ETHER, "couldn't open control socket.");
++		return FALSE;
++	}
++
++	memset (&req, 0, sizeof (struct ifreq));
++	strncpy (req.ifr_name, nm_device_get_iface (dev), IFNAMSIZ);
++
++	memset (&wol, 0, sizeof (wol));
++	wol.cmd = ETHTOOL_GWOL;
++	req.ifr_data = (void *) &wol;
++
++	ret = ioctl (fd, SIOCETHTOOL, &req);
++	if (ret == 0)
++		is_wol = wol.wolopts != 0;
++	else {
++		nm_log_dbg (LOGD_HW | LOGD_ETHER, "(%s): unable to read Wake-on-LAN state (error %d)",
++		            nm_device_get_iface (dev), errno);
++	}
++
++	close (fd);
++	return is_wol;
++}
++
+ static void
+ dispose (GObject *object)
+ {
+@@ -1810,6 +1843,7 @@ nm_device_ethernet_class_init (NMDeviceE
+ 	parent_class->get_best_auto_connection = real_get_best_auto_connection;
+ 	parent_class->connection_secrets_updated = real_connection_secrets_updated;
+ 	parent_class->check_connection_compatible = real_check_connection_compatible;
++	parent_class->get_wake_on_lan = get_wake_on_lan;
+ 
+ 	parent_class->act_stage1_prepare = real_act_stage1_prepare;
+ 	parent_class->act_stage2_config = real_act_stage2_config;
+diff -up NetworkManager-0.8.1/src/nm-device.h.wol NetworkManager-0.8.1/src/nm-device.h
+--- NetworkManager-0.8.1/src/nm-device.h.wol	2014-06-13 16:49:19.698271337 -0400
++++ NetworkManager-0.8.1/src/nm-device.h	2014-06-13 16:49:19.822271344 -0400
+@@ -80,6 +80,8 @@ typedef struct {
+ 
+ 	gboolean	(* is_available) (NMDevice *self);
+ 
++	gboolean	(* get_wake_on_lan) (NMDevice *self);
++
+ 	NMConnection * (* get_best_auto_connection) (NMDevice *self,
+ 	                                             GSList *connections,
+ 	                                             char **specific_object);
+@@ -181,6 +183,8 @@ NMConnection *  nm_device_get_connection
+ 
+ gboolean		nm_device_is_available (NMDevice *dev);
+ 
++gboolean		nm_device_get_wake_on_lan (NMDevice *dev);
++
+ NMConnection * nm_device_get_best_auto_connection (NMDevice *dev,
+                                                    GSList *connections,
+                                                    char **specific_object);
+diff -up NetworkManager-0.8.1/src/nm-device-wifi.c.wol NetworkManager-0.8.1/src/nm-device-wifi.c
+--- NetworkManager-0.8.1/src/nm-device-wifi.c.wol	2014-06-13 16:49:19.785271342 -0400
++++ NetworkManager-0.8.1/src/nm-device-wifi.c	2014-06-13 16:49:19.822271344 -0400
+@@ -3853,6 +3853,14 @@ real_set_enabled (NMDeviceInterface *dev
+ 	}
+ }
+ 
++#include "wifi-utils-nl80211.c"
++
++static gboolean
++get_wake_on_lan (NMDevice *dev)
++{
++	return wifi_nl80211_get_wake_on_lan (nm_device_get_ifindex (dev));
++}
++
+ /********************************************************************/
+ 
+ NMDevice *
+@@ -4026,6 +4034,7 @@ nm_device_wifi_class_init (NMDeviceWifiC
+ 	parent_class->is_available = real_is_available;
+ 	parent_class->connection_secrets_updated = real_connection_secrets_updated;
+ 	parent_class->check_connection_compatible = real_check_connection_compatible;
++	parent_class->get_wake_on_lan = get_wake_on_lan;
+ 
+ 	parent_class->act_stage1_prepare = real_act_stage1_prepare;
+ 	parent_class->act_stage2_config = real_act_stage2_config;
+diff -up NetworkManager-0.8.1/src/nm-manager.c.wol NetworkManager-0.8.1/src/nm-manager.c
+--- NetworkManager-0.8.1/src/nm-manager.c.wol	2014-06-13 16:49:19.753271340 -0400
++++ NetworkManager-0.8.1/src/nm-manager.c	2014-06-13 16:49:19.823271344 -0400
+@@ -4360,24 +4360,45 @@ impl_manager_deactivate_connection (NMMa
+ }
+ 
+ static void
+-do_sleep_wake (NMManager *self)
++do_sleep_wake (NMManager *self, gboolean sleeping_changed)
+ {
+ 	NMManagerPrivate *priv = NM_MANAGER_GET_PRIVATE (self);
++	gboolean suspending, waking_from_suspend;
+ 	const GSList *unmanaged_specs;
+ 	GSList *iter;
+ 
++	suspending = sleeping_changed && priv->sleeping;
++	waking_from_suspend = sleeping_changed && !priv->sleeping;
++
+ 	if (manager_sleeping (self)) {
+-		nm_log_info (LOGD_SUSPEND, "sleeping or disabling...");
++		nm_log_info (LOGD_SUSPEND, suspending ? "sleeping..." : "disabling...");
+ 
+-		/* Just deactivate and down all devices from the device list,
+-		 * to keep things fast the device list will get resynced when
+-		 * the manager wakes up.
++		/* FIXME: are there still hardware devices that need to be disabled around
++		 * suspend/resume?
+ 		 */
+-		for (iter = priv->devices; iter; iter = iter->next)
+-			nm_device_set_managed (NM_DEVICE (iter->data), FALSE, NM_DEVICE_STATE_REASON_SLEEPING);
++		for (iter = priv->devices; iter; iter = iter->next) {
++			NMDevice *device = NM_DEVICE (iter->data);
+ 
++			/* Wake-on-LAN devices will be taken down post-suspend rather than pre- */
++			if (suspending && nm_device_get_wake_on_lan (device))
++				continue;
++
++			nm_device_set_managed (device, FALSE, NM_DEVICE_STATE_REASON_SLEEPING);
++		}
+ 	} else {
+-		nm_log_info (LOGD_SUSPEND, "waking up and re-enabling...");
++		nm_log_info (LOGD_SUSPEND, waking_from_suspend ? "waking up..." : "re-enabling...");
++
++		if (waking_from_suspend) {
++			/* Belatedly take down Wake-on-LAN devices; ideally we wouldn't have to do this
++			 * but for now it's the only way to make sure we re-check their connectivity.
++			 */
++			for (iter = priv->devices; iter; iter = iter->next) {
++				NMDevice *device = NM_DEVICE (iter->data);
++
++				if (nm_device_get_wake_on_lan (device))
++					nm_device_set_managed (device, FALSE, NM_DEVICE_STATE_REASON_SLEEPING);
++			}
++		}
+ 
+ 		unmanaged_specs = nm_sysconfig_settings_get_unmanaged_specs (priv->sys_settings);
+ 
+@@ -4453,7 +4474,7 @@ _internal_sleep (NMManager *self, gboole
+ 
+ 	priv->sleeping = do_sleep;
+ 
+-	do_sleep_wake (self);
++	do_sleep_wake (self, TRUE);
+ 
+ 	g_object_notify (G_OBJECT (self), NM_MANAGER_SLEEPING);
+ }
+@@ -4575,7 +4596,7 @@ _internal_enable (NMManager *self, gbool
+ 
+ 	priv->net_enabled = enable;
+ 
+-	do_sleep_wake (self);
++	do_sleep_wake (self, FALSE);
+ 
+ 	g_object_notify (G_OBJECT (self), NM_MANAGER_NETWORKING_ENABLED);
+ }
+diff -up NetworkManager-0.8.1/src/wifi-utils-nl80211.c.wol NetworkManager-0.8.1/src/wifi-utils-nl80211.c
+--- NetworkManager-0.8.1/src/wifi-utils-nl80211.c.wol	2014-06-13 16:49:19.823271344 -0400
++++ NetworkManager-0.8.1/src/wifi-utils-nl80211.c	2014-06-18 20:25:26.323135797 -0400
+@@ -0,0 +1,212 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager -- Network link manager
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Copyright (C) 2005 - 2014 Red Hat, Inc.
++ * Copyright (C) 2006 - 2008 Novell, Inc.
++ * Copyright (C) 2011 Intel Corporation. All rights reserved.
++ */
++
++#include <config.h>
++
++#include <errno.h>
++#include <string.h>
++
++#include <linux/nl80211.h>
++#include <netlink/genl/ctrl.h>
++#include <netlink/genl/genl.h>
++
++#include "nm-netlink-monitor.h"
++#include "nm-logging.h"
++
++static int
++ack_handler (struct nl_msg *msg, void *arg)
++{
++	int *done = arg;
++	*done = 1;
++	return NL_STOP;
++}
++
++static int
++finish_handler (struct nl_msg *msg, void *arg)
++{
++	int *done = arg;
++	*done = 1;
++	return NL_SKIP;
++}
++
++static int
++error_handler (struct sockaddr_nl *nla, struct nlmsgerr *err, void *arg)
++{
++	int *done = arg;
++	*done = err->error;
++	return NL_SKIP;
++}
++
++static struct nl_msg *
++_nl80211_alloc_msg (int id, int ifindex, int phy, guint32 cmd, guint32 flags)
++{
++	struct nl_msg *msg;
++
++	msg = nlmsg_alloc ();
++	if (msg) {
++		genlmsg_put (msg, 0, 0, id, 0, flags, cmd, 0);
++		NLA_PUT_U32 (msg, NL80211_ATTR_IFINDEX, ifindex);
++		if (phy != -1)
++			NLA_PUT_U32 (msg, NL80211_ATTR_WIPHY, phy);
++	}
++	return msg;
++
++ nla_put_failure:
++	nlmsg_free (msg);
++	return NULL;
++}
++
++/* NOTE: this function consumes 'msg' */
++static int
++_nl80211_send_and_recv (struct nl_handle *nlh,
++                        struct nl_cb *nl_cb,
++                        struct nl_msg *msg,
++                        int (*valid_handler) (struct nl_msg *, void *),
++                        void *valid_data)
++{
++	struct nl_cb *cb;
++	int err, done;
++
++	g_return_val_if_fail (msg != NULL, -ENOMEM);
++
++	cb = nl_cb_clone (nl_cb);
++	if (!cb) {
++		err = -ENOMEM;
++		goto out;
++	}
++
++	err = nl_send_auto_complete (nlh, msg);
++	if (err < 0)
++		goto out;
++
++	done = 0;
++	nl_cb_err (cb, NL_CB_CUSTOM, error_handler, &done);
++	nl_cb_set (cb, NL_CB_FINISH, NL_CB_CUSTOM, finish_handler, &done);
++	nl_cb_set (cb, NL_CB_ACK, NL_CB_CUSTOM, ack_handler, &done);
++	if (valid_handler)
++		nl_cb_set (cb, NL_CB_VALID, NL_CB_CUSTOM, valid_handler, valid_data);
++
++	/* Loop until one of our NL callbacks says we're done; on success
++	 * done will be 1, on error it will be < 0.
++	 */
++	while (!done) {
++		err = nl_recvmsgs (nlh, cb);
++		if (err) {
++			nm_log_warn (LOGD_WIFI, "nl_recvmsgs() error: (%d) %s",
++			             err, nl_geterror ());
++			break;
++		}
++	}
++	if (err == 0 && done < 0)
++		err = done;
++
++ out:
++	nl_cb_put (cb);
++	nlmsg_free (msg);
++	return err;
++}
++
++struct nl80211_wowlan_info {
++	gboolean enabled;
++};
++
++static int
++nl80211_wowlan_handler (struct nl_msg *msg, void *arg)
++{
++	struct nlattr *tb[NL80211_ATTR_MAX + 1];
++	struct genlmsghdr *gnlh = nlmsg_data (nlmsg_hdr (msg));
++	gboolean *enabled = arg;
++
++	if (nla_parse (tb,
++	               NL80211_ATTR_MAX,
++	               genlmsg_attrdata (gnlh, 0),
++	               genlmsg_attrlen (gnlh, 0),
++	               NULL) < 0)
++		return NL_SKIP;
++
++	if (tb[NL80211_ATTR_WOWLAN_TRIGGERS])
++		*enabled = TRUE;
++
++	return NL_SKIP;
++}
++
++static int
++nl80211_wiphy_info_handler (struct nl_msg *msg, void *arg)
++{
++	struct nlattr *tb[NL80211_ATTR_MAX + 1];
++	struct genlmsghdr *gnlh = nlmsg_data (nlmsg_hdr (msg));
++	int *phy = arg;
++
++	if (nla_parse (tb,
++	               NL80211_ATTR_MAX,
++	               genlmsg_attrdata (gnlh, 0),
++	               genlmsg_attrlen (gnlh, 0),
++	               NULL) < 0)
++		return NL_SKIP;
++
++	if (tb[NL80211_ATTR_WIPHY])
++		*phy = nla_get_u32 (tb[NL80211_ATTR_WIPHY]);
++
++	return NL_SKIP;
++}
++
++static gboolean
++wifi_nl80211_get_wake_on_lan (int ifindex)
++{
++	struct nl_handle *nlh;
++	struct nl_cb *cb;
++	struct nl_msg *msg;
++	int id, phy;
++	gboolean enabled = FALSE;
++
++	cb = nl_cb_alloc (NL_CB_DEFAULT);
++	nlh = nl_handle_alloc_cb (cb);
++	nl_cb_put (cb);
++	if (!nlh) {
++		nm_log_warn (LOGD_WIFI, "unable to allocate netlink handle for checking WoWLAN status: %s",
++		             nl_geterror ());
++		return FALSE;
++	}
++	if (genl_connect (nlh) < 0) {
++		nm_log_warn (LOGD_WIFI, "unable to connect to netlink handle for checking WoWLAN status: %s",
++		             nl_geterror ());
++		return FALSE;
++	}
++
++	id = genl_ctrl_resolve (nlh, "nl80211");
++	g_return_val_if_fail (id >= 0, FALSE);
++
++	cb = nl_cb_alloc (NL_CB_DEFAULT);
++	g_return_val_if_fail (cb != NULL, FALSE);
++
++	msg = _nl80211_alloc_msg (id, ifindex, -1, NL80211_CMD_GET_WIPHY, 0);
++	if (_nl80211_send_and_recv (nlh, cb, msg, nl80211_wiphy_info_handler, &phy) < 0)
++		goto done;
++
++	msg = _nl80211_alloc_msg (id, ifindex, phy, NL80211_CMD_GET_WOWLAN, 0);
++	_nl80211_send_and_recv (nlh, cb, msg, nl80211_wowlan_handler, &enabled);
++
++ done:
++	nl_cb_put (cb);
++	return enabled;
++}
++

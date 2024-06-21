@@ -1,0 +1,122 @@
+From f939aa2411e6491d3d9a682e92e854338f779a51 Mon Sep 17 00:00:00 2001
+From: Beniamino Galvani <bgalvani@redhat.com>
+Date: Wed, 1 Apr 2015 08:26:29 +0200
+Subject: [PATCH] dns: don't override DHCP-supplied search order with domain
+
+NM always prepends the list of DNS domains received through DHCP to
+the search list in /etc/resolv.conf, overriding the DHCP-supplied DNS
+domain search order. This behavior is not entirely correct since it
+changes the search order provided by system administrators.
+
+We cannot simply avoid adding the DNS domain list to the search list
+because this would break some configurations that rely on the 'domain'
+option to deliver the search list.
+
+This patch modifies the behavior of DNS manager to:
+ - insert the DHCP-provided 'domain' at the end of 'searches' option
+   so that 'searches' is always preferred
+ - ignore 'domain' if 'searches' option exists and 'domain' is a
+   single domain
+
+https://bugzilla.gnome.org/show_bug.cgi?id=748900
+
+(cherry picked from commit 6edc7371734315d57de020193102938846b2eb9e)
+---
+ src/named-manager/nm-named-manager.c | 54 ++++++++++++++++++++----------------
+ 1 file changed, 30 insertions(+), 24 deletions(-)
+
+diff --git a/src/named-manager/nm-named-manager.c b/src/named-manager/nm-named-manager.c
+index c17ca67..ac9f257 100644
+--- a/src/named-manager/nm-named-manager.c
++++ b/src/named-manager/nm-named-manager.c
+@@ -154,7 +154,7 @@ add_dns_option_item (GPtrArray *array, const char *str, gboolean ipv6)
+ static void
+ merge_one_ip4_config (NMResolvConfData *rc, NMIP4Config *src)
+ {
+-	guint32 num, i;
++	guint32 num, num_domains, num_searches, i;
+ 
+ 	num = nm_ip4_config_get_num_nameservers (src);
+ 	for (i = 0; i < num; i++) {
+@@ -166,20 +166,23 @@ merge_one_ip4_config (NMResolvConfData *rc, NMIP4Config *src)
+ 			add_string_item (rc->nameservers, buf);
+ 	}
+ 
+-	num = nm_ip4_config_get_num_domains (src);
+-	for (i = 0; i < num; i++) {
+-		const char *domain;
+-
+-		domain = nm_ip4_config_get_domain (src, i);
+-		if (!rc->domain)
+-			rc->domain = domain;
+-		add_string_item (rc->searches, domain);
+-	}
++	num_domains = nm_ip4_config_get_num_domains (src);
++	num_searches = nm_ip4_config_get_num_searches (src);
+ 
+-	num = nm_ip4_config_get_num_searches (src);
+-	for (i = 0; i < num; i++)
++	for (i = 0; i < num_searches; i++)
+ 		add_string_item (rc->searches, nm_ip4_config_get_search (src, i));
+ 
++	if (num_domains > 1 || !num_searches) {
++		for (i = 0; i < num_domains; i++) {
++			const char *domain;
++
++			domain = nm_ip4_config_get_domain (src, i);
++			if (!rc->domain)
++				rc->domain = domain;
++			add_string_item (rc->searches, domain);
++		}
++	}
++
+ 	num = nm_ip4_config_get_num_dns_options (src);
+ 	for (i = 0; i < num; i++) {
+ 		const char *option;
+@@ -209,7 +212,7 @@ merge_one_ip4_config (NMResolvConfData *rc, NMIP4Config *src)
+ static void
+ merge_one_ip6_config (NMResolvConfData *rc, NMIP6Config *src, const char *iface)
+ {
+-	guint32 num, i;
++	guint32 num, num_domains, num_searches, i;
+ 
+ 	num = nm_ip6_config_get_num_nameservers (src);
+ 	for (i = 0; i < num; i++) {
+@@ -235,20 +238,23 @@ merge_one_ip6_config (NMResolvConfData *rc, NMIP6Config *src, const char *iface)
+ 		}
+ 	}
+ 
+-	num = nm_ip6_config_get_num_domains (src);
+-	for (i = 0; i < num; i++) {
+-		const char *domain;
+-
+-		domain = nm_ip6_config_get_domain (src, i);
+-		if (!rc->domain)
+-			rc->domain = domain;
+-		add_string_item (rc->searches, domain);
+-	}
++	num_domains = nm_ip6_config_get_num_domains (src);
++	num_searches = nm_ip6_config_get_num_searches (src);
+ 
+-	num = nm_ip6_config_get_num_searches (src);
+-	for (i = 0; i < num; i++)
++	for (i = 0; i < num_searches; i++)
+ 		add_string_item (rc->searches, nm_ip6_config_get_search (src, i));
+ 
++	if (num_domains > 1 || !num_searches) {
++		for (i = 0; i < num_domains; i++) {
++			const char *domain;
++
++			domain = nm_ip6_config_get_domain (src, i);
++			if (!rc->domain)
++				rc->domain = domain;
++			add_string_item (rc->searches, domain);
++		}
++	}
++
+ 	num = nm_ip6_config_get_num_dns_options (src);
+ 	for (i = 0; i < num; i++) {
+ 		const char *option;
+-- 
+2.4.3
+

@@ -1,0 +1,148 @@
+From b269414ff9a4284ad2f0c37bd5dbfa938742f493 Mon Sep 17 00:00:00 2001
+From: "Zephaniah E. Loss-Cutler-Hull" <warp@aehallh.com>
+Date: Thu, 12 Aug 2010 23:52:17 -0500
+Subject: [PATCH 1/2] vpn: let plugins forbid VPN connections from getting the
+ default route (bgo #621698)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Minor fixes and cleanups by dcbw.
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ include/NetworkManagerVPN.h         |  3 +++
+ src/nm-policy.c                     | 11 +++++++++--
+ src/vpn-manager/nm-vpn-connection.c |  7 +++++++
+ 3 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/include/NetworkManagerVPN.h b/include/NetworkManagerVPN.h
+index 8b3f43b..c5c4049 100644
+--- a/include/NetworkManagerVPN.h
++++ b/include/NetworkManagerVPN.h
+@@ -168,6 +168,9 @@ typedef enum {
+  */
+ #define NM_VPN_PLUGIN_IP4_CONFIG_ROUTES      "routes"
+ 
++/* boolean: prevent this VPN connection from ever getting the default route */
++#define NM_VPN_PLUGIN_IP4_CONFIG_NEVER_DEFAULT "never-default"
++
+ /* Deprecated */
+ #define NM_VPN_PLUGIN_IP4_CONFIG_GATEWAY   NM_VPN_PLUGIN_IP4_CONFIG_EXT_GATEWAY
+ 
+diff --git a/src/nm-policy.c b/src/nm-policy.c
+index 45873d6..e7921bf 100644
+--- a/src/nm-policy.c
++++ b/src/nm-policy.c
+@@ -144,7 +144,8 @@ get_best_ip4_device (NMManager *manager, NMActRequest **out_req)
+ 			continue;
+ 
+ 		/* 'never-default' devices can't ever be the default */
+-		if (s_ip4 && nm_setting_ip4_config_get_never_default (s_ip4))
++		if (   (s_ip4 && nm_setting_ip4_config_get_never_default (s_ip4))
++		    || nm_ip4_config_get_never_default (ip4_config))
+ 			continue;
+ 
+ 		prio = nm_device_get_priority (dev);
+@@ -449,6 +450,13 @@ update_ip4_routing_and_dns (NMPolicy *policy, gboolean force_update)
+ 		/* If it's marked 'never-default', don't make it default */
+ 		vpn_connection = nm_vpn_connection_get_connection (candidate);
+ 		g_assert (vpn_connection);
++
++		/* Check the active IP4 config from the VPN service daemon */
++		ip4_config = nm_vpn_connection_get_ip4_config (candidate);
++		if (ip4_config && nm_ip4_config_get_never_default (ip4_config))
++			can_default = FALSE;
++
++		/* Check the user's preference from the NMConnection */
+ 		s_ip4 = (NMSettingIP4Config *) nm_connection_get_setting (vpn_connection, NM_TYPE_SETTING_IP4_CONFIG);
+ 		if (s_ip4 && nm_setting_ip4_config_get_never_default (s_ip4))
+ 			can_default = FALSE;
+@@ -460,7 +468,6 @@ update_ip4_routing_and_dns (NMPolicy *policy, gboolean force_update)
+ 
+ 			ip_iface = nm_vpn_connection_get_ip_iface (candidate);
+ 			connection = nm_vpn_connection_get_connection (candidate);
+-			ip4_config = nm_vpn_connection_get_ip4_config (candidate);
+ 			addr = nm_ip4_config_get_address (ip4_config, 0);
+ 
+ 			parent = nm_vpn_connection_get_parent_device (candidate);
+diff --git a/src/vpn-manager/nm-vpn-connection.c b/src/vpn-manager/nm-vpn-connection.c
+index ce94093..ff2a32b 100644
+--- a/src/vpn-manager/nm-vpn-connection.c
++++ b/src/vpn-manager/nm-vpn-connection.c
+@@ -467,6 +467,9 @@ print_vpn_config (NMIP4Config *config,
+ 		             ip_address_to_string (nm_ip4_route_get_next_hop (route)));
+ 	}
+ 
++	nm_log_info (LOGD_VPN, "Forbid Default Route: %s",
++	             nm_ip4_config_get_never_default (config) ? "yes" : "no");
++
+ 	num = nm_ip4_config_get_num_nameservers (config);
+ 	for (i = 0; i < num; i++) {
+ 		nm_log_info (LOGD_VPN, "Internal IP4 DNS: %s",
+@@ -618,6 +621,10 @@ nm_vpn_connection_ip4_config_get (DBusGProxy *proxy,
+ 		g_slist_free (routes);
+ 	}
+ 
++	val = (GValue *) g_hash_table_lookup (config_hash, NM_VPN_PLUGIN_IP4_CONFIG_NEVER_DEFAULT);
++	if (val && G_VALUE_HOLDS_BOOLEAN (val))
++		nm_ip4_config_set_never_default (config, g_value_get_boolean (val));
++
+ 	print_vpn_config (config, priv->ip4_internal_gw, priv->ip_iface, priv->banner);
+ 
+ 	/* Merge in user overrides from the NMConnection's IPv4 setting */
+-- 
+2.1.0
+
+
+From c4a154222f1cc98440bebb603b18213d6e68357a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Tue, 20 Mar 2012 17:17:49 +0100
+Subject: [PATCH 2/2] utils: override VPN plugin's never-default when ignoring
+ auto routes (rh #804563)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Setting never-default to TRUE when VPN server provides routes was done
+in https://bugzilla.gnome.org/show_bug.cgi?id=621698
+
+https://bugzilla.redhat.com/show_bug.cgi?id=804563
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ src/NetworkManagerUtils.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/src/NetworkManagerUtils.c b/src/NetworkManagerUtils.c
+index 959ccd2..b59d76a 100644
+--- a/src/NetworkManagerUtils.c
++++ b/src/NetworkManagerUtils.c
+@@ -171,6 +171,7 @@ void
+ nm_utils_merge_ip4_config (NMIP4Config *ip4_config, NMSettingIP4Config *setting)
+ {
+ 	int i, j;
++	gboolean setting_never_default;
+ 
+ 	if (!setting)
+ 		return; /* Defaults are just fine */
+@@ -261,8 +262,14 @@ nm_utils_merge_ip4_config (NMIP4Config *ip4_config, NMSettingIP4Config *setting)
+ 			nm_ip4_config_add_route (ip4_config, setting_route);
+ 	}
+ 
+-	if (nm_setting_ip4_config_get_never_default (setting))
+-		nm_ip4_config_set_never_default (ip4_config, TRUE);
++	setting_never_default = nm_setting_ip4_config_get_never_default (setting);
++
++	if (nm_setting_ip4_config_get_ignore_auto_routes (setting))
++		nm_ip4_config_set_never_default (ip4_config, setting_never_default);
++	else {
++		if (setting_never_default)
++			nm_ip4_config_set_never_default (ip4_config, TRUE);
++	}
+ }
+ 
+ static inline gboolean
+-- 
+2.1.0
+

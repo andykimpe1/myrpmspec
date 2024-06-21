@@ -1,0 +1,2299 @@
+diff --git a/network-manager-applet-0.8.1/po/POTFILES.in b/network-manager-applet-0.8.1/po/POTFILES.in
+index 111d175..5a8e123 100644
+--- a/network-manager-applet-0.8.1/po/POTFILES.in
++++ b/network-manager-applet-0.8.1/po/POTFILES.in
+@@ -5,11 +5,14 @@ nm-applet.desktop.in
+ nm-applet.schemas.in
+ nm-connection-editor.desktop.in
+ src/applet-dbus-manager.c
++src/applet-device-bond.c
++src/applet-device-bridge.c
+ src/applet-device-bt.c
+ src/applet-device-cdma.c
+ src/applet-device-gsm.c
++src/applet-device-vlan.c
++src/applet-device-wifi.c
+ src/applet-device-wired.c
+-src/applet-device-wifi.c
+ src/applet-dialogs.c
+ src/applet.c
+ src/applet.glade
+@@ -53,6 +56,7 @@ src/main.c
+ src/mb-menu-item.c
+ src/utils/mobile-wizard.c
+ src/utils/nmn-mobile-providers.c
++src/utils/utils.c
+ src/vpn-password-dialog.c
+ src/vpn-password-dialog.h
+ src/wired-dialog.c
+diff --git a/network-manager-applet-0.8.1/src/Makefile.am b/network-manager-applet-0.8.1/src/Makefile.am
+index 9601c5e..9f92bda 100644
+--- a/network-manager-applet-0.8.1/src/Makefile.am
++++ b/network-manager-applet-0.8.1/src/Makefile.am
+@@ -50,6 +50,12 @@ nm_applet_SOURCES =			\
+ 	applet-device-gsm.c \
+ 	applet-device-cdma.h \
+ 	applet-device-cdma.c \
++	applet-device-vlan.h \
++	applet-device-vlan.c \
++	applet-device-bond.h \
++	applet-device-bond.c \
++	applet-device-bridge.h \
++	applet-device-bridge.c \
+ 	mobile-helpers.c \
+ 	mobile-helpers.h \
+ 	applet-device-bt.h \
+diff --git a/network-manager-applet-0.8.1/src/applet-device-bond.c b/network-manager-applet-0.8.1/src/applet-device-bond.c
+new file mode 100644
+index 0000000..09c1938
+--- /dev/null
++++ b/network-manager-applet-0.8.1/src/applet-device-bond.c
+@@ -0,0 +1,175 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager Wireless Applet -- Display wireless access points and allow user control
++ *
++ * Dan Williams <dcbw@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2008 Red Hat, Inc.
++ * (C) Copyright 2008 Novell, Inc.
++ */
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <glib/gi18n.h>
++#include <gtk/gtk.h>
++
++#include <nm-device.h>
++#include <nm-setting-connection.h>
++#include <nm-setting-wired.h>
++#include <nm-setting-bond.h>
++#include <nm-device-bond.h>
++#include <nm-utils.h>
++
++#include "applet.h"
++#include "applet-device-bond.h"
++#include "utils.h"
++
++static void
++bond_add_menu_item (NMDevice *device,
++                    gboolean multiple_devices,
++                    GSList *connections,
++                    NMConnection *active,
++                    GtkWidget *menu,
++                    NMApplet *applet)
++{
++	const char *text;
++	GtkWidget *item;
++
++	text = utils_get_connection_device_name (connections->data);
++	item = applet_menu_item_create_device_item_helper (device, applet, text);
++
++	gtk_widget_set_sensitive (item, FALSE);
++	gtk_menu_shell_append (GTK_MENU_SHELL (menu), item);
++	gtk_widget_show (item);
++
++	if (g_slist_length (connections))
++		applet_add_connection_items (device, connections, TRUE, active, NMA_ADD_ACTIVE, menu, applet);
++
++	/* Notify user of unmanaged or unavailable device */
++	if (device) {
++		item = nma_menu_device_get_menu_item (device, applet, NULL);
++		if (item) {
++			gtk_menu_shell_append (GTK_MENU_SHELL (menu), item);
++			gtk_widget_show (item);
++		}
++	}
++
++	if (!device || !nma_menu_device_check_unusable (device)) {
++		if ((!active && g_slist_length (connections)) || (active && g_slist_length (connections) > 1))
++			applet_menu_item_add_complex_separator_helper (menu, applet, _("Available"), -1);
++
++		if (g_slist_length (connections))
++			applet_add_connection_items (device, connections, TRUE, active, NMA_ADD_INACTIVE, menu, applet);
++	}
++}
++
++static void
++bond_notify_connected (NMDevice *device,
++                       const char *msg,
++                       NMApplet *applet)
++{
++	applet_do_notify_with_pref (applet,
++	                            _("Connection Established"),
++	                            msg ? msg : _("You are now connected to the bonded network."),
++	                            "nm-device-wired",
++	                            PREF_DISABLE_CONNECTED_NOTIFICATIONS);
++}
++
++static GdkPixbuf *
++bond_get_icon (NMDevice *device,
++               NMDeviceState state,
++               NMConnection *connection,
++               char **tip,
++               NMApplet *applet)
++{
++	NMSettingConnection *s_con;
++	GdkPixbuf *pixbuf = NULL;
++	const char *id;
++
++	id = nm_device_get_iface (NM_DEVICE (device));
++	if (connection) {
++		s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
++		id = nm_setting_connection_get_id (s_con);
++	}
++
++	switch (state) {
++	case NM_DEVICE_STATE_PREPARE:
++		*tip = g_strdup_printf (_("Preparing bond connection '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_CONFIG:
++		*tip = g_strdup_printf (_("Configuring bond connection '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_NEED_AUTH:
++		*tip = g_strdup_printf (_("User authentication required for bond connection '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_IP_CONFIG:
++		*tip = g_strdup_printf (_("Requesting address for '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_ACTIVATED:
++		pixbuf = nma_icon_check_and_load ("nm-device-wired", &applet->wired_icon, applet);
++		*tip = g_strdup_printf (_("VLAN connection '%s' active"), id);
++		break;
++	default:
++		break;
++	}
++
++	return pixbuf;
++}
++
++static gboolean
++bond_new_auto_connection (NMDevice *device,
++                          gpointer dclass_data,
++                          AppletNewAutoConnectionCallback callback,
++                          gpointer callback_data)
++{
++	return FALSE;
++}
++
++
++static gboolean
++bond_get_secrets (NMDevice *device,
++                  NMSettingsConnectionInterface *connection,
++                  NMActiveConnection *active_connection,
++                  const char *setting_name,
++                  const char **hints,
++                  NMANewSecretsRequestedFunc callback,
++                  gpointer callback_data,
++                  NMApplet *applet,
++                  GError **error)
++{
++	/* No 802.1x or PPPoE possible yet on bonds */
++	return FALSE;
++}
++
++NMADeviceClass *
++applet_device_bond_get_class (NMApplet *applet)
++{
++	NMADeviceClass *dclass;
++
++	dclass = g_slice_new0 (NMADeviceClass);
++	if (!dclass)
++		return NULL;
++
++	dclass->new_auto_connection = bond_new_auto_connection;
++	dclass->add_menu_item = bond_add_menu_item;
++	dclass->notify_connected = bond_notify_connected;
++	dclass->get_icon = bond_get_icon;
++	dclass->get_secrets = bond_get_secrets;
++
++	return dclass;
++}
+diff --git a/network-manager-applet-0.8.1/src/applet-device-bond.h b/network-manager-applet-0.8.1/src/applet-device-bond.h
+new file mode 100644
+index 0000000..227c951
+--- /dev/null
++++ b/network-manager-applet-0.8.1/src/applet-device-bond.h
+@@ -0,0 +1,31 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager Wireless Applet -- Display wireless access points and allow user control
++ *
++ * Dan Williams <dcbw@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2008 Red Hat, Inc.
++ * (C) Copyright 2008 Novell, Inc.
++ */
++
++#ifndef __APPLET_DEVICE_BOND_H__
++#define __APPLET_DEVICE_BOND_H__
++
++#include "applet.h"
++
++NMADeviceClass *applet_device_bond_get_class (NMApplet *applet);
++
++#endif /* __APPLET_DEVICE_BOND_H__ */
+diff --git a/network-manager-applet-0.8.1/src/applet-device-bridge.c b/network-manager-applet-0.8.1/src/applet-device-bridge.c
+new file mode 100644
+index 0000000..b76f154
+--- /dev/null
++++ b/network-manager-applet-0.8.1/src/applet-device-bridge.c
+@@ -0,0 +1,174 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager Wireless Applet -- Display wireless access points and allow user control
++ *
++ * Dan Williams <dcbw@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2008 Red Hat, Inc.
++ * (C) Copyright 2008 Novell, Inc.
++ */
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <glib/gi18n.h>
++#include <gtk/gtk.h>
++
++#include <nm-device.h>
++#include <nm-setting-connection.h>
++#include <nm-setting-wired.h>
++#include <nm-setting-bridge.h>
++#include <nm-device-bridge.h>
++#include <nm-utils.h>
++
++#include "applet.h"
++#include "applet-device-bridge.h"
++#include "utils.h"
++
++static void
++bridge_add_menu_item (NMDevice *device,
++                      gboolean multiple_devices,
++                      GSList *connections,
++                      NMConnection *active,
++                      GtkWidget *menu,
++                      NMApplet *applet)
++{
++	const char *text;
++	GtkWidget *item;
++
++	text = utils_get_connection_device_name (connections->data);
++	item = applet_menu_item_create_device_item_helper (device, applet, text);
++
++	gtk_widget_set_sensitive (item, FALSE);
++	gtk_menu_shell_append (GTK_MENU_SHELL (menu), item);
++	gtk_widget_show (item);
++
++	if (g_slist_length (connections))
++		applet_add_connection_items (device, connections, TRUE, active, NMA_ADD_ACTIVE, menu, applet);
++
++	/* Notify user of unmanaged or unavailable device */
++	if (device) {
++		item = nma_menu_device_get_menu_item (device, applet, NULL);
++		if (item) {
++			gtk_menu_shell_append (GTK_MENU_SHELL (menu), item);
++			gtk_widget_show (item);
++		}
++	}
++
++	if (!device || !nma_menu_device_check_unusable (device)) {
++		if ((!active && g_slist_length (connections)) || (active && g_slist_length (connections) > 1))
++			applet_menu_item_add_complex_separator_helper (menu, applet, _("Available"), -1);
++
++		if (g_slist_length (connections))
++			applet_add_connection_items (device, connections, TRUE, active, NMA_ADD_INACTIVE, menu, applet);
++	}
++}
++
++static void
++bridge_notify_connected (NMDevice *device,
++                         const char *msg,
++                         NMApplet *applet)
++{
++	applet_do_notify_with_pref (applet,
++	                            _("Connection Established"),
++	                            msg ? msg : _("You are now connected to the bridged network."),
++	                            "nm-device-wired",
++	                            PREF_DISABLE_CONNECTED_NOTIFICATIONS);
++}
++
++static GdkPixbuf *
++bridge_get_icon (NMDevice *device,
++                 NMDeviceState state,
++                 NMConnection *connection,
++                 char **tip,
++                 NMApplet *applet)
++{
++	NMSettingConnection *s_con;
++	GdkPixbuf *pixbuf = NULL;
++	const char *id;
++
++	id = nm_device_get_iface (NM_DEVICE (device));
++	if (connection) {
++		s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
++		id = nm_setting_connection_get_id (s_con);
++	}
++
++	switch (state) {
++	case NM_DEVICE_STATE_PREPARE:
++		*tip = g_strdup_printf (_("Preparing bridge connection '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_CONFIG:
++		*tip = g_strdup_printf (_("Configuring bridge connection '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_NEED_AUTH:
++		*tip = g_strdup_printf (_("User authentication required for bridge connection '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_IP_CONFIG:
++		*tip = g_strdup_printf (_("Requesting address for '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_ACTIVATED:
++		pixbuf = nma_icon_check_and_load ("nm-device-wired", &applet->wired_icon, applet);
++		*tip = g_strdup_printf (_("VLAN connection '%s' active"), id);
++		break;
++	default:
++		break;
++	}
++
++	return pixbuf;
++}
++
++static gboolean
++bridge_new_auto_connection (NMDevice *device,
++                            gpointer dclass_data,
++                            AppletNewAutoConnectionCallback callback,
++                            gpointer callback_data)
++{
++	return FALSE;
++}
++
++static gboolean
++bridge_get_secrets (NMDevice *device,
++                    NMSettingsConnectionInterface *connection,
++                    NMActiveConnection *active_connection,
++                    const char *setting_name,
++                    const char **hints,
++                    NMANewSecretsRequestedFunc callback,
++                    gpointer callback_data,
++                    NMApplet *applet,
++                    GError **error)
++{
++	/* No 802.1x or PPPoE possible yet on bridges */
++	return FALSE;
++}
++
++NMADeviceClass *
++applet_device_bridge_get_class (NMApplet *applet)
++{
++	NMADeviceClass *dclass;
++
++	dclass = g_slice_new0 (NMADeviceClass);
++	if (!dclass)
++		return NULL;
++
++	dclass->new_auto_connection = bridge_new_auto_connection;
++	dclass->add_menu_item = bridge_add_menu_item;
++	dclass->notify_connected = bridge_notify_connected;
++	dclass->get_icon = bridge_get_icon;
++	dclass->get_secrets = bridge_get_secrets;
++
++	return dclass;
++}
+diff --git a/network-manager-applet-0.8.1/src/applet-device-bridge.h b/network-manager-applet-0.8.1/src/applet-device-bridge.h
+new file mode 100644
+index 0000000..33dc49a
+--- /dev/null
++++ b/network-manager-applet-0.8.1/src/applet-device-bridge.h
+@@ -0,0 +1,31 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager Wireless Applet -- Display wireless access points and allow user control
++ *
++ * Dan Williams <dcbw@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2008 Red Hat, Inc.
++ * (C) Copyright 2008 Novell, Inc.
++ */
++
++#ifndef __APPLET_DEVICE_BRIDGE_H__
++#define __APPLET_DEVICE_BRIDGE_H__
++
++#include "applet.h"
++
++NMADeviceClass *applet_device_bridge_get_class (NMApplet *applet);
++
++#endif /* __APPLET_DEVICE_BRIDGE_H__ */
+diff --git a/network-manager-applet-0.8.1/src/applet-device-bt.c b/network-manager-applet-0.8.1/src/applet-device-bt.c
+index 29c9a86..964ba29 100644
+--- a/network-manager-applet-0.8.1/src/applet-device-bt.c
++++ b/network-manager-applet-0.8.1/src/applet-device-bt.c
+@@ -43,24 +43,6 @@
+ #include "gconf-helpers.h"
+ #include "applet-dialogs.h"
+ 
+-typedef struct {
+-	NMApplet *applet;
+-	NMDevice *device;
+-	NMConnection *connection;
+-} BtMenuItemInfo;
+-
+-static void
+-bt_menu_item_info_destroy (gpointer data)
+-{
+-	BtMenuItemInfo *info = data;
+-
+-	g_object_unref (G_OBJECT (info->device));
+-	if (info->connection)
+-		g_object_unref (G_OBJECT (info->connection));
+-
+-	g_slice_free (BtMenuItemInfo, data);
+-}
+-
+ static gboolean
+ bt_new_auto_connection (NMDevice *device,
+                         gpointer dclass_data,
+@@ -73,76 +55,15 @@ bt_new_auto_connection (NMDevice *device,
+ }
+ 
+ static void
+-bt_menu_item_activate (GtkMenuItem *item, gpointer user_data)
+-{
+-	BtMenuItemInfo *info = user_data;
+-
+-	applet_menu_item_activate_helper (info->device,
+-	                                  info->connection,
+-	                                  "/",
+-	                                  info->applet,
+-	                                  user_data);
+-}
+-
+-
+-typedef enum {
+-	ADD_ACTIVE = 1,
+-	ADD_INACTIVE = 2,
+-} AddActiveInactiveEnum;
+-
+-static void
+-add_connection_items (NMDevice *device,
+-                      GSList *connections,
+-                      NMConnection *active,
+-                      AddActiveInactiveEnum flag,
+-                      GtkWidget *menu,
+-                      NMApplet *applet)
+-{
+-	GSList *iter;
+-	BtMenuItemInfo *info;
+-
+-	for (iter = connections; iter; iter = g_slist_next (iter)) {
+-		NMConnection *connection = NM_CONNECTION (iter->data);
+-		GtkWidget *item;
+-
+-		if (active == connection) {
+-			if ((flag & ADD_ACTIVE) == 0)
+-				continue;
+-		} else {
+-			if ((flag & ADD_INACTIVE) == 0)
+-				continue;
+-		}
+-
+-		item = applet_new_menu_item_helper (connection, active, (flag & ADD_ACTIVE));
+-
+-		info = g_slice_new0 (BtMenuItemInfo);
+-		info->applet = applet;
+-		info->device = g_object_ref (G_OBJECT (device));
+-		info->connection = g_object_ref (connection);
+-
+-		g_signal_connect_data (item, "activate",
+-		                       G_CALLBACK (bt_menu_item_activate),
+-		                       info,
+-		                       (GClosureNotify) bt_menu_item_info_destroy, 0);
+-
+-		gtk_menu_shell_append (GTK_MENU_SHELL (menu), item);
+-	}
+-}
+-
+-static void
+ bt_add_menu_item (NMDevice *device,
+-                  guint32 n_devices,
++                  gboolean multiple_devices,
++                  GSList *connections,
+                   NMConnection *active,
+                   GtkWidget *menu,
+                   NMApplet *applet)
+ {
+ 	const char *text;
+ 	GtkWidget *item;
+-	GSList *connections, *all;
+-
+-	all = applet_get_all_connections (applet);
+-	connections = utils_filter_connections_for_device (device, all);
+-	g_slist_free (all);
+ 
+ 	text = nm_device_bt_get_name (NM_DEVICE_BT (device));
+ 	if (!text) {
+@@ -159,7 +80,7 @@ bt_add_menu_item (NMDevice *device,
+ 	gtk_widget_show (item);
+ 
+ 	if (g_slist_length (connections))
+-		add_connection_items (device, connections, active, ADD_ACTIVE, menu, applet);
++		applet_add_connection_items (device, connections, TRUE, active, NMA_ADD_ACTIVE, menu, applet);
+ 
+ 	/* Notify user of unmanaged or unavailable device */
+ 	item = nma_menu_device_get_menu_item (device, applet, NULL);
+@@ -172,41 +93,21 @@ bt_add_menu_item (NMDevice *device,
+ 		/* Add menu items for existing bluetooth connections for this device */
+ 		if (g_slist_length (connections)) {
+ 			applet_menu_item_add_complex_separator_helper (menu, applet, _("Available"), -1);
+-			add_connection_items (device, connections, active, ADD_INACTIVE, menu, applet);
++			applet_add_connection_items (device, connections, TRUE, active, NMA_ADD_INACTIVE, menu, applet);
+ 		}
+ 	}
+-
+-	g_slist_free (connections);
+ }
+ 
+ static void
+-bt_device_state_changed (NMDevice *device,
+-                         NMDeviceState new_state,
+-                         NMDeviceState old_state,
+-                         NMDeviceStateReason reason,
+-                         NMApplet *applet)
++bt_notify_connected (NMDevice *device,
++                     const char *msg,
++                     NMApplet *applet)
+ {
+-	if (new_state == NM_DEVICE_STATE_ACTIVATED) {
+-		NMConnection *connection;
+-		NMSettingConnection *s_con = NULL;
+-		char *str = NULL;
+-
+-		connection = applet_find_active_connection_for_device (device, applet, NULL);
+-		if (connection) {
+-			const char *id;
+-			s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+-			id = s_con ? nm_setting_connection_get_id (s_con) : NULL;
+-			if (id)
+-				str = g_strdup_printf (_("You are now connected to '%s'."), id);
+-		}
+-
+-		applet_do_notify_with_pref (applet,
+-		                            _("Connection Established"),
+-		                            str ? str : _("You are now connected to the mobile broadband network."),
+-		                            "nm-device-wwan",
+-		                            PREF_DISABLE_CONNECTED_NOTIFICATIONS);
+-		g_free (str);
+-	}
++	applet_do_notify_with_pref (applet,
++	                            _("Connection Established"),
++	                            msg ? msg : _("You are now connected to the mobile broadband network."),
++	                            "nm-device-wwan",
++	                            PREF_DISABLE_CONNECTED_NOTIFICATIONS);
+ }
+ 
+ static GdkPixbuf *
+@@ -454,7 +355,7 @@ applet_device_bt_get_class (NMApplet *applet)
+ 
+ 	dclass->new_auto_connection = bt_new_auto_connection;
+ 	dclass->add_menu_item = bt_add_menu_item;
+-	dclass->device_state_changed = bt_device_state_changed;
++	dclass->notify_connected = bt_notify_connected;
+ 	dclass->get_icon = bt_get_icon;
+ 	dclass->get_secrets = bt_get_secrets;
+ 
+diff --git a/network-manager-applet-0.8.1/src/applet-device-cdma.c b/network-manager-applet-0.8.1/src/applet-device-cdma.c
+index a3e0cf5..75b8e57 100644
+--- a/network-manager-applet-0.8.1/src/applet-device-cdma.c
++++ b/network-manager-applet-0.8.1/src/applet-device-cdma.c
+@@ -254,7 +254,8 @@ cdma_act_to_mb_act (CdmaDeviceInfo *info)
+ 
+ static void
+ cdma_add_menu_item (NMDevice *device,
+-                    guint32 n_devices,
++                    gboolean multiple_devices,
++                    GSList *connections,
+                     NMConnection *active,
+                     GtkWidget *menu,
+                     NMApplet *applet)
+@@ -262,15 +263,11 @@ cdma_add_menu_item (NMDevice *device,
+ 	CdmaDeviceInfo *info;
+ 	char *text;
+ 	GtkWidget *item;
+-	GSList *connections, *all, *iter;
++	GSList *iter;
+ 
+ 	info = g_object_get_data (G_OBJECT (device), "devinfo");
+ 
+-	all = applet_get_all_connections (applet);
+-	connections = utils_filter_connections_for_device (device, all);
+-	g_slist_free (all);
+-
+-	if (n_devices > 1) {
++	if (multiple_devices) {
+ 		char *desc;
+ 
+ 		desc = (char *) utils_get_device_description (device);
+@@ -346,8 +343,6 @@ cdma_add_menu_item (NMDevice *device,
+ 			add_connection_item (device, NULL, item, menu, applet);
+ 		}
+ 	}
+-
+-	g_slist_free (connections);
+ }
+ 
+ static void
+@@ -359,34 +354,23 @@ cdma_device_state_changed (NMDevice *device,
+ {
+ 	CdmaDeviceInfo *info;
+ 
+-	if (new_state == NM_DEVICE_STATE_ACTIVATED) {
+-		NMConnection *connection;
+-		NMSettingConnection *s_con = NULL;
+-		char *str = NULL;
+-
+-		connection = applet_find_active_connection_for_device (device, applet, NULL);
+-		if (connection) {
+-			const char *id;
+-
+-			s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+-			id = s_con ? nm_setting_connection_get_id (s_con) : NULL;
+-			if (id)
+-				str = g_strdup_printf (_("You are now connected to '%s'."), id);
+-		}
+-
+-		applet_do_notify_with_pref (applet,
+-		                            _("Connection Established"),
+-		                            str ? str : _("You are now connected to the CDMA network."),
+-		                            "nm-device-wwan",
+-		                            PREF_DISABLE_CONNECTED_NOTIFICATIONS);
+-		g_free (str);
+-	}
+-
+ 	/* Start/stop polling of quality and registration when device state changes */
+ 	info = g_object_get_data (G_OBJECT (device), "devinfo");
+ 	check_start_polling (info);
+ }
+ 
++static void
++cdma_notify_connected (NMDevice *device,
++                       const char *msg,
++                       NMApplet *applet)
++{
++	applet_do_notify_with_pref (applet,
++	                            _("Connection Established"),
++	                            msg ? msg : _("You are now connected to the CDMA network."),
++	                            "nm-device-wwan",
++	                            PREF_DISABLE_CONNECTED_NOTIFICATIONS);
++}
++
+ static GdkPixbuf *
+ cdma_get_icon (NMDevice *device,
+                NMDeviceState state,
+@@ -978,6 +962,7 @@ applet_device_cdma_get_class (NMApplet *applet)
+ 	dclass->new_auto_connection = cdma_new_auto_connection;
+ 	dclass->add_menu_item = cdma_add_menu_item;
+ 	dclass->device_state_changed = cdma_device_state_changed;
++	dclass->notify_connected = cdma_notify_connected;
+ 	dclass->get_icon = cdma_get_icon;
+ 	dclass->get_secrets = cdma_get_secrets;
+ 	dclass->device_added = cdma_device_added;
+diff --git a/network-manager-applet-0.8.1/src/applet-device-gsm.c b/network-manager-applet-0.8.1/src/applet-device-gsm.c
+index b53a233..015e232 100644
+--- a/network-manager-applet-0.8.1/src/applet-device-gsm.c
++++ b/network-manager-applet-0.8.1/src/applet-device-gsm.c
+@@ -298,7 +298,8 @@ gsm_act_to_mb_act (GsmDeviceInfo *info)
+ 
+ static void
+ gsm_add_menu_item (NMDevice *device,
+-                   guint32 n_devices,
++                   gboolean multiple_devices,
++                   GSList *connections,
+                    NMConnection *active,
+                    GtkWidget *menu,
+                    NMApplet *applet)
+@@ -306,15 +307,11 @@ gsm_add_menu_item (NMDevice *device,
+ 	GsmDeviceInfo *info;
+ 	char *text;
+ 	GtkWidget *item;
+-	GSList *connections, *all, *iter;
++	GSList *iter;
+ 
+ 	info = g_object_get_data (G_OBJECT (device), "devinfo");
+ 
+-	all = applet_get_all_connections (applet);
+-	connections = utils_filter_connections_for_device (device, all);
+-	g_slist_free (all);
+-
+-	if (n_devices > 1) {
++	if (multiple_devices) {
+ 		char *desc;
+ 
+ 		desc = (char *) utils_get_device_description (device);
+@@ -389,8 +386,6 @@ gsm_add_menu_item (NMDevice *device,
+ 			add_connection_item (device, NULL, item, menu, applet);
+ 		}
+ 	}
+-
+-	g_slist_free (connections);
+ }
+ 
+ static void
+@@ -402,34 +397,23 @@ gsm_device_state_changed (NMDevice *device,
+ {
+ 	GsmDeviceInfo *info;
+ 
+-	if (new_state == NM_DEVICE_STATE_ACTIVATED) {
+-		NMConnection *connection;
+-		NMSettingConnection *s_con = NULL;
+-		char *str = NULL;
+-
+-		connection = applet_find_active_connection_for_device (device, applet, NULL);
+-		if (connection) {
+-			const char *id;
+-
+-			s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+-			id = s_con ? nm_setting_connection_get_id (s_con) : NULL;
+-			if (id)
+-				str = g_strdup_printf (_("You are now connected to '%s'."), id);
+-		}
+-
+-		applet_do_notify_with_pref (applet,
+-		                            _("Connection Established"),
+-		                            str ? str : _("You are now connected to the GSM network."),
+-		                            "nm-device-wwan",
+-		                            PREF_DISABLE_CONNECTED_NOTIFICATIONS);
+-		g_free (str);
+-	}
+-
+ 	/* Start/stop polling of quality and registration when device state changes */
+ 	info = g_object_get_data (G_OBJECT (device), "devinfo");
+ 	check_start_polling (info);
+ }
+ 
++static void
++gsm_notify_connected (NMDevice *device,
++                      const char *msg,
++                      NMApplet *applet)
++{
++	applet_do_notify_with_pref (applet,
++	                            _("Connection Established"),
++	                            msg ? msg : _("You are now connected to the GSM network."),
++	                            "nm-device-wwan",
++	                            PREF_DISABLE_CONNECTED_NOTIFICATIONS);
++}
++
+ static GdkPixbuf *
+ gsm_get_icon (NMDevice *device,
+               NMDeviceState state,
+@@ -1519,6 +1503,7 @@ applet_device_gsm_get_class (NMApplet *applet)
+ 	dclass->new_auto_connection = gsm_new_auto_connection;
+ 	dclass->add_menu_item = gsm_add_menu_item;
+ 	dclass->device_state_changed = gsm_device_state_changed;
++	dclass->notify_connected = gsm_notify_connected;
+ 	dclass->get_icon = gsm_get_icon;
+ 	dclass->get_secrets = gsm_get_secrets;
+ 	dclass->device_added = gsm_device_added;
+diff --git a/network-manager-applet-0.8.1/src/applet-device-vlan.c b/network-manager-applet-0.8.1/src/applet-device-vlan.c
+new file mode 100644
+index 0000000..b5d10e2
+--- /dev/null
++++ b/network-manager-applet-0.8.1/src/applet-device-vlan.c
+@@ -0,0 +1,289 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager Wireless Applet -- Display wireless access points and allow user control
++ *
++ * Dan Williams <dcbw@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2008 Red Hat, Inc.
++ * (C) Copyright 2008 Novell, Inc.
++ */
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <glib/gi18n.h>
++#include <gtk/gtk.h>
++
++#include <nm-device.h>
++#include <nm-setting-connection.h>
++#include <nm-setting-wired.h>
++#include <nm-setting-vlan.h>
++#include <nm-device-ethernet.h>
++#include <nm-device-vlan.h>
++#include <nm-utils.h>
++
++#include "applet.h"
++#include "applet-device-vlan.h"
++#include "utils.h"
++
++static NMDevice *
++find_device_by_iface (const char *iface, const GPtrArray *devices)
++{
++	NMDevice *candidate;
++	int i;
++
++	for (i = 0; i < devices->len; i++) {
++		candidate = devices->pdata[i];
++
++		if (!g_strcmp0 (iface, nm_device_get_iface (candidate)))
++			return candidate;
++	}
++	return NULL;
++}
++
++static NMDevice *
++find_device_by_mac (const GByteArray *mac, const GPtrArray *devices)
++{
++	NMDevice *candidate, *device = NULL;
++	char *vlan_hw_address, *candidate_hw_address;
++	int i;
++
++	vlan_hw_address = nm_utils_hwaddr_ntoa (mac->data, nm_utils_hwaddr_type (mac->len));
++
++	for (i = 0; i < devices->len && device == NULL; i++) {
++		candidate = devices->pdata[i];
++
++		if (!g_object_class_find_property (G_OBJECT_GET_CLASS (candidate),
++		                                   "hw-address"))
++			continue;
++
++		g_object_get (G_OBJECT (candidate),
++		              "hw-address", &candidate_hw_address,
++		              NULL);
++		if (!g_strcmp0 (vlan_hw_address, candidate_hw_address))
++			device = candidate;
++		g_free (candidate_hw_address);
++	}
++	g_free (vlan_hw_address);
++
++	return device;
++}
++
++static NMDevice *
++find_vlan_parent (GSList *connections, NMApplet *applet)
++{
++	const GPtrArray *devices;
++	NMDevice *parent_device;
++	GSList *iter;
++
++	devices = nm_client_get_devices (applet->nm_client);
++	if (!devices)
++		return NULL;
++
++	for (iter = connections; iter; iter = iter->next) {
++		NMConnection *connection = iter->data;
++		NMSettingVlan *s_vlan;
++		const char *parent;
++
++		s_vlan = nm_connection_get_setting_vlan (connection);
++		g_return_val_if_fail (s_vlan != NULL, NULL);
++
++		parent = nm_setting_vlan_get_parent (s_vlan);
++		if (parent && nm_utils_iface_valid_name (parent)) {
++			parent_device = find_device_by_iface (parent, devices);
++		} else {
++			NMSettingConnection *s_con;
++			NMSetting *s_hw;
++			const char *type;
++			GByteArray *mac;
++
++			s_con = nm_connection_get_setting_connection (connection);
++			type = nm_setting_connection_get_connection_type (s_con);
++			s_hw = nm_connection_get_setting_by_name (connection, type);
++			if (!s_hw) {
++				g_warn_if_reached ();
++				continue;
++			}
++
++			if (!g_object_class_find_property (G_OBJECT_GET_CLASS (s_hw),
++			                                   "mac-address"))
++				continue;
++
++			g_object_get (G_OBJECT (s_hw),
++			              "mac-address", &mac,
++			              NULL);
++			if (mac) {
++				parent_device = find_device_by_mac (mac, devices);
++				g_byte_array_unref (mac);
++			} else
++				parent_device = NULL;
++		}
++		
++		if (parent_device)
++			return parent_device;
++	}
++
++	return NULL;
++}
++
++static void
++vlan_add_menu_item (NMDevice *device,
++                    gboolean multiple_devices,
++                    GSList *connections,
++                    NMConnection *active,
++                    GtkWidget *menu,
++                    NMApplet *applet)
++{
++	const char *text;
++	GtkWidget *item;
++	gboolean carrier = TRUE;
++
++	text = utils_get_connection_device_name (connections->data);
++	item = applet_menu_item_create_device_item_helper (device, applet, text);
++
++	/* If the VLAN device exists, check its carrier */
++	if (device && nm_device_get_capabilities (device) & NM_DEVICE_CAP_CARRIER_DETECT)
++		carrier = nm_device_vlan_get_carrier (NM_DEVICE_VLAN (device));
++	else {
++		NMDevice *parent;
++
++		/* If we can find its parent, check the parent's carrier */
++		parent = find_vlan_parent (connections, applet);
++
++		if (parent && nm_device_get_capabilities (parent) & NM_DEVICE_CAP_CARRIER_DETECT)
++			g_object_get (G_OBJECT (parent), "carrier", &carrier, NULL);
++	} /* else fall back to assuming carrier is present */		
++
++	gtk_widget_set_sensitive (item, FALSE);
++	gtk_menu_shell_append (GTK_MENU_SHELL (menu), item);
++	gtk_widget_show (item);
++
++	if (g_slist_length (connections))
++		applet_add_connection_items (device, connections, carrier, active, NMA_ADD_ACTIVE, menu, applet);
++
++	/* Notify user of unmanaged or unavailable device */
++	if (device) {
++		item = nma_menu_device_get_menu_item (device, applet, carrier ? NULL : _("disconnected"));
++		if (item) {
++			gtk_menu_shell_append (GTK_MENU_SHELL (menu), item);
++			gtk_widget_show (item);
++		}
++	}
++
++	if (!device || !nma_menu_device_check_unusable (device)) {
++		if ((!active && g_slist_length (connections)) || (active && g_slist_length (connections) > 1))
++			applet_menu_item_add_complex_separator_helper (menu, applet, _("Available"), -1);
++
++		if (g_slist_length (connections))
++			applet_add_connection_items (device, connections, carrier, active, NMA_ADD_INACTIVE, menu, applet);
++	}
++}
++
++static void
++vlan_notify_connected (NMDevice *device,
++                       const char *msg,
++                       NMApplet *applet)
++{
++	applet_do_notify_with_pref (applet,
++	                            _("Connection Established"),
++	                            msg ? msg : _("You are now connected to the VLAN."),
++	                            "nm-device-wired",
++	                            PREF_DISABLE_CONNECTED_NOTIFICATIONS);
++}
++
++static GdkPixbuf *
++vlan_get_icon (NMDevice *device,
++               NMDeviceState state,
++               NMConnection *connection,
++               char **tip,
++               NMApplet *applet)
++{
++	NMSettingConnection *s_con;
++	GdkPixbuf *pixbuf = NULL;
++	const char *id;
++
++	id = nm_device_get_iface (NM_DEVICE (device));
++	if (connection) {
++		s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
++		id = nm_setting_connection_get_id (s_con);
++	}
++
++	switch (state) {
++	case NM_DEVICE_STATE_PREPARE:
++		*tip = g_strdup_printf (_("Preparing VLAN connection '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_CONFIG:
++		*tip = g_strdup_printf (_("Configuring VLAN connection '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_NEED_AUTH:
++		*tip = g_strdup_printf (_("User authentication required for VLAN connection '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_IP_CONFIG:
++		*tip = g_strdup_printf (_("Requesting address for '%s'..."), id);
++		break;
++	case NM_DEVICE_STATE_ACTIVATED:
++		pixbuf = nma_icon_check_and_load ("nm-device-wired", &applet->wired_icon, applet);
++		*tip = g_strdup_printf (_("VLAN connection '%s' active"), id);
++		break;
++	default:
++		break;
++	}
++
++	return pixbuf;
++}
++
++static gboolean
++vlan_new_auto_connection (NMDevice *device,
++                          gpointer dclass_data,
++                          AppletNewAutoConnectionCallback callback,
++                          gpointer callback_data)
++{
++	return FALSE;
++}
++
++static gboolean
++vlan_get_secrets (NMDevice *device,
++                  NMSettingsConnectionInterface *connection,
++                  NMActiveConnection *active_connection,
++                  const char *setting_name,
++                  const char **hints,
++                  NMANewSecretsRequestedFunc callback,
++                  gpointer callback_data,
++                  NMApplet *applet,
++                  GError **error)
++{
++	/* No 802.1x or PPPoE possible yet on VLANs */
++	return FALSE;
++}
++
++NMADeviceClass *
++applet_device_vlan_get_class (NMApplet *applet)
++{
++	NMADeviceClass *dclass;
++
++	dclass = g_slice_new0 (NMADeviceClass);
++	if (!dclass)
++		return NULL;
++
++	dclass->new_auto_connection = vlan_new_auto_connection;
++	dclass->add_menu_item = vlan_add_menu_item;
++	dclass->notify_connected = vlan_notify_connected;
++	dclass->get_icon = vlan_get_icon;
++	dclass->get_secrets = vlan_get_secrets;
++
++	return dclass;
++}
+diff --git a/network-manager-applet-0.8.1/src/applet-device-vlan.h b/network-manager-applet-0.8.1/src/applet-device-vlan.h
+new file mode 100644
+index 0000000..e905f42
+--- /dev/null
++++ b/network-manager-applet-0.8.1/src/applet-device-vlan.h
+@@ -0,0 +1,31 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager Wireless Applet -- Display wireless access points and allow user control
++ *
++ * Dan Williams <dcbw@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2008 Red Hat, Inc.
++ * (C) Copyright 2008 Novell, Inc.
++ */
++
++#ifndef __APPLET_DEVICE_VLAN_H__
++#define __APPLET_DEVICE_VLAN_H__
++
++#include "applet.h"
++
++NMADeviceClass *applet_device_vlan_get_class (NMApplet *applet);
++
++#endif /* __APPLET_DEVICE_VLAN_H__ */
+diff --git a/network-manager-applet-0.8.1/src/applet-device-wifi.c b/network-manager-applet-0.8.1/src/applet-device-wifi.c
+index 3a1ed90..95409af 100644
+--- a/network-manager-applet-0.8.1/src/applet-device-wifi.c
++++ b/network-manager-applet-0.8.1/src/applet-device-wifi.c
+@@ -686,7 +686,8 @@ sort_toplevel (gconstpointer tmpa, gconstpointer tmpb)
+ 
+ static void
+ wireless_add_menu_item (NMDevice *device,
+-                        guint32 n_devices,
++                        gboolean multiple_devices,
++                        GSList *connections,
+                         NMConnection *active,
+                         GtkWidget *menu,
+                         NMApplet *applet)
+@@ -696,7 +697,7 @@ wireless_add_menu_item (NMDevice *device,
+ 	const GPtrArray *aps;
+ 	int i;
+ 	NMAccessPoint *active_ap = NULL;
+-	GSList *connections = NULL, *all, *iter;
++	GSList *iter;
+ 	gboolean wireless_enabled = TRUE;
+ 	GSList *menu_items = NULL;  /* All menu items we'll be adding */
+ 	NMNetworkMenuItem *item, *active_item = NULL;
+@@ -705,7 +706,7 @@ wireless_add_menu_item (NMDevice *device,
+ 	wdev = NM_DEVICE_WIFI (device);
+ 	aps = nm_device_wifi_get_access_points (wdev);
+ 
+-	if (n_devices > 1) {
++	if (multiple_devices) {
+ 		char *desc;
+ 
+ 		desc = (char *) utils_get_device_description (device);
+@@ -727,10 +728,6 @@ wireless_add_menu_item (NMDevice *device,
+ 	gtk_menu_shell_append (GTK_MENU_SHELL (menu), widget);
+ 	gtk_widget_show (widget);
+ 
+-	all = applet_get_all_connections (applet);
+-	connections = utils_filter_connections_for_device (device, all);
+-	g_slist_free (all);
+-
+ 	/* Add the active AP if we're connected to something and the device is available */
+ 	if (!nma_menu_device_check_unusable (device)) {
+ 		active_ap = nm_device_wifi_get_active_access_point (wdev);
+@@ -829,7 +826,6 @@ wireless_add_menu_item (NMDevice *device,
+ 
+ out:
+ 	g_slist_free (menu_items);
+-	g_slist_free (connections);
+ }
+ 
+ static void
+@@ -1198,8 +1194,6 @@ wireless_device_state_changed (NMDevice *device,
+ {
+ 	NMSettingsConnectionInterface *connection;
+ 	NMAccessPoint *new = NULL;
+-	char *msg;
+-	char *esc_ssid = NULL;
+ 
+ 	new = update_active_ap (device, new_state, applet);
+ 
+@@ -1210,24 +1204,34 @@ wireless_device_state_changed (NMDevice *device,
+ 		return;
+ 
+ 	if (new) {
+-		const GByteArray *ssid = nm_access_point_get_ssid (new);
+-
+-		if (ssid)
+-			esc_ssid = nm_utils_ssid_to_utf8 ((const char *) ssid->data, ssid->len);
+-
+ 		/* Save this BSSID to seen-bssids list */
+ 		connection = applet_get_exported_connection_for_device (device, applet);
+ 		if (connection)
+ 			add_seen_bssid (connection, new);
+ 	}
++}
++
++static void
++wireless_notify_connected (NMDevice *device,
++                           const char *msg,
++                           NMApplet *applet)
++{
++	NMAccessPoint *ap;
++	const GByteArray *ssid;
++	char *esc_ssid = NULL;
++	char *ssid_msg;
++
++	ap = g_object_get_data (G_OBJECT (device), ACTIVE_AP_TAG);
++	ssid = nm_access_point_get_ssid (ap);
++	if (ssid)
++		esc_ssid = nm_utils_ssid_to_utf8 ((const char *) ssid->data, ssid->len);
+ 
+-	msg = g_strdup_printf (_("You are now connected to the wireless network '%s'."),
+-	                       esc_ssid ? esc_ssid : _("(none)"));
++	ssid_msg = g_strdup_printf (_("You are now connected to the Wi-Fi network '%s'."),
++	                            esc_ssid ? esc_ssid : _("(none)"));
+ 	applet_do_notify_with_pref (applet, _("Connection Established"),
+-	                            msg, "nm-device-wireless",
++	                            ssid_msg, "nm-device-wireless",
+ 	                            PREF_DISABLE_CONNECTED_NOTIFICATIONS);
+-	g_free (msg);
+-	g_free (esc_ssid);
++	g_free (ssid_msg);
+ }
+ 
+ static GdkPixbuf *
+@@ -1805,6 +1809,7 @@ applet_device_wifi_get_class (NMApplet *applet)
+ 	dclass->add_menu_item = wireless_add_menu_item;
+ 	dclass->device_added = wireless_device_added;
+ 	dclass->device_state_changed = wireless_device_state_changed;
++	dclass->notify_connected = wireless_notify_connected;
+ 	dclass->get_icon = wireless_get_icon;
+ 	dclass->get_more_info = wireless_get_more_info;
+ 	dclass->get_secrets = wireless_get_secrets;
+diff --git a/network-manager-applet-0.8.1/src/applet-device-wired.c b/network-manager-applet-0.8.1/src/applet-device-wired.c
+index b1649cd..bb961d8 100644
+--- a/network-manager-applet-0.8.1/src/applet-device-wired.c
++++ b/network-manager-applet-0.8.1/src/applet-device-wired.c
+@@ -42,24 +42,6 @@
+ #include "utils.h"
+ #include "gconf-helpers.h"
+ 
+-typedef struct {
+-	NMApplet *applet;
+-	NMDevice *device;
+-	NMConnection *connection;
+-} WiredMenuItemInfo;
+-
+-static void
+-wired_menu_item_info_destroy (gpointer data)
+-{
+-	WiredMenuItemInfo *info = (WiredMenuItemInfo *) data;
+-
+-	g_object_unref (G_OBJECT (info->device));
+-	if (info->connection)
+-		g_object_unref (G_OBJECT (info->connection));
+-
+-	g_slice_free (WiredMenuItemInfo, data);
+-}
+-
+ #define DEFAULT_WIRED_NAME _("Auto Ethernet")
+ 
+ static gboolean
+@@ -95,106 +77,18 @@ wired_new_auto_connection (NMDevice *device,
+ }
+ 
+ static void
+-wired_menu_item_activate (GtkMenuItem *item, gpointer user_data)
+-{
+-	WiredMenuItemInfo *info = (WiredMenuItemInfo *) user_data;
+-
+-	applet_menu_item_activate_helper (info->device,
+-	                                  info->connection,
+-	                                  "/",
+-	                                  info->applet,
+-	                                  user_data);
+-}
+-
+-
+-typedef enum {
+-	ADD_ACTIVE = 1,
+-	ADD_INACTIVE = 2,
+-} AddActiveInactiveEnum;
+-
+-static void
+-add_connection_items (NMDevice *device,
+-                      GSList *connections,
+-                      gboolean carrier,
+-                      NMConnection *active,
+-                      AddActiveInactiveEnum flag,
+-                      GtkWidget *menu,
+-                      NMApplet *applet)
+-{
+-	GSList *iter;
+-	WiredMenuItemInfo *info;
+-
+-	for (iter = connections; iter; iter = g_slist_next (iter)) {
+-		NMConnection *connection = NM_CONNECTION (iter->data);
+-		GtkWidget *item;
+-
+-		if (active == connection) {
+-			if ((flag & ADD_ACTIVE) == 0)
+-				continue;
+-		} else {
+-			if ((flag & ADD_INACTIVE) == 0)
+-				continue;
+-		}
+-
+-		item = applet_new_menu_item_helper (connection, active, (flag & ADD_ACTIVE));
+-		gtk_widget_set_sensitive (item, carrier);
+-
+-		info = g_slice_new0 (WiredMenuItemInfo);
+-		info->applet = applet;
+-		info->device = g_object_ref (G_OBJECT (device));
+-		info->connection = g_object_ref (connection);
+-
+-		g_signal_connect_data (item, "activate",
+-		                       G_CALLBACK (wired_menu_item_activate),
+-		                       info,
+-		                       (GClosureNotify) wired_menu_item_info_destroy, 0);
+-
+-		gtk_menu_shell_append (GTK_MENU_SHELL (menu), item);
+-	}
+-}
+-
+-static void
+-add_default_connection_item (NMDevice *device,
+-                             gboolean carrier,
+-                             GtkWidget *menu,
+-                             NMApplet *applet)
+-{
+-	WiredMenuItemInfo *info;
+-	GtkWidget *item;
+-	
+-	item = gtk_check_menu_item_new_with_label (DEFAULT_WIRED_NAME);
+-	gtk_widget_set_sensitive (GTK_WIDGET (item), carrier);
+-	gtk_check_menu_item_set_draw_as_radio (GTK_CHECK_MENU_ITEM (item), TRUE);
+-
+-	info = g_slice_new0 (WiredMenuItemInfo);
+-	info->applet = applet;
+-	info->device = g_object_ref (G_OBJECT (device));
+-
+-	g_signal_connect_data (item, "activate",
+-	                       G_CALLBACK (wired_menu_item_activate),
+-	                       info,
+-	                       (GClosureNotify) wired_menu_item_info_destroy, 0);
+-
+-	gtk_menu_shell_append (GTK_MENU_SHELL (menu), item);
+-}
+-
+-static void
+ wired_add_menu_item (NMDevice *device,
+-                     guint32 n_devices,
++                     gboolean multiple_devices,
++                     GSList *connections,
+                      NMConnection *active,
+                      GtkWidget *menu,
+                      NMApplet *applet)
+ {
+ 	char *text;
+ 	GtkWidget *item;
+-	GSList *connections, *all;
+ 	gboolean carrier = TRUE;
+ 
+-	all = applet_get_all_connections (applet);
+-	connections = utils_filter_connections_for_device (device, all);
+-	g_slist_free (all);
+-
+-	if (n_devices > 1) {
++	if (multiple_devices) {
+ 		char *desc = NULL;
+ 
+ 		desc = (char *) utils_get_device_description (device);
+@@ -227,7 +121,7 @@ wired_add_menu_item (NMDevice *device,
+ 	gtk_widget_show (item);
+ 
+ 	if (g_slist_length (connections))
+-		add_connection_items (device, connections, carrier, active, ADD_ACTIVE, menu, applet);
++		applet_add_connection_items (device, connections, carrier, active, NMA_ADD_ACTIVE, menu, applet);
+ 
+ 	/* Notify user of unmanaged or unavailable device */
+ 	item = nma_menu_device_get_menu_item (device, applet, carrier ? NULL : _("disconnected"));
+@@ -241,42 +135,22 @@ wired_add_menu_item (NMDevice *device,
+ 			applet_menu_item_add_complex_separator_helper (menu, applet, _("Available"), -1);
+ 
+ 		if (g_slist_length (connections))
+-			add_connection_items (device, connections, carrier, active, ADD_INACTIVE, menu, applet);
++			applet_add_connection_items (device, connections, carrier, active, NMA_ADD_INACTIVE, menu, applet);
+ 		else
+-			add_default_connection_item (device, carrier, menu, applet);
++			applet_add_default_connection_item (device, DEFAULT_WIRED_NAME, carrier, menu, applet);
+ 	}
+-
+-	g_slist_free (connections);
+ }
+ 
+ static void
+-wired_device_state_changed (NMDevice *device,
+-                            NMDeviceState new_state,
+-                            NMDeviceState old_state,
+-                            NMDeviceStateReason reason,
+-                            NMApplet *applet)
++wired_notify_connected (NMDevice *device,
++                        const char *msg,
++                        NMApplet *applet)
+ {
+-	if (new_state == NM_DEVICE_STATE_ACTIVATED) {
+-		NMConnection *connection;
+-		NMSettingConnection *s_con = NULL;
+-		char *str = NULL;
+-
+-		connection = applet_find_active_connection_for_device (device, applet, NULL);
+-		if (connection) {
+-			const char *id;
+-			s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+-			id = s_con ? nm_setting_connection_get_id (s_con) : NULL;
+-			if (id)
+-				str = g_strdup_printf (_("You are now connected to '%s'."), id);
+-		}
+-
+-		applet_do_notify_with_pref (applet,
+-		                            _("Connection Established"),
+-		                            str ? str : _("You are now connected to the wired network."),
+-		                            "nm-device-wired",
+-		                            PREF_DISABLE_CONNECTED_NOTIFICATIONS);
+-		g_free (str);
+-	}
++	applet_do_notify_with_pref (applet,
++	                            _("Connection Established"),
++	                            msg ? msg : _("You are now connected to the wired network."),
++	                            "nm-device-wired",
++	                            PREF_DISABLE_CONNECTED_NOTIFICATIONS);
+ }
+ 
+ static GdkPixbuf *
+@@ -807,7 +681,7 @@ applet_device_wired_get_class (NMApplet *applet)
+ 
+ 	dclass->new_auto_connection = wired_new_auto_connection;
+ 	dclass->add_menu_item = wired_add_menu_item;
+-	dclass->device_state_changed = wired_device_state_changed;
++	dclass->notify_connected = wired_notify_connected;
+ 	dclass->get_icon = wired_get_icon;
+ 	dclass->get_secrets = wired_get_secrets;
+ 
+diff --git a/network-manager-applet-0.8.1/src/applet.c b/network-manager-applet-0.8.1/src/applet.c
+index 023a20a..725d763 100644
+--- a/network-manager-applet-0.8.1/src/applet.c
++++ b/network-manager-applet-0.8.1/src/applet.c
+@@ -40,7 +40,10 @@
+ #include <sys/socket.h>
+ 
+ #include <NetworkManagerVPN.h>
++#include <nm-device-bond.h>
++#include <nm-device-bridge.h>
+ #include <nm-device-ethernet.h>
++#include <nm-device-vlan.h>
+ #include <nm-device-wifi.h>
+ #include <nm-gsm-device.h>
+ #include <nm-cdma-device.h>
+@@ -59,11 +62,14 @@
+ #include <libnotify/notify.h>
+ 
+ #include "applet.h"
++#include "applet-device-bond.h"
++#include "applet-device-bridge.h"
+ #include "applet-device-wired.h"
+ #include "applet-device-wifi.h"
+ #include "applet-device-gsm.h"
+ #include "applet-device-cdma.h"
+ #include "applet-device-bt.h"
++#include "applet-device-vlan.h"
+ #include "applet-dialogs.h"
+ #include "vpn-password-dialog.h"
+ #include "applet-dbus-manager.h"
+@@ -262,11 +268,43 @@ get_device_class (NMDevice *device, NMApplet *applet)
+ 		return applet->cdma_class;
+ 	else if (NM_IS_DEVICE_BT (device))
+ 		return applet->bt_class;
++	else if (NM_IS_DEVICE_VLAN (device))
++		return applet->vlan_class;
++	else if (NM_IS_DEVICE_BOND (device))
++		return applet->bond_class;
++	else if (NM_IS_DEVICE_BRIDGE (device))
++		return applet->bridge_class;
+ 	else
+ 		g_message ("%s: Unknown device type '%s'", __func__, G_OBJECT_TYPE_NAME (device));
+ 	return NULL;
+ }
+ 
++static inline NMADeviceClass *
++get_device_class_from_connection (NMConnection *connection, NMApplet *applet)
++{
++	NMSettingConnection *s_con;
++	const char *ctype;
++
++	g_return_val_if_fail (connection != NULL, NULL);
++	g_return_val_if_fail (applet != NULL, NULL);
++
++	s_con = nm_connection_get_setting_connection (connection);
++	g_return_val_if_fail (s_con != NULL, NULL);
++
++	ctype = nm_setting_connection_get_connection_type (s_con);
++	g_return_val_if_fail (ctype != NULL, NULL);
++
++	if (!strcmp (ctype, NM_SETTING_BOND_SETTING_NAME))
++		return applet->bond_class;
++	else if (!strcmp (ctype, NM_SETTING_BRIDGE_SETTING_NAME))
++		return applet->bridge_class;
++	else if (!strcmp (ctype, NM_SETTING_VLAN_SETTING_NAME))
++		return applet->vlan_class;
++	else
++		g_warning ("%s: unhandled connection type '%s'", __func__, ctype);
++	return NULL;
++}
++
+ static gboolean
+ is_system_connection (NMConnection *connection)
+ {
+@@ -390,12 +428,10 @@ applet_menu_item_activate_helper (NMDevice *device,
+ 	AppletItemActivateInfo *info;
+ 	NMADeviceClass *dclass;
+ 
+-	g_return_if_fail (NM_IS_DEVICE (device));
+-
+ 	info = g_malloc0 (sizeof (AppletItemActivateInfo));
+ 	info->applet = applet;
+ 	info->specific_object = g_strdup (specific_object);
+-	info->device = g_object_ref (device);
++	info->device = device ? g_object_ref (device) : NULL;
+ 	info->dclass_data = dclass_data;
+ 
+ 	if (connection) {
+@@ -403,6 +439,8 @@ applet_menu_item_activate_helper (NMDevice *device,
+ 		return;
+ 	}
+ 
++	g_return_if_fail (NM_IS_DEVICE (device));
++
+ 	dclass = get_device_class (device, applet);
+ 
+ 	/* If no connection was passed in, ask the device class to create a new
+@@ -412,10 +450,8 @@ applet_menu_item_activate_helper (NMDevice *device,
+ 	g_assert (dclass);
+ 	if (!dclass->new_auto_connection (device, dclass_data,
+ 	                                  applet_menu_item_activate_helper_part2,
+-	                                  info)) {
+-		nm_warning ("Couldn't create default connection.");
++	                                  info))
+ 		applet_item_activate_info_destroy (info);
+-	}
+ }
+ 
+ void
+@@ -1124,65 +1160,17 @@ static void nma_menu_add_text_item (GtkWidget *menu, char *text)
+ }
+ 
+ static gint
+-sort_devices (gconstpointer a, gconstpointer b)
++sort_devices_by_description (gconstpointer a, gconstpointer b)
+ {
+ 	NMDevice *aa = NM_DEVICE (a);
+ 	NMDevice *bb = NM_DEVICE (b);
+-	GType aa_type;
+-	GType bb_type;
+-
+-	aa_type = G_OBJECT_TYPE (G_OBJECT (aa));
+-	bb_type = G_OBJECT_TYPE (G_OBJECT (bb));
+-
+-	if (aa_type == bb_type) {
+-		char *aa_desc = NULL;
+-		char *bb_desc = NULL;
+-
+-		aa_desc = (char *) utils_get_device_description (aa);
+-		if (!aa_desc)
+-			aa_desc = (char *) nm_device_get_iface (aa);
+-
+-		bb_desc = (char *) utils_get_device_description (bb);
+-		if (!bb_desc)
+-			bb_desc = (char *) nm_device_get_iface (bb);
++	const char *aa_desc;
++	const char *bb_desc;
+ 
+-		if (!aa_desc && bb_desc)
+-			return -1;
+-		else if (aa_desc && !bb_desc)
+-			return 1;
+-		else if (!aa_desc && !bb_desc)
+-			return 0;
++	aa_desc = utils_get_device_description (aa);
++	bb_desc = utils_get_device_description (bb);
+ 
+-		g_assert (aa_desc);
+-		g_assert (bb_desc);
+-		return strcmp (aa_desc, bb_desc);
+-	}
+-
+-	if (aa_type == NM_TYPE_DEVICE_ETHERNET && bb_type == NM_TYPE_DEVICE_WIFI)
+-		return -1;
+-	if (aa_type == NM_TYPE_DEVICE_ETHERNET && bb_type == NM_TYPE_GSM_DEVICE)
+-		return -1;
+-	if (aa_type == NM_TYPE_DEVICE_ETHERNET && bb_type == NM_TYPE_CDMA_DEVICE)
+-		return -1;
+-	if (aa_type == NM_TYPE_DEVICE_ETHERNET && bb_type == NM_TYPE_DEVICE_BT)
+-		return -1;
+-
+-	if (aa_type == NM_TYPE_GSM_DEVICE && bb_type == NM_TYPE_CDMA_DEVICE)
+-		return -1;
+-	if (aa_type == NM_TYPE_GSM_DEVICE && bb_type == NM_TYPE_DEVICE_WIFI)
+-		return -1;
+-	if (aa_type == NM_TYPE_GSM_DEVICE && bb_type == NM_TYPE_DEVICE_BT)
+-		return -1;
+-
+-	if (aa_type == NM_TYPE_CDMA_DEVICE && bb_type == NM_TYPE_DEVICE_WIFI)
+-		return -1;
+-	if (aa_type == NM_TYPE_CDMA_DEVICE && bb_type == NM_TYPE_DEVICE_BT)
+-		return -1;
+-
+-	if (aa_type == NM_TYPE_DEVICE_BT && bb_type == NM_TYPE_DEVICE_WIFI)
+-		return -1;
+-
+-	return 1;
++	return g_strcmp0 (aa_desc, bb_desc);
+ }
+ 
+ static gboolean
+@@ -1250,6 +1238,57 @@ applet_find_active_connection_for_device (NMDevice *device,
+ 	return connection;
+ }
+ 
++static NMConnection *
++applet_find_active_connection_for_virtual_device (const char *iface,
++                                                  NMApplet *applet,
++                                                  NMActiveConnection **out_active)
++{
++	const GPtrArray *active_connections;
++	NMConnection *connection = NULL;
++	int i;
++
++	g_return_val_if_fail (iface != NULL, NULL);
++	g_return_val_if_fail (NM_IS_APPLET (applet), NULL);
++	if (out_active)
++		g_return_val_if_fail (*out_active == NULL, NULL);
++
++	active_connections = nm_client_get_active_connections (applet->nm_client);
++	for (i = 0; active_connections && (i < active_connections->len); i++) {
++		NMSettingsConnectionInterface *tmp;
++		NMSettingsInterface *settings = NULL;
++		NMActiveConnection *active;
++		const char *service_name;
++		const char *connection_path;
++
++		active = NM_ACTIVE_CONNECTION (g_ptr_array_index (active_connections, i));
++		service_name = nm_active_connection_get_service_name (active);
++		connection_path = nm_active_connection_get_connection (active);
++
++		if (!service_name || !connection_path)
++			continue;
++
++		if (!strcmp (service_name, NM_DBUS_SERVICE_SYSTEM_SETTINGS))
++			settings = NM_SETTINGS_INTERFACE (applet->system_settings);
++		else if (!strcmp (service_name, NM_DBUS_SERVICE_USER_SETTINGS))
++			settings = NM_SETTINGS_INTERFACE (applet->gconf_settings);
++		else
++			g_assert_not_reached ();
++
++		tmp = nm_settings_interface_get_connection_by_path (settings, connection_path);
++		if (!tmp)
++			continue;
++
++		if (!g_strcmp0 (nm_connection_get_virtual_iface_name (NM_CONNECTION (tmp)), iface)) {
++			connection = NM_CONNECTION (tmp);
++			if (out_active)
++				*out_active = active;
++			break;
++		}
++	}
++
++	return connection;
++}
++
+ gboolean
+ nma_menu_device_check_unusable (NMDevice *device)
+ {
+@@ -1349,81 +1388,156 @@ nma_menu_device_get_menu_item (NMDevice *device,
+ 	return item;
+ }
+ 
+-static guint32
+-nma_menu_add_devices (GtkWidget *menu, NMApplet *applet)
++static int
++add_device_items (GType type, const GPtrArray *all_devices, GSList *all_connections,
++                  GtkWidget *menu, NMApplet *applet)
+ {
+-	const GPtrArray *temp = NULL;
+-	GSList *devices = NULL, *iter = NULL;
+-	gint n_wifi_devices = 0;
+-	gint n_usable_wifi_devices = 0;
+-	gint n_wired_devices = 0;
+-	gint n_mb_devices = 0;
+-	gint n_bt_devices = 0;
+-	int i;
++	GSList *devices = NULL, *iter;
++	int i, n_devices = 0;
++
++	for (i = 0; all_devices && (i < all_devices->len); i++) {
++		NMDevice *device = all_devices->pdata[i];
+ 
+-	temp = nm_client_get_devices (applet->nm_client);
+-	for (i = 0; temp && (i < temp->len); i++)
+-		devices = g_slist_append (devices, g_ptr_array_index (temp, i));
+-	if (devices)
+-		devices = g_slist_sort (devices, sort_devices);
++		if (G_TYPE_CHECK_INSTANCE_TYPE (device, type)) {
++			n_devices++;
++			devices = g_slist_prepend (devices, device);
++		}
++	}
++	devices = g_slist_sort (devices, sort_devices_by_description);
+ 
+ 	for (iter = devices; iter; iter = iter->next) {
+-		NMDevice *device = NM_DEVICE (iter->data);
++		NMDevice *device = iter->data;
++		NMADeviceClass *dclass;
++		NMConnection *active;
++		GSList *connections;
+ 
+-		/* Ignore unsupported devices */
+-		if (!(nm_device_get_capabilities (device) & NM_DEVICE_CAP_NM_SUPPORTED))
+-			continue;
++		dclass = get_device_class (device, applet);
++		g_assert (dclass != NULL);
++
++		connections = utils_filter_connections_for_device (device, all_connections);
++		active = applet_find_active_connection_for_device (device, applet, NULL);
++
++		dclass->add_menu_item (device, n_devices > 1, connections, active, menu, applet);
+ 
+-		if (NM_IS_DEVICE_WIFI (device)) {
+-			n_wifi_devices++;
+-			if (   nm_client_wireless_get_enabled (applet->nm_client)
+-			    && (nm_device_get_state (device) >= NM_DEVICE_STATE_DISCONNECTED))
+-				n_usable_wifi_devices++;
+-		} else if (NM_IS_DEVICE_ETHERNET (device))
+-			n_wired_devices++;
+-		else if (NM_IS_CDMA_DEVICE (device) || NM_IS_GSM_DEVICE (device))
+-			n_mb_devices++;
+-		else if (NM_IS_DEVICE_BT (device))
+-			n_bt_devices++;
++		g_slist_free (connections);
+ 	}
+ 
+-	if (!n_wired_devices && !n_wifi_devices && !n_mb_devices && !n_bt_devices) {
+-		nma_menu_add_text_item (menu, _("No network devices available"));
+-		goto out;
++	g_slist_free (devices);
++	return n_devices;
++}
++
++static gint
++sort_connections_by_ifname (gconstpointer a, gconstpointer b)
++{
++	NMConnection *aa = NM_CONNECTION (a);
++	NMConnection *bb = NM_CONNECTION (b);
++
++	return strcmp (nm_connection_get_virtual_iface_name (aa),
++				   nm_connection_get_virtual_iface_name (bb));
++}
++
++static int
++add_virtual_items (const char *type, const GPtrArray *all_devices,
++                   GSList *all_connections, GtkWidget *menu, NMApplet *applet)
++{
++	GSList *iter, *connections = NULL;
++	int n_devices = 0;
++
++	for (iter = all_connections; iter; iter = iter->next) {
++		NMConnection *connection = iter->data;
++
++		if (!nm_connection_get_virtual_iface_name (connection))
++			continue;
++		if (nm_connection_is_type (connection, type))
++			connections = g_slist_prepend (connections, connection);
+ 	}
+ 
+-	/* Add all devices in our device list to the menu */
+-	for (iter = devices; iter; iter = iter->next) {
+-		NMDevice *device = NM_DEVICE (iter->data);
+-		gint n_devices = 0;
++	if (!connections)
++		return 0;
++
++	connections = g_slist_sort (connections, sort_connections_by_ifname);
++	/* Count the number of unique interface names */
++	iter = connections;
++	while (iter) {
++		NMConnection *connection = iter->data;
++
++		n_devices++;
++
++		/* Skip ahead until we find a connection with a different ifname
++		 * (or reach the end of the list).
++		 */
++		while (iter && sort_connections_by_ifname (connection, iter->data) == 0)
++			iter = iter->next;
++	}
++
++	iter = connections;
++	while (iter) {
++		NMConnection *connection = iter->data;
++		NMDevice *device = NULL;
++		const char *iface = nm_connection_get_virtual_iface_name (connection);
++		GSList *iface_connections = NULL;
+ 		NMADeviceClass *dclass;
+ 		NMConnection *active;
++		int i;
+ 
+-		/* Ignore unsupported devices */
+-		if (!(nm_device_get_capabilities (device) & NM_DEVICE_CAP_NM_SUPPORTED))
+-			continue;
++		for (i = 0; all_devices && (i < all_devices->len); i++) {
++			NMDevice *candidate = all_devices->pdata[i];
++
++			if (!strcmp (nm_device_get_iface (candidate), iface)) {
++				device = candidate;
++				break;
++			}
++		}
+ 
+-		if (NM_IS_DEVICE_WIFI (device))
+-			n_devices = n_wifi_devices;
+-		else if (NM_IS_DEVICE_ETHERNET (device))
+-			n_devices = n_wired_devices;
+-		else if (NM_IS_CDMA_DEVICE (device) || NM_IS_GSM_DEVICE (device))
+-			n_devices = n_mb_devices;
++		while (iter && sort_connections_by_ifname (connection, iter->data) == 0) {
++			iface_connections = g_slist_prepend (iface_connections, connection);
++			iter = iter->next;
++		}
+ 
+-		active = applet_find_active_connection_for_device (device, applet, NULL);
++		active = applet_find_active_connection_for_virtual_device (iface, applet, NULL);
+ 
+-		dclass = get_device_class (device, applet);
+-		if (dclass)
+-			dclass->add_menu_item (device, n_devices, active, menu, applet);
++		dclass = get_device_class_from_connection (connection, applet);
++		dclass->add_menu_item (device, n_devices > 1, iface_connections, active, menu, applet);
++
++		g_slist_free (iface_connections);
+ 	}
+ 
+- out:
+-	g_slist_free (devices);
++	g_slist_free (connections);
++	return n_devices;
++}
+ 
+-	/* Return # of usable wifi devices here for correct enable/disable state
+-	 * of things like Enable Wireless, "Connect to other..." and such.
+-	 */
+-	return n_usable_wifi_devices;
++static void
++nma_menu_add_devices (GtkWidget *menu, NMApplet *applet)
++{
++	const GPtrArray *all_devices;
++	GSList *all_connections;
++	gint n_items;
++
++	all_connections = applet_get_all_connections (applet);
++	all_devices = nm_client_get_devices (applet->nm_client);
++
++	n_items = 0;
++	n_items += add_virtual_items (NM_SETTING_BRIDGE_SETTING_NAME,
++	                              all_devices, all_connections, menu, applet);
++	n_items += add_virtual_items (NM_SETTING_BOND_SETTING_NAME,
++	                              all_devices, all_connections, menu, applet);
++	n_items += add_device_items  (NM_TYPE_DEVICE_ETHERNET,
++	                              all_devices, all_connections, menu, applet);
++	n_items += add_virtual_items (NM_SETTING_VLAN_SETTING_NAME,
++	                              all_devices, all_connections, menu, applet);
++	n_items += add_device_items  (NM_TYPE_DEVICE_WIFI,
++	                              all_devices, all_connections, menu, applet);
++	n_items += add_device_items  (NM_TYPE_GSM_DEVICE,
++	                              all_devices, all_connections, menu, applet);
++	n_items += add_device_items  (NM_TYPE_CDMA_DEVICE,
++	                              all_devices, all_connections, menu, applet);
++	n_items += add_device_items  (NM_TYPE_DEVICE_BT,
++	                              all_devices, all_connections, menu, applet);
++
++	g_slist_free (all_connections);
++
++	if (!n_items)
++		nma_menu_add_text_item (menu, _("No network devices available"));
+ }
+ 
+ static int
+@@ -1600,6 +1714,30 @@ nma_set_notifications_enabled_cb (GtkWidget *widget, NMApplet *applet)
+ 	                       NULL);
+ }
+ 
++static gboolean
++has_usable_wifi (NMApplet *applet)
++{
++	const GPtrArray *devices;
++	int i;
++
++	if (!nm_client_wireless_get_enabled (applet->nm_client))
++		return FALSE;
++
++	devices = nm_client_get_devices (applet->nm_client);
++	if (!devices)
++		return FALSE;
++
++	for (i = 0; i < devices->len; i++) {
++		NMDevice *device = devices->pdata[i];
++
++		if (   NM_IS_DEVICE_WIFI (device)
++		    && (nm_device_get_state (device) >= NM_DEVICE_STATE_DISCONNECTED))
++			return TRUE;
++	}
++
++	return FALSE;
++}
++
+ /*
+  * nma_menu_show_cb
+  *
+@@ -1608,8 +1746,6 @@ nma_set_notifications_enabled_cb (GtkWidget *widget, NMApplet *applet)
+  */
+ static void nma_menu_show_cb (GtkWidget *menu, NMApplet *applet)
+ {
+-	guint32 n_wireless;
+-
+ 	g_return_if_fail (menu != NULL);
+ 	g_return_if_fail (applet != NULL);
+ 
+@@ -1629,11 +1765,10 @@ static void nma_menu_show_cb (GtkWidget *menu, NMApplet *applet)
+ 		return;
+ 	}
+ 
+-	n_wireless = nma_menu_add_devices (menu, applet);
+-
++	nma_menu_add_devices (menu, applet);
+ 	nma_menu_add_vpn_submenu (menu, applet);
+ 
+-	if (n_wireless > 0 && nm_client_wireless_get_enabled (applet->nm_client)) {
++	if (has_usable_wifi (applet)) {
+ 		/* Add the "Hidden wireless network..." entry */
+ 		nma_menu_add_separator_item (menu);
+ 		nma_menu_add_hidden_network_item (menu, applet);
+@@ -1814,7 +1949,7 @@ ce_child_setup (gpointer user_data G_GNUC_UNUSED)
+ }
+ 
+ static void
+-nma_edit_connections_cb (GtkMenuItem *mi, NMApplet *applet)
++nma_edit_connections_cb (void)
+ {
+ 	char *argv[2];
+ 	GError *error = NULL;
+@@ -1938,6 +2073,104 @@ static GtkWidget *nma_context_menu_create (NMApplet *applet)
+ 	return GTK_WIDGET (menu);
+ }
+ 
++typedef struct {
++	NMApplet *applet;
++	NMDevice *device;
++	NMConnection *connection;
++} AppletMenuItemInfo;
++
++static void
++applet_menu_item_info_destroy (gpointer data, GClosure *closure)
++{
++	AppletMenuItemInfo *info = data;
++
++	if (info->device)
++		g_object_unref (info->device);
++	if (info->connection)
++		g_object_unref (info->connection);
++
++	g_slice_free (AppletMenuItemInfo, data);
++}
++
++static void
++applet_menu_item_activate (GtkMenuItem *item, gpointer user_data)
++{
++	AppletMenuItemInfo *info = user_data;
++
++	applet_menu_item_activate_helper (info->device,
++	                                  info->connection,
++	                                  "/",
++	                                  info->applet,
++	                                  user_data);
++}
++
++void
++applet_add_connection_items (NMDevice *device,
++                             GSList *connections,
++                             gboolean sensitive,
++                             NMConnection *active,
++                             NMAAddActiveInactiveEnum flag,
++                             GtkWidget *menu,
++                             NMApplet *applet)
++{
++	GSList *iter;
++	AppletMenuItemInfo *info;
++
++	for (iter = connections; iter; iter = iter->next) {
++		NMConnection *connection = NM_CONNECTION (iter->data);
++		GtkWidget *item;
++
++		if (active == connection) {
++			if ((flag & NMA_ADD_ACTIVE) == 0)
++				continue;
++		} else {
++			if ((flag & NMA_ADD_INACTIVE) == 0)
++				continue;
++		}
++
++		item = applet_new_menu_item_helper (connection, active, (flag & NMA_ADD_ACTIVE));
++		gtk_widget_set_sensitive (item, sensitive);
++
++		info = g_slice_new0 (AppletMenuItemInfo);
++		info->applet = applet;
++		info->device = device ? g_object_ref (device) : NULL;
++		info->connection = g_object_ref (connection);
++
++		g_signal_connect_data (item, "activate",
++		                       G_CALLBACK (applet_menu_item_activate),
++		                       info,
++		                       applet_menu_item_info_destroy, 0);
++
++		gtk_menu_shell_append (GTK_MENU_SHELL (menu), item);
++	}
++}
++
++void
++applet_add_default_connection_item (NMDevice *device,
++                                    const char *label,
++                                    gboolean sensitive,
++                                    GtkWidget *menu,
++                                    NMApplet *applet)
++{
++	AppletMenuItemInfo *info;
++	GtkWidget *item;
++	
++	item = gtk_check_menu_item_new_with_label (label);
++	gtk_widget_set_sensitive (GTK_WIDGET (item), sensitive);
++	gtk_check_menu_item_set_draw_as_radio (GTK_CHECK_MENU_ITEM (item), TRUE);
++
++	info = g_slice_new0 (AppletMenuItemInfo);
++	info->applet = applet;
++	info->device = g_object_ref (device);
++
++	g_signal_connect_data (item, "activate",
++	                       G_CALLBACK (applet_menu_item_activate),
++	                       info,
++	                       applet_menu_item_info_destroy, 0);
++
++	gtk_menu_shell_append (GTK_MENU_SHELL (menu), item);
++}
++
+ 
+ /*****************************************************************************/
+ 
+@@ -2082,9 +2315,29 @@ foo_device_state_changed_cb (NMDevice *device,
+ 	dclass = get_device_class (device, applet);
+ 	g_assert (dclass);
+ 
+-	dclass->device_state_changed (device, new_state, old_state, reason, applet);
++	if (dclass->device_state_changed)
++		dclass->device_state_changed (device, new_state, old_state, reason, applet);
+ 	applet_common_device_state_changed (device, new_state, old_state, reason, applet);
+ 
++	if (   new_state == NM_DEVICE_STATE_ACTIVATED
++	    && !gconf_client_get_bool (applet->gconf_client, PREF_DISABLE_CONNECTED_NOTIFICATIONS, NULL)) {
++		NMConnection *connection;
++		NMSettingConnection *s_con = NULL;
++		char *str = NULL;
++
++		connection = applet_find_active_connection_for_device (device, applet, NULL);
++		if (connection) {
++			const char *id;
++			s_con = nm_connection_get_setting_connection (connection);
++			id = s_con ? nm_setting_connection_get_id (s_con) : NULL;
++			if (id)
++				str = g_strdup_printf (_("You are now connected to '%s'."), id);
++		}
++
++		dclass->notify_connected (device, str, applet);
++		g_free (str);
++	}
++
+ 	applet_schedule_update_icon (applet);
+ }
+ 
+@@ -3059,6 +3312,15 @@ constructor (GType type,
+ 	applet->bt_class = applet_device_bt_get_class (applet);
+ 	g_assert (applet->bt_class);
+ 
++	applet->vlan_class = applet_device_vlan_get_class (applet);
++	g_assert (applet->vlan_class);
++
++	applet->bond_class = applet_device_bond_get_class (applet);
++	g_assert (applet->bond_class);
++
++	applet->bridge_class = applet_device_bridge_get_class (applet);
++	g_assert (applet->bridge_class);
++
+ 	foo_client_setup (applet);
+ 
+ 	/* timeout to update connection timestamps every 5 minutes */
+@@ -3093,6 +3355,11 @@ static void finalize (GObject *object)
+ 	g_slice_free (NMADeviceClass, applet->wired_class);
+ 	g_slice_free (NMADeviceClass, applet->wifi_class);
+ 	g_slice_free (NMADeviceClass, applet->gsm_class);
++	g_slice_free (NMADeviceClass, applet->cdma_class);
++	g_slice_free (NMADeviceClass, applet->bt_class);
++	g_slice_free (NMADeviceClass, applet->vlan_class);
++	g_slice_free (NMADeviceClass, applet->bond_class);
++	g_slice_free (NMADeviceClass, applet->bridge_class);
+ 
+ 	if (applet->update_icon_id)
+ 		g_source_remove (applet->update_icon_id);
+diff --git a/network-manager-applet-0.8.1/src/applet.h b/network-manager-applet-0.8.1/src/applet.h
+index f35cffe..e163447 100644
+--- a/network-manager-applet-0.8.1/src/applet.h
++++ b/network-manager-applet-0.8.1/src/applet.h
+@@ -102,6 +102,9 @@ typedef struct
+ 	NMADeviceClass *gsm_class;
+ 	NMADeviceClass *cdma_class;
+ 	NMADeviceClass *bt_class;
++	NMADeviceClass *vlan_class;
++	NMADeviceClass *bond_class;
++	NMADeviceClass *bridge_class;
+ 
+ 	/* Data model elements */
+ 	guint			update_icon_id;
+@@ -169,7 +172,8 @@ struct NMADeviceClass {
+ 	                                        gpointer callback_data);
+ 
+ 	void           (*add_menu_item)        (NMDevice *device,
+-	                                        guint32 num_devices,
++	                                        gboolean multiple_devices,
++	                                        GSList *connections,
+ 	                                        NMConnection *active,
+ 	                                        GtkWidget *menu,
+ 	                                        NMApplet *applet);
+@@ -187,6 +191,9 @@ struct NMADeviceClass {
+ 	                                        NMConnection *connection,
+ 	                                        char **tip,
+ 	                                        NMApplet *applet);
++	void           (*notify_connected)     (NMDevice *device,
++	                                        const char *msg,
++	                                        NMApplet *applet);
+ 
+ 	void           (*get_more_info)        (NMDevice *device,
+ 	                                        NMConnection *connection,
+@@ -269,4 +276,23 @@ GdkPixbuf * nma_icon_check_and_load (const char *name,
+                                      GdkPixbuf **icon,
+                                      NMApplet *applet);
+ 
++typedef enum {
++	NMA_ADD_ACTIVE = 1,
++	NMA_ADD_INACTIVE = 2,
++} NMAAddActiveInactiveEnum;
++
++void applet_add_connection_items (NMDevice *device,
++                                  GSList *connections,
++                                  gboolean sensitive,
++                                  NMConnection *active,
++                                  NMAAddActiveInactiveEnum flag,
++                                  GtkWidget *menu,
++                                  NMApplet *applet);
++
++void applet_add_default_connection_item (NMDevice *device,
++                                         const char *label,
++                                         gboolean sensitive,
++                                         GtkWidget *menu,
++                                         NMApplet *applet);
++
+ #endif
+diff --git a/network-manager-applet-0.8.1/src/utils/utils.c b/network-manager-applet-0.8.1/src/utils/utils.c
+index 51bc9ac..46873ea 100644
+--- a/network-manager-applet-0.8.1/src/utils/utils.c
++++ b/network-manager-applet-0.8.1/src/utils/utils.c
+@@ -24,6 +24,7 @@
+ #include <string.h>
+ #include <netinet/ether.h>
+ #include <glib.h>
++#include <glib/gi18n.h>
+ 
+ #include <nm-device-ethernet.h>
+ #include <nm-device-wifi.h>
+@@ -196,6 +197,33 @@ utils_get_device_description (NMDevice *device)
+ 	return description;
+ }
+ 
++const char *
++utils_get_connection_device_name (NMConnection *connection)
++{
++	const char *iface, *type, *display_type;
++	NMSettingConnection *s_con;
++
++	iface = nm_connection_get_virtual_iface_name (connection);
++	g_return_val_if_fail (iface != NULL, NULL);
++
++	s_con = nm_connection_get_setting_connection (connection);
++	g_return_val_if_fail (s_con != NULL, NULL);
++	type = nm_setting_connection_get_connection_type (s_con);
++
++	if (!strcmp (type, NM_SETTING_BOND_SETTING_NAME))
++		display_type = _("Bond");
++	else if (!strcmp (type, NM_SETTING_BRIDGE_SETTING_NAME))
++		display_type = _("Bridge");
++	else if (!strcmp (type, NM_SETTING_VLAN_SETTING_NAME))
++		display_type = _("VLAN");
++	else {
++		g_warning ("Unrecognized virtual device type '%s'", type);
++		display_type = type;
++	}
++
++	return g_strdup_printf ("%s (%s)", display_type, iface);
++}
++
+ /*
+  * utils_ether_addr_valid
+  *
+diff --git a/network-manager-applet-0.8.1/src/utils/utils.h b/network-manager-applet-0.8.1/src/utils/utils.h
+index a36d9e8..6f0411f 100644
+--- a/network-manager-applet-0.8.1/src/utils/utils.h
++++ b/network-manager-applet-0.8.1/src/utils/utils.h
+@@ -30,6 +30,7 @@
+ #include <nm-access-point.h>
+ 
+ const char *utils_get_device_description (NMDevice *device);
++const char *utils_get_connection_device_name (NMConnection *connection);
+ 
+ guint32 utils_freq_to_channel (guint32 freq);
+ guint32 utils_channel_to_freq (guint32 channel, char *band);

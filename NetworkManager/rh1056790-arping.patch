@@ -1,0 +1,241 @@
+From adcb68da31578437b1fb0fafebe308afb2a73bc8 Mon Sep 17 00:00:00 2001
+From: Dan Winship <danw@gnome.org>
+Date: Thu, 19 Feb 2015 16:42:09 +0100
+Subject: [PATCH 1/2] device: send ARPs when configuring static IPv4 addresses
+ (rh #1073447)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+After applying a configuration with static IPv4 addresses, call
+/sbin/arping to announce the new addresses to the host's neighbors.
+(Basic idea copied from Fedora ifup-eth.)
+
+Rebased from upstream commit 01f41506fb99514ddf72bd48e6ec5d1dd4aa371d
+by jklimes.
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ src/nm-device.c | 98 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 98 insertions(+)
+
+diff --git a/src/nm-device.c b/src/nm-device.c
+index d68192b..d7a6dde 100644
+--- a/src/nm-device.c
++++ b/src/nm-device.c
+@@ -140,6 +140,7 @@ typedef struct {
+ 	gulong          dhcp4_timeout_sigid;
+ 	NMDHCP4Config * dhcp4_config;
+ 
++	guint           arp_round2_id;
+ 	PingInfo        gw_ping;
+ 
+ 	/* dnsmasq stuff for shared connections */
+@@ -2904,6 +2905,99 @@ start_sharing (NMDevice *self)
+ 	return TRUE;
+ }
+ 
++static void
++send_arps (NMDevice *self, const char *mode_arg)
++{
++	const char *argv[] = { "/sbin/arping", mode_arg, "-q", "-I", nm_device_get_ip_iface (self), "-c", "1", NULL, NULL };
++	int ip_arg = G_N_ELEMENTS (argv) - 2;
++	NMConnection *connection;
++	NMSettingIP4Config *s_ip4;
++	int i, num;
++	NMIP4Address *addr;
++	guint32 ipaddr;
++	char ipaddr_str [INET_ADDRSTRLEN];
++	GError *error = NULL;
++
++	connection = nm_device_get_connection (self);
++	if (!connection)
++		return;
++	s_ip4 = nm_connection_get_setting_ip4_config (connection);
++	if (!s_ip4)
++		return;
++	num = nm_setting_ip4_config_get_num_addresses (s_ip4);
++
++	for (i = 0; i < num; i++) {
++		addr = nm_setting_ip4_config_get_address (s_ip4, i);
++		ipaddr = nm_ip4_address_get_address (addr);
++		argv[ip_arg] = (char *) inet_ntop (AF_INET, &ipaddr, ipaddr_str, sizeof (ipaddr_str));
++
++		nm_log_dbg (LOGD_DEVICE | LOGD_IP4,
++		            "Running arping %s -I %s %s",
++		            mode_arg, nm_device_get_iface (self), argv[ip_arg]);
++		g_spawn_async (NULL, (char **) argv, NULL,
++		               G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
++		               NULL, NULL, NULL, &error);
++		if (error) {
++			nm_log_warn (LOGD_DEVICE | LOGD_IP4,
++			             "Could not send ARP for local address %s: %s",
++			             argv[ip_arg], error->message);
++			g_clear_error (&error);
++		}
++	}
++}
++
++static gboolean
++arp_announce_round2 (gpointer self)
++{
++	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
++
++	priv->arp_round2_id = 0;
++
++	if (   priv->state >= NM_DEVICE_STATE_IP_CONFIG
++	    && priv->state <= NM_DEVICE_STATE_ACTIVATED)
++		send_arps (self, "-U");
++
++	return FALSE;
++}
++
++static void
++arp_cleanup (NMDevice *self)
++{
++	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
++
++	if (priv->arp_round2_id) {
++		g_source_remove (priv->arp_round2_id);
++		priv->arp_round2_id = 0;
++	}
++}
++
++static void
++arp_announce (NMDevice *self)
++{
++	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
++	NMConnection *connection;
++	NMSettingIP4Config *s_ip4;
++	int num;
++
++	arp_cleanup (self);
++
++	/* We only care about manually-configured addresses; DHCP- and autoip-configured
++	 * ones should already have been seen on the network at this point.
++	 */
++	connection = nm_device_get_connection (self);
++	if (!connection)
++		return;
++	s_ip4 = nm_connection_get_setting_ip4_config (connection);
++	if (!s_ip4)
++		return;
++	num = nm_setting_ip4_config_get_num_addresses (s_ip4);
++	if (num == 0)
++		return;
++
++	send_arps (self, "-A");
++	priv->arp_round2_id = g_timeout_add_seconds (2, arp_announce_round2, self);
++}
++
+ /*
+  * nm_device_activate_stage5_ip_config_commit
+  *
+@@ -2989,6 +3083,8 @@ nm_device_activate_stage5_ip_config_commit (gpointer user_data)
+ 		}
+ 	}
+ 
++	arp_announce (self);
++
+ 	nm_device_start_ip_check (self);
+ 
+ out:
+@@ -3182,6 +3278,7 @@ nm_device_deactivate_quickly (NMDevice *self)
+ 
+ 	priv = NM_DEVICE_GET_PRIVATE (self);
+ 
++	arp_cleanup (self);
+ 	ip_check_gw_ping_cleanup (self);
+ 
+ 	/* Break the activation chain */
+@@ -3949,6 +4046,7 @@ dispose (GObject *object)
+ 		}
+ 	}
+ 
++	arp_cleanup (self);
+ 	ip_check_gw_ping_cleanup (self);
+ 
+ 	/* Clear any queued transitions */
+-- 
+2.1.0
+
+
+From 9879caf7bb77935051b84e69f5edc753639400e7 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Thu, 19 Feb 2015 17:25:46 +0100
+Subject: [PATCH 2/2] core: search for arping binary too (bgo #734131)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Rebased from upstream commit 005cb2fc35e2c3d343e33de05a09e53fad608dc5
+by jklimes.
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ src/nm-device.c | 39 ++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 38 insertions(+), 1 deletion(-)
+
+diff --git a/src/nm-device.c b/src/nm-device.c
+index d7a6dde..dfb9c86 100644
+--- a/src/nm-device.c
++++ b/src/nm-device.c
+@@ -2905,10 +2905,39 @@ start_sharing (NMDevice *self)
+ 	return TRUE;
+ }
+ 
++
++static const char *
++_find_arping_binary ()
++{
++	const char *progname = "arping";
++	const char *const DEFAULT_PATHS[] = {
++		"/sbin/",
++		"/usr/sbin/",
++		"/usr/local/sbin/",
++		"/bin/",
++		"/usr/bin/",
++		"/usr/local/bin/",
++		NULL,
++	};
++	const char *ret;
++	int i;
++
++	for (i = 0; DEFAULT_PATHS[i]; i++) {
++		char *tmp = g_strdup_printf ("%s%s", DEFAULT_PATHS[i], progname);
++		if (g_file_test (tmp, G_FILE_TEST_IS_EXECUTABLE)) {
++			ret = g_intern_string (tmp);
++			g_free (tmp);
++			return ret;
++		}
++		g_free (tmp);
++	}
++	return NULL;
++}
++
+ static void
+ send_arps (NMDevice *self, const char *mode_arg)
+ {
+-	const char *argv[] = { "/sbin/arping", mode_arg, "-q", "-I", nm_device_get_ip_iface (self), "-c", "1", NULL, NULL };
++	const char *argv[] = { NULL, mode_arg, "-q", "-I", nm_device_get_ip_iface (self), "-c", "1", NULL, NULL };
+ 	int ip_arg = G_N_ELEMENTS (argv) - 2;
+ 	NMConnection *connection;
+ 	NMSettingIP4Config *s_ip4;
+@@ -2925,6 +2954,14 @@ send_arps (NMDevice *self, const char *mode_arg)
+ 	if (!s_ip4)
+ 		return;
+ 	num = nm_setting_ip4_config_get_num_addresses (s_ip4);
++	if (num == 0)
++		return;
++
++	argv[0] = _find_arping_binary ();
++	if (!argv[0]) {
++		nm_log_warn (LOGD_DEVICE | LOGD_IP4, "arping could not be found; no ARPs will be sent");
++		return;
++	}
+ 
+ 	for (i = 0; i < num; i++) {
+ 		addr = nm_setting_ip4_config_get_address (s_ip4, i);
+-- 
+2.1.0
+

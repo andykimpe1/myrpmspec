@@ -1,0 +1,144 @@
+From 2eec2a989e72606d5865326572a0bbdc1d191229 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Wed, 2 Mar 2011 23:59:43 -0600
+Subject: [PATCH] eap: make DER certificate checking code endian-safe
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This is upstream commit rebased for RHEL 6:
+eap: make DER certificate checking code endian-safe
+2eec2a989e72606d5865326572a0bbdc1d191229
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ src/wireless-security/eap-method.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
+index 7e8f970..ba9ded0 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
+@@ -483,7 +483,6 @@ file_is_der_or_pem (const char *filename,
+ 	int fd;
+ 	unsigned char buffer[8192];
+ 	ssize_t bytes_read;
+-	guint16 der_tag = 0x8230;
+ 	gboolean success = FALSE;
+ 	gboolean encrypted = FALSE;
+ 
+@@ -497,7 +496,7 @@ file_is_der_or_pem (const char *filename,
+ 	buffer[bytes_read] = '\0';
+ 
+ 	/* Check for DER signature */
+-	if (!memcmp (buffer, &der_tag, 2)) {
++	if (bytes_read > 2 && buffer[0] == 0x30 && buffer[1] == 0x82) {
+ 		success = TRUE;
+ 		goto out;
+ 	}
+-- 
+2.1.0
+
+From 9b30279c0a76f7ffb770cbce5e22d9644923b6ef Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Thu, 12 May 2011 10:13:30 -0500
+Subject: [PATCH] 8021x: handle PKCS#8 private keys (bgo #649326)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Detect the keys and whether or not they are encrypted.
+
+This is upstream commit rebased for RHEL 6:
+8021x: handle PKCS#8 private keys (bgo #649326)
+9b30279c0a76f7ffb770cbce5e22d9644923b6ef
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ src/wireless-security/eap-method.c | 41 ++++++++++++++++++++++++++++----------
+ 1 file changed, 31 insertions(+), 10 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
+index 2815821..a785564 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
+@@ -491,6 +491,8 @@ find_tag (const char *tag, const char *buf, gsize len)
+ 
+ static const char *pem_rsa_key_begin = "-----BEGIN RSA PRIVATE KEY-----";
+ static const char *pem_dsa_key_begin = "-----BEGIN DSA PRIVATE KEY-----";
++static const char *pem_pkcs8_enc_key_begin = "-----BEGIN ENCRYPTED PRIVATE KEY-----";
++static const char *pem_pkcs8_dec_key_begin = "-----BEGIN PRIVATE KEY-----";
+ static const char *pem_cert_begin = "-----BEGIN CERTIFICATE-----";
+ static const char *proc_type_tag = "Proc-Type: 4,ENCRYPTED";
+ static const char *dek_info_tag = "DEK-Info:";
+@@ -521,6 +523,19 @@ file_has_extension (const char *filename, const char *extensions[])
+ }
+ 
+ static gboolean
++pem_file_is_encrypted (const char *buffer, gsize bytes_read)
++{
++	/* Check if the private key is encrypted or not by looking for the
++	 * old OpenSSL-style proc-type and dec-info tags.
++	 */
++	if (find_tag (proc_type_tag, (const char *) buffer, bytes_read)) {
++		if (find_tag (dek_info_tag, (const char *) buffer, bytes_read))
++			return TRUE;
++	}
++	return FALSE;
++}
++
++static gboolean
+ file_is_der_or_pem (const char *filename,
+                     gboolean privkey,
+                     gboolean *out_privkey_encrypted)
+@@ -529,7 +544,6 @@ file_is_der_or_pem (const char *filename,
+ 	unsigned char buffer[8192];
+ 	ssize_t bytes_read;
+ 	gboolean success = FALSE;
+-	gboolean encrypted = FALSE;
+ 
+ 	fd = open (filename, O_RDONLY);
+ 	if (fd < 0)
+@@ -550,23 +564,30 @@ file_is_der_or_pem (const char *filename,
+ 	if (privkey) {
+ 		if (find_tag (pem_rsa_key_begin, (const char *) buffer, bytes_read)) {
+ 			success = TRUE;
++			if (out_privkey_encrypted)
++				*out_privkey_encrypted = pem_file_is_encrypted ((const char *) buffer, bytes_read);
+ 			goto out;
+ 		}
+ 
+ 		if (find_tag (pem_dsa_key_begin, (const char *) buffer, bytes_read)) {
+ 			success = TRUE;
++			if (out_privkey_encrypted)
++				*out_privkey_encrypted = pem_file_is_encrypted ((const char *) buffer, bytes_read);
+ 			goto out;
+ 		}
+ 
+-		/* Check if the private key is encrypted or not by looking for the
+-		 * old OpenSSL-style proc-type and dec-info tags.
+-		 */
+-		if (out_privkey_encrypted) {
+-			if (find_tag (proc_type_tag, (const char *) buffer, bytes_read)) {
+-				if (find_tag (dek_info_tag, (const char *) buffer, bytes_read))
+-					encrypted = TRUE;
+-			}
+-			*out_privkey_encrypted = encrypted;
++		if (find_tag (pem_pkcs8_enc_key_begin, (const char *) buffer, bytes_read)) {
++			success = TRUE;
++			if (out_privkey_encrypted)
++				*out_privkey_encrypted = TRUE;
++			goto out;
++		}
++
++		if (find_tag (pem_pkcs8_dec_key_begin, (const char *) buffer, bytes_read)) {
++			success = TRUE;
++			if (out_privkey_encrypted)
++				*out_privkey_encrypted = FALSE;
++			goto out;
+ 		}
+ 	} else {
+ 		if (find_tag (pem_cert_begin, (const char *) buffer, bytes_read)) {
+-- 
+2.1.0
+

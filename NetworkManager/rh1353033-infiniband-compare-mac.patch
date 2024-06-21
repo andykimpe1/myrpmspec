@@ -1,0 +1,326 @@
+From d3202a3dee5d5beb1aa181c6d866cdd738b99f99 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Wed, 12 Oct 2016 13:45:31 +0200
+Subject: [PATCH 1/2] fix compiler warnings
+
+Unrelated patch, but it's annoying to have compiler warnings
+on a regular build. Just fix them.
+---
+ cli/src/connections.c      | 5 +----
+ src/nm-device-infiniband.c | 4 ----
+ 2 files changed, 1 insertion(+), 8 deletions(-)
+
+diff --git a/cli/src/connections.c b/cli/src/connections.c
+index c9fc9ec..5b07c42 100644
+--- a/cli/src/connections.c
++++ b/cli/src/connections.c
+@@ -1511,7 +1511,6 @@ do_connection_up (NmCli *nmc, int argc, char **argv)
+ 	NMSettingConnection *s_con;
+ 	gboolean is_system;
+ 	const char *con_path;
+-	const char *con_type;
+ 	const char *iface = NULL;
+ 	const char *ap = NULL;
+ 	gboolean id_specified = FALSE;
+@@ -1601,7 +1600,6 @@ do_connection_up (NmCli *nmc, int argc, char **argv)
+ 
+ 	s_con = (NMSettingConnection *) nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION);
+ 	g_assert (s_con);
+-	con_type = nm_setting_connection_get_connection_type (s_con);
+ 
+ 	if (   nm_connection_is_type (connection, NM_SETTING_BOND_SETTING_NAME)
+ 	    || nm_connection_is_type (connection, NM_SETTING_VLAN_SETTING_NAME)
+@@ -1647,7 +1645,6 @@ do_connection_down (NmCli *nmc, int argc, char **argv)
+ 	const char *active_path;
+ 	NMConnectionScope active_service_scope, con_scope;
+ 	gboolean id_specified = FALSE;
+-	gboolean wait = TRUE;
+ 	int i;
+ 
+ 	while (argc > 0) {
+@@ -1671,7 +1668,7 @@ do_connection_down (NmCli *nmc, int argc, char **argv)
+ 			}
+ 		}
+ 		else if (strcmp (*argv, "--nowait") == 0) {
+-			wait = FALSE;
++			/*???*/
+ 		}
+ 		else {
+ 			fprintf (stderr, _("Unknown parameter: %s\n"), *argv);
+diff --git a/src/nm-device-infiniband.c b/src/nm-device-infiniband.c
+index 7e2eb14..d98a00e 100644
+--- a/src/nm-device-infiniband.c
++++ b/src/nm-device-infiniband.c
+@@ -110,7 +110,6 @@ constructor (GType type,
+ 			 GObjectConstructParam *construct_params)
+ {
+ 	GObject *object;
+-	NMDeviceInfinibandPrivate *priv;
+ 	NMDevice *self;
+ 
+ 	object = G_OBJECT_CLASS (nm_device_infiniband_parent_class)->constructor (type,
+@@ -120,7 +119,6 @@ constructor (GType type,
+ 		return NULL;
+ 
+ 	self = NM_DEVICE (object);
+-	priv = NM_DEVICE_INFINIBAND_GET_PRIVATE (self);
+ 
+ 	nm_log_dbg (LOGD_HW | LOGD_INFINIBAND, "(%s): kernel ifindex %d",
+ 	            nm_device_get_iface (NM_DEVICE (self)),
+@@ -437,9 +435,7 @@ hwaddr_matches (NMDevice *device,
+ 	NMSettingInfiniband *s_ib;
+ 	const guint8 *devaddr;
+ 	const GByteArray *mac = NULL;
+-	int devtype;
+ 
+-	devtype = nm_device_wired_get_hwaddr_type (NM_DEVICE_WIRED (device));
+ 	devaddr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (device));
+ 	g_return_val_if_fail (devaddr != NULL, FALSE);
+ 
+-- 
+2.7.4
+
+
+From b4c796c4d8ee1b4d74ba16ebf30d16554b9f9a09 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Tue, 11 Oct 2016 10:59:07 +0200
+Subject: [PATCH 2/2] fix comparing MAC addresses for infiniband (rh#1353033)
+
+For infiniband types, only the last 8 octets of the MAC address
+shall be compared.
+
+Add a new utility function _nm_rhel69_utils_equal_mac_address()
+to libnm-util. Usually, we should't add downstream ABI that is not
+in newer upstream releases as well, to allow an upgrade patch.
+However, the RHEL version of NetworkManager and libnm already contains
+other rhel-only ABI, thus on upgrade all applications that link against
+libnm must anyway be rebuild. In other words, for RHEL-6 we allow
+the an incompatible ABI of libnm-util/libnm-glib.
+
+https://bugzilla.redhat.com/show_bug.cgi?id=1353033
+---
+ cli/src/connections.c                          |  5 ++-
+ libnm-util/libnm-util.ver                      |  1 +
+ libnm-util/nm-utils.c                          | 31 ++++++++++++++++++
+ libnm-util/nm-utils.h                          |  6 ++++
+ network-manager-applet-0.8.1/src/utils/utils.c |  4 ++-
+ src/nm-device-infiniband.c                     | 44 +++++++++++++++++---------
+ src/system-settings/nm-sysconfig-settings.c    |  5 +--
+ 7 files changed, 77 insertions(+), 19 deletions(-)
+
+diff --git a/cli/src/connections.c b/cli/src/connections.c
+index 5b07c42..78efe04 100644
+--- a/cli/src/connections.c
++++ b/cli/src/connections.c
+@@ -978,7 +978,10 @@ check_infiniband_compatible (NMDeviceInfiniband *device, NMConnection *connectio
+ 		}
+ 
+ 		mac = nm_setting_infiniband_get_mac_address (s_infiniband);
+-		if (mac && memcmp (mac->data, device_mac->data, mac->len)) {
++		if (   mac
++		    && !_nm_rhel69_utils_equal_mac_address (ARPHRD_INFINIBAND,
++		                                            device_mac->data, device_mac->len,
++		                                            mac->data, mac->len)) {
+ 			g_byte_array_unref (device_mac);
+ 			g_set_error (error, 0, 0,
+ 			             "The connection's MAC address did not match this device.");
+diff --git a/libnm-util/libnm-util.ver b/libnm-util/libnm-util.ver
+index 49f91d7..5100c26 100644
+--- a/libnm-util/libnm-util.ver
++++ b/libnm-util/libnm-util.ver
+@@ -499,6 +499,7 @@ global:
+ 	nm_ip4_route_set_prefix;
+ 	nm_ip4_route_set_next_hop;
+ 	nm_ip4_route_set_metric;
++	_nm_rhel69_utils_equal_mac_address;
+ local:
+ 	*;
+ };
+diff --git a/libnm-util/nm-utils.c b/libnm-util/nm-utils.c
+index 1cf3f2d..4fcbca1 100644
+--- a/libnm-util/nm-utils.c
++++ b/libnm-util/nm-utils.c
+@@ -2715,3 +2715,34 @@ int _nm_utils_dns_option_find_idx (GSList *list, const char *option)
+ 	g_free (option_name);
+ 	return -1;
+ }
++
++gboolean
++_nm_rhel69_utils_equal_mac_address (int arp_type,
++                                    gconstpointer data_a,
++                                    gsize len_a,
++                                    gconstpointer data_b,
++                                    gsize len_b)
++{
++	switch (arp_type) {
++	case ARPHRD_ETHER:
++	case ARPHRD_INFINIBAND:
++		if (len_a != len_b)
++			return FALSE;
++		if (len_a == 0)
++			return FALSE;
++		if (!data_a || !data_b)
++			g_return_val_if_reached (FALSE);
++		if (arp_type == ARPHRD_ETHER) {
++			return    len_a == ETH_ALEN
++			       && !memcmp (data_a, data_b, ETH_ALEN);
++		} else {
++			return    len_a == INFINIBAND_ALEN
++			       && !memcmp (&((const guint8 *) data_a)[INFINIBAND_ALEN - 8],
++			                   &((const guint8 *) data_b)[INFINIBAND_ALEN - 8],
++			                   8);
++		}
++	default:
++		g_return_val_if_reached (FALSE);
++	}
++}
++
+diff --git a/libnm-util/nm-utils.h b/libnm-util/nm-utils.h
+index 69b8457..d878e51 100644
+--- a/libnm-util/nm-utils.h
++++ b/libnm-util/nm-utils.h
+@@ -244,6 +244,12 @@ gboolean    _nm_utils_dns_option_validate (const char *option, char **out_name,
+                                            const DNSOptionDesc *option_descs);
+ int         _nm_utils_dns_option_find_idx (GSList *list, const char *option);
+ 
++gboolean _nm_rhel69_utils_equal_mac_address (int arp_type,
++                                             gconstpointer data_a,
++                                             gsize len_a,
++                                             gconstpointer data_b,
++                                             gsize len_b);
++
+ G_END_DECLS
+ 
+ #endif /* NM_UTILS_H */
+diff --git a/network-manager-applet-0.8.1/src/utils/utils.c b/network-manager-applet-0.8.1/src/utils/utils.c
+index ec4b3ca..ec7180b 100644
+--- a/network-manager-applet-0.8.1/src/utils/utils.c
++++ b/network-manager-applet-0.8.1/src/utils/utils.c
+@@ -596,7 +596,9 @@ connection_valid_for_infiniband (NMConnection *connection,
+ 	device_mac = nm_utils_hwaddr_atoba (device_mac_str, ARPHRD_INFINIBAND);
+ 	g_return_val_if_fail (device_mac != NULL, FALSE);
+ 
+-	if (memcmp (mac->data, device_mac->data, mac->len) != 0) {
++	if (!_nm_rhel69_utils_equal_mac_address (ARPHRD_INFINIBAND,
++	                                         mac->data, mac->len,
++	                                         device_mac->data, device_mac->len)) {
+ 		g_byte_array_unref (device_mac);
+ 		return FALSE;
+ 	}
+diff --git a/src/nm-device-infiniband.c b/src/nm-device-infiniband.c
+index d98a00e..ff13521 100644
+--- a/src/nm-device-infiniband.c
++++ b/src/nm-device-infiniband.c
+@@ -84,6 +84,23 @@ nm_infiniband_error_quark (void)
+ /* This should really be standard. */
+ #define ENUM_ENTRY(NAME, DESC) { NAME, "" #NAME "", DESC }
+ 
++static gboolean
++_equal_mac_address (NMSettingInfiniband *s_infiniband, gconstpointer hwaddr, gsize hwaddr_len)
++{
++	const GByteArray *mac;
++
++	if (!s_infiniband)
++		g_return_val_if_reached (TRUE);
++
++	mac = nm_setting_infiniband_get_mac_address (s_infiniband);
++	if (!mac)
++		return TRUE;
++
++	return _nm_rhel69_utils_equal_mac_address (ARPHRD_INFINIBAND,
++	                                           hwaddr, hwaddr_len,
++	                                           mac->data, mac->len);
++}
++
+ static GType
+ nm_infiniband_error_get_type (void)
+ {
+@@ -206,10 +223,8 @@ real_get_best_auto_connection (NMDevice *dev,
+ 
+ 		if (s_infiniband) {
+ 			guint8 *hwaddr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (dev));
+-			const GByteArray *mac;
+ 
+-			mac = nm_setting_infiniband_get_mac_address (s_infiniband);
+-			if (mac && memcmp (mac->data, hwaddr, INFINIBAND_ALEN))
++			if (!_equal_mac_address (s_infiniband, hwaddr, INFINIBAND_ALEN))
+ 				continue;
+ 		}
+ 
+@@ -306,7 +321,6 @@ real_check_connection_compatible (NMDevice *device,
+ 	NMSettingInfiniband *s_infiniband;
+ 	const char *connection_type;
+ 	const char *ifname;
+-	const GByteArray *mac;
+ 
+ 	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+ 	g_assert (s_con);
+@@ -339,8 +353,7 @@ real_check_connection_compatible (NMDevice *device,
+ 	if (s_infiniband) {
+ 		guint8 *hwaddr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (device));
+ 
+-		mac = nm_setting_infiniband_get_mac_address (s_infiniband);
+-		if (mac && memcmp (mac->data, hwaddr, INFINIBAND_ALEN)) {
++		if (!_equal_mac_address (s_infiniband, hwaddr, INFINIBAND_ALEN)) {
+ 			g_set_error (error,
+ 			             NM_INFINIBAND_ERROR,
+ 						 NM_INFINIBAND_ERROR_CONNECTION_INCOMPATIBLE,
+@@ -372,15 +385,12 @@ static gboolean
+ infiniband_match_config (NMDevice *self, NMConnection *connection)
+ {
+ 	NMSettingInfiniband *s_infiniband;
+-	const GByteArray *s_mac;
+ 
+ 	s_infiniband = (NMSettingInfiniband *) nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND);
+ 	if (!s_infiniband)
+ 		return FALSE;
+ 
+-	/* MAC address check */
+-	s_mac = nm_setting_infiniband_get_mac_address (s_infiniband);
+-	if (s_mac && memcmp (s_mac->data, nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (self)), INFINIBAND_ALEN))
++	if (!_equal_mac_address (s_infiniband, nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (self)), INFINIBAND_ALEN))
+ 		return FALSE;
+ 
+ 	return TRUE;
+@@ -444,13 +454,17 @@ hwaddr_matches (NMDevice *device,
+ 		mac = nm_setting_infiniband_get_mac_address (s_ib);
+ 
+ 	if (mac) {
+-		g_return_val_if_fail (mac->len == INFINIBAND_ALEN, FALSE);
+ 		if (other_hwaddr) {
+-			g_return_val_if_fail (other_hwaddr_len == INFINIBAND_ALEN, FALSE);
+-			if (memcmp (mac->data, other_hwaddr, mac->len) == 0)
++			if (_nm_rhel69_utils_equal_mac_address (ARPHRD_INFINIBAND,
++			                                        other_hwaddr, other_hwaddr_len,
++			                                        mac->data, mac->len))
++				return TRUE;
++		} else {
++			if (_nm_rhel69_utils_equal_mac_address (ARPHRD_INFINIBAND,
++			                                        devaddr, INFINIBAND_ALEN,
++			                                        mac->data, mac->len))
+ 				return TRUE;
+-		} else if (memcmp (mac->data, devaddr, mac->len) == 0)
+-			return TRUE;
++		}
+ 	} else if (fail_if_no_hwaddr == FALSE)
+ 		return TRUE;
+ 
+diff --git a/src/system-settings/nm-sysconfig-settings.c b/src/system-settings/nm-sysconfig-settings.c
+index 1c22fcb..a591c5e 100644
+--- a/src/system-settings/nm-sysconfig-settings.c
++++ b/src/system-settings/nm-sysconfig-settings.c
+@@ -1315,8 +1315,9 @@ have_connection_for_device (NMSysconfigSettings *self, GByteArray *mac, const ch
+ 			nm_setting_infiniband_get_mac_address (s_infiniband);
+ 		if (setting_mac) {
+ 			/* A connection mac-locked to this device */
+-			if (mac->len == setting_mac->len &&
+-				!memcmp (setting_mac->data, mac->data, mac->len)) {
++			if (_nm_rhel69_utils_equal_mac_address (s_wired ? ARPHRD_ETHER : ARPHRD_INFINIBAND,
++			                                        mac->data, mac->len,
++			                                        setting_mac->data, setting_mac->len)) {
+ 				ret = TRUE;
+ 				break;
+ 			}
+-- 
+2.7.4
+

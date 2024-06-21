@@ -1,0 +1,124 @@
+diff -up NetworkManager-0.8.1/src/nm-manager.c.bond-vlan-switch NetworkManager-0.8.1/src/nm-manager.c
+--- NetworkManager-0.8.1/src/nm-manager.c.bond-vlan-switch	2012-03-23 11:55:05.337460999 -0500
++++ NetworkManager-0.8.1/src/nm-manager.c	2012-03-23 13:35:45.700946062 -0500
+@@ -22,6 +22,7 @@
+ #include <config.h>
+ #include <netinet/ether.h>
+ #include <string.h>
++#include <strings.h>
+ #include <dbus/dbus-glib-lowlevel.h>
+ #include <dbus/dbus-glib.h>
+ #include <sys/types.h>
+@@ -236,6 +237,8 @@ typedef struct {
+ 
+ 	guint timestamp_update_id;
+ 
++	gboolean bond_vlan_enabled;
++
+ 	gboolean disposed;
+ } NMManagerPrivate;
+ 
+@@ -1557,6 +1560,9 @@ get_virtual_iface_name (NMManager *self,
+ 	if (out_parent)
+ 		*out_parent = NULL;
+ 
++	if (!NM_MANAGER_GET_PRIVATE (self)->bond_vlan_enabled)
++		return NULL;
++
+ 	if (nm_connection_is_type (connection, NM_SETTING_BOND_SETTING_NAME))
+ 		return g_strdup (nm_connection_get_virtual_iface_name (connection));
+ 
+@@ -1625,6 +1631,9 @@ system_create_virtual_device (NMManager
+ 	char *iface = NULL, *udi;
+ 	NMDevice *device = NULL, *parent = NULL;
+ 
++	if (!priv->bond_vlan_enabled)
++		return NULL;
++
+ 	iface = get_virtual_iface_name (self, connection, &parent);
+ 	if (!iface) {
+ 		nm_log_warn (LOGD_DEVICE, "(%s) failed to determine virtual interface name",
+@@ -1679,8 +1688,12 @@ out:
+ static void
+ system_create_virtual_devices (NMManager *self)
+ {
++	NMManagerPrivate *priv = NM_MANAGER_GET_PRIVATE (self);
+ 	GSList *iter, *connections;
+ 
++	if (!priv->bond_vlan_enabled)
++		return;
++
+ 	nm_log_dbg (LOGD_CORE, "creating virtual devices...");
+ 
+ 	connections = nm_manager_get_connections (self, NM_CONNECTION_SCOPE_SYSTEM, FALSE);
+@@ -2810,6 +2823,7 @@ udev_device_added_cb (NMUdevManager *ude
+                       gpointer user_data)
+ {
+ 	NMManager *self = NM_MANAGER (user_data);
++	NMManagerPrivate *priv = NM_MANAGER_GET_PRIVATE (self);
+ 	NMDevice *device;
+ 
+ 	g_return_if_fail (udev_device != NULL);
+@@ -2832,18 +2846,24 @@ udev_device_added_cb (NMUdevManager *ude
+ 		device = nm_device_wifi_new (sysfs_path, iface, driver);
+ 	else if (is_infiniband (udev_device))
+ 		device = nm_device_infiniband_new (sysfs_path, iface, driver);
+-	else if (is_bond (ifindex))
+-		device = nm_device_bond_new (sysfs_path, iface);
+-	else if (is_vlan (ifindex)) {
++	else if (is_bond (ifindex)) {
++		if (priv->bond_vlan_enabled)
++			device = nm_device_bond_new (sysfs_path, iface);
++		else
++			nm_log_dbg (LOGD_HW, "(%s): ignoring because NM_BOND_VLAN_ENABLED not set", iface);
++	} else if (is_vlan (ifindex)) {
+ 		int parent_ifindex = -1;
+ 		NMDevice *parent;
+ 
+ 		/* Have to find the parent device */
+ 		if (nm_system_get_iface_vlan_info (ifindex, &parent_ifindex, NULL)) {
+ 			parent = find_device_by_ifindex (self, parent_ifindex);
+-			if (parent)
+-				device = nm_device_vlan_new (sysfs_path, iface, parent);
+-			else {
++			if (parent) {
++				if (priv->bond_vlan_enabled)
++					device = nm_device_vlan_new (sysfs_path, iface, parent);
++				else
++					nm_log_dbg (LOGD_HW, "(%s): ignoring because NM_BOND_VLAN_ENABLED not set", iface);
++			} else {
+ 				/* If udev signaled the VLAN interface before it signaled
+ 				 * the VLAN's parent at startup we may not know about the
+ 				 * parent device yet.  But we'll find it on the second pass
+@@ -5392,6 +5412,7 @@ nm_manager_init (NMManager *manager)
+ 	DBusGConnection *g_connection;
+ 	guint id, i;
+ 	GFile *file;
++	char *contents = NULL, *p;
+ 
+ 	/* Initialize rfkill structures and states */
+ 	memset (priv->radio_states, 0, sizeof (priv->radio_states));
+@@ -5503,6 +5524,23 @@ nm_manager_init (NMManager *manager)
+ 
+ 	/* Update timestamps in active connections */
+ 	priv->timestamp_update_id = g_timeout_add_seconds (300, (GSourceFunc) periodic_update_active_connection_timestamps, manager);
++
++	/* Check whether we're supposed to manage bonds and VLAN interfaces */
++#define BV_ENABLED_KEY "NM_BOND_VLAN_ENABLED"
++	if (g_file_get_contents (SYSCONFDIR "/sysconfig/network", &contents, NULL, NULL) && contents) {
++		p = strcasestr (contents, BV_ENABLED_KEY);
++		if (p) {
++			p += strlen (BV_ENABLED_KEY);
++			if (*p++ == '=') {
++				if (   strcasecmp (p, "yes") == 0
++				    || strcasestr (p, "y")
++				    || strcasestr (p, "true"))
++					priv->bond_vlan_enabled = TRUE;
++			}
++		}
++		g_free (contents);
++	}
++	nm_log_info (LOGD_HW, "Bonding/VLAN support %s", priv->bond_vlan_enabled ? "enabled" : "disabled");
+ }
+ 
+ static void

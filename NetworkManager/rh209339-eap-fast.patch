@@ -1,0 +1,1731 @@
+Commits relevant to EAP-FAST extracted from upstream NM (NM_0_8 branch) and
+applet (NMA_0_8 branch), squashed and backported in order to apply cleanly
+to RHEL-6.3.
+Especially, the editor/applet commit had to be changed, because here we use
+glade, but usptream switched to GtkBuilder.
+Also wpa_supplicant stuff had to be adapted, because of changed DBus API.
+===
+
+From 91a58738622c30130a2f6dfa68da3a971a596534 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Fri, 20 Jan 2012 15:10:30 +0100
+Subject: [PATCH] libnm-util: add 'pac-file' property for 8021x setting (used
+ in EAP-FAST)
+
+---
+ libnm-util/libnm-util.ver     |    1 +
+ libnm-util/nm-setting-8021x.c |   40 +++++++++++++++++++++++++++++++++++++++-
+ libnm-util/nm-setting-8021x.h |    5 ++++-
+ 3 files changed, 44 insertions(+), 2 deletions(-)
+
+diff --git a/libnm-util/libnm-util.ver b/libnm-util/libnm-util.ver
+index ccdd38c..17cdc50 100644
+--- a/libnm-util/libnm-util.ver
++++ b/libnm-util/libnm-util.ver
+@@ -47,6 +47,7 @@ global:
+ 	nm_setting_802_1x_get_eap_method;
+ 	nm_setting_802_1x_get_identity;
+ 	nm_setting_802_1x_get_num_eap_methods;
++	nm_setting_802_1x_get_pac_file;
+ 	nm_setting_802_1x_get_password;
+ 	nm_setting_802_1x_get_phase1_fast_provisioning;
+ 	nm_setting_802_1x_get_phase1_peaplabel;
+diff --git a/libnm-util/nm-setting-8021x.c b/libnm-util/nm-setting-8021x.c
+index fa0ef74..7cadd9f 100644
+--- a/libnm-util/nm-setting-8021x.c
++++ b/libnm-util/nm-setting-8021x.c
+@@ -19,7 +19,7 @@
+  * Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
+  * Boston, MA 02110-1301 USA.
+  *
+- * (C) Copyright 2007 - 2008 Red Hat, Inc.
++ * (C) Copyright 2007 - 2012 Red Hat, Inc.
+  * (C) Copyright 2007 - 2008 Novell, Inc.
+  */
+ 
+@@ -113,6 +113,7 @@ typedef struct {
+ 	GSList *eap; /* GSList of strings */
+ 	char *identity;
+ 	char *anonymous_identity;
++	char *pac_file;
+ 	GByteArray *ca_cert;
+ 	char *ca_path;
+ 	GByteArray *client_cert;
+@@ -139,6 +140,7 @@ enum {
+ 	PROP_EAP,
+ 	PROP_IDENTITY,
+ 	PROP_ANONYMOUS_IDENTITY,
++	PROP_PAC_FILE,
+ 	PROP_CA_CERT,
+ 	PROP_CA_PATH,
+ 	PROP_CLIENT_CERT,
+@@ -334,6 +336,22 @@ nm_setting_802_1x_get_anonymous_identity (NMSetting8021x *setting)
+ }
+ 
+ /**
++ * nm_setting_802_1x_get_pac_file:
++ * @setting: the #NMSetting8021x
++ *
++ * Returns the file containing PAC credentials used by EAP-FAST method.
++ *
++ * Returns: the PAC file
++ **/
++const char *
++nm_setting_802_1x_get_pac_file (NMSetting8021x *setting)
++{
++	g_return_val_if_fail (NM_IS_SETTING_802_1X (setting), NULL);
++
++	return NM_SETTING_802_1X_GET_PRIVATE (setting)->pac_file;
++}
++
++/**
+  * nm_setting_802_1x_get_ca_path:
+  * @setting: the #NMSetting8021x
+  *
+@@ -3009,6 +3027,10 @@ set_property (GObject *object, guint prop_id,
+ 		g_free (priv->anonymous_identity);
+ 		priv->anonymous_identity = g_value_dup_string (value);
+ 		break;
++	case PROP_PAC_FILE:
++		g_free (priv->pac_file);
++		priv->pac_file = g_value_dup_string (value);
++		break;
+ 	case PROP_CA_CERT:
+ 		if (priv->ca_cert) {
+ 			g_byte_array_free (priv->ca_cert, TRUE);
+@@ -3163,6 +3185,9 @@ get_property (GObject *object, guint prop_id,
+ 	case PROP_ANONYMOUS_IDENTITY:
+ 		g_value_set_string (value, priv->anonymous_identity);
+ 		break;
++	case PROP_PAC_FILE:
++		g_value_set_string (value, priv->pac_file);
++		break;
+ 	case PROP_CA_CERT:
+ 		g_value_set_boxed (value, priv->ca_cert);
+ 		break;
+@@ -3308,6 +3333,19 @@ nm_setting_802_1x_class_init (NMSetting8021xClass *setting_class)
+ 						  G_PARAM_READWRITE | NM_SETTING_PARAM_SERIALIZE));
+ 
+ 	/**
++	 * NMSetting8021x:pac-file:
++	 *
++	 * UTF-8 encoded file path containing PAC for EAP-FAST.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_PAC_FILE,
++		 g_param_spec_string (NM_SETTING_802_1X_PAC_FILE,
++						  "PAC file",
++						  "UTF-8 encoded file path containing PAC for EAP-FAST.",
++						  NULL,
++						  G_PARAM_READWRITE | NM_SETTING_PARAM_SERIALIZE));
++
++	/**
+ 	 * NMSetting8021x:ca-cert:
+ 	 *
+ 	 * Contains the CA certificate if used by the EAP method specified in the
+diff --git a/libnm-util/nm-setting-8021x.h b/libnm-util/nm-setting-8021x.h
+index 1b54331..00a06ba 100644
+--- a/libnm-util/nm-setting-8021x.h
++++ b/libnm-util/nm-setting-8021x.h
+@@ -19,7 +19,7 @@
+  * Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
+  * Boston, MA 02110-1301 USA.
+  *
+- * (C) Copyright 2007 - 2009 Red Hat, Inc.
++ * (C) Copyright 2007 - 2012 Red Hat, Inc.
+  * (C) Copyright 2007 - 2008 Novell, Inc.
+  */
+ 
+@@ -69,6 +69,7 @@ GQuark nm_setting_802_1x_error_quark (vo
+ #define NM_SETTING_802_1X_EAP "eap"
+ #define NM_SETTING_802_1X_IDENTITY "identity"
+ #define NM_SETTING_802_1X_ANONYMOUS_IDENTITY "anonymous-identity"
++#define NM_SETTING_802_1X_PAC_FILE "pac-file"
+ #define NM_SETTING_802_1X_CA_CERT "ca-cert"
+ #define NM_SETTING_802_1X_CA_PATH "ca-path"
+ #define NM_SETTING_802_1X_CLIENT_CERT "client-cert"
+@@ -151,6 +152,8 @@ const char *      nm_setting_802_1x_get_identity                     (NMSetting8
+ 
+ const char *      nm_setting_802_1x_get_anonymous_identity           (NMSetting8021x *setting);
+ 
++const char *      nm_setting_802_1x_get_pac_file                     (NMSetting8021x *setting);
++
+ gboolean          nm_setting_802_1x_get_system_ca_certs              (NMSetting8021x *setting);
+ const char *      nm_setting_802_1x_get_ca_path                      (NMSetting8021x *setting);
+ const char *      nm_setting_802_1x_get_phase2_ca_path               (NMSetting8021x *setting);
+-- 
+1.7.7.6
+
+From 8679f350e901282c22c7b0da5841588f4d3306e5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Fri, 20 Jan 2012 15:21:32 +0100
+Subject: [PATCH] supplicant: handle parameters for EAP-FAST authentication
+
+---
+ src/supplicant-manager/nm-supplicant-config.c      |   35 ++++++++++++++++++-
+ .../nm-supplicant-settings-verify.c                |    7 +++-
+ 2 files changed, 38 insertions(+), 4 deletions(-)
+
+diff --git a/src/supplicant-manager/nm-supplicant-config.c b/src/supplicant-manager/nm-supplicant-config.c
+index 4dd704d..7d306dd 100644
+--- a/src/supplicant-manager/nm-supplicant-config.c
++++ b/src/supplicant-manager/nm-supplicant-config.c
+@@ -15,7 +15,7 @@
+  * with this program; if not, write to the Free Software Foundation, Inc.,
+  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+  *
+- * Copyright (C) 2006 - 2010 Red Hat, Inc.
++ * Copyright (C) 2006 - 2012 Red Hat, Inc.
+  * Copyright (C) 2007 - 2008 Novell, Inc.
+  */
+ 
+@@ -713,6 +713,7 @@ nm_supplicant_config_add_setting_8021x (NMSupplicantConfig *self,
+ 	const GByteArray *array;
+ 	gboolean peap = FALSE;
+ 	guint32 i, num_eap;
++	gboolean fast_provisoning_allowed = FALSE;
+ 
+ 	g_return_val_if_fail (NM_IS_SUPPLICANT_CONFIG (self), FALSE);
+ 	g_return_val_if_fail (setting != NULL, FALSE);
+@@ -777,6 +778,16 @@ nm_supplicant_config_add_setting_8021x (NMSupplicantConfig *self,
+ 		g_string_append_printf (phase1, "peaplabel=%s", nm_setting_802_1x_get_phase1_peaplabel (setting));
+ 	}
+ 
++	value = nm_setting_802_1x_get_phase1_fast_provisioning (setting);
++	if (value) {
++		if (phase1->len)
++			g_string_append_c (phase1, ' ');
++		g_string_append_printf (phase1, "fast_provisioning=%s", value);
++		
++		if (strcmp (value, "0") != 0)
++			fast_provisoning_allowed = TRUE;
++	}
++
+ 	if (phase1->len) {
+ 		if (!add_string_val (self, phase1->str, "phase1", FALSE, FALSE)) {
+ 			g_string_free (phase1, TRUE);
+@@ -786,7 +797,7 @@ nm_supplicant_config_add_setting_8021x (NMSupplicantConfig *self,
+ 	g_string_free (phase1, TRUE);
+ 
+ 	phase2 = g_string_new (NULL);
+-	if (nm_setting_802_1x_get_phase2_auth (setting)) {
++	if (nm_setting_802_1x_get_phase2_auth (setting) && !fast_provisoning_allowed) {
+ 		tmp = g_ascii_strup (nm_setting_802_1x_get_phase2_auth (setting), -1);
+ 		g_string_append_printf (phase2, "auth=%s", tmp);
+ 		g_free (tmp);
+@@ -808,6 +819,26 @@ nm_supplicant_config_add_setting_8021x (NMSupplicantConfig *self,
+ 	}
+ 	g_string_free (phase2, TRUE);
+ 
++	/* PAC file */
++	path = nm_setting_802_1x_get_pac_file (setting);
++	if (path) {
++		if (!add_string_val (self, path, "pac_file", FALSE, FALSE))
++			return FALSE;
++	} else {
++		/* PAC file is not specified.
++		 * If provisioning is allowed, use an blob format.
++		 */
++		if (fast_provisoning_allowed) {
++			char *blob_name = g_strdup_printf ("blob://pac-blob-%s", connection_uid);
++			if (!add_string_val (self, blob_name, "pac_file", FALSE, FALSE)) {
++				g_free (blob_name);
++				return FALSE;
++			}
++			g_free (blob_name);
++		} else
++			return FALSE;
++	}
++
+ 	/* CA path */
+ 	path = nm_setting_802_1x_get_ca_path (setting);
+ 	if (nm_setting_802_1x_get_system_ca_certs (setting))
+diff --git a/src/supplicant-manager/nm-supplicant-settings-verify.c b/src/supplicant-manager/nm-supplicant-settings-verify.c
+index 2336ad7..de38346 100644
+--- a/src/supplicant-manager/nm-supplicant-settings-verify.c
++++ b/src/supplicant-manager/nm-supplicant-settings-verify.c
+@@ -15,7 +15,7 @@
+  * with this program; if not, write to the Free Software Foundation, Inc.,
+  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+  *
+- * Copyright (C) 2006 - 2008 Red Hat, Inc.
++ * Copyright (C) 2006 - 2012 Red Hat, Inc.
+  */
+ 
+ #include <glib.h>
+@@ -73,7 +73,9 @@ const char * eap_allowed[] =      { "LEAP", "MD5", "TLS", "PEAP", "TTLS", "SIM",
+ 
+ const char * phase1_allowed[] =   {"peapver=0", "peapver=1", "peaplabel=1",
+                                     "peap_outer_success=0", "include_tls_length=1",
+-                                    "sim_min_num_chal=3", NULL };
++                                    "sim_min_num_chal=3", "fast_provisioning=0",
++                                    "fast_provisioning=1", "fast_provisioning=2",
++                                    "fast_provisioning=3", NULL };
+ const char * phase2_allowed[] =   {"auth=PAP", "auth=CHAP", "auth=MSCHAP",
+                                    "auth=MSCHAPV2", "auth=GTC", "auth=OTP",
+                                    "auth=MD5", "auth=TLS", "autheap=MD5",
+@@ -127,6 +125,7 @@ static const struct Opt opt_table[] = {
+ 	{ "fragment_size",      TYPE_INT,     1, 2000, FALSE,  NULL },
+ 	{ "proactive_key_caching", TYPE_INT,  0, 1, FALSE,  NULL },
+ 	{ "bgscan",             TYPE_BYTES,   0, 0, FALSE,  NULL },
++	{ "pac_file",           TYPE_BYTES,   0, 1024, FALSE,  NULL },
+ };
+ 
+ 
+-- 
+1.7.7.6
+
+From 81a668ba3106913e2bb233217cca89965276fd3d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Mon, 23 Jan 2012 13:53:08 +0100
+Subject: [PATCH] ifcfg-rh: add read/write support for EAP-FAST
+
+---
+ system-settings/plugins/ifcfg-rh/reader.c |  136 ++++++++++++++++++++++++++---
+ system-settings/plugins/ifcfg-rh/writer.c |   20 ++++-
+ 2 files changed, 143 insertions(+), 13 deletions(-)
+
+diff --git a/system-settings/plugins/ifcfg-rh/reader.c b/system-settings/plugins/ifcfg-rh/reader.c
+index 82c9da9..461f64a 100644
+--- a/system-settings/plugins/ifcfg-rh/reader.c
++++ b/system-settings/plugins/ifcfg-rh/reader.c
+@@ -15,7 +15,7 @@
+  * with this program; if not, write to the Free Software Foundation, Inc.,
+  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+  *
+- * Copyright (C) 2008 - 2010 Red Hat, Inc.
++ * Copyright (C) 2008 - 2012 Red Hat, Inc.
+  */
+ 
+ #include <stdlib.h>
+@@ -92,6 +92,12 @@ static gboolean eap_ttls_reader (const char *eap_method,
+                                  gboolean phase2,
+                                  GError **error);
+ 
++static gboolean eap_fast_reader (const char *eap_method,
++                                 shvarFile *ifcfg,
++                                 shvarFile *keys,
++                                 NMSetting8021x *s_8021x,
++                                 gboolean phase2,
++                                 GError **error);
+ 
+ static gboolean
+ get_int (const char *str, int *value)
+@@ -2015,6 +2021,7 @@ static EAPReader eap_readers[] = {
+ 	{ "tls", eap_tls_reader, FALSE },
+ 	{ "peap", eap_peap_reader, FALSE },
+ 	{ "ttls", eap_ttls_reader, FALSE },
++	{ "fast", eap_fast_reader, FALSE },
+ 	{ NULL, NULL }
+ };
+ 
+@@ -2058,18 +2065,18 @@ eap_simple_reader (const char *eap_method,
+ }
+ 
+ static char *
+-get_cert_file (const char *ifcfg_path, const char *cert_path)
++get_full_file_path (const char *ifcfg_path, const char *file_path)
+ {
+-	const char *base = cert_path;
++	const char *base = file_path;
+ 	char *p, *ret, *dirname;
+ 
+ 	g_return_val_if_fail (ifcfg_path != NULL, NULL);
+-	g_return_val_if_fail (cert_path != NULL, NULL);
++	g_return_val_if_fail (file_path != NULL, NULL);
+ 
+-	if (cert_path[0] == '/')
+-		return g_strdup (cert_path);
++	if (file_path[0] == '/')
++		return g_strdup (file_path);
+ 
+-	p = strrchr (cert_path, '/');
++	p = strrchr (file_path, '/');
+ 	if (p)
+ 		base = p + 1;
+ 
+@@ -2110,7 +2117,7 @@ eap_tls_reader (const char *eap_method,
+ 	                      phase2 ? "IEEE_8021X_INNER_CA_CERT" : "IEEE_8021X_CA_CERT",
+ 	                      FALSE);
+ 	if (ca_cert) {
+-		real_path = get_cert_file (ifcfg->fileName, ca_cert);
++		real_path = get_full_file_path (ifcfg->fileName, ca_cert);
+ 		if (phase2) {
+ 			if (!nm_setting_802_1x_set_phase2_ca_cert (s_8021x,
+ 			                                           real_path,
+@@ -2165,7 +2172,7 @@ eap_tls_reader (const char *eap_method,
+ 	}
+ 
+ 	g_free (real_path);
+-	real_path = get_cert_file (ifcfg->fileName, privkey);
++	real_path = get_full_file_path (ifcfg->fileName, privkey);
+ 	if (phase2) {
+ 		if (!nm_setting_802_1x_set_phase2_private_key (s_8021x,
+ 		                                               real_path,
+@@ -2203,7 +2210,7 @@ eap_tls_reader (const char *eap_method,
+ 		}
+ 
+ 		g_free (real_path);
+-		real_path = get_cert_file (ifcfg->fileName, client_cert);
++		real_path = get_full_file_path (ifcfg->fileName, client_cert);
+ 		if (phase2) {
+ 			if (!nm_setting_802_1x_set_phase2_client_cert (s_8021x,
+ 			                                               real_path,
+@@ -2251,7 +2258,7 @@ eap_peap_reader (const char *eap_method,
+ 
+ 	ca_cert = svGetValue (ifcfg, "IEEE_8021X_CA_CERT", FALSE);
+ 	if (ca_cert) {
+-		real_cert_path = get_cert_file (ifcfg->fileName, ca_cert);
++		real_cert_path = get_full_file_path (ifcfg->fileName, ca_cert);
+ 		if (!nm_setting_802_1x_set_ca_cert (s_8021x,
+ 		                                    real_cert_path,
+ 		                                    NM_SETTING_802_1X_CK_SCHEME_PATH,
+@@ -2357,7 +2364,7 @@ eap_ttls_reader (const char *eap_method,
+ 
+ 	ca_cert = svGetValue (ifcfg, "IEEE_8021X_CA_CERT", FALSE);
+ 	if (ca_cert) {
+-		real_cert_path = get_cert_file (ifcfg->fileName, ca_cert);
++		real_cert_path = get_full_file_path (ifcfg->fileName, ca_cert);
+ 		if (!nm_setting_802_1x_set_ca_cert (s_8021x,
+ 		                                    real_cert_path,
+ 		                                    NM_SETTING_802_1X_CK_SCHEME_PATH,
+@@ -2427,6 +2434,111 @@ done:
+ 	return success;
+ }
+ 
++static gboolean
++eap_fast_reader (const char *eap_method,
++                 shvarFile *ifcfg,
++                 shvarFile *keys,
++                 NMSetting8021x *s_8021x,
++                 gboolean phase2,
++                 GError **error)
++{
++	char *anon_ident = NULL;
++	char *pac_file = NULL;
++	char *real_pac_path = NULL;
++	char *inner_auth = NULL;
++	char *fast_provisioning = NULL;
++	char *lower;
++	char **list = NULL, **iter;
++	const char* pac_prov_str;
++	gboolean allow_unauth = FALSE, allow_auth = FALSE;
++	gboolean success = FALSE;
++
++	pac_file = svGetValue (ifcfg, "IEEE_8021X_PAC_FILE", FALSE);
++	if (pac_file) {
++		real_pac_path = get_full_file_path (ifcfg->fileName, pac_file);
++		g_object_set (s_8021x, NM_SETTING_802_1X_PAC_FILE, real_pac_path, NULL);
++	}
++
++	fast_provisioning = svGetValue (ifcfg, "IEEE_8021X_FAST_PROVISIONING", FALSE);
++	if (fast_provisioning) {
++		list = g_strsplit_set (fast_provisioning, " \t", 0);
++		for (iter = list; iter && *iter; iter++) {
++			if (**iter == '\0')
++				continue;
++			if (strcmp (*iter, "allow-unauth") == 0)
++				allow_unauth = TRUE;
++			else if (strcmp (*iter, "allow-auth") == 0)
++				allow_auth = TRUE;
++			else {
++				PLUGIN_WARN (IFCFG_PLUGIN_NAME, "    warning: invalid IEEE_8021X_FAST_PROVISIONING '%s' "
++				             "(space-separated list of these values [allow-auth, allow-unauth] expected)",
++				             *iter);
++			}
++		}
++		g_strfreev (list);
++		list = NULL;
++	}
++	pac_prov_str = allow_unauth ? (allow_auth ? "3" : "1") : (allow_auth ? "2" : "0");
++	g_object_set (s_8021x, NM_SETTING_802_1X_PHASE1_FAST_PROVISIONING, pac_prov_str, NULL);
++
++	if (!pac_file && !(allow_unauth || allow_auth)) {
++		g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
++		             "IEEE_8021X_PAC_FILE not provided and EAP-FAST automatic PAC provisioning disabled.");
++		goto done;
++	}
++
++	anon_ident = svGetValue (ifcfg, "IEEE_8021X_ANON_IDENTITY", FALSE);
++	if (anon_ident && strlen (anon_ident))
++		g_object_set (s_8021x, NM_SETTING_802_1X_ANONYMOUS_IDENTITY, anon_ident, NULL);
++
++	inner_auth = svGetValue (ifcfg, "IEEE_8021X_INNER_AUTH_METHODS", FALSE);
++	if (!inner_auth) {
++		g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
++		             "Missing IEEE_8021X_INNER_AUTH_METHODS.");
++		goto done;
++	}
++
++	/* Handle options for the inner auth method */
++	list = g_strsplit (inner_auth, " ", 0);
++	for (iter = list; iter && *iter; iter++) {
++		if (!strlen (*iter))
++			continue;
++
++		if (   !strcmp (*iter, "MSCHAPV2")
++		    || !strcmp (*iter, "GTC")) {
++			if (!eap_simple_reader (*iter, ifcfg, keys, s_8021x, TRUE, error))
++				goto done;
++		} else {
++			g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
++			             "Unknown IEEE_8021X_INNER_AUTH_METHOD '%s'.",
++			             *iter);
++			goto done;
++		}
++
++		lower = g_ascii_strdown (*iter, -1);
++		g_object_set (s_8021x, NM_SETTING_802_1X_PHASE2_AUTH, lower, NULL);
++		g_free (lower);
++		break;
++	}
++
++	if (!nm_setting_802_1x_get_phase2_auth (s_8021x)) {
++		g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
++		             "No valid IEEE_8021X_INNER_AUTH_METHODS found.");
++		goto done;
++	}
++
++	success = TRUE;
++
++done:
++	g_strfreev (list);
++	g_free (inner_auth);
++	g_free (fast_provisioning);
++	g_free (real_pac_path);
++	g_free (pac_file);
++	g_free (anon_ident);
++	return success;
++}
++
+ static NMSetting8021x *
+ fill_8021x (shvarFile *ifcfg,
+             const char *file,
+diff --git a/system-settings/plugins/ifcfg-rh/writer.c b/system-settings/plugins/ifcfg-rh/writer.c
+index f950f5d..4134b1e 100644
+--- a/system-settings/plugins/ifcfg-rh/writer.c
++++ b/system-settings/plugins/ifcfg-rh/writer.c
+@@ -15,7 +15,7 @@
+  * with this program; if not, write to the Free Software Foundation, Inc.,
+  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+  *
+- * Copyright (C) 2009 - 2011 Red Hat, Inc.
++ * Copyright (C) 2009 - 2012 Red Hat, Inc.
+  */
+ 
+ #include <ctype.h>
+@@ -485,6 +485,24 @@ write_8021x_setting (NMConnection *connection,
+ 	if (value && !strcmp (value, "1"))
+ 		svSetValue (ifcfg, "IEEE_8021X_PEAP_FORCE_NEW_LABEL", "yes", FALSE);
+ 
++	/* PAC file */
++	value = nm_setting_802_1x_get_pac_file (s_8021x);
++	svSetValue (ifcfg, "IEEE_8021X_PAC_FILE", NULL, FALSE);
++	if (value)
++		svSetValue (ifcfg, "IEEE_8021X_PAC_FILE", value, FALSE);
++
++	/* FAST PAC provisioning */
++	value = nm_setting_802_1x_get_phase1_fast_provisioning (s_8021x);
++	svSetValue (ifcfg, "IEEE_8021X_FAST_PROVISIONING", NULL, FALSE);
++	if (value) {
++		if (strcmp (value, "1") == 0)
++			svSetValue (ifcfg, "IEEE_8021X_FAST_PROVISIONING", "allow-unauth", FALSE);
++		else if (strcmp (value, "2") == 0)
++			svSetValue (ifcfg, "IEEE_8021X_FAST_PROVISIONING", "allow-auth", FALSE);
++		else if (strcmp (value, "3") == 0)
++			svSetValue (ifcfg, "IEEE_8021X_FAST_PROVISIONING", "allow-unauth allow-auth", FALSE);
++	}
++
+ 	/* Phase2 auth methods */
+ 	svSetValue (ifcfg, "IEEE_8021X_INNER_AUTH_METHODS", NULL, FALSE);
+ 	phase2_auth = g_string_new (NULL);
+-- 
+1.7.7.6
+
+From dd562a3dc4eeb7ee64a1835bbf146985a9c91957 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Mon, 30 Jan 2012 18:07:35 +0100
+Subject: [PATCH] supplicant: fix checking config for EAP-FAST authentication
+
+We do not want to break other methods, when EAP-FAST specific error condition
+is detected: no PAC file provided and automatic PAC provisioning is disabled.
+---
+ src/supplicant-manager/nm-supplicant-config.c |   20 +++++++++++++-------
+ 1 files changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/src/supplicant-manager/nm-supplicant-config.c b/src/supplicant-manager/nm-supplicant-config.c
+index 7d306dd..0dfcaad 100644
+--- a/src/supplicant-manager/nm-supplicant-config.c
++++ b/src/supplicant-manager/nm-supplicant-config.c
+@@ -711,7 +711,7 @@ nm_supplicant_config_add_setting_8021x (NMSupplicantConfig *self,
+ 	gboolean success, added;
+ 	GString *phase1, *phase2;
+ 	const GByteArray *array;
+-	gboolean peap = FALSE;
++	gboolean peap = FALSE, fast = FALSE;
+ 	guint32 i, num_eap;
+ 	gboolean fast_provisoning_allowed = FALSE;
+ 
+@@ -737,15 +737,15 @@ nm_supplicant_config_add_setting_8021x (NMSupplicantConfig *self,
+ 
+ 	ADD_STRING_LIST_VAL (setting, 802_1x, eap_method, eap_methods, "eap", TRUE, FALSE);
+ 
+-	/* Check for PEAP + GTC */
++	/* Check EAP method for special handling: PEAP + GTC, FAST */
+ 	num_eap = nm_setting_802_1x_get_num_eap_methods (setting);
+ 	for (i = 0; i < num_eap; i++) {
+ 		const char *method = nm_setting_802_1x_get_eap_method (setting, i);
+ 
+-		if (method && (strcasecmp (method, "peap") == 0)) {
++		if (method && (strcasecmp (method, "peap") == 0))
+ 			peap = TRUE;
+-			break;
+-		}
++		if (method && (strcasecmp (method, "fast") == 0))
++			fast = TRUE;
+ 	}
+ 
+ 	/* When using PEAP-GTC, we're likely using Cisco kit, so we want to turn
+@@ -835,8 +835,14 @@ nm_supplicant_config_add_setting_8021x (NMSupplicantConfig *self,
+ 				return FALSE;
+ 			}
+ 			g_free (blob_name);
+-		} else
+-			return FALSE;
++		} else {
++			/* This is only error for EAP-FAST; don't disturb other methods. */
++			if (fast) {
++				nm_log_err (LOGD_SUPPLICANT, "EAP-FAST error: no PAC file provided and "
++				                              "automatic PAC provisioning is disabled.");
++				return FALSE;
++			}
++		}
+ 	}
+ 
+ 	/* CA path */
+-- 
+1.7.7.6
+
+From fec7fc4e01b113651ebb5486d9100245bd78f374 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Wed, 1 Feb 2012 16:05:15 +0100
+Subject: [PATCH] cli: add 'pac-file' property of 802-1x setting
+
+---
+ cli/src/settings.c |   81 +++++++++++++++++++++++++++-------------------------
+ 1 files changed, 42 insertions(+), 39 deletions(-)
+
+diff --git a/cli/src/settings.c b/cli/src/settings.c
+index 8b62876..afce1f5 100644
+--- a/cli/src/settings.c
++++ b/cli/src/settings.c
+@@ -14,7 +14,7 @@
+  * with this program; if not, write to the Free Software Foundation, Inc.,
+  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+  *
+- * (C) Copyright 2010 Red Hat, Inc.
++ * (C) Copyright 2010 - 2012 Red Hat, Inc.
+  */
+ 
+ #include "config.h"
+@@ -76,31 +76,33 @@ static NmcOutputField nmc_fields_setting_8021X[] = {
+ 	SETTING_FIELD (NM_SETTING_802_1X_EAP, 10),                          /* 1 */
+ 	SETTING_FIELD (NM_SETTING_802_1X_IDENTITY, 15),                     /* 2 */
+ 	SETTING_FIELD (NM_SETTING_802_1X_ANONYMOUS_IDENTITY, 15),           /* 3 */
+-	SETTING_FIELD (NM_SETTING_802_1X_CA_CERT, 10),                      /* 4 */
+-	SETTING_FIELD (NM_SETTING_802_1X_CA_PATH, 10),                      /* 5 */
+-	SETTING_FIELD (NM_SETTING_802_1X_CLIENT_CERT, 10),                  /* 6 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PHASE1_PEAPVER, 10),               /* 7 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PHASE1_PEAPLABEL, 10),             /* 8 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PHASE1_FAST_PROVISIONING, 10),     /* 9 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PHASE2_AUTH, 10),                  /* 10 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PHASE2_AUTHEAP, 10),               /* 11 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PHASE2_CA_CERT, 20),               /* 12 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PHASE2_CA_PATH, 20),               /* 13 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PHASE2_CLIENT_CERT, 20),           /* 14 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PASSWORD, 10),                     /* 15 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PRIVATE_KEY, 15),                  /* 16 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PRIVATE_KEY_PASSWORD, 20),         /* 17 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PHASE2_PRIVATE_KEY, 20),           /* 18 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PHASE2_PRIVATE_KEY_PASSWORD, 20),  /* 19 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PIN, 8),                           /* 20 */
+-	SETTING_FIELD (NM_SETTING_802_1X_PSK, 8),                           /* 21 */
+-	SETTING_FIELD (NM_SETTING_802_1X_SYSTEM_CA_CERTS, 17),              /* 22 */
++	SETTING_FIELD (NM_SETTING_802_1X_PAC_FILE, 15),                     /* 4 */
++	SETTING_FIELD (NM_SETTING_802_1X_CA_CERT, 10),                      /* 5 */
++	SETTING_FIELD (NM_SETTING_802_1X_CA_PATH, 10),                      /* 6 */
++	SETTING_FIELD (NM_SETTING_802_1X_CLIENT_CERT, 10),                  /* 7 */
++	SETTING_FIELD (NM_SETTING_802_1X_PHASE1_PEAPVER, 10),               /* 8 */
++	SETTING_FIELD (NM_SETTING_802_1X_PHASE1_PEAPLABEL, 10),             /* 9 */
++	SETTING_FIELD (NM_SETTING_802_1X_PHASE1_FAST_PROVISIONING, 10),     /* 10 */
++	SETTING_FIELD (NM_SETTING_802_1X_PHASE2_AUTH, 10),                  /* 11 */
++	SETTING_FIELD (NM_SETTING_802_1X_PHASE2_AUTHEAP, 10),               /* 12 */
++	SETTING_FIELD (NM_SETTING_802_1X_PHASE2_CA_CERT, 20),               /* 13 */
++	SETTING_FIELD (NM_SETTING_802_1X_PHASE2_CA_PATH, 20),               /* 14 */
++	SETTING_FIELD (NM_SETTING_802_1X_PHASE2_CLIENT_CERT, 20),           /* 15 */
++	SETTING_FIELD (NM_SETTING_802_1X_PASSWORD, 10),                     /* 16 */
++	SETTING_FIELD (NM_SETTING_802_1X_PRIVATE_KEY, 15),                  /* 17 */
++	SETTING_FIELD (NM_SETTING_802_1X_PRIVATE_KEY_PASSWORD, 20),         /* 18 */
++	SETTING_FIELD (NM_SETTING_802_1X_PHASE2_PRIVATE_KEY, 20),           /* 19 */
++	SETTING_FIELD (NM_SETTING_802_1X_PHASE2_PRIVATE_KEY_PASSWORD, 20),  /* 20 */
++	SETTING_FIELD (NM_SETTING_802_1X_PIN, 8),                           /* 21 */
++	SETTING_FIELD (NM_SETTING_802_1X_PSK, 8),                           /* 22 */
++	SETTING_FIELD (NM_SETTING_802_1X_SYSTEM_CA_CERTS, 17),              /* 23 */
+ 	{NULL, NULL, 0, NULL, 0}
+ };
+ #define NMC_FIELDS_SETTING_802_1X_ALL     "name"","\
+                                           NM_SETTING_802_1X_EAP","\
+                                           NM_SETTING_802_1X_IDENTITY","\
+                                           NM_SETTING_802_1X_ANONYMOUS_IDENTITY","\
++                                          NM_SETTING_802_1X_PAC_FILE","\
+                                           NM_SETTING_802_1X_CA_CERT","\
+                                           NM_SETTING_802_1X_CA_PATH","\
+                                           NM_SETTING_802_1X_CLIENT_CERT","\
+@@ -631,25 +633,26 @@ setting_802_1X_details (NMSetting *setting, NmCli *nmc)
+ 	nmc->allowed_fields[1].value = eap_str->str;
+ 	nmc->allowed_fields[2].value = nm_setting_802_1x_get_identity (s_8021X);
+ 	nmc->allowed_fields[3].value = nm_setting_802_1x_get_anonymous_identity (s_8021X);
+-	nmc->allowed_fields[4].value = ca_cert_str;
+-	nmc->allowed_fields[5].value = nm_setting_802_1x_get_ca_path (s_8021X);
+-	nmc->allowed_fields[6].value = client_cert_str;
+-	nmc->allowed_fields[7].value = nm_setting_802_1x_get_phase1_peapver (s_8021X);
+-	nmc->allowed_fields[8].value = nm_setting_802_1x_get_phase1_peaplabel (s_8021X);
+-	nmc->allowed_fields[9].value = nm_setting_802_1x_get_phase1_fast_provisioning (s_8021X);
+-	nmc->allowed_fields[10].value = nm_setting_802_1x_get_phase2_auth (s_8021X);
+-	nmc->allowed_fields[11].value = nm_setting_802_1x_get_phase2_autheap (s_8021X);
+-	nmc->allowed_fields[12].value = phase2_ca_cert_str;
+-	nmc->allowed_fields[13].value = nm_setting_802_1x_get_phase2_ca_path (s_8021X);
+-	nmc->allowed_fields[14].value = phase2_client_cert_str;
+-	nmc->allowed_fields[15].value = nm_setting_802_1x_get_password (s_8021X);
+-	nmc->allowed_fields[16].value = private_key_str;
+-	nmc->allowed_fields[17].value = nm_setting_802_1x_get_private_key_password (s_8021X);
+-	nmc->allowed_fields[18].value = phase2_private_key_str;
+-	nmc->allowed_fields[19].value = nm_setting_802_1x_get_phase2_private_key_password (s_8021X);
+-	nmc->allowed_fields[20].value = nm_setting_802_1x_get_pin (s_8021X);
+-	nmc->allowed_fields[21].value = nm_setting_802_1x_get_psk (s_8021X);
+-	nmc->allowed_fields[22].value = nm_setting_802_1x_get_system_ca_certs (s_8021X) ? _("yes") : _("no");
++	nmc->allowed_fields[4].value = nm_setting_802_1x_get_pac_file (s_8021X);
++	nmc->allowed_fields[5].value = ca_cert_str;
++	nmc->allowed_fields[6].value = nm_setting_802_1x_get_ca_path (s_8021X);
++	nmc->allowed_fields[7].value = client_cert_str;
++	nmc->allowed_fields[8].value = nm_setting_802_1x_get_phase1_peapver (s_8021X);
++	nmc->allowed_fields[9].value = nm_setting_802_1x_get_phase1_peaplabel (s_8021X);
++	nmc->allowed_fields[10].value = nm_setting_802_1x_get_phase1_fast_provisioning (s_8021X);
++	nmc->allowed_fields[11].value = nm_setting_802_1x_get_phase2_auth (s_8021X);
++	nmc->allowed_fields[12].value = nm_setting_802_1x_get_phase2_autheap (s_8021X);
++	nmc->allowed_fields[13].value = phase2_ca_cert_str;
++	nmc->allowed_fields[14].value = nm_setting_802_1x_get_phase2_ca_path (s_8021X);
++	nmc->allowed_fields[15].value = phase2_client_cert_str;
++	nmc->allowed_fields[16].value = nm_setting_802_1x_get_password (s_8021X);
++	nmc->allowed_fields[17].value = private_key_str;
++	nmc->allowed_fields[18].value = nm_setting_802_1x_get_private_key_password (s_8021X);
++	nmc->allowed_fields[19].value = phase2_private_key_str;
++	nmc->allowed_fields[20].value = nm_setting_802_1x_get_phase2_private_key_password (s_8021X);
++	nmc->allowed_fields[21].value = nm_setting_802_1x_get_pin (s_8021X);
++	nmc->allowed_fields[22].value = nm_setting_802_1x_get_psk (s_8021X);
++	nmc->allowed_fields[23].value = nm_setting_802_1x_get_system_ca_certs (s_8021X) ? _("yes") : _("no");
+ 
+ 	nmc->print_fields.flags = multiline_flag | mode_flag | escape_flag | NMC_PF_FLAG_SECTION_PREFIX;
+ 	print_fields (nmc->print_fields, nmc->allowed_fields); /* Print values */
+-- 
+1.7.7.6
+
+From 977e0db633d17dcb6e9324704d275d5475981cb8 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Thu, 6 Oct 2011 13:31:23 -0500
+Subject: [PATCH] supplicant: check supported EAP methods for EAP-FAST
+
+This commit had to be adjusted due to wpa_supplicant DBus interface.
+In RHEL6.3, the older fi.epitest.hostap.WPASupplicant API is used. The difference
+is that EAP methods are listed in via 'capabilities' call on interface with the
+older API, instead of 'EapMethods' call on main supplicant interface in newer
+DBus API.
+
+---
+ src/supplicant-manager/nm-supplicant-manager.c |   75 +++++++++++++++++++++++-
+ 1 files changed, 74 insertions(+), 1 deletions(-)
+
+diff --git a/src/supplicant-manager/nm-supplicant-manager.c b/src/supplicant-manager/nm-supplicant-manager.c
+index a2cf58e..4f6a368 100644
+--- a/src/supplicant-manager/nm-supplicant-manager.c
++++ b/src/supplicant-manager/nm-supplicant-manager.c
+@@ -203,13 +268,18 @@ nm_supplicant_manager_name_owner_changed (NMDBusManager *dbus_mgr,
+ 	if (!old_owner_good && new_owner_good) {
+ 		gboolean running;
+ 
++		nm_log_info (LOGD_SUPPLICANT, "wpa_supplicant started");
++
+ 		running = nm_supplicant_manager_startup (self);
+ 
+ 		if (running && priv->poke_id) {
+ 			g_source_remove (priv->poke_id);
+ 			priv->poke_id = 0;
+ 		}
++
+ 	} else if (old_owner_good && !new_owner_good) {
++		nm_log_info (LOGD_SUPPLICANT, "wpa_supplicant stopped");
++
+ 		nm_supplicant_manager_set_state (self, NM_SUPPLICANT_MANAGER_STATE_DOWN);
+ 
+ 		if (priv->poke_id)
+diff -Naurp a/src/supplicant-manager/nm-supplicant-interface.c b/src/supplicant-manager/nm-supplicant-interface.c
+--- a/src/supplicant-manager/nm-supplicant-interface.c
++++ b/src/supplicant-manager/nm-supplicant-interface.c
+@@ -789,6 +789,59 @@ nm_supplicant_interface_get_scanning (NM
+ }
+ 
+ static void
++iface_capabilities_cb (DBusGProxy *proxy, DBusGProxyCall *call_id, gpointer user_data)
++{
++	NMSupplicantInfo *info = (NMSupplicantInfo *) user_data;
++	NMSupplicantInterfacePrivate *priv = NM_SUPPLICANT_INTERFACE_GET_PRIVATE (info->interface);
++	GError *error = NULL;
++	GHashTable *hash = NULL;
++	GValue *val;
++
++	if (!dbus_g_proxy_end_call (proxy, call_id, &error,
++	                            DBUS_TYPE_G_MAP_OF_VARIANT, &hash,
++	                            G_TYPE_INVALID)) {
++		nm_log_warn (LOGD_SUPPLICANT, "Unexpected error requesting capabilities: (%d) %s",
++		             error ? error->code : -1,
++		             error && error->message ? error->message : "(unknown)");
++		g_error_free (error);
++	} else {
++		val = (GValue *) g_hash_table_lookup (hash, "eap");
++		if (val && G_VALUE_HOLDS (val, G_TYPE_BOXED)) {
++			const char **it = g_value_get_boxed (val);
++			while (it && *it) {
++				if (strcasecmp (*it++, "FAST") == 0) {
++					priv->fast_supported = TRUE;
++					break;
++				}
++			}
++			nm_log_dbg (LOGD_SUPPLICANT, "EAP-FAST is %ssupported for '%s'",
++			            priv->fast_supported ? "" : "not ", priv->dev);
++		} else {
++			nm_log_warn (LOGD_SUPPLICANT, "Unexpected 'eap' capabilities type %s",
++			             G_VALUE_TYPE_NAME (val));
++		}
++		g_hash_table_destroy (hash);
++	}
++}
++
++static void
++check_supported_eap_methods (NMSupplicantInterface *self)
++{
++
++	NMSupplicantInterfacePrivate *priv = NM_SUPPLICANT_INTERFACE_GET_PRIVATE (self);
++	NMSupplicantInfo *info;
++	DBusGProxyCall *call;
++
++	info = nm_supplicant_info_new (self, priv->iface_proxy, priv->other_pcalls);
++	call = dbus_g_proxy_begin_call (priv->iface_proxy, "capabilities",
++	                                iface_capabilities_cb,
++	                                info,
++	                                nm_supplicant_info_destroy,
++	                                G_TYPE_INVALID);
++	nm_supplicant_info_set_call (info, call);
++}
++
++static void
+ nm_supplicant_interface_add_cb (DBusGProxy *proxy, DBusGProxyCall *call_id, gpointer user_data)
+ {
+ 	NMSupplicantInfo *info = (NMSupplicantInfo *) user_data;
+@@ -851,6 +915,9 @@ nm_supplicant_interface_add_cb (DBusGPro
+ 		/* Interface added to the supplicant; get its initial state. */
+ 		wpas_iface_get_state (info->interface);
+ 		wpas_iface_get_scanning (info->interface);
++
++		/* Grab list of supported EAP methods */
++		check_supported_eap_methods (info->interface);
+ 	}
+ }
+ 
+-- 
+1.7.7.6
+
+From ef9ef7133f0cccadd0ccd2cf57d9bea8aeebbd41 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Tue, 7 Feb 2012 23:46:12 -0600
+Subject: [PATCH] supplicant: early exit if EAP-FAST is not supported by the
+ supplicant
+
+EAP-FAST used to require some patches to OpenSSL which aren't always
+applied.  We can't depend on the supplicant supporting EAP-FAST like
+we can for EAP methods that don't require any special support from
+external libraries.  To ensure the error gets reported correctly and
+early, fail the configuration step if EAP-FAST isn't supported by
+the supplicant but the connection requests it.
+---
+ src/supplicant-manager/nm-supplicant-config.c    |   16 +++++++++++++++-
+ src/supplicant-manager/nm-supplicant-config.h    |    2 ++
+ src/supplicant-manager/nm-supplicant-interface.c |   17 +++++++++++++++--
+ src/supplicant-manager/nm-supplicant-interface.h |    3 ++-
+ src/supplicant-manager/nm-supplicant-manager.c   |    2 +-
+ 5 files changed, 35 insertions(+), 5 deletions(-)
+
+diff --git a/src/supplicant-manager/nm-supplicant-config.c b/src/supplicant-manager/nm-supplicant-config.c
+index 0dfcaad..e9ac130 100644
+--- a/src/supplicant-manager/nm-supplicant-config.c
++++ b/src/supplicant-manager/nm-supplicant-config.c
+@@ -54,6 +54,7 @@ typedef struct
+ 	GHashTable *config;
+ 	GHashTable *blobs;
+ 	guint32    ap_scan;
++	gboolean   fast_required;
+ 	gboolean   dispose_has_run;
+ } NMSupplicantConfigPrivate;
+ 
+@@ -278,6 +279,14 @@ nm_supplicant_config_set_ap_scan (NMSupplicantConfig * self,
+ 	NM_SUPPLICANT_CONFIG_GET_PRIVATE (self)->ap_scan = ap_scan;
+ }
+ 
++gboolean
++nm_supplicant_config_fast_required (NMSupplicantConfig *self)
++{
++	g_return_val_if_fail (NM_IS_SUPPLICANT_CONFIG (self), FALSE);
++
++	return NM_SUPPLICANT_CONFIG_GET_PRIVATE (self)->fast_required;
++}
++
+ static void
+ get_hash_cb (gpointer key, gpointer value, gpointer user_data)
+ {
+@@ -706,6 +715,7 @@ nm_supplicant_config_add_setting_8021x (NMSupplicantConfig *self,
+                                         const char *connection_uid,
+                                         gboolean wired)
+ {
++	NMSupplicantConfigPrivate *priv;
+ 	char *tmp;
+ 	const char *peapver, *value, *path;
+ 	gboolean success, added;
+@@ -719,6 +729,8 @@ nm_supplicant_config_add_setting_8021x (NMSupplicantConfig *self,
+ 	g_return_val_if_fail (setting != NULL, FALSE);
+ 	g_return_val_if_fail (connection_uid != NULL, FALSE);
+ 
++	priv = NM_SUPPLICANT_CONFIG_GET_PRIVATE (self);
++
+ 	value = nm_setting_802_1x_get_password (setting);
+ 	if (!add_string_val (self, value, "password", FALSE, TRUE))
+ 		return FALSE;
+@@ -744,8 +756,10 @@ nm_supplicant_config_add_setting_8021x (NMSupplicantConfig *self,
+ 
+ 		if (method && (strcasecmp (method, "peap") == 0))
+ 			peap = TRUE;
+-		if (method && (strcasecmp (method, "fast") == 0))
++		if (method && (strcasecmp (method, "fast") == 0)) {
+ 			fast = TRUE;
++			priv->fast_required = TRUE;
++		}
+ 	}
+ 
+ 	/* When using PEAP-GTC, we're likely using Cisco kit, so we want to turn
+diff --git a/src/supplicant-manager/nm-supplicant-config.h b/src/supplicant-manager/nm-supplicant-config.h
+index dad23e2..cd5572f 100644
+--- a/src/supplicant-manager/nm-supplicant-config.h
++++ b/src/supplicant-manager/nm-supplicant-config.h
+@@ -57,6 +57,8 @@ guint32 nm_supplicant_config_get_ap_scan (NMSupplicantConfig *self);
+ void nm_supplicant_config_set_ap_scan (NMSupplicantConfig *self,
+                                        guint32 ap_scan);
+ 
++gboolean nm_supplicant_config_fast_required (NMSupplicantConfig *self);
++
+ GHashTable *nm_supplicant_config_get_hash (NMSupplicantConfig *self);
+ 
+ GHashTable *nm_supplicant_config_get_blobs (NMSupplicantConfig *self);
+diff --git a/src/supplicant-manager/nm-supplicant-interface.c b/src/supplicant-manager/nm-supplicant-interface.c
+index a65a458..cdd35a1 100644
+--- a/src/supplicant-manager/nm-supplicant-interface.c
++++ b/src/supplicant-manager/nm-supplicant-interface.c
+@@ -104,6 +104,7 @@ typedef struct
+ 	NMDBusManager *       dbus_mgr;
+ 	char *                dev;
+ 	gboolean              is_wireless;
++	gboolean              fast_supported;
+ 
+ 	char *                object_path;
+ 	guint32               state;
+@@ -1293,7 +1298,15 @@ nm_supplicant_interface_set_config (NMSupplicantInterface * self,
+ 	priv = NM_SUPPLICANT_INTERFACE_GET_PRIVATE (self);
+ 
+ 	nm_supplicant_interface_disconnect (self);
+-	
++
++	/* Make sure the supplicant supports EAP-FAST before trying to send
++	 * it an EAP-FAST configuration.
++	 */
++	if (nm_supplicant_config_fast_required (cfg) && !priv->fast_supported) {
++		nm_log_warn (LOGD_SUPPLICANT, "EAP-FAST is not supported by the supplicant");
++		return FALSE;
++	}
++
+ 	if (priv->cfg)
+ 		g_object_unref (priv->cfg);
+ 	priv->cfg = cfg;
+-- 
+1.7.7.6
+
+From 0285856d58e5eff391bcf324b63d7985fd4c77a2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Fri, 20 Jan 2012 15:25:08 +0100
+Subject: [PATCH] applet/editor: EAP-FAST support
+
+This commit had to be edited quite a lot due to the usage of GladeXML, while
+upstream had switched to GtkBuilder.
+
+These are the original statistics:
+---
+ po/POTFILES.in                            |    2 +
+ src/wireless-security/Makefile.am         |    3 +
+ src/wireless-security/eap-method-fast.c   |  443 +++++++++++++++++++++++++++++
+ src/wireless-security/eap-method-fast.h   |   36 +++
+ src/wireless-security/eap-method-fast.ui  |  192 +++++++++++++
+ src/wireless-security/eap-method.h        |    3 +-
+ src/wireless-security/wireless-security.c |   14 +-
+ 7 files changed, 691 insertions(+), 2 deletions(-)
+ create mode 100644 src/wireless-security/eap-method-fast.c
+ create mode 100644 src/wireless-security/eap-method-fast.h
+ create mode 100644 src/wireless-security/eap-method-fast.ui
+
+diff --git a/network-manager-applet-0.8.1/po/POTFILES.in b/network-manager-applet-0.8.1/po/POTFILES.in
+index 8da4820..d5b36e4 100644
+--- a/network-manager-applet-0.8.1/po/POTFILES.in
++++ b/network-manager-applet-0.8.1/po/POTFILES.in
+@@ -51,6 +51,7 @@ src/vpn-password-dialog.h
+ src/wired-dialog.c
+ src/wireless-dialog.c
+ src/wireless-security/eap-method.c
++src/wireless-security/eap-method-fast.c
+ src/wireless-security/eap-method-peap.c
+ src/wireless-security/eap-method-tls.c
+ src/wireless-security/eap-method-ttls.c
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/Makefile.am b/network-manager-applet-0.8.1/src/wireless-security/Makefile.am
+index 1eaecd6..9e81b52 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/Makefile.am
++++ b/network-manager-applet-0.8.1/src/wireless-security/Makefile.am
+@@ -19,6 +19,8 @@ libwireless_security_la_SOURCES = \
+ 	eap-method-tls.c \
+ 	eap-method-leap.h \
+ 	eap-method-leap.c \
++	eap-method-fast.h \
++	eap-method-fast.c \
+ 	eap-method-ttls.h \
+ 	eap-method-ttls.c \
+ 	eap-method-peap.h \
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-fast.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-fast.c
+new file mode 100644
+index 0000000..b952dd4
+--- /dev/null
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-fast.c
+@@ -0,0 +1,438 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* vim: set ft=c ts=4 sts=4 sw=4 noexpandtab smartindent: */
++
++/* EAP-FAST authentication method (RFC4851)
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2012 Red Hat, Inc.
++ */
++
++#include "config.h"
++
++#include <glib/gi18n.h>
++#include <ctype.h>
++#include <string.h>
++
++#include <nm-setting-connection.h>
++#include <nm-setting-8021x.h>
++
++#include "eap-method.h"
++#include "wireless-security.h"
++
++#define I_NAME_COLUMN   0
++#define I_METHOD_COLUMN 1
++
++struct _EAPMethodFAST {
++	EAPMethod parent;
++
++	GtkSizeGroup *size_group;
++	WirelessSecurity *sec_parent;
++	gboolean is_editor;
++};
++
++static void
++destroy (EAPMethod *parent)
++{
++	EAPMethodFAST *method = (EAPMethodFAST *) parent;
++
++	if (method->size_group)
++		g_object_unref (method->size_group);
++	g_slice_free (EAPMethodFAST, method);
++}
++
++static gboolean
++validate (EAPMethod *parent)
++{
++	GtkWidget *widget;
++	GtkTreeModel *model;
++	GtkTreeIter iter;
++	EAPMethod *eap = NULL;
++	const char *file;
++	gboolean provisioning;
++	gboolean valid = FALSE;
++
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_pac_provision_checkbutton");
++	g_assert (widget);
++	provisioning = gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (widget));
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_pac_file_button");
++	g_assert (widget);
++	file = gtk_file_chooser_get_filename (GTK_FILE_CHOOSER (widget));
++	if (!provisioning && !file)
++		return FALSE;
++
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_inner_auth_combo");
++	g_assert (widget);
++	model = gtk_combo_box_get_model (GTK_COMBO_BOX (widget));
++	gtk_combo_box_get_active_iter (GTK_COMBO_BOX (widget), &iter);
++	gtk_tree_model_get (model, &iter, I_METHOD_COLUMN, &eap, -1);
++	g_assert (eap);
++	valid = eap_method_validate (eap);
++	eap_method_unref (eap);
++	return valid;
++}
++
++static void
++add_to_size_group (EAPMethod *parent, GtkSizeGroup *group)
++{
++	EAPMethodFAST *method = (EAPMethodFAST *) parent;
++	GtkWidget *widget;
++	GtkTreeModel *model;
++	GtkTreeIter iter;
++	EAPMethod *eap;
++
++	if (method->size_group)
++		g_object_unref (method->size_group);
++	method->size_group = g_object_ref (group);
++
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_anon_identity_label");
++	g_assert (widget);
++	gtk_size_group_add_widget (group, widget);
++
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_pac_file_label");
++	g_assert (widget);
++	gtk_size_group_add_widget (group, widget);
++
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_pac_provision_checkbutton");
++	g_assert (widget);
++	gtk_size_group_add_widget (group, widget);
++
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_inner_auth_label");
++	g_assert (widget);
++	gtk_size_group_add_widget (group, widget);
++
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_inner_auth_combo");
++	g_assert (widget);
++
++	model = gtk_combo_box_get_model (GTK_COMBO_BOX (widget));
++	gtk_combo_box_get_active_iter (GTK_COMBO_BOX (widget), &iter);
++	gtk_tree_model_get (model, &iter, I_METHOD_COLUMN, &eap, -1);
++	g_assert (eap);
++	eap_method_add_to_size_group (eap, group);
++	eap_method_unref (eap);
++}
++
++static void
++fill_connection (EAPMethod *parent, NMConnection *connection)
++{
++	NMSetting8021x *s_8021x;
++	GtkWidget *widget;
++	const char *text;
++	char *filename;
++	EAPMethod *eap = NULL;
++	GtkTreeModel *model;
++	GtkTreeIter iter;
++	gboolean enabled;
++	int pac_provisioning = 0;
++
++	s_8021x = NM_SETTING_802_1X (nm_connection_get_setting (connection, NM_TYPE_SETTING_802_1X));
++	g_assert (s_8021x);
++
++	nm_setting_802_1x_add_eap_method (s_8021x, "fast");
++
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_anon_identity_entry");
++	g_assert (widget);
++	text = gtk_entry_get_text (GTK_ENTRY (widget));
++	if (text && strlen (text))
++		g_object_set (s_8021x, NM_SETTING_802_1X_ANONYMOUS_IDENTITY, text, NULL);
++
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_pac_file_button");
++	g_assert (widget);
++	filename = gtk_file_chooser_get_filename (GTK_FILE_CHOOSER (widget));
++	g_object_set (s_8021x, NM_SETTING_802_1X_PAC_FILE, filename, NULL);
++
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_pac_provision_checkbutton");
++	enabled = gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (widget));
++
++	if (!enabled)
++		g_object_set (G_OBJECT (s_8021x), NM_SETTING_802_1X_PHASE1_FAST_PROVISIONING, "0", NULL);
++	else {
++		widget = glade_xml_get_widget (parent->xml, "eap_fast_pac_provision_combo");
++		pac_provisioning = gtk_combo_box_get_active (GTK_COMBO_BOX (widget));
++
++		switch (pac_provisioning) {
++		case 0:  /* Anonymous */
++			g_object_set (G_OBJECT (s_8021x), NM_SETTING_802_1X_PHASE1_FAST_PROVISIONING, "1", NULL);
++			break;
++		case 1:  /* Authenticated */
++			g_object_set (G_OBJECT (s_8021x), NM_SETTING_802_1X_PHASE1_FAST_PROVISIONING, "2", NULL);
++			break;
++		case 2:  /* Both - anonymous and authenticated */
++			g_object_set (G_OBJECT (s_8021x), NM_SETTING_802_1X_PHASE1_FAST_PROVISIONING, "3", NULL);
++			break;
++		default: /* Should not happen */
++			g_object_set (G_OBJECT (s_8021x), NM_SETTING_802_1X_PHASE1_FAST_PROVISIONING, "1", NULL);
++			break;
++		}
++	}
++
++	widget = glade_xml_get_widget (parent->xml, "eap_fast_inner_auth_combo");
++	model = gtk_combo_box_get_model (GTK_COMBO_BOX (widget));
++	gtk_combo_box_get_active_iter (GTK_COMBO_BOX (widget), &iter);
++	gtk_tree_model_get (model, &iter, I_METHOD_COLUMN, &eap, -1);
++	g_assert (eap);
++
++	eap_method_fill_connection (eap, connection);
++	eap_method_unref (eap);
++}
++
++static void
++inner_auth_combo_changed_cb (GtkWidget *combo, gpointer user_data)
++{
++	EAPMethod *parent = (EAPMethod *) user_data;
++	EAPMethodFAST *method = (EAPMethodFAST *) parent;
++	GtkWidget *vbox;
++	EAPMethod *eap = NULL;
++	GList *elt, *children;
++	GtkTreeModel *model;
++	GtkTreeIter iter;
++	GtkWidget *eap_widget;
++
++	vbox = glade_xml_get_widget (parent->xml, "eap_fast_inner_auth_vbox");
++	g_assert (vbox);
++
++	/* Remove any previous wireless security widgets */
++	children = gtk_container_get_children (GTK_CONTAINER (vbox));
++	for (elt = children; elt; elt = g_list_next (elt))
++		gtk_container_remove (GTK_CONTAINER (vbox), GTK_WIDGET (elt->data));
++	g_list_free (children);
++
++	model = gtk_combo_box_get_model (GTK_COMBO_BOX (combo));
++	gtk_combo_box_get_active_iter (GTK_COMBO_BOX (combo), &iter);
++	gtk_tree_model_get (model, &iter, I_METHOD_COLUMN, &eap, -1);
++	g_assert (eap);
++
++	eap_widget = eap_method_get_widget (eap);
++	g_assert (eap_widget);
++	gtk_widget_unparent (eap_widget);
++
++	if (method->size_group)
++		eap_method_add_to_size_group (eap, method->size_group);
++	gtk_container_add (GTK_CONTAINER (vbox), eap_widget);
++
++	eap_method_unref (eap);
++
++	wireless_security_changed_cb (combo, method->sec_parent);
++}
++
++static GtkWidget *
++inner_auth_combo_init (EAPMethodFAST *method,
++                       const char *glade_file,
++                       NMConnection *connection,
++                       NMSetting8021x *s_8021x)
++{
++	EAPMethod *parent = (EAPMethod *) method;
++	GtkWidget *combo;
++	GtkListStore *auth_model;
++	GtkTreeIter iter;
++	EAPMethodSimple *em_gtc;
++	EAPMethodSimple *em_mschap_v2;
++	guint32 active = 0;
++	const char *phase2_auth = NULL;
++
++	auth_model = gtk_list_store_new (2, G_TYPE_STRING, eap_method_get_g_type ());
++
++	if (s_8021x) {
++		if (nm_setting_802_1x_get_phase2_auth (s_8021x))
++			phase2_auth = nm_setting_802_1x_get_phase2_auth (s_8021x);
++		else if (nm_setting_802_1x_get_phase2_autheap (s_8021x))
++			phase2_auth = nm_setting_802_1x_get_phase2_autheap (s_8021x);
++	}
++
++	em_gtc = eap_method_simple_new (glade_file,
++	                                method->sec_parent,
++	                                connection,
++	                                EAP_METHOD_SIMPLE_TYPE_GTC,
++	                                method->is_editor);
++	gtk_list_store_append (auth_model, &iter);
++	gtk_list_store_set (auth_model, &iter,
++	                    I_NAME_COLUMN, _("GTC"),
++	                    I_METHOD_COLUMN, em_gtc,
++	                    -1);
++	eap_method_unref (EAP_METHOD (em_gtc));
++
++	/* Check for defaulting to GTC */
++	if (phase2_auth && !strcasecmp (phase2_auth, "gtc"))
++		active = 0;
++
++	em_mschap_v2 = eap_method_simple_new (glade_file,
++	                                      method->sec_parent,
++	                                      connection,
++	                                      EAP_METHOD_SIMPLE_TYPE_MSCHAP_V2,
++	                                      method->is_editor);
++	gtk_list_store_append (auth_model, &iter);
++	gtk_list_store_set (auth_model, &iter,
++	                    I_NAME_COLUMN, _("MSCHAPv2"),
++	                    I_METHOD_COLUMN, em_mschap_v2,
++	                    -1);
++	eap_method_unref (EAP_METHOD (em_mschap_v2));
++
++	/* Check for defaulting to MSCHAPv2 */
++	if (phase2_auth && !strcasecmp (phase2_auth, "mschapv2"))
++		active = 1;
++
++	combo = glade_xml_get_widget (parent->xml, "eap_fast_inner_auth_combo");
++	g_assert (combo);
++
++	gtk_combo_box_set_model (GTK_COMBO_BOX (combo), GTK_TREE_MODEL (auth_model));
++	g_object_unref (G_OBJECT (auth_model));
++	gtk_combo_box_set_active (GTK_COMBO_BOX (combo), active);
++
++	g_signal_connect (G_OBJECT (combo), "changed",
++	                  (GCallback) inner_auth_combo_changed_cb,
++	                  method);
++	return combo;
++}
++
++static void
++update_secrets (EAPMethod *parent, NMConnection *connection)
++{
++	eap_method_phase2_update_secrets_helper (parent,
++	                                         connection,
++	                                         "eap_fast_inner_auth_combo",
++	                                         I_METHOD_COLUMN);
++}
++
++static void
++pac_toggled_cb (GtkWidget *widget, gpointer user_data)
++{
++	EAPMethod *parent = (EAPMethod *) user_data;
++	EAPMethodFAST *method = (EAPMethodFAST *) parent;
++	gboolean enabled = FALSE;
++	GtkWidget *provision_combo;
++
++	provision_combo = glade_xml_get_widget (parent->xml, "eap_fast_pac_provision_combo");
++	g_return_if_fail (provision_combo);
++
++	enabled = gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (widget));
++
++	gtk_widget_set_sensitive (provision_combo, enabled);
++
++	wireless_security_changed_cb (widget, method->sec_parent);
++}
++
++EAPMethodFAST *
++eap_method_fast_new (const char *glade_file,
++                     WirelessSecurity *ws_parent,
++                     NMConnection *connection,
++                     gboolean is_editor)
++{
++	EAPMethodFAST *method;
++	GtkWidget *widget;
++	GladeXML *xml;
++	GtkFileFilter *filter;
++	NMSetting8021x *s_8021x = NULL;
++	const char *filename;
++	gboolean provisioning_enabled = TRUE;
++
++	g_return_val_if_fail (glade_file != NULL, NULL);
++
++	xml = glade_xml_new (glade_file, "eap_fast_notebook", NULL);
++	if (xml == NULL) {
++		g_warning ("Couldn't get eap_fast_widget from glade xml");
++		return NULL;
++	}
++
++	widget = glade_xml_get_widget (xml, "eap_fast_notebook");
++	g_assert (widget);
++	g_object_ref_sink (widget);
++
++	method = g_slice_new0 (EAPMethodFAST);
++	if (!method) {
++		g_object_unref (xml);
++		g_object_unref (widget);
++		return NULL;
++	}
++
++	eap_method_init (EAP_METHOD (method),
++	                 validate,
++	                 add_to_size_group,
++	                 fill_connection,
++	                 update_secrets,
++	                 destroy,
++	                 xml,
++	                 widget,
++	                 "eap_fast_anon_identity_entry");
++
++	method->sec_parent = ws_parent;
++	method->is_editor = is_editor;
++
++	if (connection)
++		s_8021x = NM_SETTING_802_1X (nm_connection_get_setting (connection, NM_TYPE_SETTING_802_1X));
++
++	widget = glade_xml_get_widget (xml, "eap_fast_pac_provision_combo");
++	g_assert (widget);
++	gtk_combo_box_set_active (GTK_COMBO_BOX (widget), 0);
++	if (s_8021x) {
++		const char *fast_prov;
++
++		fast_prov = nm_setting_802_1x_get_phase1_fast_provisioning (s_8021x);
++		if (fast_prov) {
++			if (!strcmp (fast_prov, "0"))
++				provisioning_enabled = FALSE;
++			else if (!strcmp (fast_prov, "1"))
++				gtk_combo_box_set_active (GTK_COMBO_BOX (widget), 0);
++			else if (!strcmp (fast_prov, "2"))
++				gtk_combo_box_set_active (GTK_COMBO_BOX (widget), 1);
++			else if (!strcmp (fast_prov, "3"))
++				gtk_combo_box_set_active (GTK_COMBO_BOX (widget), 2);
++		}
++	}
++	gtk_widget_set_sensitive (widget, provisioning_enabled);
++	g_signal_connect (G_OBJECT (widget), "changed",
++	                  (GCallback) wireless_security_changed_cb,
++	                  ws_parent);
++
++	widget = glade_xml_get_widget (xml, "eap_fast_pac_provision_checkbutton");
++	gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (widget), provisioning_enabled);
++	g_signal_connect (G_OBJECT (widget), "toggled", G_CALLBACK (pac_toggled_cb), EAP_METHOD (method));
++
++	widget = glade_xml_get_widget (xml, "eap_fast_anon_identity_entry");
++	if (s_8021x && nm_setting_802_1x_get_anonymous_identity (s_8021x))
++		gtk_entry_set_text (GTK_ENTRY (widget), nm_setting_802_1x_get_anonymous_identity (s_8021x));
++	g_signal_connect (G_OBJECT (widget), "changed",
++	                  (GCallback) wireless_security_changed_cb,
++	                  ws_parent);
++
++	widget = glade_xml_get_widget (xml, "eap_fast_pac_file_button");
++	g_assert (widget);
++	gtk_file_chooser_set_local_only (GTK_FILE_CHOOSER (widget), TRUE);
++	gtk_file_chooser_button_set_title (GTK_FILE_CHOOSER_BUTTON (widget),
++	                                   _("Choose a PAC file..."));
++	g_signal_connect (G_OBJECT (widget), "selection-changed",
++	                  (GCallback) wireless_security_changed_cb,
++	                  ws_parent);
++
++	filter = gtk_file_filter_new ();
++	gtk_file_filter_add_pattern (filter, "*.pac");
++	gtk_file_filter_set_name (filter, _("PAC files (*.pac)"));
++	gtk_file_chooser_add_filter (GTK_FILE_CHOOSER (widget), filter);
++	filter = gtk_file_filter_new ();
++	gtk_file_filter_add_pattern (filter, "*");
++	gtk_file_filter_set_name (filter, _("All files"));
++	gtk_file_chooser_add_filter (GTK_FILE_CHOOSER (widget), filter);
++
++	if (connection && s_8021x) {
++		filename = nm_setting_802_1x_get_pac_file (s_8021x);
++		if (filename)
++			gtk_file_chooser_set_filename (GTK_FILE_CHOOSER (widget), filename);
++	}
++
++	widget = inner_auth_combo_init (method, glade_file, connection, s_8021x);
++	inner_auth_combo_changed_cb (widget, (gpointer) method);
++
++	return method;
++}
++
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-fast.h b/network-manager-applet-0.8.1/src/wireless-security/eap-method-fast.h
+new file mode 100644
+index 0000000..32b9a4b
+--- /dev/null
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-fast.h
+@@ -0,0 +1,36 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* vim: set ft=c ts=4 sts=4 sw=4 noexpandtab smartindent: */
++
++/* EAP-FAST authentication method (RFC4851)
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2012 Red Hat, Inc.
++ */
++
++#ifndef EAP_METHOD_FAST_H
++#define EAP_METHOD_FAST_H
++
++#include "wireless-security.h"
++
++typedef struct _EAPMethodFAST EAPMethodFAST;
++
++EAPMethodFAST *eap_method_fast_new (const char *glade_file,
++                                    WirelessSecurity *ws_parent,
++                                    NMConnection *connection,
++                                    gboolean is_editor);
++
++#endif /* EAP_METHOD_FAST_H */
++
+diff -Naurp a/network-manager-applet-0.8.1/src/applet.glade b/network-manager-applet-0.8.1/src/applet.glade
+--- a/network-manager-applet-0.8.1/src/applet.glade
++++ b/network-manager-applet-0.8.1/src/applet.glade
+@@ -836,6 +836,164 @@ Shared Key</property>
+       </widget>
+     </child>
+   </widget>
++  <widget class="GtkWindow" id="eap_fast_widget">
++    <property name="visible">True</property>
++    <property name="title">eap_fast_widget</property>
++    <child>
++      <widget class="GtkNotebook" id="eap_fast_notebook">
++        <property name="visible">True</property>
++        <property name="show_tabs">False</property>
++        <property name="show_border">False</property>
++        <child>
++          <widget class="GtkTable" id="table15">
++            <property name="visible">True</property>
++            <property name="n_rows">5</property>
++            <property name="n_columns">2</property>
++            <property name="column_spacing">12</property>
++            <property name="row_spacing">6</property>
++            <child>
++              <widget class="GtkLabel" id="eap_fast_anon_identity_label">
++                <property name="visible">True</property>
++                <property name="xalign">0</property>
++                <property name="label" translatable="yes">Anony_mous identity:</property>
++                <property name="use_underline">True</property>
++                <property name="mnemonic_widget">eap_fast_anon_identity_entry</property>
++              </widget>
++              <packing>
++                <property name="x_options">GTK_FILL</property>
++                <property name="y_options"/>
++              </packing>
++            </child>
++            <child>
++              <widget class="GtkEntry" id="eap_fast_anon_identity_entry">
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="activates_default">True</property>
++              </widget>
++              <packing>
++                <property name="left_attach">1</property>
++                <property name="right_attach">2</property>
++                <property name="y_options"/>
++              </packing>
++            </child>
++            <child>
++              <widget class="GtkLabel" id="eap_fast_pac_file_label">
++                <property name="visible">True</property>
++                <property name="xalign">0</property>
++                <property name="label" translatable="yes">_PAC file:</property>
++                <property name="use_underline">True</property>
++                <property name="mnemonic_widget">eap_fast_pac_file_button</property>
++              </widget>
++              <packing>
++                <property name="top_attach">2</property>
++                <property name="bottom_attach">3</property>
++                <property name="x_options">GTK_FILL</property>
++                <property name="y_options"/>
++              </packing>
++            </child>
++            <child>
++              <widget class="GtkFileChooserButton" id="eap_fast_pac_file_button">
++                <property name="visible">True</property>
++              </widget>
++              <packing>
++                <property name="left_attach">1</property>
++                <property name="right_attach">2</property>
++                <property name="top_attach">2</property>
++                <property name="bottom_attach">3</property>
++                <property name="x_options">GTK_FILL</property>
++                <property name="y_options">GTK_FILL</property>
++              </packing>
++            </child>
++            <child>
++              <widget class="GtkVBox" id="eap_fast_inner_auth_vbox">
++                <property name="visible">True</property>
++                <property name="orientation">vertical</property>
++                <child>
++                  <placeholder/>
++                </child>
++              </widget>
++              <packing>
++                <property name="right_attach">2</property>
++                <property name="top_attach">4</property>
++                <property name="bottom_attach">5</property>
++                <property name="x_options">GTK_FILL</property>
++              </packing>
++            </child>
++            <child>
++              <widget class="GtkLabel" id="eap_fast_inner_auth_label">
++                <property name="visible">True</property>
++                <property name="xalign">0</property>
++                <property name="label" translatable="yes">I_nner authentication:</property>
++                <property name="use_underline">True</property>
++                <property name="mnemonic_widget">eap_fast_inner_auth_combo</property>
++              </widget>
++              <packing>
++                <property name="top_attach">3</property>
++                <property name="bottom_attach">4</property>
++                <property name="x_options">GTK_FILL</property>
++                <property name="y_options"/>
++              </packing>
++            </child>
++            <child>
++              <widget class="GtkComboBox" id="eap_fast_inner_auth_combo">
++                <property name="visible">True</property>
++                <property name="items" translatable="yes"> </property>
++              </widget>
++              <packing>
++                <property name="left_attach">1</property>
++                <property name="right_attach">2</property>
++                <property name="top_attach">3</property>
++                <property name="bottom_attach">4</property>
++                <property name="x_options">GTK_FILL</property>
++                <property name="y_options">GTK_FILL</property>
++              </packing>
++            </child>
++            <child>
++              <widget class="GtkCheckButton" id="eap_fast_pac_provision_checkbutton">
++                <property name="label" translatable="yes">_Allow automatic PAC provisioning</property>
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="receives_default">False</property>
++                <property name="use_underline">True</property>
++                <property name="draw_indicator">True</property>
++              </widget>
++              <packing>
++                <property name="top_attach">1</property>
++                <property name="bottom_attach">2</property>
++                <property name="x_options">GTK_FILL</property>
++                <property name="y_options"/>
++              </packing>
++            </child>
++            <child>
++              <widget class="GtkComboBox" id="eap_fast_pac_provision_combo">
++                <property name="visible">True</property>
++                <property name="items" translatable="yes">Anonymous
++Authenticated
++Both</property>
++              </widget>
++              <packing>
++                <property name="left_attach">1</property>
++                <property name="right_attach">2</property>
++                <property name="top_attach">1</property>
++                <property name="bottom_attach">2</property>
++                <property name="x_options">GTK_FILL</property>
++                <property name="y_options">GTK_FILL</property>
++              </packing>
++            </child>
++          </widget>
++        </child>
++        <child>
++          <widget class="GtkLabel" id="label62">
++            <property name="visible">True</property>
++          </widget>
++          <packing>
++            <property name="tab_fill">False</property>
++            <property name="type">tab</property>
++          </packing>
++        </child>
++      </widget>
++    </child>
++  </widget>
+   <widget class="GtkWindow" id="eap_tls_widget">
+     <property name="visible">True</property>
+     <property name="title">eap_tls_widget</property>
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method.h b/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
+index 0c39948..7babfaa 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
+@@ -17,7 +17,7 @@
+  * with this program; if not, write to the Free Software Foundation, Inc.,
+  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+  *
+- * (C) Copyright 2007 - 2009 Red Hat, Inc.
++ * (C) Copyright 2007 - 2012 Red Hat, Inc.
+  */
+ 
+ #ifndef EAP_METHOD_H
+@@ -84,6 +84,7 @@ GType eap_method_get_g_type (void);
+ 
+ #include "eap-method-tls.h"
+ #include "eap-method-leap.h"
++#include "eap-method-fast.h"
+ #include "eap-method-ttls.h"
+ #include "eap-method-peap.h"
+ #include "eap-method-simple.h"
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c b/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c
+index 91ab4c9..e887bf4 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c
+@@ -17,7 +17,7 @@
+  * with this program; if not, write to the Free Software Foundation, Inc.,
+  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+  *
+- * (C) Copyright 2007 - 2009 Red Hat, Inc.
++ * (C) Copyright 2007 - 2012 Red Hat, Inc.
+  */
+ 
+ #include <string.h>
+@@ -299,6 +299,7 @@ ws_802_1x_auth_combo_init (WirelessSecur
+ 	GtkTreeIter iter;
+ 	EAPMethodTLS *em_tls;
+ 	EAPMethodLEAP *em_leap;
++	EAPMethodFAST *em_fast;
+ 	EAPMethodTTLS *em_ttls;
+ 	EAPMethodPEAP *em_peap;
+ 	const char *default_method = NULL;
+@@ -347,6 +348,17 @@ ws_802_1x_auth_combo_init (WirelessSecurity *sec,
+ 		item++;
+ 	}
+ 
++	em_fast = eap_method_fast_new (glade_file, sec, connection, is_editor);
++	gtk_list_store_append (auth_model, &iter);
++	gtk_list_store_set (auth_model, &iter,
++	                    AUTH_NAME_COLUMN, _("FAST"),
++	                    AUTH_METHOD_COLUMN, em_fast,
++	                    -1);
++	eap_method_unref (EAP_METHOD (em_fast));
++	if (default_method && (active < 0) && !strcmp (default_method, "fast"))
++		active = item;
++	item++;
++
+ 	em_ttls = eap_method_ttls_new (glade_file, sec, connection, is_editor);
+ 	gtk_list_store_append (auth_model, &iter);
+ 	gtk_list_store_set (auth_model, &iter,
+-- 
+1.7.7.6
+

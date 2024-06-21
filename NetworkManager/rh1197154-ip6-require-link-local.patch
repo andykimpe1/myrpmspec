@@ -1,0 +1,52 @@
+From 7fbd1d1866b1f5410558f03b8ef48070584d9e60 Mon Sep 17 00:00:00 2001
+From: Lubomir Rintel <lkundrak@v3.sk>
+Date: Tue, 31 Mar 2015 14:23:15 +0200
+Subject: [PATCH] ip6-manager: ensure we don't get past GOT_LINK_LOCAL if we don't have a link-local address
+
+Since rh1076169-ip6-unsolicited-RA-flags.patch it was possible to move DHCP
+activation once we have an IP address. However, a link-local address that's
+needed for DHCPv6 to start can vanish afterwards.
+
+Let's not progress to GOT_ADDRESS if there's no ll address yet, return to
+UNCONFIGURED if it vanishes even if we progressed past GOT_LINK_LOCAL already
+and require ll address for transition to GOT_ROUTER_ADVERTISEMENT.
+
+https://bugzilla.redhat.com/show_bug.cgi?id=1197154
+---
+ src/ip6-manager/nm-ip6-manager.c |    6 ++++--
+ 1 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/ip6-manager/nm-ip6-manager.c b/src/ip6-manager/nm-ip6-manager.c
+index 8e19117..7c7be0a 100644
+--- a/src/ip6-manager/nm-ip6-manager.c
++++ b/src/ip6-manager/nm-ip6-manager.c
+@@ -373,7 +373,8 @@ nm_ip6_device_sync_from_netlink (NMIP6Device *device, gboolean config_changed)
+ 				device->state = NM_IP6_DEVICE_GOT_LINK_LOCAL;
+ 			found_linklocal = TRUE;
+ 		} else {
+-			if (device->state < NM_IP6_DEVICE_GOT_ADDRESS)
++			if (   device->state < NM_IP6_DEVICE_GOT_ADDRESS
++			    && device->state >= NM_IP6_DEVICE_GOT_LINK_LOCAL)
+ 				device->state = NM_IP6_DEVICE_GOT_ADDRESS;
+ 			found_other = TRUE;
+ 		}
+@@ -383,7 +384,7 @@ nm_ip6_device_sync_from_netlink (NMIP6Device *device, gboolean config_changed)
+ 	 * before in the initial run, but if it goes away later, make sure we
+ 	 * regress from GOT_LINK_LOCAL back to UNCONFIGURED.
+ 	 */
+-	if ((device->state == NM_IP6_DEVICE_GOT_LINK_LOCAL) && !found_linklocal)
++	if ((device->state >= NM_IP6_DEVICE_GOT_LINK_LOCAL) && !found_linklocal)
+ 		device->state = NM_IP6_DEVICE_UNCONFIGURED;
+ 
+ 	nm_log_dbg (LOGD_IP6, "(%s): addresses synced (state %s)",
+@@ -392,6 +393,7 @@ nm_ip6_device_sync_from_netlink (NMIP6Device *device, gboolean config_changed)
+ 	/* We got a router advertisement, let's process the flags. If we only see
+ 	 * an address and not the flag it's been an unsolicited one. */
+ 	if (   (device->target_state == NM_IP6_DEVICE_GOT_ADDRESS)
++	    && (device->state >= NM_IP6_DEVICE_GOT_LINK_LOCAL)
+ 	    && (found_other || device->ra_flags & IF_RA_RCVD)) {
+ 
+ 		if (device->state < NM_IP6_DEVICE_GOT_ROUTER_ADVERTISEMENT)
+-- 
+1.7.1
+

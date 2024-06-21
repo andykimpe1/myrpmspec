@@ -1,0 +1,1381 @@
+From a8cb94d35fc4dc0d2dd7ebdcf783d6978b65a42b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Thu, 28 Aug 2014 17:57:28 +0200
+Subject: [PATCH] editor: enhance nm-connection-editor to support bridges (rh
+ #902820)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+http://bugzilla.redhat.com/show_bug.cgi?id=902820
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ .../src/connection-editor/Makefile.am              |   3 +
+ .../src/connection-editor/ce-page-bridge.ui        | 455 +++++++++++++
+ .../src/connection-editor/new-connection.c         |   7 +
+ .../src/connection-editor/nm-connection-editor.c   |  13 +-
+ .../src/connection-editor/page-bridge.c            | 726 +++++++++++++++++++++
+ .../src/connection-editor/page-bridge.h            |  64 ++
+ 6 files changed, 1266 insertions(+), 2 deletions(-)
+ create mode 100644 network-manager-applet-0.8.1/src/connection-editor/ce-page-bridge.ui
+ create mode 100644 network-manager-applet-0.8.1/src/connection-editor/page-bridge.c
+ create mode 100644 network-manager-applet-0.8.1/src/connection-editor/page-bridge.h
+
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/Makefile.am b/network-manager-applet-0.8.1/src/connection-editor/Makefile.am
+index 9890596..2643b84 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/Makefile.am
++++ b/network-manager-applet-0.8.1/src/connection-editor/Makefile.am
+@@ -54,6 +54,8 @@ nm_connection_editor_SOURCES = \
+ 	page-vpn.c \
+ 	page-bond.h \
+ 	page-bond.c \
++	page-bridge.h \
++	page-bridge.c \
+ 	page-vlan.h \
+ 	page-vlan.c \
+ 	ip4-routes-dialog.h \
+@@ -93,6 +95,7 @@ ui_DATA = \
+ 	ce-page-wireless-security.ui \
+ 	ce-page-infiniband.ui \
+ 	ce-page-bond.ui \
++	ce-page-bridge.ui \
+ 	ce-page-ip4.ui \
+ 	ce-page-ip6.ui \
+ 	ce-page-dsl.ui \
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/ce-page-bridge.ui b/network-manager-applet-0.8.1/src/connection-editor/ce-page-bridge.ui
+new file mode 100644
+index 0000000..7cd6655
+--- /dev/null
++++ b/network-manager-applet-0.8.1/src/connection-editor/ce-page-bridge.ui
+@@ -0,0 +1,455 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<interface>
++  <requires lib="gtk+" version="2.16"/>
++  <object class="GtkAdjustment" id="bridge_ageing_time_adjustment">
++    <property name="upper">4294967296</property>
++    <property name="step_increment">1</property>
++    <property name="page_increment">10</property>
++  </object>
++  <object class="GtkAdjustment" id="bridge_forward_delay_adjustment">
++    <property name="upper">30</property>
++    <property name="value">15</property>
++    <property name="step_increment">1</property>
++    <property name="page_increment">100</property>
++  </object>
++  <object class="GtkAdjustment" id="bridge_hello_time_adjustment">
++    <property name="lower">1</property>
++    <property name="upper">10</property>
++    <property name="value">2</property>
++    <property name="step_increment">1</property>
++    <property name="page_increment">1</property>
++  </object>
++  <object class="GtkAdjustment" id="bridge_max_age_adjustment">
++    <property name="lower">6</property>
++    <property name="upper">40</property>
++    <property name="value">6</property>
++    <property name="step_increment">1</property>
++    <property name="page_increment">1</property>
++  </object>
++  <object class="GtkAdjustment" id="bridge_priority_adjustment">
++    <property name="upper">65535</property>
++    <property name="step_increment">1</property>
++    <property name="page_increment">10</property>
++  </object>
++  <object class="GtkListStore" id="bridge_connections_model">
++    <columns>
++      <!-- column-name connection -->
++      <column type="NMConnection"/>
++      <!-- column-name name -->
++      <column type="gchararray"/>
++    </columns>
++  </object>
++  <object class="GtkTable" id="BridgePage">
++    <property name="visible">True</property>
++    <property name="can_focus">False</property>
++    <property name="border_width">12</property>
++    <property name="n_rows">9</property>
++    <property name="n_columns">2</property>
++    <property name="column_spacing">12</property>
++    <property name="row_spacing">6</property>
++    <child>
++      <object class="GtkLabel" id="bridge_connections_label">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="xalign">0</property>
++        <property name="label" translatable="yes">Bridged _connections:</property>
++        <property name="use_underline">True</property>
++      </object>
++      <packing>
++        <property name="right_attach">2</property>
++        <property name="top_attach">1</property>
++        <property name="bottom_attach">2</property>
++        <property name="x_options">GTK_FILL</property>
++        <property name="y_options"></property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkHBox" id="hbox2">
++        <property name="visible">True</property>
++        <property name="spacing">10</property>
++        <child>
++          <object class="GtkScrolledWindow" id="scrolledwindow1">
++            <property name="visible">True</property>
++            <property name="can_focus">True</property>
++            <property name="hscrollbar_policy">never</property>
++            <property name="vscrollbar_policy">automatic</property>
++            <property name="shadow_type">in</property>
++            <child>
++              <object class="GtkTreeView" id="bridge_connections">
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="model">bridge_connections_model</property>
++                <property name="headers_visible">False</property>
++                <child>
++                  <object class="GtkTreeViewColumn" id="bridge_connection_name">
++                    <child>
++                      <object class="GtkCellRendererText" id="bridge_connection_renderer"/>
++                      <attributes>
++                        <attribute name="text">1</attribute>
++                      </attributes>
++                    </child>
++                  </object>
++                </child>
++              </object>
++            </child>
++          </object>
++          <packing>
++            <property name="position">0</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkVButtonBox" id="buttonbox1">
++            <property name="visible">True</property>
++            <property name="orientation">vertical</property>
++            <property name="spacing">10</property>
++            <property name="layout_style">start</property>
++            <child>
++              <object class="GtkButton" id="bridge_connection_add">
++                <property name="label">gtk-add</property>
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="receives_default">True</property>
++                <property name="use_stock">True</property>
++              </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="position">0</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkButton" id="bridge_connection_edit">
++                <property name="label" translatable="yes">_Edit</property>
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="receives_default">True</property>
++                <property name="use_underline">True</property>
++              </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="position">1</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkButton" id="bridge_connection_delete">
++                <property name="label" translatable="yes">_Delete</property>
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="receives_default">True</property>
++                <property name="use_underline">True</property>
++              </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="position">2</property>
++              </packing>
++            </child>
++          </object>
++          <packing>
++            <property name="expand">False</property>
++            <property name="fill">False</property>
++            <property name="position">1</property>
++          </packing>
++        </child>
++      </object>
++      <packing>
++        <property name="right_attach">2</property>
++        <property name="top_attach">2</property>
++        <property name="bottom_attach">3</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkLabel" id="bridge_prio">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="xalign">0</property>
++        <property name="label" translatable="yes">_Priority:</property>
++        <property name="use_underline">True</property>
++        <property name="mnemonic_widget">bridge_priority</property>
++      </object>
++      <packing>
++        <property name="top_attach">5</property>
++        <property name="bottom_attach">6</property>
++        <property name="y_options">GTK_FILL</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkLabel" id="bridge_interface_label">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="xalign">0</property>
++        <property name="label" translatable="yes">_Interface name:</property>
++        <property name="use_underline">True</property>
++        <property name="mnemonic_widget">bridge_interface</property>
++      </object>
++      <packing>
++        <property name="y_options">GTK_FILL</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkEntry" id="bridge_interface">
++        <property name="visible">True</property>
++        <property name="can_focus">True</property>
++        <property name="invisible_char">●</property>
++      </object>
++      <packing>
++        <property name="left_attach">1</property>
++        <property name="right_attach">2</property>
++        <property name="y_options">GTK_FILL</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkLabel" id="bridge_forward_delay_label">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="xalign">0</property>
++        <property name="label" translatable="yes">_Forward delay:</property>
++        <property name="use_underline">True</property>
++        <property name="mnemonic_widget">bridge_forward_delay</property>
++      </object>
++      <packing>
++        <property name="top_attach">6</property>
++        <property name="bottom_attach">7</property>
++        <property name="y_options">GTK_FILL</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkLabel" id="bridge_hello_time_label">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="xalign">0</property>
++        <property name="label" translatable="yes">_Hello time:</property>
++        <property name="use_underline">True</property>
++        <property name="mnemonic_widget">bridge_hello_time</property>
++      </object>
++      <packing>
++        <property name="top_attach">7</property>
++        <property name="bottom_attach">8</property>
++        <property name="y_options">GTK_FILL</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkHBox" id="bridge_forward_delay_box">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="spacing">4</property>
++        <child>
++          <object class="GtkSpinButton" id="bridge_forward_delay">
++            <property name="visible">True</property>
++            <property name="can_focus">True</property>
++            <property name="invisible_char">●</property>
++            <property name="invisible_char_set">True</property>
++            <property name="adjustment">bridge_forward_delay_adjustment</property>
++            <property name="snap_to_ticks">True</property>
++            <property name="numeric">True</property>
++          </object>
++          <packing>
++            <property name="expand">True</property>
++            <property name="fill">True</property>
++            <property name="position">0</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkLabel" id="label2">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="xalign">0</property>
++            <property name="label" translatable="yes">s</property>
++          </object>
++          <packing>
++            <property name="expand">True</property>
++            <property name="fill">True</property>
++            <property name="position">1</property>
++          </packing>
++        </child>
++      </object>
++      <packing>
++        <property name="left_attach">1</property>
++        <property name="right_attach">2</property>
++        <property name="top_attach">6</property>
++        <property name="bottom_attach">7</property>
++        <property name="y_options">GTK_FILL</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkHBox" id="bridge_hello_time_box">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="spacing">4</property>
++        <child>
++          <object class="GtkSpinButton" id="bridge_hello_time">
++            <property name="visible">True</property>
++            <property name="can_focus">True</property>
++            <property name="invisible_char">●</property>
++            <property name="invisible_char_set">True</property>
++            <property name="adjustment">bridge_hello_time_adjustment</property>
++            <property name="snap_to_ticks">True</property>
++            <property name="numeric">True</property>
++          </object>
++          <packing>
++            <property name="expand">True</property>
++            <property name="fill">True</property>
++            <property name="position">0</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkLabel" id="label3">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="xalign">0</property>
++            <property name="label" translatable="yes">s</property>
++          </object>
++          <packing>
++            <property name="expand">True</property>
++            <property name="fill">True</property>
++            <property name="position">1</property>
++          </packing>
++        </child>
++      </object>
++      <packing>
++        <property name="left_attach">1</property>
++        <property name="right_attach">2</property>
++        <property name="top_attach">7</property>
++        <property name="bottom_attach">8</property>
++        <property name="y_options">GTK_FILL</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkCheckButton" id="bridge_stp_checkbox">
++        <property name="label" translatable="yes">Enable _STP (Spanning Tree Protocol)</property>
++        <property name="visible">True</property>
++        <property name="can_focus">True</property>
++        <property name="receives_default">False</property>
++        <property name="use_underline">True</property>
++        <property name="xalign">0</property>
++        <property name="draw_indicator">True</property>
++      </object>
++      <packing>
++        <property name="right_attach">2</property>
++        <property name="top_attach">4</property>
++        <property name="bottom_attach">5</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkSpinButton" id="bridge_priority">
++        <property name="visible">True</property>
++        <property name="can_focus">True</property>
++        <property name="invisible_char">●</property>
++        <property name="invisible_char_set">True</property>
++        <property name="adjustment">bridge_priority_adjustment</property>
++        <property name="numeric">True</property>
++      </object>
++      <packing>
++        <property name="left_attach">1</property>
++        <property name="right_attach">2</property>
++        <property name="top_attach">5</property>
++        <property name="bottom_attach">6</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkLabel" id="bridge_max_age_label">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="xalign">0</property>
++        <property name="label" translatable="yes">_Max age:</property>
++        <property name="use_underline">True</property>
++        <property name="mnemonic_widget">bridge_max_age</property>
++      </object>
++      <packing>
++        <property name="top_attach">8</property>
++        <property name="bottom_attach">9</property>
++        <property name="y_options">GTK_FILL</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkHBox" id="bridge_max_age_box">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="spacing">4</property>
++        <child>
++          <object class="GtkSpinButton" id="bridge_max_age">
++            <property name="visible">True</property>
++            <property name="can_focus">True</property>
++            <property name="invisible_char">●</property>
++            <property name="invisible_char_set">True</property>
++            <property name="adjustment">bridge_max_age_adjustment</property>
++            <property name="snap_to_ticks">True</property>
++            <property name="numeric">True</property>
++          </object>
++          <packing>
++            <property name="position">0</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkLabel" id="label1">
++            <property name="visible">True</property>
++            <property name="xalign">0</property>
++            <property name="label" translatable="yes">s</property>
++          </object>
++          <packing>
++            <property name="position">1</property>
++          </packing>
++        </child>
++      </object>
++      <packing>
++        <property name="left_attach">1</property>
++        <property name="right_attach">2</property>
++        <property name="top_attach">8</property>
++        <property name="bottom_attach">9</property>
++        <property name="y_options">GTK_FILL</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkLabel" id="bridge_ageing_time_label">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="xalign">0</property>
++        <property name="label" translatable="yes">_Aging time:</property>
++        <property name="use_underline">True</property>
++        <property name="mnemonic_widget">bridge_ageing_time</property>
++      </object>
++      <packing>
++        <property name="top_attach">3</property>
++        <property name="bottom_attach">4</property>
++        <property name="y_options">GTK_FILL</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkHBox" id="bridge_ageing_time_box">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="spacing">4</property>
++        <child>
++          <object class="GtkSpinButton" id="bridge_ageing_time">
++            <property name="visible">True</property>
++            <property name="can_focus">True</property>
++            <property name="invisible_char">●</property>
++            <property name="invisible_char_set">True</property>
++            <property name="adjustment">bridge_ageing_time_adjustment</property>
++            <property name="snap_to_ticks">True</property>
++            <property name="numeric">True</property>
++          </object>
++          <packing>
++            <property name="position">0</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkLabel" id="label4">
++            <property name="visible">True</property>
++            <property name="can_focus">False</property>
++            <property name="xalign">0</property>
++            <property name="label" translatable="yes">s</property>
++          </object>
++          <packing>
++            <property name="position">1</property>
++          </packing>
++        </child>
++      </object>
++      <packing>
++        <property name="left_attach">1</property>
++        <property name="right_attach">2</property>
++        <property name="top_attach">3</property>
++        <property name="bottom_attach">4</property>
++        <property name="y_options">GTK_FILL</property>
++      </packing>
++    </child>
++  </object>
++</interface>
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/new-connection.c b/network-manager-applet-0.8.1/src/connection-editor/new-connection.c
+index 59b717a..dc19825 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/new-connection.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/new-connection.c
+@@ -31,6 +31,7 @@
+ #include "page-dsl.h"
+ #include "page-infiniband.h"
+ #include "page-bond.h"
++#include "page-bridge.h"
+ #include "page-vlan.h"
+ #include "page-vpn.h"
+ #include "vpn-helpers.h"
+@@ -139,6 +140,12 @@ get_connection_type_list (void)
+ 	data.virtual = TRUE;
+ 	g_array_append_val (array, data);
+ 
++	data.name = _("Bridge");
++	data.new_connection_func = bridge_connection_new;
++	data.setting_type = NM_TYPE_SETTING_BRIDGE;
++	data.virtual = TRUE;
++	g_array_append_val (array, data);
++
+ 	data.name = _("VLAN");
+ 	data.new_connection_func = vlan_connection_new;
+ 	data.setting_type = NM_TYPE_SETTING_VLAN;
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c b/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
+index 23ace20..3a87c55 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
+@@ -47,6 +47,7 @@
+ #include <nm-setting-cdma.h>
+ #include <nm-setting-infiniband.h>
+ #include <nm-setting-bond.h>
++#include <nm-setting-bridge.h>
+ #include <nm-utils.h>
+ 
+ #include "nm-connection-editor.h"
+@@ -66,6 +67,7 @@
+ #include "page-vpn.h"
+ #include "page-infiniband.h"
+ #include "page-bond.h"
++#include "page-bridge.h"
+ #include "page-vlan.h"
+ #include "ce-polkit-button.h"
+ #include "vpn-helpers.h"
+@@ -190,8 +192,12 @@ update_sensitivity (NMConnectionEditor *editor)
+ 	if (   !g_strcmp0 (nm_setting_connection_get_connection_type (s_con),
+ 	                   NM_SETTING_BOND_SETTING_NAME)
+ 	    || !g_strcmp0 (nm_setting_connection_get_slave_type (s_con),
+-	                   NM_SETTING_BOND_SETTING_NAME)) {
+-		/* Bond connections and their slaves must be system connections */
++	                   NM_SETTING_BOND_SETTING_NAME)
++	    || !g_strcmp0 (nm_setting_connection_get_connection_type (s_con),
++	                   NM_SETTING_BRIDGE_SETTING_NAME)
++	    || !g_strcmp0 (nm_setting_connection_get_slave_type (s_con),
++	                   NM_SETTING_BRIDGE_SETTING_NAME)) {
++		/* Bond and bridge connections and their slaves must be system connections */
+ 		gtk_widget_set_sensitive (GTK_WIDGET (editor->system_checkbutton), FALSE);
+ 	} else {
+ 		gtk_widget_set_sensitive (GTK_WIDGET (editor->system_checkbutton),
+@@ -976,6 +982,9 @@ nm_connection_editor_set_connection (NMConnectionEditor *editor,
+ 	} else if (!strcmp (connection_type, NM_SETTING_BOND_SETTING_NAME)) {
+ 		if (!add_page (editor, ce_page_bond_new, editor->connection, error))
+ 			goto out;
++	} else if (!strcmp (connection_type, NM_SETTING_BRIDGE_SETTING_NAME)) {
++		if (!add_page (editor, ce_page_bridge_new, editor->connection, error))
++			goto out;
+ 	} else if (!strcmp (connection_type, NM_SETTING_VLAN_SETTING_NAME)) {
+ 		if (!add_page (editor, ce_page_vlan_new, editor->connection, error))
+ 			goto out;
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/page-bridge.c b/network-manager-applet-0.8.1/src/connection-editor/page-bridge.c
+new file mode 100644
+index 0000000..1e85dc4
+--- /dev/null
++++ b/network-manager-applet-0.8.1/src/connection-editor/page-bridge.c
+@@ -0,0 +1,726 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager Connection editor -- Connection editor for NetworkManager
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Copyright 2012 - 2014 Red Hat, Inc.
++ */
++
++#include "config.h"
++
++#include <stdlib.h>
++#include <gtk/gtk.h>
++#include <glib/gi18n.h>
++
++#include <nm-setting-connection.h>
++#include <nm-setting-bridge.h>
++#include <nm-setting-wired.h>
++#include <nm-setting-vlan.h>
++#include <nm-setting-bond.h>
++
++#include "page-bridge.h"
++#include "page-wired.h"
++#include "page-vlan.h"
++#include "page-bond.h"
++#include "nm-connection-editor.h"
++#include "new-connection.h"
++
++G_DEFINE_TYPE (CEPageBridge, ce_page_bridge, CE_TYPE_PAGE)
++
++#define CE_PAGE_BRIDGE_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), CE_TYPE_PAGE_BRIDGE, CEPageBridgePrivate))
++
++typedef struct {
++	NMRemoteConnection *connection;
++	NMRemoteSettingsSystem *system_settings;
++	NMAGConfSettings *gconf_settings;
++
++	NMSettingBridge *setting;
++	const char *uuid;
++
++	GtkWindow *toplevel;
++
++	GtkEntry *interface_name;
++	GtkSpinButton *ageing_time;
++	GtkCheckButton *stp;
++	GtkSpinButton *priority;
++	GtkSpinButton *forward_delay;
++	GtkSpinButton *hello_time;
++	GtkSpinButton *max_age;
++
++	GtkTreeView *connections;
++	GtkTreeModel *connections_model;
++	GtkButton *add, *edit, *delete;
++} CEPageBridgePrivate;
++
++enum {
++	COL_CONNECTION,
++	COL_NAME
++};
++
++static int
++name_sort_func (GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b, gpointer user_data)
++{
++	NMConnection *conn_a, *conn_b;
++	int ret;
++
++	/* We fetch COL_CONNECTION rather than COL_NAME to avoid a strdup/free. */
++	gtk_tree_model_get (model, a, COL_CONNECTION, &conn_a, -1);
++	gtk_tree_model_get (model, b, COL_CONNECTION, &conn_b, -1);
++	ret = strcmp (nm_connection_get_id (conn_a), nm_connection_get_id (conn_b));
++	g_object_unref (conn_a);
++	g_object_unref (conn_b);
++
++	return ret;
++}
++
++static void
++bridge_private_init (CEPageBridge *self)
++{
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++	GtkBuilder *builder;
++
++	builder = CE_PAGE (self)->builder;
++
++	priv->interface_name = GTK_ENTRY (gtk_builder_get_object (builder, "bridge_interface"));
++	priv->connections = GTK_TREE_VIEW (gtk_builder_get_object (builder, "bridge_connections"));
++	priv->connections_model = GTK_TREE_MODEL (gtk_builder_get_object (builder, "bridge_connections_model"));
++	gtk_tree_sortable_set_sort_func (GTK_TREE_SORTABLE (priv->connections_model),
++	                                 COL_NAME, name_sort_func,
++	                                 NULL, NULL);
++	gtk_tree_sortable_set_sort_column_id (GTK_TREE_SORTABLE (priv->connections_model),
++	                                      COL_NAME, GTK_SORT_ASCENDING);
++
++
++	priv->ageing_time = GTK_SPIN_BUTTON (gtk_builder_get_object (builder, "bridge_ageing_time"));
++	priv->stp = GTK_CHECK_BUTTON (gtk_builder_get_object (builder, "bridge_stp_checkbox"));
++	priv->priority = GTK_SPIN_BUTTON (gtk_builder_get_object (builder, "bridge_priority"));
++	priv->forward_delay = GTK_SPIN_BUTTON (gtk_builder_get_object (builder, "bridge_forward_delay"));
++	priv->hello_time = GTK_SPIN_BUTTON (gtk_builder_get_object (builder, "bridge_hello_time"));
++	priv->max_age = GTK_SPIN_BUTTON (gtk_builder_get_object (builder, "bridge_max_age"));
++
++	priv->add = GTK_BUTTON (gtk_builder_get_object (builder, "bridge_connection_add"));
++	priv->edit = GTK_BUTTON (gtk_builder_get_object (builder, "bridge_connection_edit"));
++	priv->delete = GTK_BUTTON (gtk_builder_get_object (builder, "bridge_connection_delete"));
++
++	priv->toplevel = GTK_WINDOW (gtk_widget_get_ancestor (GTK_WIDGET (priv->connections),
++	                                                      GTK_TYPE_WINDOW));
++}
++
++static void
++dispose (GObject *object)
++{
++	CEPageBridge *self = CE_PAGE_BRIDGE (object);
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++	GtkTreeIter iter;
++
++	if (priv->system_settings) {
++		g_signal_handlers_disconnect_matched (priv->system_settings, G_SIGNAL_MATCH_DATA,
++		                                      0, 0, NULL, NULL, self);
++		g_object_unref (priv->system_settings);
++		priv->system_settings = NULL;
++	}
++	if (priv->gconf_settings) {
++		g_signal_handlers_disconnect_matched (priv->gconf_settings, G_SIGNAL_MATCH_DATA,
++		                                      0, 0, NULL, NULL, self);
++		g_object_unref (priv->gconf_settings);
++		priv->gconf_settings = NULL;
++	}
++	if (priv->connection) {
++		g_object_unref (priv->connection);
++		priv->connection = NULL;
++	}
++
++	if (gtk_tree_model_get_iter_first (priv->connections_model, &iter)) {
++		do {
++			NMRemoteConnection *connection = NULL;
++
++			gtk_tree_model_get (priv->connections_model, &iter,
++			                    COL_CONNECTION, &connection,
++			                    -1);
++			g_signal_handlers_disconnect_matched (connection, G_SIGNAL_MATCH_DATA,
++			                                      0, 0, NULL, NULL, self);
++			g_object_unref (connection);
++		} while (gtk_tree_model_iter_next (priv->connections_model, &iter));
++	}
++
++	G_OBJECT_CLASS (ce_page_bridge_parent_class)->dispose (object);
++}
++
++static void
++stuff_changed (GtkWidget *w, gpointer user_data)
++{
++	ce_page_changed (CE_PAGE (user_data));
++}
++
++static void
++connection_removed (NMRemoteConnection *connection, gpointer user_data)
++{
++	CEPageBridge *self = CE_PAGE_BRIDGE (user_data);
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++	GtkTreeIter iter;
++
++	if (!gtk_tree_model_get_iter_first (priv->connections_model, &iter))
++		return;
++
++	do {
++		NMRemoteConnection *candidate = NULL;
++
++		gtk_tree_model_get (priv->connections_model, &iter,
++		                    COL_CONNECTION, &candidate,
++		                    -1);
++		if (candidate == connection) {
++			gtk_list_store_remove (GTK_LIST_STORE (priv->connections_model), &iter);
++			stuff_changed (NULL, self);
++			return;
++		}
++	} while (gtk_tree_model_iter_next (priv->connections_model, &iter));
++}
++
++static void
++connection_added (NMSettingsInterface *settings,
++                  NMSettingsConnectionInterface *connection,
++                  gpointer user_data)
++{
++	CEPageBridge *self = CE_PAGE_BRIDGE (user_data);
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++	NMSettingConnection *s_con;
++	const char *slave_type, *master;
++	const char *interface_name;
++	GtkTreeIter iter;
++
++	s_con = nm_connection_get_setting_connection (NM_CONNECTION (connection));
++	if (!s_con)
++		return;
++
++	slave_type = nm_setting_connection_get_slave_type (s_con);
++	if (!slave_type || strcmp (slave_type, NM_SETTING_BRIDGE_SETTING_NAME) != 0)
++		return;
++
++	master = nm_setting_connection_get_master (s_con);
++	if (!master)
++		return;
++
++	interface_name = nm_setting_bridge_get_interface_name (priv->setting);
++	if (   strcmp (master, interface_name) != 0
++	    && strcmp (master, priv->uuid) != 0)
++		return;
++
++	gtk_list_store_append (GTK_LIST_STORE (priv->connections_model), &iter);
++	gtk_list_store_set (GTK_LIST_STORE (priv->connections_model), &iter,
++	                    COL_CONNECTION, connection,
++	                    COL_NAME, nm_setting_connection_get_id (s_con),
++	                    -1);
++	stuff_changed (NULL, self);
++
++	g_signal_connect (connection, "removed",
++	                  G_CALLBACK (connection_removed), self);
++}
++
++static void
++stp_toggled (GtkToggleButton *stp, gpointer user_data)
++{
++	CEPageBridge *self = user_data;
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++
++	if (gtk_toggle_button_get_active (stp)) {
++		gtk_widget_set_sensitive (GTK_WIDGET (priv->priority), TRUE);
++		gtk_widget_set_sensitive (GTK_WIDGET (priv->forward_delay), TRUE);
++		gtk_widget_set_sensitive (GTK_WIDGET (priv->hello_time), TRUE);
++		gtk_widget_set_sensitive (GTK_WIDGET (priv->max_age), TRUE);
++	} else {
++		gtk_widget_set_sensitive (GTK_WIDGET (priv->priority), FALSE);
++		gtk_widget_set_sensitive (GTK_WIDGET (priv->forward_delay), FALSE);
++		gtk_widget_set_sensitive (GTK_WIDGET (priv->hello_time), FALSE);
++		gtk_widget_set_sensitive (GTK_WIDGET (priv->max_age), FALSE);
++	}
++	ce_page_changed (CE_PAGE (user_data));
++}
++
++static void
++populate_ui (CEPageBridge *self)
++{
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++	NMSettingBridge *s_bridge = priv->setting;
++	NMSettingConnection *s_con;
++	const char *iface;
++	GSList *connections, *c;
++	gboolean stp;
++	int priority, forward_delay, hello_time, max_age;
++	int ageing_time;
++
++	s_con = nm_connection_get_setting_connection (NM_CONNECTION (priv->connection));
++	g_return_if_fail (s_con != NULL);
++
++	/* Interface name */
++	iface = nm_setting_bridge_get_interface_name (s_bridge);
++	gtk_entry_set_text (priv->interface_name, iface ? iface : "");
++	g_signal_connect (priv->interface_name, "changed",
++	                  G_CALLBACK (stuff_changed),
++	                  self);
++
++	/* Bridged connections */
++	connections = nm_settings_interface_list_connections (NM_SETTINGS_INTERFACE (priv->system_settings));
++	for (c = connections; c; c = c->next)
++		connection_added (NM_SETTINGS_INTERFACE (priv->system_settings), c->data, self);
++	g_slist_free (connections);
++
++	/* Ageing time */
++	ageing_time = nm_setting_bridge_get_ageing_time (s_bridge);
++	gtk_spin_button_set_value (priv->ageing_time, (gdouble) ageing_time);
++	g_signal_connect (priv->ageing_time, "value-changed",
++	                  G_CALLBACK (stuff_changed),
++	                  self);
++
++	/* STP */
++	g_signal_connect (priv->stp, "toggled",
++	                  G_CALLBACK (stp_toggled),
++	                  self);
++	stp = nm_setting_bridge_get_stp (s_bridge);
++	gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (priv->stp), stp);
++	stp_toggled (GTK_TOGGLE_BUTTON (priv->stp), self);
++
++	/* Priority */
++	priority = nm_setting_bridge_get_priority (s_bridge);
++	gtk_spin_button_set_value (priv->priority, (gdouble) priority);
++	g_signal_connect (priv->priority, "value-changed",
++	                  G_CALLBACK (stuff_changed),
++	                  self);
++
++	/* Forward delay */
++	forward_delay = nm_setting_bridge_get_forward_delay (s_bridge);
++	gtk_spin_button_set_value (priv->forward_delay, (gdouble) forward_delay);
++	g_signal_connect (priv->forward_delay, "value-changed",
++	                  G_CALLBACK (stuff_changed),
++	                  self);
++
++	/* Hello time */
++	hello_time = nm_setting_bridge_get_hello_time (s_bridge);
++	gtk_spin_button_set_value (priv->hello_time, (gdouble) hello_time);
++	g_signal_connect (priv->hello_time, "value-changed",
++	                  G_CALLBACK (stuff_changed),
++	                  self);
++
++	/* Max age */
++	max_age = nm_setting_bridge_get_max_age (s_bridge);
++	gtk_spin_button_set_value (priv->max_age, (gdouble) max_age);
++	g_signal_connect (priv->max_age, "value-changed",
++	                  G_CALLBACK (stuff_changed),
++	                  self);
++}
++
++static void
++connections_selection_changed_cb (GtkTreeSelection *selection, gpointer user_data)
++{
++	CEPageBridge *self = user_data;
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++	GtkTreeIter iter;
++	GtkTreeModel *model;
++	NMRemoteConnection *connection;
++	NMSettingConnection *s_con;
++	gboolean sensitive = FALSE;
++
++	if (gtk_tree_selection_get_selected (selection, &model, &iter)) {
++		gtk_tree_model_get (model, &iter,
++		                    0, &connection,
++		                    -1);
++		s_con = nm_connection_get_setting_connection (NM_CONNECTION (connection));
++		g_assert (s_con);
++	
++		sensitive = !nm_setting_connection_get_read_only (s_con);
++	}
++
++	gtk_widget_set_sensitive (GTK_WIDGET (priv->edit), sensitive);
++	gtk_widget_set_sensitive (GTK_WIDGET (priv->delete), sensitive);
++}
++
++static void
++add_response_cb (NMConnectionEditor *editor, NMRemoteConnection *connection,
++                 gboolean added, gpointer user_data)
++{
++	g_object_unref (editor);
++}
++
++static void
++add_bridge_connection (NMConnection *connection,
++                       gpointer user_data)
++{
++	CEPageBridge *self = user_data;
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++	NMSettingConnection *s_con;
++	NMConnectionEditor *editor;
++	const char *iface_name;
++	char *name;
++
++	if (!connection)
++		return;
++
++	/* Mark the connection as a bridge port so that the editor knows not
++	 * to add IPv4 and IPv6 pages, and rename it.
++	 */
++	s_con = nm_connection_get_setting_connection (connection);
++	g_assert (s_con != NULL);
++
++	iface_name = gtk_entry_get_text (priv->interface_name);
++	if (!*iface_name)
++		iface_name = nm_setting_bridge_get_interface_name (priv->setting);
++	if (!*iface_name)
++		iface_name = "bridge";
++	name = g_strdup_printf (_("%s slave %d"), iface_name,
++	                        gtk_tree_model_iter_n_children (priv->connections_model, NULL) + 1);
++
++	g_object_set (G_OBJECT (s_con),
++	              NM_SETTING_CONNECTION_ID, name,
++	              NM_SETTING_CONNECTION_MASTER, priv->uuid,
++	              NM_SETTING_CONNECTION_SLAVE_TYPE, NM_SETTING_BRIDGE_SETTING_NAME,
++	              NM_SETTING_CONNECTION_AUTOCONNECT, FALSE,
++	              NULL);
++	g_free (name);
++
++	nm_connection_set_scope (connection, NM_CONNECTION_SCOPE_SYSTEM);
++
++	editor = nm_connection_editor_new (priv->toplevel,
++	                                   connection,
++	                                   CE_PAGE (self)->client,
++	                                   priv->system_settings,
++	                                   priv->gconf_settings);
++	if (!editor) {
++		g_object_unref (connection);
++		return;
++	}
++
++	g_signal_connect (editor, "done", G_CALLBACK (add_response_cb), self);
++	nm_connection_editor_run (editor);
++}
++
++static gboolean
++connection_type_filter (GType type, gpointer user_data)
++{
++	if (type == NM_TYPE_SETTING_WIRED ||
++	    type == NM_TYPE_SETTING_VLAN ||
++	    type == NM_TYPE_SETTING_BOND)
++		return TRUE;
++	else
++		return FALSE;
++}
++
++static void
++add_clicked (GtkButton *button, gpointer user_data)
++{
++	CEPageBridge *self = CE_PAGE_BRIDGE (user_data);
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++
++	new_connection_dialog (priv->toplevel,
++	                       priv->system_settings,
++	                       priv->gconf_settings,
++	                       connection_type_filter,
++	                       add_bridge_connection,
++	                       self);
++}
++
++static NMSettingsConnectionInterface *
++get_selected_connection (CEPageBridge *self)
++{
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++	GtkTreeSelection *selection;
++	GList *selected_rows;
++	GtkTreeModel *model = NULL;
++	GtkTreeIter iter;
++	NMSettingsConnectionInterface *connection = NULL;
++
++	selection = gtk_tree_view_get_selection (priv->connections);
++	selected_rows = gtk_tree_selection_get_selected_rows (selection, &model);
++	if (!selected_rows)
++		return NULL;
++
++	if (gtk_tree_model_get_iter (model, &iter, (GtkTreePath *) selected_rows->data))
++		gtk_tree_model_get (model, &iter, 0, &connection, -1);
++
++	/* free memory */
++	g_list_foreach (selected_rows, (GFunc) gtk_tree_path_free, NULL);
++	g_list_free (selected_rows);
++
++	return connection;
++}
++
++static void
++edit_done_cb (NMConnectionEditor *editor, GtkResponseType response, gpointer user_data)
++{
++	g_object_unref (editor);
++}
++
++static void
++edit_clicked (GtkButton *button, gpointer user_data)
++{
++	CEPageBridge *self = user_data;
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++	NMConnectionEditor *editor;
++	NMSettingsConnectionInterface *connection;
++
++	connection = get_selected_connection (self);
++	if (!connection)
++		return;
++
++	editor = nm_connection_editor_get (NM_CONNECTION (connection));
++	if (editor) {
++		nm_connection_editor_present (editor);
++		return;
++	}
++
++	editor = nm_connection_editor_new (priv->toplevel,
++	                                   NM_CONNECTION (connection),
++	                                   CE_PAGE (self)->client,
++	                                   priv->system_settings,
++	                                   priv->gconf_settings);
++	if (!editor)
++		return;
++
++	g_signal_connect (editor, "done", G_CALLBACK (edit_done_cb), self);
++	nm_connection_editor_run (editor);
++}
++
++static void
++connection_double_clicked_cb (GtkTreeView *tree_view,
++                              GtkTreePath *path,
++                              GtkTreeViewColumn *column,
++                              gpointer user_data)
++{
++	edit_clicked (NULL, user_data);
++}
++
++static void
++delete_clicked (GtkButton *button, gpointer user_data)
++{
++	CEPageBridge *self = user_data;
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++	NMSettingsConnectionInterface *connection;
++
++	connection = get_selected_connection (self);
++	if (!connection)
++		return;
++
++	delete_connection (priv->toplevel, connection, TRUE, NULL, NULL);
++}
++
++static void
++finish_setup (CEPageBridge *self, gpointer unused, GError *error, gpointer user_data)
++{
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++	GtkTreeSelection *selection;
++
++	if (error)
++		return;
++
++	populate_ui (self);
++
++	g_signal_connect (priv->add, "clicked", G_CALLBACK (add_clicked), self);
++	g_signal_connect (priv->edit, "clicked", G_CALLBACK (edit_clicked), self);
++	g_signal_connect (priv->delete, "clicked", G_CALLBACK (delete_clicked), self);
++
++	g_signal_connect (priv->connections, "row-activated", G_CALLBACK (connection_double_clicked_cb), self);
++
++	selection = gtk_tree_view_get_selection (priv->connections);
++	g_signal_connect (selection, "changed", G_CALLBACK (connections_selection_changed_cb), self);
++	connections_selection_changed_cb (selection, self);
++}
++
++CEPage *
++ce_page_bridge_new (NMConnection *connection,
++                    GtkWindow *parent_window,
++                    NMClient *client,
++                    NMRemoteSettingsSystem *system_settings,
++                    NMAGConfSettings *gconf_settings,
++                    const char **out_secrets_setting_name,
++                    GError **error)
++{
++	CEPageBridge *self;
++	CEPageBridgePrivate *priv;
++	CEPage *parent;
++	NMSettingConnection *s_con;
++
++	self = CE_PAGE_BRIDGE (g_object_new (CE_TYPE_PAGE_BRIDGE,
++	                                     CE_PAGE_CONNECTION, connection,
++	                                     CE_PAGE_PARENT_WINDOW, parent_window,
++	                                     CE_PAGE_CLIENT, client,
++	                                     CE_PAGE_SYSTEM_SETTINGS, system_settings,
++	                                     CE_PAGE_GCONF_SETTINGS, gconf_settings,
++	                                     NULL));
++
++	parent = CE_PAGE (self);
++
++	parent->builder = gtk_builder_new ();
++
++	if (!gtk_builder_add_from_file (parent->builder, UIDIR "/ce-page-bridge.ui", error)) {
++		g_warning ("Couldn't load builder file: %s", (*error)->message);
++		g_set_error_literal (error, NMA_ERROR, NMA_ERROR_GENERIC, _("Could not load bridge user interface."));
++		g_object_unref (self);
++		return NULL;
++	}
++
++	parent->page = GTK_WIDGET (gtk_builder_get_object (parent->builder, "BridgePage"));
++	if (!parent->page) {
++		g_set_error_literal (error, NMA_ERROR, NMA_ERROR_GENERIC, _("Could not load bridge user interface."));
++		g_object_unref (self);
++		return NULL;
++	}
++	g_object_ref_sink (parent->page);
++
++	parent->title = g_strdup (_("Bridge"));
++
++	bridge_private_init (self);
++	priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++
++	priv->connection = g_object_ref (connection);
++	priv->system_settings = g_object_ref (system_settings);
++	priv->gconf_settings = g_object_ref (gconf_settings);
++
++	s_con = nm_connection_get_setting_connection (connection);
++	priv->uuid = nm_setting_connection_get_uuid (s_con);
++
++	g_signal_connect (system_settings, "new-connection",
++	                  G_CALLBACK (connection_added), self);
++
++	priv->setting = (NMSettingBridge *) nm_connection_get_setting (connection, NM_TYPE_SETTING_BRIDGE);
++	if (!priv->setting) {
++		priv->setting = NM_SETTING_BRIDGE (nm_setting_bridge_new ());
++		nm_connection_add_setting (connection, NM_SETTING (priv->setting));
++	}
++
++	g_signal_connect (self, "initialized", G_CALLBACK (finish_setup), NULL);
++
++	return CE_PAGE (self);
++}
++
++static void
++ui_to_setting (CEPageBridge *self)
++{
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++	const char *interface_name;
++	int ageing_time, priority, forward_delay, hello_time, max_age;
++	gboolean stp;
++
++	/* Interface name */
++	interface_name = gtk_entry_get_text (priv->interface_name);
++	g_object_set (priv->setting,
++	              NM_SETTING_BRIDGE_INTERFACE_NAME, interface_name,
++	              NULL);
++
++	ageing_time = gtk_spin_button_get_value_as_int (priv->ageing_time);
++	stp = gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (priv->stp));
++	g_object_set (G_OBJECT (priv->setting),
++	              NM_SETTING_BRIDGE_AGEING_TIME, ageing_time,
++	              NM_SETTING_BRIDGE_STP, stp,
++	              NULL);
++
++	if (stp) {
++		priority = gtk_spin_button_get_value_as_int (priv->priority);
++		forward_delay = gtk_spin_button_get_value_as_int (priv->forward_delay);
++		hello_time = gtk_spin_button_get_value_as_int (priv->hello_time);
++		max_age = gtk_spin_button_get_value_as_int (priv->max_age);
++
++		g_object_set (G_OBJECT (priv->setting),
++		              NM_SETTING_BRIDGE_PRIORITY, priority,
++		              NM_SETTING_BRIDGE_FORWARD_DELAY, forward_delay,
++		              NM_SETTING_BRIDGE_HELLO_TIME, hello_time,
++		              NM_SETTING_BRIDGE_MAX_AGE, max_age,
++		              NULL);
++	}
++
++	/* Slaves are updated as they're edited, so nothing to do */
++}
++
++static gboolean
++validate (CEPage *page, NMConnection *connection, GError **error)
++{
++	CEPageBridge *self = CE_PAGE_BRIDGE (page);
++	CEPageBridgePrivate *priv = CE_PAGE_BRIDGE_GET_PRIVATE (self);
++
++	ui_to_setting (self);
++	return nm_setting_verify (NM_SETTING (priv->setting), NULL, error);
++}
++
++static void
++ce_page_bridge_init (CEPageBridge *self)
++{
++}
++
++static void
++ce_page_bridge_class_init (CEPageBridgeClass *bridge_class)
++{
++	GObjectClass *object_class = G_OBJECT_CLASS (bridge_class);
++	CEPageClass *parent_class = CE_PAGE_CLASS (bridge_class);
++
++	g_type_class_add_private (object_class, sizeof (CEPageBridgePrivate));
++
++	/* virtual methods */
++	object_class->dispose = dispose;
++
++	parent_class->validate = validate;
++}
++
++void
++bridge_connection_new (GtkWindow *parent,
++                     const char *detail,
++                     NMRemoteSettingsSystem *system_settings,
++                     NMAGConfSettings *gconf_settings,
++                     PageNewConnectionResultFunc result_func,
++                     gpointer user_data)
++{
++	NMConnection *connection;
++	int bridge_num = 0, num;
++	GSList *connections, *iter;
++	NMConnection *conn2;
++	NMSettingBridge *s_bridge;
++	const char *iface;
++	char *my_iface;
++
++	connection = ce_page_new_connection (_("Bridge connection %d"),
++	                                     NM_SETTING_BRIDGE_SETTING_NAME,
++	                                     TRUE,
++	                                     system_settings,
++	                                     gconf_settings,
++	                                     user_data);
++	nm_connection_add_setting (connection, nm_setting_bridge_new ());
++	nm_connection_set_scope (connection, NM_CONNECTION_SCOPE_SYSTEM);
++
++	/* Find an available interface name */
++	connections = ce_page_list_connections (system_settings, gconf_settings);
++	for (iter = connections; iter; iter = iter->next) {
++		conn2 = iter->data;
++
++		if (!nm_connection_is_type (conn2, NM_SETTING_BRIDGE_SETTING_NAME))
++			continue;
++		s_bridge = nm_connection_get_setting_bridge (conn2);
++		if (!s_bridge)
++			continue;
++		iface = nm_setting_bridge_get_interface_name (s_bridge);
++		if (!iface || strncmp (iface, "bridge", 6) != 0 || !g_ascii_isdigit (iface[6]))
++			continue;
++
++		num = atoi (iface + 6);
++		if (bridge_num <= num)
++			bridge_num = num + 1;
++	}
++	g_slist_free (connections);
++
++	my_iface = g_strdup_printf ("bridge%d", bridge_num);
++	s_bridge = nm_connection_get_setting_bridge (connection);
++	g_object_set (G_OBJECT (s_bridge),
++	              NM_SETTING_BRIDGE_INTERFACE_NAME, my_iface,
++	              NULL);
++	g_free (my_iface);
++
++	(*result_func) (connection, FALSE, NULL, user_data);
++}
++
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/page-bridge.h b/network-manager-applet-0.8.1/src/connection-editor/page-bridge.h
+new file mode 100644
+index 0000000..695993d
+--- /dev/null
++++ b/network-manager-applet-0.8.1/src/connection-editor/page-bridge.h
+@@ -0,0 +1,64 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager Connection editor -- Connection editor for NetworkManager
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Copyright 2012 - 2014 Red Hat, Inc.
++ */
++
++#ifndef __PAGE_BRIDGE_H__
++#define __PAGE_BRIDGE_H__
++
++#include <nm-connection.h>
++
++#include <glib.h>
++#include <glib-object.h>
++
++#include "ce-page.h"
++
++#define CE_TYPE_PAGE_BRIDGE            (ce_page_bridge_get_type ())
++#define CE_PAGE_BRIDGE(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), CE_TYPE_PAGE_BRIDGE, CEPageBridge))
++#define CE_PAGE_BRIDGE_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST ((klass), CE_TYPE_PAGE_BRIDGE, CEPageBridgeClass))
++#define CE_IS_PAGE_BRIDGE(obj)         (G_TYPE_CHECK_INSTANCE_TYPE ((obj), CE_TYPE_PAGE_BRIDGE))
++#define CE_IS_PAGE_BRIDGE_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE ((klass), CE_TYPE_PAGE_BRIDGE))
++#define CE_PAGE_BRIDGE_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS ((obj), CE_TYPE_PAGE_BRIDGE, CEPageBridgeClass))
++
++typedef struct {
++	CEPage parent;
++} CEPageBridge;
++
++typedef struct {
++	CEPageClass parent;
++} CEPageBridgeClass;
++
++GType ce_page_bridge_get_type (void);
++
++CEPage *ce_page_bridge_new (NMConnection *connection,
++                            GtkWindow *parent,
++                            NMClient *client,
++                            NMRemoteSettingsSystem *system_settings,
++                            NMAGConfSettings *gconf_settings,
++                            const char **out_secrets_setting_name,
++                            GError **error);
++
++void bridge_connection_new (GtkWindow *parent,
++                            const char *detail,
++                            NMRemoteSettingsSystem *system_settings,
++                            NMAGConfSettings *gconf_settings,
++                            PageNewConnectionResultFunc result_func,
++                            gpointer user_data);
++
++#endif  /* __PAGE_BRIDGE_H__ */
++
+-- 
+1.7.11.7
+

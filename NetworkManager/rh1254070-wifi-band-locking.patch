@@ -1,0 +1,579 @@
+From a9b37dd2817595e16074a328191f5792fedcef88 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Mon, 10 Mar 2014 09:12:37 -0500
+Subject: [PATCH 1/5] wifi: support locking connections to a band (5GHz or
+ 2GHz) (bgo #627571)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+https://bugzilla.gnome.org/show_bug.cgi?id=627571
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ src/supplicant-manager/nm-supplicant-config.c | 26 ++++++++++++++++++++++++--
+ 1 file changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/src/supplicant-manager/nm-supplicant-config.c b/src/supplicant-manager/nm-supplicant-config.c
+index 9f0c3f4..086a0cc 100644
+--- a/src/supplicant-manager/nm-supplicant-config.c
++++ b/src/supplicant-manager/nm-supplicant-config.c
+@@ -358,6 +358,13 @@ nm_supplicant_config_get_blobs (NMSupplicantConfig * self)
+ #define MAC_FMT "%02x:%02x:%02x:%02x:%02x:%02x"
+ #define MAC_ARG(x) ((guint8*)(x))[0],((guint8*)(x))[1],((guint8*)(x))[2],((guint8*)(x))[3],((guint8*)(x))[4],((guint8*)(x))[5]
+ 
++#define TWO_GHZ_FREQS  "2412,2417,2422,2427,2432,2437,2442,2447,2452,2457,2462,2467,2472,2484"
++#define FIVE_GHZ_FREQS "4915,4920,4925,4935,4940,4945,4960,4980,5035,5040,5045,5055,5060,5080," \
++                         "5170,5180,5190,5200,5210,5220,5230,5240,5260,5280,5300,5320,5500," \
++                         "5520,5540,5560,5580,5600,5620,5640,5660,5680,5700,5745,5765,5785," \
++                         "5805,5825"
++
++
+ gboolean
+ nm_supplicant_config_add_setting_wireless (NMSupplicantConfig * self,
+                                            NMSettingWireless * setting,
+@@ -367,7 +374,7 @@ nm_supplicant_config_add_setting_wireless (NMSupplicantConfig * self,
+ {
+ 	NMSupplicantConfigPrivate *priv;
+ 	gboolean is_adhoc;
+-	const char *mode;
++	const char *mode, *band;
+ 	const GByteArray *id;
+ 
+ 	g_return_val_if_fail (NM_IS_SUPPLICANT_CONFIG (self), FALSE);
+@@ -434,7 +441,22 @@ nm_supplicant_config_add_setting_wireless (NMSupplicantConfig * self,
+ 		g_free (str_bssid);
+ 	}
+ 
+-	// FIXME: band & channel config items
++	band = nm_setting_wireless_get_band (setting);
++	if (band) {
++		const char *freqs = NULL;
++
++		if (!strcmp (band, "a"))
++			freqs = FIVE_GHZ_FREQS;
++		else if (!strcmp (band, "bg"))
++			freqs = TWO_GHZ_FREQS;
++
++		if (freqs && !nm_supplicant_config_add_option (self, "freq_list", freqs, strlen (freqs), FALSE)) {
++			nm_log_warn (LOGD_SUPPLICANT, "Error adding frequency list/band to supplicant config.");
++			return FALSE;
++		}
++	}
++
++	// FIXME: channel config item
+ 	
+ 	return TRUE;
+ }
+-- 
+2.1.0
+
+
+From 4fd0745fd56bac6be7d776b0bd90d222e3fff06a Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Wed, 26 Mar 2014 09:19:41 -0500
+Subject: [PATCH 2/5] wifi: fixup for "wifi: support locking connections to a
+ band (5GHz or 2GHz) (bgo #627571)"
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The new freq_list option must pass configuration verification.
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ src/supplicant-manager/nm-supplicant-settings-verify.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/supplicant-manager/nm-supplicant-settings-verify.c b/src/supplicant-manager/nm-supplicant-settings-verify.c
+index e990397..e8d7034 100644
+--- a/src/supplicant-manager/nm-supplicant-settings-verify.c
++++ b/src/supplicant-manager/nm-supplicant-settings-verify.c
+@@ -128,6 +128,7 @@ static const struct Opt opt_table[] = {
+ 	{ "proactive_key_caching", TYPE_INT,  0, 1, FALSE,  NULL },
+ 	{ "bgscan",             TYPE_BYTES,   0, 0, FALSE,  NULL },
+ 	{ "pac_file",           TYPE_BYTES,   0, 1024, FALSE,  NULL },
++	{ "freq_list",          TYPE_BYTES,   0, 0, FALSE,  NULL },
+ };
+ 
+ 
+-- 
+2.1.0
+
+
+From 850e39ce59a58e7abecac459bb2ac110623c2bf7 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Thu, 2 Oct 2014 12:04:12 -0500
+Subject: [PATCH 3/5] supplicant: fix handling of 'freq_list' option and band
+ locking (bgo #737795)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The supplicant has a custom parsing function for freq_list which
+handles the list as a string.  Having NM marshal the option
+as TYPE_BYTES causes the supplicant to interpret the values that
+NM passes (which are in ASCII) as a byte-array and thus the
+supplicant gets a bogus frequency list.  Instead, NM should
+marshal freq_list as a simple string (using TYPE_KEYWORD without
+value checking).
+
+https://bugzilla.gnome.org/show_bug.cgi?id=737795
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ src/supplicant-manager/nm-supplicant-settings-verify.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/supplicant-manager/nm-supplicant-settings-verify.c b/src/supplicant-manager/nm-supplicant-settings-verify.c
+index e8d7034..432d8f7 100644
+--- a/src/supplicant-manager/nm-supplicant-settings-verify.c
++++ b/src/supplicant-manager/nm-supplicant-settings-verify.c
+@@ -128,7 +128,7 @@ static const struct Opt opt_table[] = {
+ 	{ "proactive_key_caching", TYPE_INT,  0, 1, FALSE,  NULL },
+ 	{ "bgscan",             TYPE_BYTES,   0, 0, FALSE,  NULL },
+ 	{ "pac_file",           TYPE_BYTES,   0, 1024, FALSE,  NULL },
+-	{ "freq_list",          TYPE_BYTES,   0, 0, FALSE,  NULL },
++	{ "freq_list",          TYPE_KEYWORD, 0, 0, FALSE,  NULL },
+ };
+ 
+ 
+-- 
+2.1.0
+
+
+From 201c11fa4747a4520e5cd5729c6303f8c99dc4b5 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Thu, 2 Oct 2014 12:25:18 -0500
+Subject: [PATCH 4/5] ifcfg-rh: read and write WiFi bands with BAND keyword
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+BAND alone will be honored, but CHANNEL will override BAND
+since CHANNEL almost always implies BAND as well.
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ system-settings/plugins/ifcfg-rh/reader.c          |  31 +++-
+ .../ifcfg-rh/tests/network-scripts/Makefile.am     |   3 +
+ .../tests/network-scripts/ifcfg-test-wifi-band-a   |  13 ++
+ .../ifcfg-test-wifi-band-a-channel-mismatch        |   9 +
+ .../ifcfg-test-wifi-band-bg-channel-mismatch       |   9 +
+ .../plugins/ifcfg-rh/tests/test-ifcfg-rh.c         | 204 +++++++++++++++++++++
+ system-settings/plugins/ifcfg-rh/writer.c          |   4 +
+ 7 files changed, 271 insertions(+), 2 deletions(-)
+ create mode 100644 system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-band-a
+ create mode 100644 system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-band-a-channel-mismatch
+ create mode 100644 system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-band-bg-channel-mismatch
+
+diff --git a/system-settings/plugins/ifcfg-rh/reader.c b/system-settings/plugins/ifcfg-rh/reader.c
+index 91deeb5..d9e6970 100644
+--- a/system-settings/plugins/ifcfg-rh/reader.c
++++ b/system-settings/plugins/ifcfg-rh/reader.c
+@@ -2949,6 +2949,7 @@ make_wireless_setting (shvarFile *ifcfg,
+ 	NMSettingWireless *s_wireless;
+ 	GByteArray *array = NULL;
+ 	char *value;
++	long int chan = 0;
+ 
+ 	s_wireless = NM_SETTING_WIRELESS (nm_setting_wireless_new ());
+ 
+@@ -3088,8 +3089,6 @@ make_wireless_setting (shvarFile *ifcfg,
+ 
+ 	value = svGetValue (ifcfg, "CHANNEL", FALSE);
+ 	if (value) {
+-		long int chan;
+-
+ 		errno = 0;
+ 		chan = strtol (value, NULL, 10);
+ 		if (errno || chan <= 0 || chan > 196) {
+@@ -3099,6 +3098,34 @@ make_wireless_setting (shvarFile *ifcfg,
+ 			goto error;
+ 		}
+ 		g_object_set (s_wireless, NM_SETTING_WIRELESS_CHANNEL, (guint32) chan, NULL);
++		g_free (value);
++	}
++
++	value = svGetValue (ifcfg, "BAND", FALSE);
++	if (value) {
++		if (!strcmp (value, "a")) {
++			if (chan && chan <= 14) {
++				g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
++				             "Band '%s' invalid for channel %ld", value, chan);
++				g_free (value);
++				goto error;
++			}
++		} else if (!strcmp (value, "bg")) {
++			if (chan && chan > 14) {
++				g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
++				             "Band '%s' invalid for channel %ld", value, chan);
++				g_free (value);
++				goto error;
++			}
++		} else {
++			g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
++			             "Invalid wireless band '%s'", value);
++			g_free (value);
++			goto error;
++		}
++		g_object_set (s_wireless, NM_SETTING_WIRELESS_BAND, value, NULL);
++		g_free (value);
++	} else if (chan > 0) {
+ 		if (chan > 14)
+ 			g_object_set (s_wireless, NM_SETTING_WIRELESS_BAND, "a", NULL);
+ 		else
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am b/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
+index 1280dc3..be68f6e 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
+@@ -44,6 +44,9 @@ EXTRA_DIST = \
+ 	keys-test-wifi-wpa-eap-tls \
+ 	ifcfg-test-wifi-wpa-eap-ttls-tls \
+ 	keys-test-wifi-wpa-eap-ttls-tls \
++	ifcfg-test-wifi-band-a \
++	ifcfg-test-wifi-band-a-channel-mismatch \
++	ifcfg-test-wifi-band-bg-channel-mismatch \
+ 	test_ca_cert.pem \
+ 	test1_key_and_cert.pem \
+ 	ifcfg-test-ibft-dhcp \
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-band-a b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-band-a
+new file mode 100644
+index 0000000..4328611
+--- /dev/null
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-band-a
+@@ -0,0 +1,13 @@
++TYPE=Wireless
++DEVICE=eth2
++HWADDR=00:16:41:11:22:33
++NM_CONTROLLED=yes
++BOOTPROTO=dhcp
++ESSID=blahblah
++BAND=a
++MODE=Managed
++RATE=auto
++ONBOOT=yes
++USERCTL=yes
++PEERDNS=yes
++IPV6INIT=no
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-band-a-channel-mismatch b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-band-a-channel-mismatch
+new file mode 100644
+index 0000000..8905ba0
+--- /dev/null
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-band-a-channel-mismatch
+@@ -0,0 +1,9 @@
++TYPE=Wireless
++DEVICE=eth2
++HWADDR=00:16:41:11:22:33
++BOOTPROTO=dhcp
++ESSID=blahblah
++CHANNEL=9
++BAND=a
++MODE=Managed
++
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-band-bg-channel-mismatch b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-band-bg-channel-mismatch
+new file mode 100644
+index 0000000..e02e21a
+--- /dev/null
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-wifi-band-bg-channel-mismatch
+@@ -0,0 +1,9 @@
++TYPE=Wireless
++DEVICE=eth2
++HWADDR=00:16:41:11:22:33
++BOOTPROTO=dhcp
++ESSID=blahblah
++CHANNEL=183
++BAND=bg
++MODE=Managed
++
+diff --git a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+index e4aa152..a240f34 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
++++ b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+@@ -6019,6 +6019,206 @@ test_read_wifi_wep_eap_ttls_chap (void)
+ 	g_object_unref (connection);
+ }
+ 
++static void
++test_read_wifi_band_a (void)
++{
++	NMConnection *connection;
++	NMSettingConnection *s_con;
++	NMSettingWireless *s_wifi;
++	gboolean success;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE;
++	GError *error = NULL;
++
++	connection = connection_from_file (TEST_IFCFG_DIR"/network-scripts/ifcfg-test-wifi-band-a",
++	                                   NULL,
++	                                   TYPE_WIRELESS,
++	                                   NULL,
++	                                   &unmanaged,
++	                                   &keyfile,
++	                                   &routefile,
++	                                   &route6file,
++	                                   &error,
++	                                   &ignore_error);
++
++	g_assert_no_error (error);
++	g_assert (connection);
++
++	success = nm_connection_verify (connection, &error);
++	g_assert_no_error (error);
++	g_assert (success);
++
++	s_con = nm_connection_get_setting_connection (connection);
++	g_assert (s_con);
++	g_assert_cmpstr (nm_setting_connection_get_connection_type (s_con), ==, NM_SETTING_WIRELESS_SETTING_NAME);
++
++	s_wifi = (NMSettingWireless *) nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS);
++	g_assert (s_wifi);
++	g_assert_cmpstr (nm_setting_wireless_get_band (s_wifi), ==, "a");
++
++	g_object_unref (connection);
++}
++
++static void
++test_write_wifi_band_a (void)
++{
++	NMConnection *connection, *reread;
++	NMSettingConnection *s_con;
++	NMSettingWireless *s_wifi;
++	NMSettingIP4Config *s_ip4;
++	NMSettingIP6Config *s_ip6;
++	char *uuid, *testfile = NULL, *val;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE;
++	gboolean success;
++	GError *error = NULL;
++	shvarFile *f;
++	GByteArray *ssid;
++	const unsigned char ssid_data[] = { 0x54, 0x65, 0x73, 0x74, 0x20, 0x53, 0x53, 0x49, 0x44 };
++
++	connection = nm_connection_new ();
++
++	/* Connection setting */
++	s_con = (NMSettingConnection *) nm_setting_connection_new ();
++	nm_connection_add_setting (connection, NM_SETTING (s_con));
++
++	uuid = nm_utils_uuid_generate ();
++	g_object_set (s_con,
++	              NM_SETTING_CONNECTION_ID, "Test Write WiFi Band A",
++	              NM_SETTING_CONNECTION_UUID, uuid,
++	              NM_SETTING_CONNECTION_TYPE, NM_SETTING_WIRELESS_SETTING_NAME,
++	              NULL);
++	g_free (uuid);
++
++	/* Wifi setting */
++	s_wifi = (NMSettingWireless *) nm_setting_wireless_new ();
++	nm_connection_add_setting (connection, NM_SETTING (s_wifi));
++
++	ssid = g_byte_array_sized_new (sizeof (ssid_data));
++	g_byte_array_append (ssid, ssid_data, sizeof (ssid_data));
++
++	g_object_set (s_wifi,
++	              NM_SETTING_WIRELESS_SSID, ssid,
++	              NM_SETTING_WIRELESS_MODE, "infrastructure",
++	              NM_SETTING_WIRELESS_BAND, "a",
++	              NULL);
++
++	g_byte_array_free (ssid, TRUE);
++
++	/* IP4 setting */
++	s_ip4 = (NMSettingIP4Config *) nm_setting_ip4_config_new ();
++	g_assert (s_ip4);
++	nm_connection_add_setting (connection, NM_SETTING (s_ip4));
++	g_object_set (s_ip4, NM_SETTING_IP4_CONFIG_METHOD, NM_SETTING_IP4_CONFIG_METHOD_AUTO, NULL);
++
++	/* IP6 setting */
++	s_ip6 = (NMSettingIP6Config *) nm_setting_ip6_config_new ();
++	g_assert (s_ip6);
++	nm_connection_add_setting (connection, NM_SETTING (s_ip6));
++	g_object_set (s_ip6, NM_SETTING_IP6_CONFIG_METHOD, NM_SETTING_IP6_CONFIG_METHOD_IGNORE, NULL);
++
++	success = nm_connection_verify (connection, &error);
++	g_assert_no_error (error);
++	g_assert (success);
++
++	/* Save the ifcfg */
++	success = writer_new_connection (connection,
++	                                 TEST_SCRATCH_DIR "/network-scripts/",
++	                                 &testfile,
++	                                 &error);
++	g_assert_no_error (error);
++	g_assert (success);
++
++	f = svNewFile (testfile);
++	g_assert (f);
++
++	/* re-read the file to check that what key was written. */
++	val = svGetValue (f, "BAND", FALSE);
++	g_assert (val);
++	g_assert_cmpstr (val, ==, "a");
++	g_free (val);
++	svCloseFile (f);
++
++	/* re-read the connection for comparison */
++	reread = connection_from_file (testfile, NULL, TYPE_WIRELESS,
++	                               NULL,
++	                               &unmanaged,
++	                               &keyfile,
++	                               &routefile,
++	                               &route6file,
++	                               &error,
++	                               &ignore_error);
++	unlink (testfile);
++	g_assert_no_error (error);
++	g_assert (reread);
++
++	success = nm_connection_verify (reread, &error);
++	g_assert_no_error (error);
++	g_assert (success);
++
++	g_assert (nm_connection_compare (connection, reread, NM_SETTING_COMPARE_FLAG_EXACT));
++
++	g_free (testfile);
++	g_object_unref (connection);
++	g_object_unref (reread);
++}
++
++static void
++test_read_wifi_band_a_channel_mismatch (void)
++{
++	NMConnection *connection;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE;
++	GError *error = NULL;
++
++	connection = connection_from_file (TEST_IFCFG_DIR"/network-scripts/ifcfg-test-wifi-band-a-channel-mismatch",
++	                                   NULL,
++	                                   TYPE_WIRELESS,
++	                                   NULL,
++	                                   &unmanaged,
++	                                   &keyfile,
++	                                   &routefile,
++	                                   &route6file,
++	                                   &error,
++	                                   &ignore_error);
++	g_assert (connection == NULL);
++	g_assert_error (error, IFCFG_PLUGIN_ERROR, 0);
++}
++
++static void
++test_read_wifi_band_bg_channel_mismatch (void)
++{
++	NMConnection *connection;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE;
++	GError *error = NULL;
++
++	connection = connection_from_file (TEST_IFCFG_DIR"/network-scripts/ifcfg-test-wifi-band-bg-channel-mismatch",
++	                                   NULL,
++	                                   TYPE_WIRELESS,
++	                                   NULL,
++	                                   &unmanaged,
++	                                   &keyfile,
++	                                   &routefile,
++	                                   &route6file,
++	                                   &error,
++	                                   &ignore_error);
++	g_assert (connection == NULL);
++	g_assert_error (error, IFCFG_PLUGIN_ERROR, 0);
++}
++
+ #define TEST_IFCFG_WIRED_QETH_STATIC TEST_IFCFG_DIR"/network-scripts/ifcfg-test-wired-qeth-static"
+ 
+ static void
+@@ -11806,6 +12006,9 @@ int main (int argc, char **argv)
+ 	test_read_wifi_wpa_eap_tls ();
+ 	test_read_wifi_wpa_eap_ttls_tls ();
+ 	test_read_wifi_wep_eap_ttls_chap ();
++	test_read_wifi_band_a ();
++	test_read_wifi_band_a_channel_mismatch ();
++	test_read_wifi_band_bg_channel_mismatch ();
+ 	test_read_wired_qeth_static ();
+ 	test_read_wired_ctc_static ();
+ 	test_read_infiniband ();
+@@ -11864,6 +12067,7 @@ int main (int argc, char **argv)
+ 	test_write_wifi_wpa_eap_ttls_tls ();
+ 	test_write_wifi_wpa_eap_ttls_mschapv2 ();
+ 	test_write_wifi_dynamic_wep_leap ();
++	test_write_wifi_band_a ();
+ 	test_write_wired_qeth_dhcp ();
+ 	test_write_wired_ctc_dhcp ();
+ 	test_write_infiniband ();
+diff --git a/system-settings/plugins/ifcfg-rh/writer.c b/system-settings/plugins/ifcfg-rh/writer.c
+index e51987c..53d790c 100644
+--- a/system-settings/plugins/ifcfg-rh/writer.c
++++ b/system-settings/plugins/ifcfg-rh/writer.c
+@@ -838,11 +838,15 @@ write_wireless_setting (NMConnection *connection,
+ 	}
+ 
+ 	svSetValue (ifcfg, "CHANNEL", NULL, FALSE);
++	svSetValue (ifcfg, "BAND", NULL, FALSE);
+ 	chan = nm_setting_wireless_get_channel (s_wireless);
+ 	if (chan) {
+ 		tmp = g_strdup_printf ("%u", chan);
+ 		svSetValue (ifcfg, "CHANNEL", tmp, FALSE);
+ 		g_free (tmp);
++	} else {
++		/* Band only set if channel is not, since channel implies band */
++		svSetValue (ifcfg, "BAND", nm_setting_wireless_get_band (s_wireless), FALSE);
+ 	}
+ 
+ 	svSetValue (ifcfg, "BSSID", NULL, FALSE);
+-- 
+2.1.0
+
+
+From 95854032d3e8a22f34d3604500195d457c7067b5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Mon, 17 Aug 2015 14:32:31 +0200
+Subject: [PATCH 5/5] supplicant: wpa_supplicant wants space-separeted list of
+ frequences
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+See https://w1.fi/cgit/hostap/tree/wpa_supplicant/wpa_supplicant.conf#n663
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ src/supplicant-manager/nm-supplicant-config.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/src/supplicant-manager/nm-supplicant-config.c b/src/supplicant-manager/nm-supplicant-config.c
+index 086a0cc..90621da 100644
+--- a/src/supplicant-manager/nm-supplicant-config.c
++++ b/src/supplicant-manager/nm-supplicant-config.c
+@@ -358,11 +358,11 @@ nm_supplicant_config_get_blobs (NMSupplicantConfig * self)
+ #define MAC_FMT "%02x:%02x:%02x:%02x:%02x:%02x"
+ #define MAC_ARG(x) ((guint8*)(x))[0],((guint8*)(x))[1],((guint8*)(x))[2],((guint8*)(x))[3],((guint8*)(x))[4],((guint8*)(x))[5]
+ 
+-#define TWO_GHZ_FREQS  "2412,2417,2422,2427,2432,2437,2442,2447,2452,2457,2462,2467,2472,2484"
+-#define FIVE_GHZ_FREQS "4915,4920,4925,4935,4940,4945,4960,4980,5035,5040,5045,5055,5060,5080," \
+-                         "5170,5180,5190,5200,5210,5220,5230,5240,5260,5280,5300,5320,5500," \
+-                         "5520,5540,5560,5580,5600,5620,5640,5660,5680,5700,5745,5765,5785," \
+-                         "5805,5825"
++#define TWO_GHZ_FREQS  "2412 2417 2422 2427 2432 2437 2442 2447 2452 2457 2462 2467 2472 2484"
++#define FIVE_GHZ_FREQS "4915 4920 4925 4935 4940 4945 4960 4980 5035 5040 5045 5055 5060 5080 " \
++                         "5170 5180 5190 5200 5210 5220 5230 5240 5260 5280 5300 5320 5500 " \
++                         "5520 5540 5560 5580 5600 5620 5640 5660 5680 5700 5745 5765 5785 " \
++                         "5805 5825"
+ 
+ 
+ gboolean
+-- 
+2.1.0
+

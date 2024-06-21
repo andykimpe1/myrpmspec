@@ -1,0 +1,385 @@
+From 257f7db0f514bdf187acdba2843c7a0873e142c4 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Wed, 14 Aug 2013 16:49:56 +0200
+Subject: [PATCH 1/1] core: don't fight with the kernel over the default IPv6 route (rh #991341)
+
+This fixes bug https://bugzilla.redhat.com/show_bug.cgi?id=991341 by
+backporting commit 77de91e5a8b1c1993ae65c54b37e0411e78e6fe6.
+
+The following is the original commit message:
+
+>> core: don't fight with the kernel over the default IPv6 route
+>>
+>> The kernel wants there to be a default route over every RA-ed IPv6
+>> interface, and it gets confused and annoyed if we remove that default
+>> route and replace it with our own (causing it to effectively drop all
+>> further RAs on the floor, which is particularly bad if some of the
+>> information in the earlier RA had an expiration time).
+>>
+>> So, rather than replacing the kernel's default route(s), just add an
+>> additional one of our own, with a lower (ie, higher priority) metric.
+>>
+>> https://bugzilla.redhat.com/show_bug.cgi?id=785772
+---
+ src/nm-netlink-utils.c |  181 ++++++++++++++++++++++++++++++++++++++++++++++++
+ src/nm-netlink-utils.h |   28 ++++++++
+ src/nm-system.c        |   54 +++++++++++---
+ 3 files changed, 251 insertions(+), 12 deletions(-)
+
+diff --git a/src/nm-netlink-utils.c b/src/nm-netlink-utils.c
+index 451e22d..d2aaee9 100644
+--- a/src/nm-netlink-utils.c
++++ b/src/nm-netlink-utils.c
+@@ -21,6 +21,7 @@
+ #include "logging/nm-logging.h"
+ #include "nm-netlink-utils.h"
+ #include "nm-netlink-monitor.h"
++#include "nm-netlink-compat.h"
+ 
+ #include <arpa/inet.h>
+ #include <netinet/in.h>
+@@ -121,3 +122,183 @@ nm_netlink_find_address (int ifindex,
+ 	return info.found;
+ }
+ 
++/**
++ * nm_netlink_route_delete:
++ * @route: the route to delete
++ *
++ * Returns: %TRUE if the request was successful, %FALSE if it failed
++ **/
++gboolean
++nm_netlink_route_delete (struct rtnl_route *route)
++{
++	struct nl_handle *nlh;
++	int err = 0;
++
++	g_return_val_if_fail (route != NULL, FALSE);
++
++	nlh = nm_netlink_get_default_handle ();
++	err = rtnl_route_del (nlh, route, 0);
++
++	if (err)
++		nm_log_dbg (LOGD_IP4 | LOGD_IP6, "%s (%d)", nl_geterror(), err);
++
++	/* Workaround libnl BUG: ESRCH is aliased to generic NLE_FAILURE
++	* See: http://git.kernel.org/?p=libs/netlink/libnl.git;a=commit;h=7e9d5f */
++	if (err == -NLE_FAILURE)
++		err = -NLE_OBJ_NOTFOUND;
++
++	return (err && (err != -NLE_OBJ_NOTFOUND) && (err != -NLE_RANGE) ) ? FALSE : TRUE;
++}
++
++
++static void
++dump_route (struct rtnl_route *route)
++{
++	char buf6[INET6_ADDRSTRLEN];
++	char buf4[INET_ADDRSTRLEN];
++	struct nl_addr *nl;
++	struct in6_addr *addr6 = NULL;
++	struct in_addr *addr4 = NULL;
++	int prefixlen = 0;
++	const char *sf = "UNSPEC";
++	int family = rtnl_route_get_family (route);
++	guint32 log_level = LOGD_IP4 | LOGD_IP6;
++
++	memset (buf6, 0, sizeof (buf6));
++	memset (buf4, 0, sizeof (buf4));
++	nl = rtnl_route_get_dst (route);
++	if (nl) {
++		if (nl_addr_get_family (nl) == AF_INET) {
++			addr4 = nl_addr_get_binary_addr (nl);
++			if (addr4)
++				inet_ntop (AF_INET, addr4, &buf4[0], sizeof (buf4));
++		} else if (nl_addr_get_family (nl) == AF_INET6) {
++			addr6 = nl_addr_get_binary_addr (nl);
++			if (addr6)
++				inet_ntop (AF_INET6, addr6, &buf6[0], sizeof (buf6));
++		}
++		prefixlen = nl_addr_get_prefixlen (nl);
++	}
++
++	if (family == AF_INET) {
++		sf = "INET";
++		log_level = LOGD_IP4;
++	} else if (family == AF_INET6) {
++		sf = "INET6";
++		log_level = LOGD_IP6;
++	}
++
++	nm_log_dbg (log_level, "  route idx %d family %s (%d) addr %s/%d",
++	            rtnl_route_get_oif (route),
++	            sf, family,
++	            strlen (buf4) ? buf4 : (strlen (buf6) ? buf6 : "<unknown>"),
++	            prefixlen);
++}
++
++
++typedef struct {
++	int ifindex;
++	int family;
++	int scope;
++	gboolean ignore_inet6_ll_mc;
++	char *iface;
++	NlRouteForeachFunc callback;
++	gpointer user_data;
++	struct rtnl_route *out_route;
++} ForeachRouteInfo;
++
++static void
++foreach_route_cb (struct nl_object *object, void *user_data)
++{
++	ForeachRouteInfo *info = user_data;
++	struct rtnl_route *route = (struct rtnl_route *) object;
++	struct nl_addr *dst;
++
++	if (info->out_route)
++		return;
++
++	if (nm_logging_level_enabled (LOGL_DEBUG))
++		dump_route (route);
++
++	if (   info->ifindex >= 0
++	    && rtnl_route_get_oif (route) != info->ifindex)
++		return;
++
++	if (   info->scope != RT_SCOPE_UNIVERSE
++	    && rtnl_route_get_scope (route) != info->scope)
++		return;
++
++	if (   info->family != AF_UNSPEC
++	    && rtnl_route_get_family (route) != info->family)
++		return;
++
++	dst = rtnl_route_get_dst (route);
++
++	/* Check for IPv6 LL and MC routes that might need to be ignored */
++	if (   (info->family == AF_INET6 || info->family == AF_UNSPEC)
++	    && (rtnl_route_get_family (route) == AF_INET6)) {
++		struct in6_addr *addr = NULL;
++
++		if (dst)
++			addr = nl_addr_get_binary_addr (dst);
++		if (addr) {
++			if (   IN6_IS_ADDR_LINKLOCAL (addr)
++			    || IN6_IS_ADDR_MC_LINKLOCAL (addr)
++			    || (IN6_IS_ADDR_MULTICAST (addr) && (nl_addr_get_prefixlen (dst) == 8)))
++				return;
++		}
++	}
++
++	info->out_route = info->callback (route, dst, info->iface, info->user_data);
++	if (info->out_route) {
++		/* Ref the route so it sticks around after the cache is cleared */
++		rtnl_route_get (info->out_route);
++	}
++}
++
++/**
++ * nm_netlink_foreach_route:
++ * @ifindex: the interface index to filter routes for
++ * @family: the address family to filter routes for
++ * @scope: route scope, eg RT_SCOPE_LINK
++ * @ignore_inet6_ll_mc: if %TRUE ignore IPv6 link-local and multi-cast routes
++ * @callback: function called when a route matches the filter
++ * @user_data: data passed to @callback
++ *
++ * Filters each route in the routing table against the given @ifindex and
++ * @family (if given) and calls @callback for each matching route.
++ *
++ * Returns: a route if @callback returned one; the caller must dispose of the
++ * route using rtnl_route_put() when it is no longer required.
++ **/
++struct rtnl_route *
++nm_netlink_foreach_route (int ifindex,
++                          int family,
++                          int scope,
++                          gboolean ignore_inet6_ll_mc,
++                          NlRouteForeachFunc callback,
++                          gpointer user_data)
++{
++	struct nl_cache *cache;
++	ForeachRouteInfo info;
++
++	memset (&info, 0, sizeof (info));
++	info.ifindex = ifindex;
++	info.family = family;
++	info.scope = scope;
++	info.ignore_inet6_ll_mc = ignore_inet6_ll_mc;
++	info.callback = callback;
++	info.user_data = user_data;
++	info.iface = nm_netlink_index_to_iface (ifindex);
++
++	cache = rtnl_route_alloc_cache (nm_netlink_get_default_handle ());
++	g_warn_if_fail (cache != NULL);
++	if (cache) {
++		nl_cache_foreach (cache, foreach_route_cb, &info);
++		nl_cache_free (cache);
++	}
++	g_free (info.iface);
++	return info.out_route;
++}
++
++
+diff --git a/src/nm-netlink-utils.h b/src/nm-netlink-utils.h
+index 93a6457..1b36bbb 100644
+--- a/src/nm-netlink-utils.h
++++ b/src/nm-netlink-utils.h
+@@ -22,11 +22,39 @@
+ #define NM_NETLINK_UTILS_H
+ 
+ #include <glib.h>
++#include <netlink/route/rtnl.h>
++#include <netlink/route/route.h>
+ 
+ gboolean nm_netlink_find_address (int ifindex,
+                                   int family,
+                                   void *addr,  /* struct in_addr or struct in6_addr */
+                                   int prefix_);
+ 
++gboolean nm_netlink_route_delete (struct rtnl_route *route);
++
++/**
++ * NlRouteForeachFunc:
++ * @route: the route being processed
++ * @dst: the route's destination address
++ * @iface: the interface name of the index passed to nm_netlink_foreach_route()
++ * @in_family: the address family passed to nm_netlink_foreach_route()
++ * @user_data: the user data pointer passed to nm_netlink_foreach_route()
++ *
++ * Returns: a route to return to the caller of nm_netlink_foreach_route() which
++ * terminates routing table iteration, or NULL to continue iterating the
++ * routing table.
++ **/
++typedef struct rtnl_route * (*NlRouteForeachFunc) (struct rtnl_route *route,
++                                                   struct nl_addr *dst,
++                                                   const char *iface,
++                                                   gpointer user_data);
++
++struct rtnl_route * nm_netlink_foreach_route (int ifindex,
++                                              int family,
++                                              int scope,
++                                              gboolean ignore_inet6_ll_mc,
++                                              NlRouteForeachFunc callback,
++                                              gpointer user_data);
++
+ #endif  /* NM_NETLINK_UTILS_H */
+ 
+diff --git a/src/nm-system.c b/src/nm-system.c
+index a1fd78d..5073331 100644
+--- a/src/nm-system.c
++++ b/src/nm-system.c
+@@ -54,6 +54,7 @@
+ #include "nm-logging.h"
+ #include "nm-netlink-monitor.h"
+ #include "nm-netlink-compat.h"
++#include "nm-netlink-utils.h"
+ 
+ /* Because of a bug in libnl, rtnl.h should be included before route.h */
+ #include <netlink/route/rtnl.h>
+@@ -1124,7 +1125,7 @@ error:
+ }
+ 
+ static int
+-replace_default_ip6_route (const char *iface, const struct in6_addr *gw)
++add_default_ip6_route (const char *iface, const struct in6_addr *gw)
+ {
+ 	struct rtnl_route *route = NULL;
+ 	struct nl_handle *nlh;
+@@ -1147,6 +1148,7 @@ replace_default_ip6_route (const char *iface, const struct in6_addr *gw)
+ 	rtnl_route_set_table (route, RT_TABLE_MAIN);
+ 	rtnl_route_set_scope (route, RT_SCOPE_UNIVERSE);
+ 	rtnl_route_set_oif (route, iface_idx);
++	rtnl_route_set_priority (route, 1);
+ 
+ 	if (gw && !IN6_IS_ADDR_UNSPECIFIED (gw)) {
+ 		/* Build up the gateway address */
+@@ -1160,14 +1162,9 @@ replace_default_ip6_route (const char *iface, const struct in6_addr *gw)
+ 	}
+ 
+ 	/* Add the new default route */
+-	err = rtnl_route_add (nlh, route, NLM_F_REPLACE);
+-	if (err == -NLE_EXIST) {
+-		/* FIXME: even though we use NLM_F_REPLACE the kernel won't replace
+-		 * the route if it's the same.  Should try to remove it first, then
+-		 * add the new one again here.
+-		 */
++	err = rtnl_route_add (nlh, route, NLM_F_CREATE);
++	if (err == -NLE_EXIST)
+ 		err = 0;
+-	}
+ 
+ out:
+ 	if (gw_addr)
+@@ -1176,6 +1173,24 @@ out:
+ 	return err;
+ }
+ 
++static struct rtnl_route *
++delete_static_default_routes (struct rtnl_route *route,
++                              struct nl_addr *dst,
++                              const char *iface,
++                              gpointer user_data)
++{
++	if (   nl_addr_get_prefixlen (dst) == 0
++	    && rtnl_route_get_protocol (route) == RTPROT_STATIC) {
++		if (!nm_netlink_route_delete (route)) {
++			nm_log_err (LOGD_DEVICE | LOGD_IP6,
++			            "(%s): failed to delete existing IPv6 default route",
++			            iface);
++		}
++	}
++
++	return NULL;
++}
++
+ /*
+  * nm_system_replace_default_ip6_route
+  *
+@@ -1185,15 +1200,30 @@ out:
+ gboolean
+ nm_system_replace_default_ip6_route (const char *iface, const struct in6_addr *gw)
+ {
+-	struct rtnl_route *gw_route = NULL;
++	struct rtnl_route *gw_route;
+ 	struct nl_handle *nlh;
+ 	gboolean success = FALSE;
+-	int err;
++	int err, ifindex;
++
++	g_return_val_if_fail (iface, FALSE);
++	ifindex = nm_netlink_iface_to_index (iface);
++	if (ifindex < 0)
++		return FALSE;
+ 
+ 	nlh = nm_netlink_get_default_handle ();
+ 	g_return_val_if_fail (nlh != NULL, FALSE);
+ 
+-	err = replace_default_ip6_route (iface, gw);
++
++	/* We can't just use NLM_F_REPLACE here like in the IPv4 case, because
++	 * the kernel doesn't like it if we replace the default routes it
++	 * creates. (See rh#785772.) So we delete any non-kernel default routes,
++	 * and then add a new default route of our own with a lower metric than
++	 * the kernel ones.
++	 */
++	nm_netlink_foreach_route (ifindex, AF_INET6, RT_SCOPE_UNIVERSE, TRUE,
++                              delete_static_default_routes, NULL);
++
++	err = add_default_ip6_route (iface, gw);
+ 	if (err == 0) {
+ 		return TRUE;
+ 	} else if ((err != -NLE_OBJ_NOTFOUND) && (err != -NLE_FAILURE)) {
+@@ -1209,7 +1239,7 @@ nm_system_replace_default_ip6_route (const char *iface, const struct in6_addr *g
+ 		return FALSE;
+ 
+ 	/* Try adding the original route again */
+-	err = replace_default_ip6_route (iface, gw);
++	err = add_default_ip6_route (iface, gw);
+ 	if (err != 0) {
+ 		rtnl_route_del (nlh, gw_route, 0);
+ 		nm_log_err (LOGD_DEVICE | LOGD_IP6,
+-- 
+1.7.1
+

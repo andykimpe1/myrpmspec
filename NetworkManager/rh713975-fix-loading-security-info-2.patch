@@ -1,0 +1,164 @@
+From 16b1c6a5579f970c909f9915da2a60f02e507779 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Wed, 11 Sep 2013 16:48:08 +0200
+Subject: [PATCH 1/1] editor: fix missing user/password when loading wifi connection to edit
+
+(backported from commit 3cae06120a4dd9bebd5f2e57e181ea95e87c8ac4)
+
+When you opened an existing wifi in nm-connection-editor, the username
+and password field were unset for WPA & WPA2 Enterprise.
+
+(This regression was introduced by commit c9476e9c07839e71aed49e820e364ad0b9f47039)
+
+https://bugzilla.redhat.com/show_bug.cgi?id=1000564
+
+Signed-off-by: Thomas Haller <thaller@redhat.com>
+---
+ .../src/wireless-security/eap-method-leap.c        |   11 -------
+ .../src/wireless-security/eap-method-simple.c      |   25 -----------------
+ .../src/wireless-security/wireless-security.c      |   29 ++++++++++++++++++++
+ .../src/wireless-security/wireless-security.h      |    2 +
+ 4 files changed, 31 insertions(+), 36 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c
+index c671cee..c62f7dc 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-leap.c
+@@ -159,13 +159,6 @@ eap_method_leap_new (const char *glade_file,
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+ 	                  ws_parent);
+-	if (connection) {
+-		NMSetting8021x *s_8021x;
+-
+-		s_8021x = NM_SETTING_802_1X (nm_connection_get_setting (connection, NM_TYPE_SETTING_802_1X));
+-		if (s_8021x && nm_setting_802_1x_get_identity (s_8021x))
+-			gtk_entry_set_text (method->username_entry, nm_setting_802_1x_get_identity (s_8021x));
+-	}
+ 
+ 	widget = glade_xml_get_widget (parent->xml, "eap_leap_password_entry");
+ 	g_assert (widget);
+@@ -174,10 +167,6 @@ eap_method_leap_new (const char *glade_file,
+ 	                  (GCallback) wireless_security_changed_cb,
+ 	                  ws_parent);
+ 
+-	/* Fill secrets, if any */
+-	if (connection)
+-		update_secrets (parent, connection);
+-
+ 	widget = glade_xml_get_widget (parent->xml, "show_checkbutton");
+ 	g_assert (widget);
+ 	method->show_password = GTK_TOGGLE_BUTTON (widget);
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c
+index a8b5e32..823ad62 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-simple.c
+@@ -205,7 +205,6 @@ eap_method_simple_new (const char *glade_file,
+ 	EAPMethod *parent;
+ 	EAPMethodSimple *method;
+ 	GtkWidget *widget;
+-	gboolean always_ask = FALSE;
+ 
+ 	g_return_val_if_fail (glade_file != NULL, NULL);
+ 
+@@ -239,13 +238,6 @@ eap_method_simple_new (const char *glade_file,
+ 	g_signal_connect (G_OBJECT (widget), "changed",
+ 	                  (GCallback) wireless_security_changed_cb,
+ 	                  ws_parent);
+-	if (connection) {
+-		NMSetting8021x *s_8021x;
+-
+-		s_8021x = NM_SETTING_802_1X (nm_connection_get_setting (connection, NM_TYPE_SETTING_802_1X));
+-		if (s_8021x && nm_setting_802_1x_get_identity (s_8021x))
+-			gtk_entry_set_text (method->username_entry, nm_setting_802_1x_get_identity (s_8021x));
+-	}
+ 
+ 	widget = glade_xml_get_widget (parent->xml, "eap_simple_password_entry");
+ 	g_assert (widget);
+@@ -272,23 +264,6 @@ eap_method_simple_new (const char *glade_file,
+ 		                  method);
+ 	}
+ 
+-	if (connection) {
+-		NMSettingConnection *s_con;
+-		const char *uuid;
+-
+-		s_con = (NMSettingConnection *) nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION);
+-		g_assert (s_con);
+-
+-		uuid = nm_setting_connection_get_uuid (s_con);
+-		always_ask = nm_gconf_get_8021x_password_always_ask (uuid);
+-	}
+-
+-	gtk_toggle_button_set_active (method->always_ask, always_ask);
+-
+-	/* Fill secrets if there's a static (ie, not OTP) password */
+-	if (connection && !always_ask)
+-		update_secrets (EAP_METHOD (method), connection);
+-
+ 	widget = glade_xml_get_widget (parent->xml, "show_checkbutton");
+ 	g_assert (widget);
+ 	method->show_password = GTK_TOGGLE_BUTTON (widget);
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c b/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c
+index f531ce2..ed427f7 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c
+@@ -225,6 +225,32 @@ wireless_security_set_userpass (WirelessSecurity *sec,
+ }
+ 
+ void
++wireless_security_set_userpass_802_1x (WirelessSecurity *sec,
++                                       NMConnection *connection)
++{
++	const char *user = NULL, *password = NULL, *uuid;
++	gboolean always_ask = FALSE, show_password = FALSE;
++	NMSetting8021x  *setting;
++
++	if (!connection)
++		goto set;
++
++	setting = nm_connection_get_setting_802_1x (connection);
++	if (!setting)
++		goto set;
++
++	user = nm_setting_802_1x_get_identity (setting);
++	password = nm_setting_802_1x_get_password (setting);
++
++	uuid = nm_connection_get_uuid (connection);
++	if (uuid && *uuid)
++		always_ask = nm_gconf_get_8021x_password_always_ask (uuid);
++
++set:
++	wireless_security_set_userpass (sec, user, password, always_ask, show_password);
++}
++
++void
+ wireless_security_clear_ciphers (NMConnection *connection)
+ {
+ 	NMSettingWirelessSecurity *s_wireless_sec;
+@@ -369,6 +395,9 @@ ws_802_1x_auth_combo_init (WirelessSecurity *sec,
+ 			default_method = nm_setting_802_1x_get_eap_method (s_8021x, 0);
+ 	}
+ 
++	/* initialize WirelessSecurity userpass from connection (clear if no connection) */
++	wireless_security_set_userpass_802_1x (sec, connection);
++
+ 	auth_model = gtk_list_store_new (2, G_TYPE_STRING, eap_method_get_g_type ());
+ 
+ 	em_tls = eap_method_tls_new (glade_file, sec, connection, FALSE);
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h b/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h
+index 0aa20d3..1966070 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h
++++ b/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h
+@@ -85,6 +85,8 @@ void wireless_security_set_userpass (WirelessSecurity *sec,
+                                      const char *password,
+                                      gboolean always_ask,
+                                      gboolean show_password);
++void wireless_security_set_userpass_802_1x (WirelessSecurity *sec,
++                                            NMConnection *connection);
+ 
+ WirelessSecurity *wireless_security_ref (WirelessSecurity *sec);
+ 
+-- 
+1.7.1
+

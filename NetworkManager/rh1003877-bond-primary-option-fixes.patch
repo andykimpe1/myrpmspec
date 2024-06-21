@@ -1,0 +1,639 @@
+From 36d2252322a3e01a542c407f58bb945c326056c7 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Wed, 9 Oct 2013 10:41:39 +0200
+Subject: [PATCH 1/5] libnm-util: expose nm_setting_bond_validate_option as
+ public API
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Jiří Klimeš <jklimes@redhat.com>
+Signed-off-by: Thomas Haller <thaller@redhat.com>
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ libnm-util/libnm-util.ver    |  1 +
+ libnm-util/nm-setting-bond.c | 46 +++++++++++++++++++++++++++++---------------
+ libnm-util/nm-setting-bond.h |  5 ++++-
+ 3 files changed, 35 insertions(+), 17 deletions(-)
+
+diff --git a/libnm-util/libnm-util.ver b/libnm-util/libnm-util.ver
+index 554504b..4fd0276 100644
+--- a/libnm-util/libnm-util.ver
++++ b/libnm-util/libnm-util.ver
+@@ -122,6 +122,7 @@ global:
+ 	nm_setting_bond_get_valid_options;
+ 	nm_setting_bond_add_option;
+ 	nm_setting_bond_remove_option;
++	nm_setting_bond_validate_option;
+ 	nm_setting_bridge_error_get_type;
+ 	nm_setting_bridge_error_quark;
+ 	nm_setting_bridge_get_ageing_time;
+diff --git a/libnm-util/nm-setting-bond.c b/libnm-util/nm-setting-bond.c
+index da8100a..7627973 100644
+--- a/libnm-util/nm-setting-bond.c
++++ b/libnm-util/nm-setting-bond.c
+@@ -265,29 +265,43 @@ validate_ip (const char *name, const char *value)
+ 	return success;
+ }
+ 
+-/* If value is NULL, validates name only */
+-static gboolean
+-validate_option (const char *name, const char *value)
++/**
++ * nm_setting_bond_validate_option:
++ * @name: the name of the option to validate
++ * @value: the value of the option to validate
++ *
++ * Checks whether @name is a valid bond option and @value is a valid value for
++ * the @name. If @value is NULL, the function only validates the option name.
++ *
++ * Returns: TRUE, if the @value is valid for the given name.
++ * If the @name is not a valid option, FALSE will be returned.
++ *
++ * Since: 0.9.10
++ **/
++gboolean
++nm_setting_bond_validate_option (const char *name,
++                                 const char *value)
+ {
+ 	guint i;
+ 
+-	g_return_val_if_fail (name != NULL, FALSE);
+-	g_return_val_if_fail (name[0] != '\0', FALSE);
++	if (!name || !name[0])
++		return FALSE;
+ 
+ 	for (i = 0; i < G_N_ELEMENTS (defaults); i++) {
+ 		if (g_strcmp0 (defaults[i].opt, name) == 0) {
+ 			if (value == NULL)
+ 				return TRUE;
+-			else if (defaults[i].opt_type == TYPE_INT)
++			switch (defaults[i].opt_type) {
++			case TYPE_INT:
+ 				return validate_int (name, value, &defaults[i]);
+-			else if (defaults[i].opt_type == TYPE_STR)
++			case TYPE_STR:
+ 				return validate_list (name, value, &defaults[i]);
+-			else if (defaults[i].opt_type == TYPE_BOTH)
++			case TYPE_BOTH:
+ 				return    validate_int (name, value, &defaults[i])
+ 				       || validate_list (name, value, &defaults[i]);
+-			else if (defaults[i].opt_type == TYPE_IP)
++			case TYPE_IP:
+ 				return validate_ip (name, value);
+-
++			}
+ 			return FALSE;
+ 		}
+ 	}
+@@ -310,7 +324,7 @@ nm_setting_bond_get_option_by_name (NMSettingBond *setting,
+                                     const char *name)
+ {
+ 	g_return_val_if_fail (NM_IS_SETTING_BOND (setting), NULL);
+-	g_return_val_if_fail (validate_option (name, NULL), NULL);
++	g_return_val_if_fail (nm_setting_bond_validate_option (name, NULL), NULL);
+ 
+ 	return g_hash_table_lookup (NM_SETTING_BOND_GET_PRIVATE (setting)->options, name);
+ }
+@@ -334,7 +348,7 @@ gboolean nm_setting_bond_add_option (NMSettingBond *setting,
+                                      const char *value)
+ {
+ 	g_return_val_if_fail (NM_IS_SETTING_BOND (setting), FALSE);
+-	g_return_val_if_fail (validate_option (name, value), FALSE);
++	g_return_val_if_fail (nm_setting_bond_validate_option (name, value), FALSE);
+ 	g_return_val_if_fail (value != NULL, FALSE);
+ 
+ 	g_hash_table_insert (NM_SETTING_BOND_GET_PRIVATE (setting)->options,
+@@ -358,7 +372,7 @@ nm_setting_bond_remove_option (NMSettingBond *setting,
+                                const char *name)
+ {
+ 	g_return_val_if_fail (NM_IS_SETTING_BOND (setting), FALSE);
+-	g_return_val_if_fail (validate_option (name, NULL), FALSE);
++	g_return_val_if_fail (nm_setting_bond_validate_option (name, NULL), FALSE);
+ 
+ 	return g_hash_table_remove (NM_SETTING_BOND_GET_PRIVATE (setting)->options, name);
+ }
+@@ -400,13 +414,13 @@ nm_setting_bond_get_option_default (NMSettingBond *setting, const char *name)
+ 	guint i;
+ 
+ 	g_return_val_if_fail (NM_IS_SETTING_BOND (setting), NULL);
+-	g_return_val_if_fail (validate_option (name, NULL), NULL);
++	g_return_val_if_fail (nm_setting_bond_validate_option (name, NULL), NULL);
+ 
+ 	for (i = 0; i < G_N_ELEMENTS (defaults); i++) {
+ 		if (g_strcmp0 (defaults[i].opt, name) == 0)
+ 			return defaults[i].val;
+ 	}
+-	/* Any option that passes validate_option() should also be found in defaults */
++	/* Any option that passes nm_setting_bond_validate_option() should also be found in defaults */
+ 	g_assert_not_reached ();
+ }
+ 
+@@ -443,7 +457,7 @@ verify (NMSetting *setting, GSList *all_settings, GError **error)
+ 
+ 	g_hash_table_iter_init (&iter, priv->options);
+ 	while (g_hash_table_iter_next (&iter, (gpointer) &key, (gpointer) &value)) {
+-		if (!value[0] || !validate_option (key, value)) {
++		if (!value[0] || !nm_setting_bond_validate_option (key, value)) {
+ 			g_set_error (error,
+ 			             NM_SETTING_BOND_ERROR,
+ 			             NM_SETTING_BOND_ERROR_INVALID_PROPERTY,
+diff --git a/libnm-util/nm-setting-bond.h b/libnm-util/nm-setting-bond.h
+index 999ace1..c670328 100644
+--- a/libnm-util/nm-setting-bond.h
++++ b/libnm-util/nm-setting-bond.h
+@@ -18,7 +18,7 @@
+  * Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
+  * Boston, MA 02110-1301 USA.
+  *
+- * (C) Copyright 2011 - 2012 Red Hat, Inc.
++ * (C) Copyright 2011 - 2013 Red Hat, Inc.
+  */
+ 
+ #ifndef NM_SETTING_BOND_H
+@@ -103,6 +103,9 @@ gboolean     nm_setting_bond_add_option         (NMSettingBond *setting,
+ gboolean     nm_setting_bond_remove_option      (NMSettingBond *setting,
+                                                  const char *name);
+ 
++gboolean     nm_setting_bond_validate_option    (const char *name,
++                                                 const char *value);
++
+ const char **nm_setting_bond_get_valid_options  (NMSettingBond *setting);
+ 
+ const char * nm_setting_bond_get_option_default (NMSettingBond *setting,
+-- 
+2.1.0
+
+
+From d6c80691fab3ac82376e086e35f7e8aee92acd98 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Wed, 9 Oct 2013 11:26:55 +0200
+Subject: [PATCH 2/5] libnm-util: do not g_warn when trying to set invalid bond
+ option
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+nm_setting_bond_add_option returns TRUE or FALSE indicating, whether
+the bond option was properly set. So, the API already kind of expects
+invalid values, so there is no reason to warn about it.
+
+Co-Authored-By: Jiří Klimeš <jklimes@redhat.com>
+Signed-off-by: Thomas Haller <thaller@redhat.com>
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ libnm-util/nm-setting-bond.c | 23 ++++++++++++++++-------
+ 1 file changed, 16 insertions(+), 7 deletions(-)
+
+diff --git a/libnm-util/nm-setting-bond.c b/libnm-util/nm-setting-bond.c
+index 7627973..31a8016 100644
+--- a/libnm-util/nm-setting-bond.c
++++ b/libnm-util/nm-setting-bond.c
+@@ -324,7 +324,9 @@ nm_setting_bond_get_option_by_name (NMSettingBond *setting,
+                                     const char *name)
+ {
+ 	g_return_val_if_fail (NM_IS_SETTING_BOND (setting), NULL);
+-	g_return_val_if_fail (nm_setting_bond_validate_option (name, NULL), NULL);
++
++	if (!nm_setting_bond_validate_option (name, NULL))
++		return NULL;
+ 
+ 	return g_hash_table_lookup (NM_SETTING_BOND_GET_PRIVATE (setting)->options, name);
+ }
+@@ -340,16 +342,21 @@ nm_setting_bond_get_option_by_name (NMSettingBond *setting,
+  * (ie [a-zA-Z0-9]).  Adding a new name replaces any existing name/value pair
+  * that may already exist.
+  *
++ * The order of how to set several options is relevant because there are options
++ * that conflict with each other.
++ *
+  * Returns: %TRUE if the option was valid and was added to the internal option
+  * list, %FALSE if it was not.
+  **/
+-gboolean nm_setting_bond_add_option (NMSettingBond *setting,
+-                                     const char *name,
+-                                     const char *value)
++gboolean
++nm_setting_bond_add_option (NMSettingBond *setting,
++                            const char *name,
++                            const char *value)
+ {
+ 	g_return_val_if_fail (NM_IS_SETTING_BOND (setting), FALSE);
+-	g_return_val_if_fail (nm_setting_bond_validate_option (name, value), FALSE);
+-	g_return_val_if_fail (value != NULL, FALSE);
++
++	if (!value || !nm_setting_bond_validate_option (name, value))
++		return FALSE;
+ 
+ 	g_hash_table_insert (NM_SETTING_BOND_GET_PRIVATE (setting)->options,
+ 	                     g_strdup (name), g_strdup (value));
+@@ -372,7 +379,9 @@ nm_setting_bond_remove_option (NMSettingBond *setting,
+                                const char *name)
+ {
+ 	g_return_val_if_fail (NM_IS_SETTING_BOND (setting), FALSE);
+-	g_return_val_if_fail (nm_setting_bond_validate_option (name, NULL), FALSE);
++
++	if (!nm_setting_bond_validate_option (name, NULL))
++		return FALSE;
+ 
+ 	return g_hash_table_remove (NM_SETTING_BOND_GET_PRIVATE (setting)->options, name);
+ }
+-- 
+2.1.0
+
+
+From 16726231b57eb60dd6e24a29ec49129bd3f11f22 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Mon, 14 Oct 2013 13:57:51 +0200
+Subject: [PATCH 3/5] libnm-util: validate "primary" bonding option as an
+ interface name
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Thomas Haller <thaller@redhat.com>
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ libnm-util/nm-setting-bond.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/libnm-util/nm-setting-bond.c b/libnm-util/nm-setting-bond.c
+index 31a8016..d8fa762 100644
+--- a/libnm-util/nm-setting-bond.c
++++ b/libnm-util/nm-setting-bond.c
+@@ -83,6 +83,7 @@ enum {
+ 	TYPE_STR,
+ 	TYPE_BOTH,
+ 	TYPE_IP,
++	TYPE_IFNAME,
+ };
+ 
+ typedef struct {
+@@ -104,7 +105,7 @@ static const BondDefault defaults[] = {
+ 	{ NM_SETTING_BOND_OPTION_ARP_IP_TARGET,    "",           TYPE_IP },
+ 	{ NM_SETTING_BOND_OPTION_ARP_VALIDATE,     "0",          TYPE_BOTH, 0, 3,
+ 	  { "none", "active", "backup", "all", NULL } },
+-	{ NM_SETTING_BOND_OPTION_PRIMARY,          "",           TYPE_STR },
++	{ NM_SETTING_BOND_OPTION_PRIMARY,          "",           TYPE_IFNAME },
+ 	{ NM_SETTING_BOND_OPTION_PRIMARY_RESELECT, "0",          TYPE_BOTH, 0, 2,
+ 	  { "always", "better", "failure", NULL } },
+ 	{ NM_SETTING_BOND_OPTION_FAIL_OVER_MAC,    "0",          TYPE_BOTH, 0, 2,
+@@ -265,6 +266,15 @@ validate_ip (const char *name, const char *value)
+ 	return success;
+ }
+ 
++static gboolean
++validate_ifname (const char *name, const char *value)
++{
++	if (!value || !value[0])
++		return FALSE;
++
++	return nm_utils_iface_valid_name (value);
++}
++
+ /**
+  * nm_setting_bond_validate_option:
+  * @name: the name of the option to validate
+@@ -301,6 +311,8 @@ nm_setting_bond_validate_option (const char *name,
+ 				       || validate_list (name, value, &defaults[i]);
+ 			case TYPE_IP:
+ 				return validate_ip (name, value);
++			case TYPE_IFNAME:
++				return validate_ifname (name, value);
+ 			}
+ 			return FALSE;
+ 		}
+-- 
+2.1.0
+
+
+From 0ed70359f84d4c6e9c61d15d7fa9b8499b9ee74f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Fri, 22 May 2015 10:23:34 +0200
+Subject: [PATCH 4/5] connection-editor: add bond "primary" option
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ .../src/connection-editor/ce-page-bond.ui          | 70 +++++++++++++++-------
+ .../src/connection-editor/page-bond.c              | 39 +++++++++---
+ 2 files changed, 82 insertions(+), 27 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/ce-page-bond.ui b/network-manager-applet-0.8.1/src/connection-editor/ce-page-bond.ui
+index bbe27a0..d1bbfc2 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/ce-page-bond.ui
++++ b/network-manager-applet-0.8.1/src/connection-editor/ce-page-bond.ui
+@@ -228,8 +228,8 @@
+         <property name="mnemonic_widget">bond_frequency</property>
+       </object>
+       <packing>
+-        <property name="top_attach">5</property>
+-        <property name="bottom_attach">6</property>
++        <property name="top_attach">6</property>
++        <property name="bottom_attach">7</property>
+         <property name="y_options">GTK_FILL</property>
+       </packing>
+     </child>
+@@ -263,8 +263,8 @@
+       <packing>
+         <property name="left_attach">1</property>
+         <property name="right_attach">2</property>
+-        <property name="top_attach">5</property>
+-        <property name="bottom_attach">6</property>
++        <property name="top_attach">6</property>
++        <property name="bottom_attach">7</property>
+         <property name="y_options">GTK_FILL</property>
+       </packing>
+     </child>
+@@ -301,8 +301,8 @@
+         <property name="mnemonic_widget">bond_monitoring</property>
+       </object>
+       <packing>
+-        <property name="top_attach">4</property>
+-        <property name="bottom_attach">5</property>
++        <property name="top_attach">5</property>
++        <property name="bottom_attach">6</property>
+         <property name="y_options">GTK_FILL</property>
+       </packing>
+     </child>
+@@ -320,8 +320,8 @@
+       <packing>
+         <property name="left_attach">1</property>
+         <property name="right_attach">2</property>
+-        <property name="top_attach">4</property>
+-        <property name="bottom_attach">5</property>
++        <property name="top_attach">5</property>
++        <property name="bottom_attach">6</property>
+         <property name="y_options">GTK_FILL</property>
+       </packing>
+     </child>
+@@ -334,8 +334,8 @@
+         <property name="mnemonic_widget">bond_arp_targets</property>
+       </object>
+       <packing>
+-        <property name="top_attach">8</property>
+-        <property name="bottom_attach">9</property>
++        <property name="top_attach">9</property>
++        <property name="bottom_attach">10</property>
+         <property name="y_options">GTK_FILL</property>
+       </packing>
+     </child>
+@@ -349,8 +349,8 @@
+       <packing>
+         <property name="left_attach">1</property>
+         <property name="right_attach">2</property>
+-        <property name="top_attach">8</property>
+-        <property name="bottom_attach">9</property>
++        <property name="top_attach">9</property>
++        <property name="bottom_attach">10</property>
+         <property name="y_options">GTK_FILL</property>
+       </packing>
+     </child>
+@@ -363,8 +363,8 @@
+         <property name="mnemonic_widget">bond_updelay</property>
+       </object>
+       <packing>
+-        <property name="top_attach">6</property>
+-        <property name="bottom_attach">7</property>
++        <property name="top_attach">7</property>
++        <property name="bottom_attach">8</property>
+         <property name="y_options">GTK_FILL</property>
+       </packing>
+     </child>
+@@ -377,8 +377,8 @@
+         <property name="mnemonic_widget">bond_downdelay</property>
+       </object>
+       <packing>
+-        <property name="top_attach">7</property>
+-        <property name="bottom_attach">8</property>
++        <property name="top_attach">8</property>
++        <property name="bottom_attach">9</property>
+         <property name="y_options">GTK_FILL</property>
+       </packing>
+     </child>
+@@ -414,8 +414,8 @@
+       <packing>
+         <property name="left_attach">1</property>
+         <property name="right_attach">2</property>
+-        <property name="top_attach">6</property>
+-        <property name="bottom_attach">7</property>
++        <property name="top_attach">7</property>
++        <property name="bottom_attach">8</property>
+         <property name="y_options">GTK_FILL</property>
+       </packing>
+     </child>
+@@ -451,10 +451,40 @@
+       <packing>
+         <property name="left_attach">1</property>
+         <property name="right_attach">2</property>
+-        <property name="top_attach">7</property>
+-        <property name="bottom_attach">8</property>
++        <property name="top_attach">8</property>
++        <property name="bottom_attach">9</property>
++        <property name="y_options">GTK_FILL</property>
++      </packing>
++    </child>
++    <child>
++      <object class="GtkLabel" id="bond_primary_label">
++        <property name="visible">True</property>
++        <property name="can_focus">False</property>
++        <property name="xalign">0</property>
++        <property name="label" translatable="yes">_Primary:</property>
++        <property name="use_underline">True</property>
++        <property name="mnemonic_widget">bond_primary</property>
++      </object>
++      <packing>
++        <property name="top_attach">4</property>
++        <property name="bottom_attach">5</property>
+         <property name="y_options">GTK_FILL</property>
+       </packing>
+     </child>
++    <child>
++      <object class="GtkEntry" id="bond_primary">
++        <property name="visible">True</property>
++        <property name="can_focus">True</property>
++        <property name="tooltip_text" translatable="yes">The interface name of the primary device. If set, this device will always be the active slave when it is available.</property>
++        <property name="invisible_char">●</property>
++      </object>
++      <packing>
++        <property name="left_attach">1</property>
++        <property name="right_attach">2</property>
++        <property name="top_attach">4</property>
++        <property name="bottom_attach">5</property>
++        <property name="y_options">GTK_FILL</property>
++       </packing>
++     </child>
+   </object>
+ </interface>
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/page-bond.c b/network-manager-applet-0.8.1/src/connection-editor/page-bond.c
+index 81d7905..ffdf349 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/page-bond.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/page-bond.c
+@@ -54,6 +54,8 @@ typedef struct {
+ 
+ 	GtkEntry *interface_name;
+ 	GtkComboBox *mode;
++	GtkEntry *primary;
++	GtkWidget *primary_label;
+ 	GtkComboBox *monitoring;
+ 	GtkSpinButton *frequency;
+ 	GtkSpinButton *updelay;
+@@ -118,6 +120,8 @@ bond_private_init (CEPageBond *self)
+ 	builder = CE_PAGE (self)->builder;
+ 
+ 	priv->interface_name = GTK_ENTRY (gtk_builder_get_object (builder, "bond_interface"));
++	priv->primary = GTK_ENTRY (gtk_builder_get_object (builder, "bond_primary"));
++	priv->primary_label = GTK_WIDGET (gtk_builder_get_object (builder, "bond_primary_label"));
+ 	priv->connections = GTK_TREE_VIEW (gtk_builder_get_object (builder, "bond_connections"));
+ 	priv->connections_model = GTK_TREE_MODEL (gtk_builder_get_object (builder, "bond_connections_model"));
+ 	gtk_tree_sortable_set_sort_func (GTK_TREE_SORTABLE (priv->connections_model),
+@@ -289,15 +293,24 @@ bonding_mode_changed (GtkComboBox *combo, gpointer user_data)
+ {
+ 	CEPageBond *self = user_data;
+ 	CEPageBondPrivate *priv = CE_PAGE_BOND_GET_PRIVATE (self);
++	int mode;
+ 
+-	/* balance-tlb and balance-alb work only with MII monitoring */
+-	if (   gtk_combo_box_get_active (combo) == MODE_BALANCE_TLB
+-	    || gtk_combo_box_get_active (combo) == MODE_BALANCE_ALB) {
++	mode = gtk_combo_box_get_active (combo);
++
++	if (mode == MODE_BALANCE_TLB || mode == MODE_BALANCE_ALB) {
+ 		gtk_combo_box_set_active (priv->monitoring, MONITORING_MII);
+ 		gtk_widget_set_sensitive (GTK_WIDGET (priv->monitoring), FALSE);
+ 	} else {
+ 		gtk_widget_set_sensitive (GTK_WIDGET (priv->monitoring), TRUE);
+ 	}
++
++	if (mode == MODE_ACTIVE_BACKUP) {
++		gtk_widget_show (GTK_WIDGET (priv->primary));
++		gtk_widget_show (GTK_WIDGET (priv->primary_label));
++	} else {
++		gtk_widget_hide (GTK_WIDGET (priv->primary));
++		gtk_widget_hide (GTK_WIDGET (priv->primary_label));
++	}
+ }
+ 
+ static void
+@@ -431,7 +444,7 @@ populate_ui (CEPageBond *self)
+ 	NMSettingConnection *s_con;
+ 	const char *iface;
+ 	GSList *connections, *c;
+-	const char *mode, *frequency, *updelay, *downdelay, *raw_targets;
++	const char *mode, *primary, *frequency, *updelay, *downdelay, *raw_targets;
+ 	char *targets;
+ 	int mode_idx = MODE_BALANCE_RR;
+ 
+@@ -472,6 +485,10 @@ populate_ui (CEPageBond *self)
+ 	                  self);
+ 	bonding_mode_changed (priv->mode, self);
+ 
++	/* Primary */
++	primary = nm_setting_bond_get_option_by_name (setting, NM_SETTING_BOND_OPTION_PRIMARY);
++	gtk_entry_set_text (priv->primary, primary ? primary : "");
++
+ 	/* Monitoring mode/frequency */
+ 	frequency = nm_setting_bond_get_option_by_name (setting, NM_SETTING_BOND_OPTION_ARP_INTERVAL);
+ 	if (frequency) {
+@@ -738,6 +755,7 @@ finish_setup (CEPageBond *self, gpointer unused, GError *error, gpointer user_da
+ 
+ 	g_signal_connect (priv->interface_name, "changed", G_CALLBACK (stuff_changed), self);
+ 	g_signal_connect (priv->mode, "changed", G_CALLBACK (stuff_changed), self);
++	g_signal_connect (priv->primary, "changed", G_CALLBACK (stuff_changed), self);
+ 	g_signal_connect (priv->monitoring, "changed", G_CALLBACK (stuff_changed), self);
+ 	g_signal_connect (priv->frequency, "value-changed", G_CALLBACK (stuff_changed), self);
+ 	g_signal_connect (priv->updelay, "value-changed", G_CALLBACK (stuff_changed), self);
+@@ -830,6 +848,7 @@ ui_to_setting (CEPageBond *self)
+ 	const char *frequency;
+ 	const char *updelay;
+ 	const char *downdelay;
++	const char *primary = NULL;
+ 	char *targets;
+ 
+ 	/* Interface name */
+@@ -845,6 +864,7 @@ ui_to_setting (CEPageBond *self)
+ 		break;
+ 	case MODE_ACTIVE_BACKUP:
+ 		mode = "active-backup";
++		primary = gtk_entry_get_text (priv->primary);
+ 		break;
+ 	case MODE_BALANCE_XOR:
+ 		mode = "balance-xor";
+@@ -866,15 +886,20 @@ ui_to_setting (CEPageBond *self)
+ 		break;
+ 	}
+ 
++	/* Set bond mode and primary */
++	nm_setting_bond_add_option (priv->setting, NM_SETTING_BOND_OPTION_MODE, mode);
++
++	if (primary && *primary)
++		nm_setting_bond_add_option (priv->setting, NM_SETTING_BOND_OPTION_PRIMARY, primary);
++	else
++		nm_setting_bond_remove_option (priv->setting, NM_SETTING_BOND_OPTION_PRIMARY);
++
+ 	/* Monitoring mode/frequency */
+ 	frequency = gtk_entry_get_text (GTK_ENTRY (priv->frequency));
+ 	updelay = gtk_entry_get_text (GTK_ENTRY (priv->updelay));
+ 	downdelay = gtk_entry_get_text (GTK_ENTRY (priv->downdelay));
+ 	targets = uglify_targets (gtk_entry_get_text (priv->arp_targets));
+ 
+-	/* Set bond mode */
+-	nm_setting_bond_add_option (priv->setting, NM_SETTING_BOND_OPTION_MODE, mode);
+-
+ 	switch (gtk_combo_box_get_active (priv->monitoring)) {
+ 	case MONITORING_MII:
+ 		nm_setting_bond_add_option (priv->setting, NM_SETTING_BOND_OPTION_MIIMON, frequency);
+-- 
+2.1.0
+
+
+From 151817c985291d39d59edc21635a396b2e5931fd Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Mon, 25 May 2015 09:24:45 +0200
+Subject: [PATCH 5/5] editor: properly validate 'Primary' entry on bond page
+ (as an interface name)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Jiří Klimeš <jklimes@redhat.com>
+---
+ network-manager-applet-0.8.1/src/connection-editor/page-bond.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/page-bond.c b/network-manager-applet-0.8.1/src/connection-editor/page-bond.c
+index ffdf349..2acda9e 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/page-bond.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/page-bond.c
+@@ -28,6 +28,7 @@
+ #include <nm-setting-bond.h>
+ #include <nm-setting-infiniband.h>
+ #include <nm-setting-wired.h>
++#include <nm-utils.h>
+ 
+ #include "page-bond.h"
+ #include "page-wired.h"
+@@ -934,6 +935,7 @@ validate (CEPage *page, NMConnection *connection, GError **error)
+ 	CEPageBond *self = CE_PAGE_BOND (page);
+ 	CEPageBondPrivate *priv = CE_PAGE_BOND_GET_PRIVATE (self);
+ 	GtkTreeIter iter;
++	const char *primary;
+ 
+ 	/* Need at least one slave connection; we don't need to
+ 	 * recursively check that the connections are valid because they
+@@ -942,6 +944,10 @@ validate (CEPage *page, NMConnection *connection, GError **error)
+ 	if (!gtk_tree_model_get_iter_first (priv->connections_model, &iter))
+ 		return FALSE;
+ 
++	primary = gtk_entry_get_text (priv->primary);
++	if (primary && *primary && !nm_utils_iface_valid_name (primary))
++		return FALSE;
++
+ 	ui_to_setting (self);
+ 	return nm_setting_verify (NM_SETTING (priv->setting), NULL, error);
+ }
+-- 
+2.1.0
+

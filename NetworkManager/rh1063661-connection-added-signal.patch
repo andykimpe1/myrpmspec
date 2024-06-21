@@ -1,0 +1,89 @@
+From defc3df2d3c08275b6387e37e8c4e5949d151193 Mon Sep 17 00:00:00 2001
+From: Lubomir Rintel <lkundrak@v3.sk>
+Date: Mon, 2 Mar 2015 18:10:54 +0100
+Subject: [PATCH] ifcfg-rh: always signal connection added when loading a connection
+
+If an unmanaged connection is encountered, it signals unmanaged spec update and
+NMSysconfigSettings::load_connections() claims already known connections and
+then the rest goes unnoticed:
+
+  lt-NetworkManager[25540]:    ifcfg-rh:     read connection 'b1'
+  lt-NetworkManager[25540]:    ifcfg-rh: parsing /etc/sysconfig/network-scripts/ifcfg-eth0 ...
+  lt-NetworkManager[25540]:    ifcfg-rh:     read connection 'System eth0'
+  lt-NetworkManager[25540]:    ifcfg-rh: Ignoring connection 'System eth0' and its device due to NM_CONTROLLED/BRIDGE/VLAN.
+
+  ^^^ unmanaged connection encountered
+
+  #0  get_connections (config=0x6fe580) at plugin.c:391
+  #1  0x000000000048cfc1 in load_connections (self=0x7038e0 [NMSysconfigSettings]) at nm-sysconfig-settings.c:145
+  #2  0x000000000048d05c in nm_sysconfig_settings_get_unmanaged_specs (self=0x7038e0 [NMSysconfigSettings]) at nm-sysconfig-settings.c:242
+  #3  0x000000000048e05a in get_property (object=<value optimized out>, prop_id=1, value=0x6f8160, pspec=0x6eed40 [GParamBoxed]) at nm-sysconfig-settings.c:1659
+  #4  0x0000003e6aa11d2a in object_get_property (object=0x7038e0 [NMSysconfigSettings], property_name=<value optimized out>, value=0x6f8160) at gobject.c:1131
+  #5  g_object_get_property (object=0x7038e0 [NMSysconfigSettings], property_name=<value optimized out>, value=0x6f8160) at gobject.c:1989
+  #6  0x000000000048e19d in notify (object=0x7038e0 [NMSysconfigSettings], pspec=0x6eed40 [GParamBoxed]) at nm-sysconfig-settings.c:229
+  #7  0x0000003e6aa0e3de in g_closure_invoke (closure=0x6dbd80, return_value=0x0, n_param_values=2, param_values=0x6e4640, invocation_hint=0x7fffffffcfe0) at gclosure.c:767
+  #8  0x0000003e6aa241a8 in signal_emit_unlocked_R (node=<value optimized out>, detail=254, instance=0x7038e0, emission_return=0x0, instance_and_params=0x6e4640) at gsignal.c:3182
+  #9  0x0000003e6aa25d76 in g_signal_emit_valist (instance=<value optimized out>, signal_id=<value optimized out>, detail=<value optimized out>, var_args=0x7fffffffd1d0) at gsignal.c:2983
+  #10 0x0000003e6aa26333 in g_signal_emit (instance=<value optimized out>, signal_id=<value optimized out>, detail=<value optimized out>) at gsignal.c:3040
+  #11 0x0000003e6aa12d19 in g_object_dispatch_properties_changed (object=0x7038e0 [NMSysconfigSettings], n_pspecs=1, pspecs=<value optimized out>) at gobject.c:925
+  #12 0x0000003e6aa163c4 in g_object_notify_queue_thaw (object=0x7038e0 [NMSysconfigSettings], property_name=<value optimized out>) at gobjectnotifyqueue.c:132
+  #13 g_object_notify_by_spec_internal (object=0x7038e0 [NMSysconfigSettings], property_name=<value optimized out>) at gobject.c:983
+  #14 g_object_notify (object=0x7038e0 [NMSysconfigSettings], property_name=<value optimized out>) at gobject.c:1024
+  #15 0x0000003e6aa0e3de in g_closure_invoke (closure=0x6e7cd0, return_value=0x0, n_param_values=1, param_values=0x6f82a0, invocation_hint=0x7fffffffd4f0) at gclosure.c:767
+  #16 0x0000003e6aa248d5 in signal_emit_unlocked_R (node=<value optimized out>, detail=0, instance=0x6fe580, emission_return=0x0, instance_and_params=0x6f82a0) at gsignal.c:3252
+  #17 0x0000003e6aa25d76 in g_signal_emit_valist (instance=<value optimized out>, signal_id=<value optimized out>, detail=<value optimized out>, var_args=0x7fffffffd700) at gsignal.c:2983
+  #18 0x0000003e6aa260c8 in g_signal_emit_by_name (instance=0x6fe580, detailed_signal=0x7ffff773c186 "unmanaged-specs-changed") at gsignal.c:3077
+  #19 0x00007ffff7728f2f in read_one_connection (plugin=0x6fe580 [SCPluginIfcfg], filename=<value optimized out>) at plugin.c:151
+  #20 0x00007ffff77294d6 in read_connections (plugin=0x6fe580 [SCPluginIfcfg]) at plugin.c:193
+  #21 0x00007ffff77295b5 in get_unmanaged_specs (config=0x6fe580) at plugin.c:446
+  #22 0x000000000048b994 in unmanaged_specs_changed (config=<value optimized out>, user_data=<value optimized out>) at nm-sysconfig-settings.c:326
+  #23 0x000000000048bc9e in nm_sysconfig_settings_new (config_file=<value optimized out>, plugins=<value optimized out>, bus=<value optimized out>, error=0x7fffffffdd78) at nm-sysconfig-settings.c:1579
+  #24 0x000000000045e773 in nm_manager_get (config_file=0x6d0d50 "/etc/NetworkManager/NetworkManager.conf", plugins=0x6d4f40 "ifcfg-rh,keyfile", state_file=
+      0x6d0b50 "/var/lib/NetworkManager/NetworkManager.state", initial_net_enabled=1, initial_wifi_enabled=1, initial_wwan_enabled=1, error=0x7fffffffdd78) at nm-manager.c:5326
+  #25 0x000000000044c730 in main (argc=1, argv=0x7fffffffdf08) at main.c:677
+
+  lt-NetworkManager[25540]:    ifcfg-rh: parsing /etc/sysconfig/network-scripts/ifcfg-lo ...
+  lt-NetworkManager[25540]:    ifcfg-rh: parsing /etc/sysconfig/network-scripts/ifcfg-b2 ...
+  lt-NetworkManager[25540]:    ifcfg-rh:     warning: ignoring IP6 configuration
+  lt-NetworkManager[25540]:    ifcfg-rh:     warning: ignoring IP4 configuration
+
+  ^^^ these are ignored
+
+Emit the connection added signals so that the rest is claimed.
+---
+ system-settings/plugins/ifcfg-rh/plugin.c |   12 +++++-------
+ 1 files changed, 5 insertions(+), 7 deletions(-)
+
+diff --git a/system-settings/plugins/ifcfg-rh/plugin.c b/system-settings/plugins/ifcfg-rh/plugin.c
+index 1c52b06..8b07ef9 100644
+--- a/system-settings/plugins/ifcfg-rh/plugin.c
++++ b/system-settings/plugins/ifcfg-rh/plugin.c
+@@ -159,6 +159,9 @@ read_one_connection (SCPluginIfcfg *plugin, const char *filename)
+ 		/* watch changes of ifcfg hardlinks */
+ 		g_signal_connect (G_OBJECT (connection), "ifcfg-changed",
+ 		                  G_CALLBACK (connection_ifcfg_changed), plugin);
++
++		if (!nm_ifcfg_connection_get_unmanaged_spec (connection))
++			g_signal_emit_by_name (plugin, NM_SYSTEM_CONFIG_INTERFACE_CONNECTION_ADDED, connection);
+ 	} else {
+ 		if (!ignore_error) {
+ 			PLUGIN_PRINT (IFCFG_PLUGIN_NAME, "    error: %s",
+@@ -304,13 +307,8 @@ handle_connection_remove_or_new (SCPluginIfcfg *plugin,
+ 			g_signal_emit_by_name (plugin, NM_SYSTEM_CONFIG_INTERFACE_UNMANAGED_SPECS_CHANGED);
+ 	}
+ 
+-	if (do_new) {
+-		connection = read_one_connection (plugin, path);
+-		if (connection) {
+-			if (!nm_ifcfg_connection_get_unmanaged_spec (connection))
+-				g_signal_emit_by_name (plugin, NM_SYSTEM_CONFIG_INTERFACE_CONNECTION_ADDED, connection);
+-		}
+-	}
++	if (do_new)
++		read_one_connection (plugin, path);
+ }
+ static void
+ dir_changed (GFileMonitor *monitor,
+-- 
+1.7.1
+

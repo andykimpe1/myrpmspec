@@ -1,0 +1,135 @@
+From b20a457a2b3ce0c1448932c455be401d9f2fe56d Mon Sep 17 00:00:00 2001
+From: Beniamino Galvani <bgalvani@redhat.com>
+Date: Mon, 16 Nov 2015 15:14:06 +0100
+Subject: [PATCH] ifcfg-rh: delay handling of deletion events
+
+Some popular editors write changes to a file by deleting and
+recreating it. Thus, when a connection file is edited NetworkManager
+receives a deletion event followed immediately by a creation event;
+this can cause a change in the device state -- for example if
+NM_CONTROLLED=no is set in the file NM would start to manage the
+interface after the first event.
+
+To fix this, delay all deletion events by 1 second so that we can
+detect when the file appears again and merge the two events into a
+'change' one.
+
+https://bugzilla.redhat.com/show_bug.cgi?id=1272617
+---
+ system-settings/plugins/ifcfg-rh/plugin.c | 51 +++++++++++++++++++++++++++++--
+ 1 file changed, 49 insertions(+), 2 deletions(-)
+
+diff --git a/system-settings/plugins/ifcfg-rh/plugin.c b/system-settings/plugins/ifcfg-rh/plugin.c
+index 5facc06..d8d1be7 100644
+--- a/system-settings/plugins/ifcfg-rh/plugin.c
++++ b/system-settings/plugins/ifcfg-rh/plugin.c
+@@ -84,6 +84,7 @@ G_DEFINE_TYPE_EXTENDED (SCPluginIfcfg, sc_plugin_ifcfg, G_TYPE_OBJECT, 0,
+ 
+ typedef struct {
+ 	GHashTable *connections;
++	GHashTable *timers;
+ 
+ 	gulong ih_event_id;
+ 	int sc_network_wd;
+@@ -300,6 +301,7 @@ handle_connection_remove_or_new (SCPluginIfcfg *plugin,
+ 
+ 		unmanaged = nm_ifcfg_connection_get_unmanaged_spec (connection);
+ 		g_hash_table_remove (priv->connections, path);
++		g_hash_table_remove (priv->timers, path);
+ 		g_signal_emit_by_name (connection, "removed");
+ 
+ 		/* Emit unmanaged changes _after_ removing the connection */
+@@ -310,6 +312,38 @@ handle_connection_remove_or_new (SCPluginIfcfg *plugin,
+ 	if (do_new)
+ 		read_one_connection (plugin, path);
+ }
++
++typedef struct {
++	SCPluginIfcfg *plugin;
++	NMIfcfgConnection *connection;
++	char *name;
++	guint source;
++} DeletionInfo;
++
++static void
++destroy_deletion_info (void *data)
++{
++	DeletionInfo *info = data;
++
++	if (info->source)
++		g_source_remove (info->source);
++
++	g_object_unref (info->connection);
++	g_free (info);
++}
++
++static gboolean
++deletion_timeout (gpointer user_data)
++{
++	DeletionInfo *info = user_data;
++
++	info->source = 0;
++	handle_connection_remove_or_new (info->plugin, info->name,
++	                                 info->connection, TRUE, FALSE);
++
++	return FALSE;
++}
++
+ static void
+ dir_changed (GFileMonitor *monitor,
+ 		   GFile *file,
+@@ -322,6 +356,7 @@ dir_changed (GFileMonitor *monitor,
+ 	char *path, *base, *name;
+ 	NMIfcfgConnection *connection;
+ 	gboolean do_remove = FALSE, do_new = FALSE;
++	DeletionInfo *info;
+ 
+ 	path = g_file_get_path (file);
+ 	if (utils_should_ignore_file (path, FALSE)) {
+@@ -347,8 +382,14 @@ dir_changed (GFileMonitor *monitor,
+ 	switch (event_type) {
+ 	case G_FILE_MONITOR_EVENT_DELETED:
+ 		PLUGIN_PRINT (IFCFG_PLUGIN_NAME, "removed %s.", name);
+-		if (connection)
+-			handle_connection_remove_or_new (plugin, name, connection, TRUE, FALSE);
++		if (connection && !g_hash_table_lookup (priv->timers, name)) {
++			info = g_malloc0 (sizeof (DeletionInfo));
++			info->connection = g_object_ref (connection);
++			info->plugin = plugin;
++			info->name = g_strdup (name);
++			info->source = g_timeout_add_seconds (1, deletion_timeout, info);
++			g_hash_table_insert (priv->timers, info->name, info);
++		}
+ 		break;
+ 	case G_FILE_MONITOR_EVENT_CREATED:
+ 	case G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT:
+@@ -358,6 +399,8 @@ dir_changed (GFileMonitor *monitor,
+ 		else
+ 			connection_changed_handler (plugin, name, connection, &do_remove, &do_new);
+ 
++		if (g_hash_table_remove (priv->timers, name))
++			PLUGIN_PRINT (IFCFG_PLUGIN_NAME, "%s reappeared, canceling deletion", name);
+ 		handle_connection_remove_or_new (plugin, name, connection, do_remove, do_new);
+ 		break;
+ 	default:
+@@ -375,6 +418,7 @@ setup_ifcfg_monitoring (SCPluginIfcfg *plugin)
+ 	GFileMonitor *monitor;
+ 
+ 	priv->connections = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, g_object_unref);
++	priv->timers = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, destroy_deletion_info);
+ 
+ 	file = g_file_new_for_path (IFCFG_DIR "/");
+ 	monitor = g_file_monitor_directory (file, G_FILE_MONITOR_NONE, NULL, NULL);
+@@ -694,6 +738,9 @@ dispose (GObject *object)
+ 	if (priv->connections)
+ 		g_hash_table_destroy (priv->connections);
+ 
++	if (priv->timers)
++		g_hash_table_destroy (priv->timers);
++
+ 	if (priv->monitor) {
+ 		if (priv->monitor_id)
+ 			g_signal_handler_disconnect (priv->monitor, priv->monitor_id);
+-- 
+2.5.0
+

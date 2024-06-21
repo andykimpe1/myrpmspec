@@ -1,0 +1,4976 @@
+diff --git a/cli/src/connections.c b/cli/src/connections.c
+index 9a20753..f5343e5 100644
+--- a/cli/src/connections.c
++++ b/cli/src/connections.c
+@@ -38,17 +38,20 @@
+ #include <nm-setting-cdma.h>
+ #include <nm-setting-bluetooth.h>
+ #include <nm-setting-olpc-mesh.h>
++#include <nm-setting-infiniband.h>
+ #include <nm-device-ethernet.h>
+ #include <nm-device-wifi.h>
+ #include <nm-gsm-device.h>
+ #include <nm-cdma-device.h>
+ #include <nm-device-bt.h>
+ //#include <nm-device-olpc-mesh.h>
++#include <nm-device-infiniband.h>
+ #include <nm-remote-settings.h>
+ #include <nm-remote-settings-system.h>
+ #include <nm-settings-interface.h>
+ #include <nm-settings-connection-interface.h>
+ #include <nm-vpn-connection.h>
++#include <nm-utils.h>
+ 
+ #include "utils.h"
+ #include "settings.h"
+@@ -879,6 +882,57 @@ check_olpc_mesh_compatible (NMDeviceOlpcMesh *device, NMConnection *connection,
+ #endif
+ 
+ static gboolean
++check_infiniband_compatible (NMDeviceInfiniband *device, NMConnection *connection, GError **error)
++{
++	NMSettingConnection *s_con;
++	NMSettingInfiniband *s_infiniband;
++	const char *connection_type;
++
++	g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
++
++	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
++	g_assert (s_con);
++
++	connection_type = nm_setting_connection_get_connection_type (s_con);
++	if (strcmp (connection_type, NM_SETTING_INFINIBAND_SETTING_NAME)) {
++		g_set_error (error, 0, 0,
++		             "The connection was not an InfiniBand connection.");
++		return FALSE;
++	}
++
++	s_infiniband = (NMSettingInfiniband *) nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND);
++	if (!s_infiniband) {
++		g_set_error (error, 0, 0,
++		             "The connection was not a valid InfiniBand connection.");
++		return FALSE;
++	}
++
++	if (s_infiniband) {
++		const GByteArray *mac;
++		const char *device_mac_str;
++		GByteArray *device_mac;
++
++		device_mac_str = nm_device_infiniband_get_hw_address (device);
++		device_mac = nm_utils_hwaddr_atoba (device_mac_str, ARPHRD_INFINIBAND);
++		if (!device_mac) {
++			g_set_error (error, 0, 0, "Invalid device MAC address.");
++			return FALSE;
++		}
++
++		mac = nm_setting_infiniband_get_mac_address (s_infiniband);
++		if (mac && memcmp (mac->data, device_mac->data, mac->len)) {
++			g_byte_array_unref (device_mac);
++			g_set_error (error, 0, 0,
++			             "The connection's MAC address did not match this device.");
++			return FALSE;
++		}
++		g_byte_array_unref (device_mac);
++	}
++
++	return TRUE;
++}
++
++static gboolean
+ nm_device_is_connection_compatible (NMDevice *device, NMConnection *connection, GError **error)
+ {
+ 	g_return_val_if_fail (NM_IS_DEVICE (device), FALSE);
+@@ -892,6 +946,8 @@ nm_device_is_connection_compatible (NMDevice *device, NMConnection *connection,
+ 		return check_bt_compatible (NM_DEVICE_BT (device), connection, error);
+ //	else if (NM_IS_DEVICE_OLPC_MESH (device))
+ //		return check_olpc_mesh_compatible (NM_DEVICE_OLPC_MESH (device), connection, error);
++	else if (NM_IS_DEVICE_INFINIBAND (device))
++		return check_infiniband_compatible (NM_DEVICE_INFINIBAND (device), connection, error);
+ 
+ 	g_set_error (error, 0, 0, "unhandled device type '%s'", G_OBJECT_TYPE_NAME (device));
+ 	return FALSE;
+diff --git a/cli/src/devices.c b/cli/src/devices.c
+index 7c9dcc5..9668f99 100644
+--- a/cli/src/devices.c
++++ b/cli/src/devices.c
+@@ -39,6 +39,7 @@
+ #include <nm-cdma-device.h>
+ #include <nm-device-bt.h>
+ //#include <nm-device-olpc-mesh.h>
++#include <nm-device-infiniband.h>
+ #include <nm-utils.h>
+ #include <nm-setting-ip4-config.h>
+ #include <nm-setting-ip6-config.h>
+@@ -51,6 +52,7 @@
+ #include <nm-setting-cdma.h>
+ #include <nm-setting-bluetooth.h>
+ #include <nm-setting-olpc-mesh.h>
++#include <nm-setting-infiniband.h>
+ 
+ #include "utils.h"
+ #include "devices.h"
+@@ -263,6 +265,8 @@ get_device_type (NMDevice * device)
+ 		return NM_SETTING_BLUETOOTH_SETTING_NAME;
+ //	else if (NM_IS_DEVICE_OLPC_MESH (device))
+ //		return NM_SETTING_OLPC_MESH_SETTING_NAME;
++	else if (NM_IS_DEVICE_INFINIBAND (device))
++		return NM_SETTING_INFINIBAND_SETTING_NAME;
+ 	else
+ 		return _("Unknown");
+ }
+@@ -520,6 +524,8 @@ show_device_info (gpointer data, gpointer user_data)
+ 				hwaddr = nm_device_ethernet_get_hw_address (NM_DEVICE_ETHERNET (device));
+ 			else if (NM_IS_DEVICE_WIFI (device))
+ 				hwaddr = nm_device_wifi_get_hw_address (NM_DEVICE_WIFI (device));
++			else if (NM_IS_DEVICE_INFINIBAND (device))
++				hwaddr = nm_device_infiniband_get_hw_address (NM_DEVICE_INFINIBAND (device));
+ 
+ 			nmc->allowed_fields[0].value = nmc_fields_dev_list_sections[0].name;  /* "GENERAL"*/
+ 			nmc->allowed_fields[1].value = nm_device_get_iface (device);
+diff --git a/include/NetworkManager.h b/include/NetworkManager.h
+index 9df444f..7abb430 100644
+--- a/include/NetworkManager.h
++++ b/include/NetworkManager.h
+@@ -43,6 +43,7 @@
+ #define NM_DBUS_INTERFACE_DHCP4_CONFIG      NM_DBUS_INTERFACE ".DHCP4Config"
+ #define NM_DBUS_INTERFACE_IP6_CONFIG        NM_DBUS_INTERFACE ".IP6Config"
+ #define NM_DBUS_INTERFACE_DHCP6_CONFIG      NM_DBUS_INTERFACE ".DHCP6Config"
++#define NM_DBUS_INTERFACE_DEVICE_INFINIBAND NM_DBUS_INTERFACE_DEVICE ".Infiniband"
+ 
+ 
+ #define NM_DBUS_SERVICE_USER_SETTINGS     "org.freedesktop.NetworkManagerUserSettings"
+@@ -80,7 +81,8 @@ typedef enum NMDeviceType
+ 	NM_DEVICE_TYPE_GSM,
+ 	NM_DEVICE_TYPE_CDMA,
+ 	NM_DEVICE_TYPE_BT,  /* Bluetooth */
+-	NM_DEVICE_TYPE_OLPC_MESH
++	NM_DEVICE_TYPE_OLPC_MESH,
++	NM_DEVICE_TYPE_INFINIBAND = 9,
+ } NMDeviceType;
+ 
+ /* DEPRECATED TYPE NAMES */
+@@ -372,6 +374,9 @@ typedef enum {
+ 	/* The Bluetooth connection failed or timed out */
+ 	NM_DEVICE_STATE_REASON_BT_FAILED = 44,
+ 
++	/* InfiniBand device does not support connected mode */
++	NM_DEVICE_STATE_REASON_INFINIBAND_MODE = 49,
++
+ 	/* Unused */
+ 	NM_DEVICE_STATE_REASON_LAST = 0xFFFF
+ } NMDeviceStateReason;
+diff --git a/introspection/nm-device-infiniband.xml b/introspection/nm-device-infiniband.xml
+new file mode 100644
+index 0000000..097714c
+--- /dev/null
++++ b/introspection/nm-device-infiniband.xml
+@@ -0,0 +1,27 @@
++<?xml version="1.0" encoding="UTF-8" ?>
++
++<node name="/" xmlns:tp="http://telepathy.freedesktop.org/wiki/DbusSpec#extensions-v0">
++  <interface name="org.freedesktop.NetworkManager.Device.Infiniband">
++
++    <property name="HwAddress" type="s" access="read">
++      <tp:docstring>
++        Hardware address of the device.
++      </tp:docstring>
++    </property>
++
++    <property name="Carrier" type="b" access="read">
++      <tp:docstring>
++        Indicates whether the physical carrier is found (e.g. whether a cable is plugged in or not).
++      </tp:docstring>
++    </property>
++
++    <signal name="PropertiesChanged">
++        <arg name="properties" type="a{sv}" tp:type="String_Variant_Map">
++            <tp:docstring>
++                A dictionary mapping property names to variant boxed values
++            </tp:docstring>
++        </arg>
++    </signal>
++
++  </interface>
++</node>
+diff --git a/libnm-glib/Makefile.am b/libnm-glib/Makefile.am
+index 008cc6d..20dfa1e 100644
+--- a/libnm-glib/Makefile.am
++++ b/libnm-glib/Makefile.am
+@@ -8,6 +8,7 @@ BUILT_SOURCES = \
+ 	nm-client-bindings.h \
+ 	nm-device-bindings.h \
+ 	nm-device-ethernet-bindings.h \
++	nm-device-infiniband-bindings.h \
+ 	nm-device-wifi-bindings.h \
+ 	nm-device-bt-bindings.h \
+ 	nm-exported-connection-glue.h \
+@@ -63,6 +64,7 @@ libnminclude_HEADERS = \
+ 	nm-client.h \
+ 	nm-device.h \
+ 	nm-device-ethernet.h \
++	nm-device-infiniband.h \
+ 	nm-device-wifi.h \
+ 	nm-device-bt.h \
+ 	nm-access-point.h \
+@@ -96,6 +98,7 @@ libnm_glib_la_SOURCES = \
+ 	nm-device.c \
+ 	nm-device-private.h \
+ 	nm-device-ethernet.c \
++	nm-device-infiniband.c \
+ 	nm-device-wifi.c \
+ 	nm-device-bt.c \
+ 	nm-access-point.c \
+@@ -157,6 +160,9 @@ nm-device-bindings.h: $(top_srcdir)/introspection/nm-device.xml
+ nm-device-ethernet-bindings.h: $(top_srcdir)/introspection/nm-device-ethernet.xml
+ 	$(AM_V_GEN) dbus-binding-tool --prefix=nm_device_ethernet --mode=glib-client --output=$@ $<
+ 
++nm-device-infiniband-bindings.h: $(top_srcdir)/introspection/nm-device-infiniband.xml
++	$(AM_V_GEN) dbus-binding-tool --prefix=nm_device_infiniband --mode=glib-client --output=$@ $<
++
+ nm-device-wifi-bindings.h: $(top_srcdir)/introspection/nm-device-wifi.xml
+ 	$(AM_V_GEN) dbus-binding-tool --prefix=nm_device_wifi --mode=glib-client --output=$@ $<
+ 
+diff --git a/libnm-glib/libnm-glib.ver b/libnm-glib/libnm-glib.ver
+index 1596afa..55424c0 100644
+--- a/libnm-glib/libnm-glib.ver
++++ b/libnm-glib/libnm-glib.ver
+@@ -80,6 +80,10 @@ global:
+ 	nm_device_get_type;
+ 	nm_device_get_udi;
+ 	nm_device_get_vendor;
++	nm_device_infiniband_get_carrier;
++	nm_device_infiniband_get_hw_address;
++	nm_device_infiniband_get_type;
++	nm_device_infiniband_new;
+ 	nm_device_new;
+ 	nm_device_wifi_get_access_point_by_path;
+ 	nm_device_wifi_get_access_points;
+diff --git a/libnm-glib/nm-device-infiniband.c b/libnm-glib/nm-device-infiniband.c
+new file mode 100644
+index 0000000..6289351
+--- /dev/null
++++ b/libnm-glib/nm-device-infiniband.c
+@@ -0,0 +1,273 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/*
++ * libnm_glib -- Access network status & information from glib applications
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301 USA.
++ *
++ * Copyright (C) 2007 - 2008 Novell, Inc.
++ * Copyright (C) 2007 - 2011 Red Hat, Inc.
++ */
++
++#include <config.h>
++#include <string.h>
++#include <linux/if_infiniband.h>
++#include <netinet/ether.h>
++
++#include <nm-setting-connection.h>
++#include <nm-setting-infiniband.h>
++#include <nm-utils.h>
++
++#include "nm-device-infiniband.h"
++#include "nm-device-private.h"
++#include "nm-object-private.h"
++
++#include "nm-device-infiniband-bindings.h"
++
++G_DEFINE_TYPE (NMDeviceInfiniband, nm_device_infiniband, NM_TYPE_DEVICE)
++
++#define NM_DEVICE_INFINIBAND_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_DEVICE_INFINIBAND, NMDeviceInfinibandPrivate))
++
++typedef struct {
++	DBusGProxy *proxy;
++
++	char *hw_address;
++	gboolean carrier;
++	gboolean carrier_valid;
++} NMDeviceInfinibandPrivate;
++
++enum {
++	PROP_0,
++	PROP_HW_ADDRESS,
++	PROP_CARRIER,
++
++	LAST_PROP
++};
++
++#define DBUS_PROP_HW_ADDRESS "HwAddress"
++#define DBUS_PROP_CARRIER "Carrier"
++
++/**
++ * nm_device_infiniband_new:
++ * @connection: the #DBusGConnection
++ * @path: the DBus object path of the device
++ *
++ * Creates a new #NMDeviceInfiniband.
++ *
++ * Returns: (transfer full): a new device
++ **/
++GObject *
++nm_device_infiniband_new (DBusGConnection *connection, const char *path)
++{
++	g_return_val_if_fail (connection != NULL, NULL);
++	g_return_val_if_fail (path != NULL, NULL);
++
++	return g_object_new (NM_TYPE_DEVICE_INFINIBAND,
++	                     NM_OBJECT_DBUS_CONNECTION, connection,
++	                     NM_OBJECT_DBUS_PATH, path,
++	                     NULL);
++}
++
++/**
++ * nm_device_infiniband_get_hw_address:
++ * @device: a #NMDeviceInfiniband
++ *
++ * Gets the hardware (MAC) address of the #NMDeviceInfiniband
++ *
++ * Returns: the hardware address. This is the internal string used by the
++ * device, and must not be modified.
++ **/
++const char *
++nm_device_infiniband_get_hw_address (NMDeviceInfiniband *device)
++{
++	NMDeviceInfinibandPrivate *priv;
++
++	g_return_val_if_fail (NM_IS_DEVICE_INFINIBAND (device), NULL);
++
++	priv = NM_DEVICE_INFINIBAND_GET_PRIVATE (device);
++	if (!priv->hw_address) {
++		priv->hw_address = _nm_object_get_string_property (NM_OBJECT (device),
++														   NM_DBUS_INTERFACE_DEVICE_INFINIBAND,
++														   DBUS_PROP_HW_ADDRESS);
++	}
++
++	return priv->hw_address;
++}
++
++/**
++ * nm_device_infiniband_get_carrier:
++ * @device: a #NMDeviceInfiniband
++ *
++ * Whether the device has carrier.
++ *
++ * Returns: %TRUE if the device has carrier
++ **/
++gboolean
++nm_device_infiniband_get_carrier (NMDeviceInfiniband *device)
++{
++	NMDeviceInfinibandPrivate *priv;
++
++	g_return_val_if_fail (NM_IS_DEVICE_INFINIBAND (device), FALSE);
++
++	priv = NM_DEVICE_INFINIBAND_GET_PRIVATE (device);
++	if (!priv->carrier_valid) {
++		priv->carrier = _nm_object_get_boolean_property (NM_OBJECT (device),
++														 NM_DBUS_INTERFACE_DEVICE_INFINIBAND,
++														 DBUS_PROP_CARRIER);
++		priv->carrier_valid = TRUE;
++	}
++
++	return priv->carrier;
++}
++
++/***********************************************************/
++
++static void
++nm_device_infiniband_init (NMDeviceInfiniband *device)
++{
++	NMDeviceInfinibandPrivate *priv = NM_DEVICE_INFINIBAND_GET_PRIVATE (device);
++
++	priv->carrier = FALSE;
++	priv->carrier_valid = FALSE;
++}
++
++static void
++register_for_property_changed (NMDeviceInfiniband *device)
++{
++	NMDeviceInfinibandPrivate *priv = NM_DEVICE_INFINIBAND_GET_PRIVATE (device);
++	const NMPropertiesChangedInfo property_changed_info[] = {
++		{ NM_DEVICE_INFINIBAND_HW_ADDRESS, _nm_object_demarshal_generic, &priv->hw_address },
++		{ NM_DEVICE_INFINIBAND_CARRIER,    _nm_object_demarshal_generic, &priv->carrier },
++		{ NULL },
++	};
++
++	_nm_object_handle_properties_changed (NM_OBJECT (device),
++	                                      priv->proxy,
++	                                      property_changed_info);
++}
++
++static GObject*
++constructor (GType type,
++             guint n_construct_params,
++             GObjectConstructParam *construct_params)
++{
++	GObject *object;
++	NMDeviceInfinibandPrivate *priv;
++
++	object = G_OBJECT_CLASS (nm_device_infiniband_parent_class)->constructor (type,
++																			  n_construct_params,
++																			  construct_params);
++	if (!object)
++		return NULL;
++
++	priv = NM_DEVICE_INFINIBAND_GET_PRIVATE (object);
++
++	priv->proxy = dbus_g_proxy_new_for_name (nm_object_get_connection (NM_OBJECT (object)),
++	                                         NM_DBUS_SERVICE,
++	                                         nm_object_get_path (NM_OBJECT (object)),
++	                                         NM_DBUS_INTERFACE_DEVICE_INFINIBAND);
++
++	register_for_property_changed (NM_DEVICE_INFINIBAND (object));
++
++	return object;
++}
++
++static void
++dispose (GObject *object)
++{
++	NMDeviceInfinibandPrivate *priv = NM_DEVICE_INFINIBAND_GET_PRIVATE (object);
++
++	if (priv->proxy) {
++		g_object_unref (priv->proxy);
++		priv->proxy = NULL;
++	}
++
++	G_OBJECT_CLASS (nm_device_infiniband_parent_class)->dispose (object);
++}
++
++static void
++finalize (GObject *object)
++{
++	NMDeviceInfinibandPrivate *priv = NM_DEVICE_INFINIBAND_GET_PRIVATE (object);
++
++	g_free (priv->hw_address);
++
++	G_OBJECT_CLASS (nm_device_infiniband_parent_class)->finalize (object);
++}
++
++static void
++get_property (GObject *object,
++              guint prop_id,
++              GValue *value,
++              GParamSpec *pspec)
++{
++	NMDeviceInfiniband *device = NM_DEVICE_INFINIBAND (object);
++
++	switch (prop_id) {
++	case PROP_HW_ADDRESS:
++		g_value_set_string (value, nm_device_infiniband_get_hw_address (device));
++		break;
++	case PROP_CARRIER:
++		g_value_set_boolean (value, nm_device_infiniband_get_carrier (device));
++		break;
++	default:
++		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++		break;
++	}
++}
++
++static void
++nm_device_infiniband_class_init (NMDeviceInfinibandClass *eth_class)
++{
++	GObjectClass *object_class = G_OBJECT_CLASS (eth_class);
++
++	g_type_class_add_private (eth_class, sizeof (NMDeviceInfinibandPrivate));
++
++	/* virtual methods */
++	object_class->constructor = constructor;
++	object_class->dispose = dispose;
++	object_class->finalize = finalize;
++	object_class->get_property = get_property;
++
++	/* properties */
++
++	/**
++	 * NMDeviceInfiniband:hw-address:
++	 *
++	 * The hardware (MAC) address of the device.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_HW_ADDRESS,
++		 g_param_spec_string (NM_DEVICE_INFINIBAND_HW_ADDRESS,
++		                      "Active MAC Address",
++		                      "Currently set hardware MAC address",
++		                      NULL,
++		                      G_PARAM_READABLE));
++
++	/**
++	 * NMDeviceInfiniband:carrier:
++	 *
++	 * Whether the device has carrier.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_CARRIER,
++		 g_param_spec_boolean (NM_DEVICE_INFINIBAND_CARRIER,
++		                       "Carrier",
++		                       "Carrier",
++		                       FALSE,
++		                       G_PARAM_READABLE));
++
++}
++
+diff --git a/libnm-glib/nm-device-infiniband.h b/libnm-glib/nm-device-infiniband.h
+new file mode 100644
+index 0000000..604a049
+--- /dev/null
++++ b/libnm-glib/nm-device-infiniband.h
+@@ -0,0 +1,66 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/*
++ * libnm_glib -- Access network status & information from glib applications
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301 USA.
++ *
++ * Copyright (C) 2007 - 2008 Novell, Inc.
++ * Copyright (C) 2007 - 2011 Red Hat, Inc.
++ */
++
++#ifndef NM_DEVICE_INFINIBAND_H
++#define NM_DEVICE_INFINIBAND_H
++
++#include "nm-device.h"
++
++G_BEGIN_DECLS
++
++#define NM_TYPE_DEVICE_INFINIBAND            (nm_device_infiniband_get_type ())
++#define NM_DEVICE_INFINIBAND(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), NM_TYPE_DEVICE_INFINIBAND, NMDeviceInfiniband))
++#define NM_DEVICE_INFINIBAND_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST ((klass), NM_TYPE_DEVICE_INFINIBAND, NMDeviceInfinibandClass))
++#define NM_IS_DEVICE_INFINIBAND(obj)         (G_TYPE_CHECK_INSTANCE_TYPE ((obj), NM_TYPE_DEVICE_INFINIBAND))
++#define NM_IS_DEVICE_INFINIBAND_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE ((obj), NM_TYPE_DEVICE_INFINIBAND))
++#define NM_DEVICE_INFINIBAND_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS ((obj), NM_TYPE_DEVICE_INFINIBAND, NMDeviceInfinibandClass))
++
++#define NM_DEVICE_INFINIBAND_HW_ADDRESS  "hw-address"
++#define NM_DEVICE_INFINIBAND_CARRIER     "carrier"
++
++typedef struct {
++	NMDevice parent;
++} NMDeviceInfiniband;
++
++typedef struct {
++	NMDeviceClass parent;
++
++	/* Padding for future expansion */
++	void (*_reserved1) (void);
++	void (*_reserved2) (void);
++	void (*_reserved3) (void);
++	void (*_reserved4) (void);
++	void (*_reserved5) (void);
++	void (*_reserved6) (void);
++} NMDeviceInfinibandClass;
++
++GType nm_device_infiniband_get_type (void);
++
++GObject *nm_device_infiniband_new (DBusGConnection *connection, const char *path);
++
++const char * nm_device_infiniband_get_hw_address (NMDeviceInfiniband *device);
++gboolean     nm_device_infiniband_get_carrier (NMDeviceInfiniband *device);
++
++G_END_DECLS
++
++#endif /* NM_DEVICE_INFINIBAND_H */
+diff --git a/libnm-glib/nm-device.c b/libnm-glib/nm-device.c
+index a38c646..ffcb25f 100644
+--- a/libnm-glib/nm-device.c
++++ b/libnm-glib/nm-device.c
+@@ -32,6 +32,7 @@
+ #include "nm-gsm-device.h"
+ #include "nm-cdma-device.h"
+ #include "nm-device-bt.h"
++#include "nm-device-infiniband.h"
+ #include "nm-device.h"
+ #include "nm-device-private.h"
+ #include "nm-object-private.h"
+@@ -710,6 +711,9 @@ nm_device_new (DBusGConnection *connection, const char *path)
+ 	case NM_DEVICE_TYPE_BT:
+ 		dtype = NM_TYPE_DEVICE_BT;
+ 		break;
++	case NM_DEVICE_TYPE_INFINIBAND:
++		dtype = NM_TYPE_DEVICE_INFINIBAND;
++		break;
+ 	default:
+ 		g_warning ("Unknown device type %d", g_value_get_uint (&value));
+ 		break;
+diff --git a/libnm-util/Makefile.am b/libnm-util/Makefile.am
+index f43fb60..9202561 100644
+--- a/libnm-util/Makefile.am
++++ b/libnm-util/Makefile.am
+@@ -16,6 +16,7 @@ libnm_util_include_HEADERS = 		\
+ 	nm-setting-8021x.h		\
+ 	nm-setting-bluetooth.h		\
+ 	nm-setting-connection.h		\
++	nm-setting-infiniband.h		\
+ 	nm-setting-ip4-config.h		\
+ 	nm-setting-ip6-config.h		\
+ 	nm-setting-ppp.h		\
+@@ -40,6 +41,7 @@ libnm_util_la_SOURCES=			\
+ 	nm-setting-8021x.c		\
+ 	nm-setting-bluetooth.c		\
+ 	nm-setting-connection.c		\
++	nm-setting-infiniband.c		\
+ 	nm-setting-ip4-config.c		\
+ 	nm-setting-ip6-config.c		\
+ 	nm-setting-ppp.c		\
+diff --git a/libnm-util/libnm-util.ver b/libnm-util/libnm-util.ver
+index 6c2b9fc..8c002d7 100644
+--- a/libnm-util/libnm-util.ver
++++ b/libnm-util/libnm-util.ver
+@@ -137,6 +137,13 @@ global:
+ 	nm_setting_gsm_get_pin;
+ 	nm_setting_gsm_get_puk;
+ 	nm_setting_gsm_get_home_only;
++	nm_setting_infiniband_error_get_type;
++	nm_setting_infiniband_error_quark;
++	nm_setting_infiniband_get_mac_address;
++	nm_setting_infiniband_get_mtu;
++	nm_setting_infiniband_get_transport_mode;
++	nm_setting_infiniband_get_type;
++	nm_setting_infiniband_new;
+ 	nm_setting_ip4_config_error_get_type;
+ 	nm_setting_ip4_config_error_quark;
+ 	nm_setting_ip4_config_get_type;
+@@ -355,6 +362,10 @@ global:
+ 	nm_utils_rsa_key_encrypt;
+ 	nm_utils_escape_ssid;
+ 	nm_utils_gvalue_hash_dup;
++	nm_utils_hwaddr_atoba;
++	nm_utils_hwaddr_aton;
++	nm_utils_hwaddr_len;
++	nm_utils_hwaddr_ntoa;
+ 	nm_utils_init;
+ 	nm_utils_ip4_addresses_from_gvalue;
+ 	nm_utils_ip4_addresses_to_gvalue;
+diff --git a/libnm-util/nm-connection.c b/libnm-util/nm-connection.c
+index 33790a6..6a04ce6 100644
+--- a/libnm-util/nm-connection.c
++++ b/libnm-util/nm-connection.c
+@@ -33,6 +33,7 @@
+ #include "nm-setting-8021x.h"
+ #include "nm-setting-bluetooth.h"
+ #include "nm-setting-connection.h"
++#include "nm-setting-infiniband.h"
+ #include "nm-setting-ip4-config.h"
+ #include "nm-setting-ip6-config.h"
+ #include "nm-setting-ppp.h"
+@@ -141,7 +142,7 @@ static guint signals[LAST_SIGNAL] = { 0 };
+ 
+ static GHashTable *registered_settings = NULL;
+ 
+-#define DEFAULT_MAP_SIZE 15
++#define DEFAULT_MAP_SIZE 16
+ 
+ static struct SettingInfo {
+ 	const char *name;
+@@ -237,6 +238,11 @@ register_default_settings (void)
+ 			      NM_SETTING_BLUETOOTH_ERROR,
+ 			      1);
+ 
++	register_one_setting (NM_SETTING_INFINIBAND_SETTING_NAME,
++	                      NM_TYPE_SETTING_INFINIBAND,
++	                      NM_SETTING_INFINIBAND_ERROR,
++	                      1);
++
+ 	register_one_setting (NM_SETTING_WIRELESS_SECURITY_SETTING_NAME,
+ 	                      NM_TYPE_SETTING_WIRELESS_SECURITY,
+ 	                      NM_SETTING_WIRELESS_SECURITY_ERROR,
+diff --git a/libnm-util/nm-setting-infiniband.c b/libnm-util/nm-setting-infiniband.c
+new file mode 100644
+index 0000000..9e8ec9a
+--- /dev/null
++++ b/libnm-util/nm-setting-infiniband.c
+@@ -0,0 +1,314 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++
++/*
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301 USA.
++ *
++ * Copyright 2011 Red Hat, Inc.
++ */
++
++#include <dbus/dbus-glib.h>
++#include <linux/if_infiniband.h>
++
++#include "nm-setting-infiniband.h"
++#include "nm-param-spec-specialized.h"
++#include "nm-utils-private.h"
++
++/**
++ * SECTION:nm-setting-infiniband
++ * @short_description: Describes connection properties for IP-over-InfiniBand networks
++ * @include: nm-setting-infiniband.h
++ *
++ * The #NMSettingInfiniband object is a #NMSetting subclass that describes properties
++ * necessary for connection to IP-over-InfiniBand networks.
++ **/
++
++/**
++ * nm_setting_infiniband_error_quark:
++ *
++ * Registers an error quark for #NMSettingInfiniband if necessary.
++ *
++ * Returns: the error quark used for #NMSettingInfiniband errors.
++ **/
++GQuark
++nm_setting_infiniband_error_quark (void)
++{
++	static GQuark quark;
++
++	if (G_UNLIKELY (!quark))
++		quark = g_quark_from_static_string ("nm-setting-infiniband-error-quark");
++	return quark;
++}
++
++/* This should really be standard. */
++#define ENUM_ENTRY(NAME, DESC) { NAME, "" #NAME "", DESC }
++
++GType
++nm_setting_infiniband_error_get_type (void)
++{
++	static GType etype = 0;
++
++	if (etype == 0) {
++		static const GEnumValue values[] = {
++			/* Unknown error. */
++			ENUM_ENTRY (NM_SETTING_INFINIBAND_ERROR_UNKNOWN, "UnknownError"),
++			/* The specified property was invalid. */
++			ENUM_ENTRY (NM_SETTING_INFINIBAND_ERROR_INVALID_PROPERTY, "InvalidProperty"),
++			/* The specified property was missing and is required. */
++			ENUM_ENTRY (NM_SETTING_INFINIBAND_ERROR_MISSING_PROPERTY, "MissingProperty"),
++			{ 0, 0, 0 }
++		};
++		etype = g_enum_register_static ("NMSettingInfinibandError", values);
++	}
++	return etype;
++}
++
++G_DEFINE_TYPE (NMSettingInfiniband, nm_setting_infiniband, NM_TYPE_SETTING)
++
++#define NM_SETTING_INFINIBAND_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_SETTING_INFINIBAND, NMSettingInfinibandPrivate))
++
++typedef struct {
++	GByteArray *mac_address;
++	char *transport_mode;
++	guint32 mtu;
++} NMSettingInfinibandPrivate;
++
++enum {
++	PROP_0,
++	PROP_MAC_ADDRESS,
++	PROP_MTU,
++	PROP_TRANSPORT_MODE,
++
++	LAST_PROP
++};
++
++/**
++ * nm_setting_infiniband_new:
++ *
++ * Creates a new #NMSettingInfiniband object with default values.
++ *
++ * Returns: (transfer full): the new empty #NMSettingInfiniband object
++ **/
++NMSetting *
++nm_setting_infiniband_new (void)
++{
++	return (NMSetting *) g_object_new (NM_TYPE_SETTING_INFINIBAND, NULL);
++}
++
++/**
++ * nm_setting_infiniband_get_mac_address:
++ * @setting: the #NMSettingInfiniband
++ *
++ * Returns: the #NMSettingInfiniband:mac-address property of the setting
++ **/
++const GByteArray *
++nm_setting_infiniband_get_mac_address (NMSettingInfiniband *setting)
++{
++	g_return_val_if_fail (NM_IS_SETTING_INFINIBAND (setting), NULL);
++
++	return NM_SETTING_INFINIBAND_GET_PRIVATE (setting)->mac_address;
++}
++
++/**
++ * nm_setting_infiniband_get_mtu:
++ * @setting: the #NMSettingInfiniband
++ *
++ * Returns: the #NMSettingInfiniband:mtu property of the setting
++ **/
++guint32
++nm_setting_infiniband_get_mtu (NMSettingInfiniband *setting)
++{
++	g_return_val_if_fail (NM_IS_SETTING_INFINIBAND (setting), 0);
++
++	return NM_SETTING_INFINIBAND_GET_PRIVATE (setting)->mtu;
++}
++
++/**
++ * nm_setting_infiniband_get_transport_mode:
++ * @setting: the #NMSettingInfiniband
++ *
++ * Returns the transport mode for this device. Either 'datagram' or
++ * 'connected'.
++ *
++ * Returns: the IPoIB transport mode
++ **/
++const char *
++nm_setting_infiniband_get_transport_mode (NMSettingInfiniband *setting)
++{
++	g_return_val_if_fail (NM_IS_SETTING_INFINIBAND (setting), NULL);
++
++	return NM_SETTING_INFINIBAND_GET_PRIVATE (setting)->transport_mode;
++}
++
++
++static gboolean
++verify (NMSetting *setting, GSList *all_settings, GError **error)
++{
++	NMSettingInfinibandPrivate *priv = NM_SETTING_INFINIBAND_GET_PRIVATE (setting);
++
++	if (priv->mac_address && priv->mac_address->len != INFINIBAND_ALEN) {
++		g_set_error (error,
++		             NM_SETTING_INFINIBAND_ERROR,
++		             NM_SETTING_INFINIBAND_ERROR_INVALID_PROPERTY,
++		             NM_SETTING_INFINIBAND_MAC_ADDRESS);
++		return FALSE;
++	}
++
++	if (!g_strcmp0 (priv->transport_mode, "datagram")) {
++		if (priv->mtu > 2044)
++			priv->mtu = 2044;
++	} else if (!g_strcmp0 (priv->transport_mode, "connected")) {
++		if (priv->mtu > 65520)
++			priv->mtu = 65520;
++	} else {
++		g_set_error (error,
++		             NM_SETTING_INFINIBAND_ERROR,
++		             NM_SETTING_INFINIBAND_ERROR_INVALID_PROPERTY,
++		             NM_SETTING_INFINIBAND_TRANSPORT_MODE);
++		return FALSE;
++	}
++
++	return TRUE;
++}
++
++static void
++nm_setting_infiniband_init (NMSettingInfiniband *setting)
++{
++	g_object_set (setting, NM_SETTING_NAME, NM_SETTING_INFINIBAND_SETTING_NAME, NULL);
++}
++
++static void
++finalize (GObject *object)
++{
++	NMSettingInfinibandPrivate *priv = NM_SETTING_INFINIBAND_GET_PRIVATE (object);
++
++	g_free (priv->transport_mode);
++	if (priv->mac_address)
++		g_byte_array_free (priv->mac_address, TRUE);
++
++	G_OBJECT_CLASS (nm_setting_infiniband_parent_class)->finalize (object);
++}
++
++static void
++set_property (GObject *object, guint prop_id,
++              const GValue *value, GParamSpec *pspec)
++{
++	NMSettingInfinibandPrivate *priv = NM_SETTING_INFINIBAND_GET_PRIVATE (object);
++
++	switch (prop_id) {
++	case PROP_MAC_ADDRESS:
++		if (priv->mac_address)
++			g_byte_array_free (priv->mac_address, TRUE);
++		priv->mac_address = g_value_dup_boxed (value);
++		break;
++	case PROP_MTU:
++		priv->mtu = g_value_get_uint (value);
++		break;
++	case PROP_TRANSPORT_MODE:
++		g_free (priv->transport_mode);
++		priv->transport_mode = g_value_dup_string (value);
++		break;
++	default:
++		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++		break;
++	}
++}
++
++static void
++get_property (GObject *object, guint prop_id,
++              GValue *value, GParamSpec *pspec)
++{
++	NMSettingInfiniband *setting = NM_SETTING_INFINIBAND (object);
++
++	switch (prop_id) {
++	case PROP_MAC_ADDRESS:
++		g_value_set_boxed (value, nm_setting_infiniband_get_mac_address (setting));
++		break;
++	case PROP_MTU:
++		g_value_set_uint (value, nm_setting_infiniband_get_mtu (setting));
++		break;
++	case PROP_TRANSPORT_MODE:
++		g_value_set_string (value, nm_setting_infiniband_get_transport_mode (setting));
++		break;
++	default:
++		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++		break;
++	}
++}
++
++static void
++nm_setting_infiniband_class_init (NMSettingInfinibandClass *setting_class)
++{
++	GObjectClass *object_class = G_OBJECT_CLASS (setting_class);
++	NMSettingClass *parent_class = NM_SETTING_CLASS (setting_class);
++
++	g_type_class_add_private (setting_class, sizeof (NMSettingInfinibandPrivate));
++
++	/* virtual methods */
++	object_class->set_property = set_property;
++	object_class->get_property = get_property;
++	object_class->finalize     = finalize;
++	parent_class->verify       = verify;
++
++	/* Properties */
++	/**
++	 * NMSettingInfiniband:mac-address:
++	 *
++	 * If specified, this connection will only apply to the IPoIB
++	 * device whose permanent MAC address matches. This property does
++	 * not change the MAC address of the device (i.e. MAC spoofing).
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_MAC_ADDRESS,
++		 _nm_param_spec_specialized (NM_SETTING_INFINIBAND_MAC_ADDRESS,
++		                             "Device MAC Address",
++		                             "If specified, this connection will only apply to "
++		                             "the IPoIB device whose permanent MAC address matches.  "
++		                             "This property does not change the MAC address "
++		                             "of the device (i.e. MAC spoofing).",
++		                             DBUS_TYPE_G_UCHAR_ARRAY,
++		                             G_PARAM_READWRITE | NM_SETTING_PARAM_SERIALIZE));
++
++	/**
++	 * NMSettingInfiniband:mtu:
++	 *
++	 * If non-zero, only transmit packets of the specified size or smaller,
++	 * breaking larger packets up into multiple frames.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_MTU,
++		 g_param_spec_uint (NM_SETTING_INFINIBAND_MTU,
++		                    "MTU",
++		                    "If non-zero, only transmit packets of the specified "
++		                    "size or smaller, breaking larger packets up into "
++		                    "multiple frames.",
++		                    0, G_MAXUINT32, 0,
++		                    G_PARAM_READWRITE | G_PARAM_CONSTRUCT | NM_SETTING_PARAM_SERIALIZE | NM_SETTING_PARAM_FUZZY_IGNORE));
++
++	/**
++	 * NMSettingInfiniband:transport-mode:
++	 *
++	 * The IP-over-InfiniBand transport mode. Either 'datagram' or
++	 * 'connected'.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_TRANSPORT_MODE,
++		 g_param_spec_string (NM_SETTING_INFINIBAND_TRANSPORT_MODE,
++							  "Transport Mode",
++							  "The IPoIB transport mode. Either 'datagram' or 'connected'.",
++							  "datagram",
++							  G_PARAM_READWRITE | G_PARAM_CONSTRUCT | NM_SETTING_PARAM_SERIALIZE));
++}
++
+diff --git a/libnm-util/nm-setting-infiniband.h b/libnm-util/nm-setting-infiniband.h
+new file mode 100644
+index 0000000..8d1831b
+--- /dev/null
++++ b/libnm-util/nm-setting-infiniband.h
+@@ -0,0 +1,84 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++
++/*
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301 USA.
++ *
++ * Copyright 2011 Red Hat, Inc.
++ */
++
++#ifndef NM_SETTING_INFINIBAND_H
++#define NM_SETTING_INFINIBAND_H
++
++#include <nm-setting.h>
++
++G_BEGIN_DECLS
++
++#define NM_TYPE_SETTING_INFINIBAND            (nm_setting_infiniband_get_type ())
++#define NM_SETTING_INFINIBAND(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), NM_TYPE_SETTING_INFINIBAND, NMSettingInfiniband))
++#define NM_SETTING_INFINIBAND_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST ((klass), NM_TYPE_SETTING_INFINIBAND, NMSettingInfinibandClass))
++#define NM_IS_SETTING_INFINIBAND(obj)         (G_TYPE_CHECK_INSTANCE_TYPE ((obj), NM_TYPE_SETTING_INFINIBAND))
++#define NM_IS_SETTING_INFINIBAND_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE ((obj), NM_TYPE_SETTING_INFINIBAND))
++#define NM_SETTING_INFINIBAND_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS ((obj), NM_TYPE_SETTING_INFINIBAND, NMSettingInfinibandClass))
++
++#define NM_SETTING_INFINIBAND_SETTING_NAME "infiniband"
++
++/**
++ * NMSettingInfinibandError:
++ * @NM_SETTING_INFINIBAND_ERROR_UNKNOWN: unknown or unclassified error
++ * @NM_SETTING_INFINIBAND_ERROR_INVALID_PROPERTY: the property was invalid
++ * @NM_SETTING_INFINIBAND_ERROR_MISSING_PROPERTY: the property was missing and is
++ * required
++ */
++typedef enum {
++	NM_SETTING_INFINIBAND_ERROR_UNKNOWN = 0,
++	NM_SETTING_INFINIBAND_ERROR_INVALID_PROPERTY,
++	NM_SETTING_INFINIBAND_ERROR_MISSING_PROPERTY
++} NMSettingInfinibandError;
++
++#define NM_TYPE_SETTING_INFINIBAND_ERROR (nm_setting_infiniband_error_get_type ())
++GType nm_setting_infiniband_error_get_type (void);
++
++#define NM_SETTING_INFINIBAND_ERROR nm_setting_infiniband_error_quark ()
++GQuark nm_setting_infiniband_error_quark (void);
++
++#define NM_SETTING_INFINIBAND_MAC_ADDRESS    "mac-address"
++#define NM_SETTING_INFINIBAND_MTU            "mtu"
++#define NM_SETTING_INFINIBAND_TRANSPORT_MODE "transport-mode"
++
++typedef struct {
++	NMSetting parent;
++} NMSettingInfiniband;
++
++typedef struct {
++	NMSettingClass parent;
++
++	/* Padding for future expansion */
++	void (*_reserved1) (void);
++	void (*_reserved2) (void);
++	void (*_reserved3) (void);
++	void (*_reserved4) (void);
++} NMSettingInfinibandClass;
++
++GType nm_setting_infiniband_get_type (void);
++
++NMSetting *       nm_setting_infiniband_new                (void);
++const GByteArray *nm_setting_infiniband_get_mac_address    (NMSettingInfiniband *setting);
++guint32           nm_setting_infiniband_get_mtu            (NMSettingInfiniband *setting);
++const char *      nm_setting_infiniband_get_transport_mode (NMSettingInfiniband *setting);
++
++G_END_DECLS
++
++#endif /* NM_SETTING_INFINIBAND_H */
+diff --git a/libnm-util/nm-utils.c b/libnm-util/nm-utils.c
+index ce13da3..a580113 100644
+--- a/libnm-util/nm-utils.c
++++ b/libnm-util/nm-utils.c
+@@ -24,11 +24,14 @@
+  * (C) Copyright 2005 - 2010 Red Hat, Inc.
+  */
+ 
++#include <ctype.h>
+ #include <string.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <errno.h>
+ #include <arpa/inet.h>
++#include <netinet/ether.h>
++#include <linux/if_infiniband.h>
+ 
+ #include "wireless-helper.h"
+ 
+@@ -2361,3 +2364,124 @@ nm_utils_wifi_is_channel_valid (guint32 channel, const char *band)
+ 		return FALSE;
+ }
+ 
++/**
++ * nm_utils_hwaddr_len:
++ * @type: the type of address; either %ARPHRD_ETHER or %ARPHRD_INFINIBAND
++ *
++ * Returns the length in octets of a hardware address of type @type.
++ *
++ * Return value: the length
++ */
++int
++nm_utils_hwaddr_len (int type)
++{
++	if (type == ARPHRD_ETHER)
++		return ETH_ALEN;
++	else if (type == ARPHRD_INFINIBAND)
++		return INFINIBAND_ALEN;
++	else
++		g_return_val_if_reached (-1);
++}
++
++#define HEXVAL(c) ((c) <= '9' ? (c) - '0' : ((c) & 0x4F) - 'A' + 10)
++
++/**
++ * nm_utils_hwaddr_aton:
++ * @asc: the ASCII representation of a hardware address
++ * @type: the type of address; either %ARPHRD_ETHER or %ARPHRD_INFINIBAND
++ * @buffer: buffer to store the result into
++ *
++ * Parses @asc and converts it to binary form in @buffer. See
++ * nm_utils_hwaddr_atoba() if you'd rather have the result in a
++ * #GByteArray.
++ *
++ * Return value: @buffer, or %NULL if @asc couldn't be parsed
++ */
++guint8 *
++nm_utils_hwaddr_aton (const char *asc, int type, gpointer buffer)
++{
++	const char *in = asc;
++	guint8 *out = (guint8 *)buffer;
++	int left = nm_utils_hwaddr_len (type);
++
++	while (left && *in) {
++		guint8 d1 = in[0], d2 = in[1];
++
++		if (!isxdigit (d1))
++			return NULL;
++
++		/* If there's no leading zero (ie "aa:b:cc") then fake it */
++		if (d2 && isxdigit (d2)) {
++			*out++ = (HEXVAL (d1) << 4) + HEXVAL (d2);
++			in += 2;
++		} else {
++			/* Fake leading zero */
++			*out++ = (HEXVAL ('0') << 4) + HEXVAL (d1);
++			in += 1;
++		}
++
++		left--;
++		if (*in) {
++			if (*in != ':')
++				return NULL;
++			in++;
++		}
++	}
++
++	if (left == 0 && !*in)
++		return buffer;
++	else
++		return NULL;
++}
++
++/**
++ * nm_utils_hwaddr_atoba:
++ * @asc: the ASCII representation of a hardware address
++ * @type: the type of address; either %ARPHRD_ETHER or %ARPHRD_INFINIBAND
++ *
++ * Parses @asc and converts it to binary form in a #GByteArray. See
++ * nm_utils_hwaddr_aton() if you don't want a #GByteArray.
++ *
++ * Return value: a new #GByteArray, or %NULL if @asc couldn't be
++ * parsed
++ */
++GByteArray *
++nm_utils_hwaddr_atoba (const char *asc, int type)
++{
++	GByteArray *ba;
++	int len = nm_utils_hwaddr_len (type);
++
++	ba = g_byte_array_sized_new (len);
++	ba->len = len;
++	if (!nm_utils_hwaddr_aton (asc, type, ba->data)) {
++		g_byte_array_unref (ba);
++		return NULL;
++	}
++
++	return ba;
++}
++
++/**
++ * nm_utils_hwaddr_ntoa:
++ * @addr: a binary hardware address
++ * @type: the type of address; either %ARPHRD_ETHER or %ARPHRD_INFINIBAND
++ *
++ * Converts @addr to textual form.
++ *
++ * Return value: (transfer full): the textual form of @addr
++ */
++char *
++nm_utils_hwaddr_ntoa (gconstpointer addr, int type)
++{
++	const guint8 *in = addr;
++	GString *out = g_string_new (NULL);
++	int left = nm_utils_hwaddr_len (type);
++
++	while (left--) {
++		if (out->len)
++			g_string_append_c (out, ':');
++		g_string_append_printf (out, "%02X", *in++);
++	}
++
++	return g_string_free (out, FALSE);
++}
+diff --git a/libnm-util/nm-utils.h b/libnm-util/nm-utils.h
+index 6be9179..dda0e9f 100644
+--- a/libnm-util/nm-utils.h
++++ b/libnm-util/nm-utils.h
+@@ -213,11 +213,25 @@ GByteArray *nm_utils_rsa_key_encrypt (const GByteArray *data,
+                                       char **out_password,
+                                       GError **error);
+ 
+-G_END_DECLS
+-
+ guint32 nm_utils_wifi_freq_to_channel (guint32 freq);
+ guint32 nm_utils_wifi_channel_to_freq (guint32 channel, const char *band);
+ guint32 nm_utils_wifi_find_next_channel (guint32 channel, int direction, char *band);
+ gboolean nm_utils_wifi_is_channel_valid (guint32 channel, const char *band);
+ 
++/**
++ * NM_UTILS_HWADDR_LEN_MAX:
++ *
++ * The maximum length of a hardware address of a type known by
++ * nm_utils_hwaddr_len() or nm_utils_hwaddr_aton(). This can be used
++ * as the size of the buffer passed to nm_utils_hwaddr_aton().
++ */
++#define NM_UTILS_HWADDR_LEN_MAX 20 /* INFINIBAND_ALEN */
++
++int         nm_utils_hwaddr_len   (int type) G_GNUC_PURE;
++char       *nm_utils_hwaddr_ntoa  (gconstpointer addr, int type);
++GByteArray *nm_utils_hwaddr_atoba (const char *asc, int type);
++guint8     *nm_utils_hwaddr_aton  (const char *asc, int type, gpointer buffer);
++
++G_END_DECLS
++
+ #endif /* NM_UTILS_H */
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 72b23d0..47c1648 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -94,6 +94,8 @@ NetworkManager_SOURCES = \
+ 		nm-device-ethernet.h \
+ 		nm-device-wifi.c \
+ 		nm-device-wifi.h \
++		nm-device-wired.c \
++		nm-device-wired.h \
+ 		nm-device-olpc-mesh.c	\
+ 		nm-device-olpc-mesh.h	\
+ 		nm-device-bt.c \
+@@ -104,6 +106,8 @@ NetworkManager_SOURCES = \
+ 		nm-device-cdma.h \
+ 		nm-device-gsm.c \
+ 		nm-device-gsm.h \
++		nm-device-infiniband.c \
++		nm-device-infiniband.h \
+ 		nm-wifi-ap.c \
+ 		nm-wifi-ap.h \
+ 		nm-dbus-manager.h \
+@@ -161,6 +165,9 @@ nm-device-interface-glue.h: $(top_srcdir)/introspection/nm-device.xml
+ nm-device-ethernet-glue.h: $(top_srcdir)/introspection/nm-device-ethernet.xml
+ 	$(AM_V_GEN) dbus-binding-tool --prefix=nm_device_ethernet --mode=glib-server --output=$@ $<
+ 
++nm-device-infiniband-glue.h: $(top_srcdir)/introspection/nm-device-infiniband.xml
++	$(AM_V_GEN) dbus-binding-tool --prefix=nm_device_infiniband --mode=glib-server --output=$@ $<
++
+ nm-device-wifi-glue.h: $(top_srcdir)/introspection/nm-device-wifi.xml
+ 	$(AM_V_GEN) dbus-binding-tool --prefix=nm_device_wifi --mode=glib-server --output=$@ $<
+ 
+@@ -196,6 +203,7 @@ BUILT_SOURCES = \
+ 	nm-manager-glue.h \
+ 	nm-device-interface-glue.h \
+ 	nm-device-ethernet-glue.h \
++	nm-device-infiniband-glue.h \
+ 	nm-device-wifi-glue.h \
+ 	nm-device-olpc-mesh-glue.h \
+ 	nm-device-bt-glue.h \
+diff --git a/src/NetworkManagerUtils.c b/src/NetworkManagerUtils.c
+index 1024096..83674f9 100644
+--- a/src/NetworkManagerUtils.c
++++ b/src/NetworkManagerUtils.c
+@@ -669,7 +669,7 @@ nm_utils_do_sysctl (const char *path, const char *value)
+ {
+ 	int fd, len, nwrote, total;
+ 
+-	fd = open (path, O_WRONLY | O_TRUNC);
++	fd = open (path, O_WRONLY);
+ 	if (fd == -1)
+ 		return FALSE;
+ 
+diff --git a/src/logging/nm-logging.c b/src/logging/nm-logging.c
+index 5b5622f..1b18ae6 100644
+--- a/src/logging/nm-logging.c
++++ b/src/logging/nm-logging.c
+@@ -42,7 +42,8 @@ static guint32 log_domains = \
+ 	LOGD_HW | LOGD_RFKILL | LOGD_ETHER | LOGD_WIFI | LOGD_BT | LOGD_MB | \
+ 	LOGD_DHCP4 | LOGD_DHCP6 | LOGD_PPP | LOGD_IP4 | LOGD_IP6 | LOGD_AUTOIP4 | \
+ 	LOGD_DNS | LOGD_VPN | LOGD_SHARING | LOGD_SUPPLICANT | LOGD_USER_SET | \
+-	LOGD_SYS_SET | LOGD_SUSPEND | LOGD_CORE | LOGD_DEVICE | LOGD_OLPC_MESH;
++	LOGD_SYS_SET | LOGD_SUSPEND | LOGD_CORE | LOGD_DEVICE | LOGD_OLPC_MESH | \
++	LOGD_INFINIBAND;
+ 
+ typedef struct {
+ 	guint32 num;
+@@ -82,6 +83,7 @@ static const LogDesc domain_descs[] = {
+ 	{ LOGD_CORE,      "CORE" },
+ 	{ LOGD_DEVICE,    "DEVICE" },
+ 	{ LOGD_OLPC_MESH, "OLPC" },
++	{ LOGD_INFINIBAND,"INFINIBAND" },
+ 	{ 0, NULL }
+ };
+ 
+diff --git a/src/logging/nm-logging.h b/src/logging/nm-logging.h
+index e4abcf7..bc04416 100644
+--- a/src/logging/nm-logging.h
++++ b/src/logging/nm-logging.h
+@@ -51,6 +51,7 @@ enum {
+ 	LOGD_CORE       = 0x00100000, /* Core daemon and policy stuff */
+ 	LOGD_DEVICE     = 0x00200000, /* Device state and activation */
+ 	LOGD_OLPC_MESH  = 0x00400000,
++	LOGD_INFINIBAND = 0x01000000,
+ };
+ 
+ #define LOGD_DHCP (LOGD_DHCP4 | LOGD_DHCP6)
+diff --git a/src/nm-device-ethernet.c b/src/nm-device-ethernet.c
+index 393b921..30d6484 100644
+--- a/src/nm-device-ethernet.c
++++ b/src/nm-device-ethernet.c
+@@ -37,8 +37,6 @@
+ #define G_UDEV_API_IS_SUBJECT_TO_CHANGE
+ #include <gudev/gudev.h>
+ 
+-#include <netlink/route/addr.h>
+-
+ #include "nm-glib-compat.h"
+ #include "nm-device-ethernet.h"
+ #include "nm-device-interface.h"
+@@ -48,7 +46,6 @@
+ #include "nm-supplicant-manager.h"
+ #include "nm-supplicant-interface.h"
+ #include "nm-supplicant-config.h"
+-#include "nm-netlink-monitor.h"
+ #include "nm-system.h"
+ #include "nm-setting-connection.h"
+ #include "nm-setting-wired.h"
+@@ -62,7 +59,7 @@
+ #include "nm-device-ethernet-glue.h"
+ 
+ 
+-G_DEFINE_TYPE (NMDeviceEthernet, nm_device_ethernet, NM_TYPE_DEVICE)
++G_DEFINE_TYPE (NMDeviceEthernet, nm_device_ethernet, NM_TYPE_DEVICE_WIRED)
+ 
+ #define NM_DEVICE_ETHERNET_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_DEVICE_ETHERNET, NMDeviceEthernetPrivate))
+ 
+@@ -107,14 +104,7 @@ typedef struct Supplicant {
+ typedef struct {
+ 	gboolean            disposed;
+ 
+-	guint8              hw_addr[ETH_ALEN];      /* Currently set MAC address */
+ 	guint8              perm_hw_addr[ETH_ALEN]; /* Currently set MAC address */
+-	gboolean            carrier;
+-
+-	NMNetlinkMonitor *  monitor;
+-	gulong              link_connected_id;
+-	gulong              link_disconnected_id;
+-	guint               carrier_action_defer_id;
+ 
+ 	Supplicant          supplicant;
+ 	guint               supplicant_timeout_id;
+@@ -185,122 +175,6 @@ nm_ethernet_error_get_type (void)
+ }
+ 
+ static void
+-carrier_action_defer_clear (NMDeviceEthernet *self)
+-{
+-	NMDeviceEthernetPrivate *priv = NM_DEVICE_ETHERNET_GET_PRIVATE (self);
+-
+-	if (priv->carrier_action_defer_id) {
+-		g_source_remove (priv->carrier_action_defer_id);
+-		priv->carrier_action_defer_id = 0;
+-	}
+-}
+-
+-static gboolean
+-carrier_action_defer_cb (gpointer user_data)
+-{
+-	NMDeviceEthernet *self = NM_DEVICE_ETHERNET (user_data);
+-	NMDeviceEthernetPrivate *priv = NM_DEVICE_ETHERNET_GET_PRIVATE (self);
+-	NMDeviceState state;
+-
+-	priv->carrier_action_defer_id = 0;
+-
+-	state = nm_device_interface_get_state (NM_DEVICE_INTERFACE (self));
+-	if (state == NM_DEVICE_STATE_UNAVAILABLE) {
+-		if (priv->carrier)
+-			nm_device_state_changed (NM_DEVICE (self), NM_DEVICE_STATE_DISCONNECTED, NM_DEVICE_STATE_REASON_CARRIER);
+-	} else if (state >= NM_DEVICE_STATE_DISCONNECTED) {
+-		if (!priv->carrier)
+-			nm_device_state_changed (NM_DEVICE (self), NM_DEVICE_STATE_UNAVAILABLE, NM_DEVICE_STATE_REASON_CARRIER);
+-	}
+-
+-	return FALSE;
+-}
+-
+-static void
+-set_carrier (NMDeviceEthernet *self,
+-             const gboolean carrier,
+-             const gboolean defer_action)
+-{
+-	NMDeviceEthernetPrivate *priv;
+-	NMDeviceState state;
+-
+-	g_return_if_fail (NM_IS_DEVICE (self));
+-
+-	priv = NM_DEVICE_ETHERNET_GET_PRIVATE (self);
+-	if (priv->carrier == carrier)
+-		return;
+-
+-	/* Clear any previous deferred action */
+-	carrier_action_defer_clear (self);
+-
+-	priv->carrier = carrier;
+-	g_object_notify (G_OBJECT (self), NM_DEVICE_ETHERNET_CARRIER);
+-
+-	state = nm_device_interface_get_state (NM_DEVICE_INTERFACE (self));
+-	nm_log_info (LOGD_HW | LOGD_ETHER, "(%s): carrier now %s (device state %d%s)",
+-	             nm_device_get_iface (NM_DEVICE (self)),
+-	             carrier ? "ON" : "OFF",
+-	             state,
+-	             defer_action ? ", deferring action for 4 seconds" : "");
+-
+-	if (defer_action)
+-		priv->carrier_action_defer_id = g_timeout_add_seconds (4, carrier_action_defer_cb, self);
+-	else
+-		carrier_action_defer_cb (self);
+-}
+-
+-static void
+-carrier_on (NMNetlinkMonitor *monitor,
+-            int idx,
+-            gpointer user_data)
+-{
+-	NMDevice *device = NM_DEVICE (user_data);
+-	NMDeviceEthernet *self = NM_DEVICE_ETHERNET (device);
+-	guint32 caps;
+-
+-	/* Make sure signal is for us */
+-	if (idx == nm_device_get_ifindex (device)) {
+-		/* Ignore spurious netlink messages */
+-		caps = nm_device_get_capabilities (device);
+-		if (!(caps & NM_DEVICE_CAP_CARRIER_DETECT))
+-			return;
+-
+-		set_carrier (self, TRUE, FALSE);
+-	}
+-}
+-
+-static void
+-carrier_off (NMNetlinkMonitor *monitor,
+-             int idx,
+-             gpointer user_data)
+-{
+-	NMDevice *device = NM_DEVICE (user_data);
+-	NMDeviceEthernet *self = NM_DEVICE_ETHERNET (device);
+-	guint32 caps;
+-
+-	/* Make sure signal is for us */
+-	if (idx == nm_device_get_ifindex (device)) {
+-		NMDeviceState state;
+-		gboolean defer = FALSE;
+-
+-		/* Ignore spurious netlink messages */
+-		caps = nm_device_get_capabilities (device);
+-		if (!(caps & NM_DEVICE_CAP_CARRIER_DETECT))
+-			return;
+-
+-		/* Defer carrier-off event actions while connected by a few seconds
+-		 * so that tripping over a cable, power-cycling a switch, or breaking
+-		 * off the RJ45 locking tab isn't so catastrophic.
+-		 */
+-		state = nm_device_interface_get_state (NM_DEVICE_INTERFACE (self));
+-		if (state > NM_DEVICE_STATE_DISCONNECTED)
+-			defer = TRUE;
+-
+-		set_carrier (self, FALSE, defer);
+-	}
+-}
+-
+-static void
+ _update_s390_subchannels (NMDeviceEthernet *self)
+ {
+ 	NMDeviceEthernetPrivate *priv = NM_DEVICE_ETHERNET_GET_PRIVATE (self);
+@@ -411,7 +285,6 @@ constructor (GType type,
+ 	GObject *object;
+ 	NMDeviceEthernetPrivate *priv;
+ 	NMDevice *self;
+-	guint32 caps;
+ 
+ 	object = G_OBJECT_CLASS (nm_device_ethernet_parent_class)->constructor (type,
+ 	                                                                        n_construct_params,
+@@ -429,59 +302,6 @@ constructor (GType type,
+ 	/* s390 stuff */
+ 	_update_s390_subchannels (NM_DEVICE_ETHERNET (self));
+ 
+-	caps = nm_device_get_capabilities (self);
+-	if (caps & NM_DEVICE_CAP_CARRIER_DETECT) {
+-		GError *error = NULL;
+-		guint32 ifflags = 0;
+-
+-		/* Only listen to netlink for cards that support carrier detect */
+-		priv->monitor = nm_netlink_monitor_get ();
+-
+-		priv->link_connected_id = g_signal_connect (priv->monitor, "carrier-on",
+-		                                            G_CALLBACK (carrier_on),
+-		                                            self);
+-		priv->link_disconnected_id = g_signal_connect (priv->monitor, "carrier-off",
+-		                                               G_CALLBACK (carrier_off),
+-		                                               self);
+-
+-		/* Get initial link state */
+-		if (!nm_netlink_monitor_get_flags_sync (priv->monitor,
+-		                                        nm_device_get_ifindex (NM_DEVICE (self)),
+-		                                        &ifflags,
+-		                                        &error)) {
+-			nm_log_warn (LOGD_HW | LOGD_ETHER,
+-			             "(%s): couldn't get initial carrier state: (%d) %s",
+-			             nm_device_get_iface (NM_DEVICE (self)),
+-			             error ? error->code : -1,
+-			             (error && error->message) ? error->message : "unknown");
+-			g_clear_error (&error);
+-		} else
+-			priv->carrier = !!(ifflags & IFF_LOWER_UP);
+-
+-		nm_log_info (LOGD_HW | LOGD_ETHER,
+-		             "(%s): carrier is %s",
+-		             nm_device_get_iface (NM_DEVICE (self)),
+-		             priv->carrier ? "ON" : "OFF");
+-
+-		/* Request link state again just in case an error occurred getting the
+-		 * initial link state.
+-		 */
+-		if (!nm_netlink_monitor_request_status (priv->monitor, &error)) {
+-			nm_log_warn (LOGD_HW | LOGD_ETHER,
+-			             "(%s): couldn't request carrier state: (%d) %s",
+-			             nm_device_get_iface (NM_DEVICE (self)),
+-			             error ? error->code : -1,
+-			             (error && error->message) ? error->message : "unknown");
+-			g_clear_error (&error);
+-		}
+-	} else {
+-		nm_log_info (LOGD_HW | LOGD_ETHER,
+-		             "(%s): driver '%s' does not support carrier detection.",
+-		             nm_device_get_iface (self),
+-		             nm_device_get_driver (self));
+-		priv->carrier = TRUE;
+-	}
+-
+ 	return object;
+ }
+ 
+@@ -520,24 +340,6 @@ real_take_down (NMDevice *dev)
+ 	}
+ }
+ 
+-static gboolean
+-real_hw_is_up (NMDevice *device)
+-{
+-	return nm_system_device_is_up (device);
+-}
+-
+-static gboolean
+-real_hw_bring_up (NMDevice *dev, gboolean *no_firmware)
+-{
+-	return nm_system_device_set_up_down (dev, TRUE, no_firmware);
+-}
+-
+-static void
+-real_hw_take_down (NMDevice *dev)
+-{
+-	nm_system_device_set_up_down (dev, FALSE, NULL);
+-}
+-
+ NMDevice *
+ nm_device_ethernet_new (const char *udi,
+ 						const char *iface,
+@@ -557,24 +359,6 @@ nm_device_ethernet_new (const char *udi,
+ }
+ 
+ 
+-/*
+- * nm_device_ethernet_get_address
+- *
+- * Get a device's hardware address
+- *
+- */
+-void
+-nm_device_ethernet_get_address (NMDeviceEthernet *self, struct ether_addr *addr)
+-{
+-	NMDeviceEthernetPrivate *priv;
+-
+-	g_return_if_fail (self != NULL);
+-	g_return_if_fail (addr != NULL);
+-
+-	priv = NM_DEVICE_ETHERNET_GET_PRIVATE (self);
+-	memcpy (addr, &priv->hw_addr, sizeof (priv->hw_addr));
+-}
+-
+ /* Returns speed in Mb/s */
+ static guint32
+ nm_device_ethernet_get_speed (NMDeviceEthernet *self)
+@@ -618,12 +402,14 @@ out:
+ static void
+ _update_hw_addr (NMDeviceEthernet *self, const guint8 *addr)
+ {
+-	NMDeviceEthernetPrivate *priv = NM_DEVICE_ETHERNET_GET_PRIVATE (self);
++	guint8 *current_addr;
+ 
+ 	g_return_if_fail (addr != NULL);
+ 
+-	if (memcmp (&priv->hw_addr, addr, ETH_ALEN)) {
+-		memcpy (&priv->hw_addr, addr, ETH_ALEN);
++	current_addr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (self));
++
++	if (memcmp (current_addr, addr, ETH_ALEN)) {
++		memcpy (current_addr, addr, ETH_ALEN);
+ 		g_object_notify (G_OBJECT (self), NM_DEVICE_ETHERNET_HW_ADDRESS);
+ 	}
+ }
+@@ -632,7 +418,7 @@ static gboolean
+ _set_hw_addr (NMDeviceEthernet *self, const guint8 *addr, const char *detail)
+ {
+ 	NMDevice *dev = NM_DEVICE (self);
+-	NMDeviceEthernetPrivate *priv = NM_DEVICE_ETHERNET_GET_PRIVATE (self);
++	guint8 *current_addr;
+ 	const char *iface;
+ 	char *mac_str = NULL;
+ 	gboolean success = FALSE;
+@@ -641,19 +427,18 @@ _set_hw_addr (NMDeviceEthernet *self, const guint8 *addr, const char *detail)
+ 
+ 	iface = nm_device_get_iface (dev);
+ 
+-	mac_str = g_strdup_printf ("%02X:%02X:%02X:%02X:%02X:%02X",
+-	                           addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+-
+ 	/* Do nothing if current MAC is same */
+-	if (!memcmp (&priv->hw_addr, addr, ETH_ALEN)) {
+-		nm_log_dbg (LOGD_DEVICE | LOGD_ETHER, "(%s): no MAC address change needed",
+-		            iface, detail, mac_str);
+-		g_free (mac_str);
++	current_addr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (self));
++	if (!memcmp (current_addr, addr, ETH_ALEN)) {
++		nm_log_dbg (LOGD_DEVICE | LOGD_ETHER, "(%s): no MAC address change needed", iface);
+ 		return TRUE;
+ 	}
+ 
++	mac_str = g_strdup_printf ("%02X:%02X:%02X:%02X:%02X:%02X",
++	                           addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
++
+ 	/* Can't change MAC address while device is up */
+-	real_hw_take_down (dev);
++	nm_device_hw_take_down (dev, FALSE);
+ 
+ 	success = nm_system_device_set_mac (iface, (struct ether_addr *) addr);
+ 	if (success) {
+@@ -665,7 +450,7 @@ _set_hw_addr (NMDeviceEthernet *self, const guint8 *addr, const char *detail)
+ 		nm_log_warn (LOGD_DEVICE | LOGD_ETHER, "(%s): failed to %s MAC address to %s",
+ 		             iface, detail, mac_str);
+ 	}
+-	real_hw_bring_up (dev, NULL);
++	nm_device_hw_bring_up (dev, FALSE, NULL);
+ 	g_free (mac_str);
+ 
+ 	return success;
+@@ -674,28 +459,16 @@ _set_hw_addr (NMDeviceEthernet *self, const guint8 *addr, const char *detail)
+ static void
+ real_update_hw_address (NMDevice *dev)
+ {
+-	NMDeviceEthernet *self = NM_DEVICE_ETHERNET (dev);
+-	struct ifreq req;
+-	int fd;
++	guint8 *hw_addr, old_addr[ETH_ALEN];
+ 
+-	fd = socket (PF_INET, SOCK_DGRAM, 0);
+-	if (fd < 0) {
+-		nm_log_warn (LOGD_HW, "couldn't open control socket.");
+-		return;
+-	}
++	hw_addr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (dev));
++	memcpy (old_addr, hw_addr, ETH_ALEN);
+ 
+-	memset (&req, 0, sizeof (struct ifreq));
+-	strncpy (req.ifr_name, nm_device_get_iface (dev), IFNAMSIZ);
++	NM_DEVICE_CLASS (nm_device_ethernet_parent_class)->update_hw_address (dev);
+ 
+-	errno = 0;
+-	if (ioctl (fd, SIOCGIFHWADDR, &req) < 0) {
+-		nm_log_err (LOGD_HW | LOGD_ETHER,
+-		            "(%s) failed to read hardware address (error %d)",
+-		            nm_device_get_iface (dev), errno);
+-	} else
+-		_update_hw_addr (self, (const guint8 *) &req.ifr_hwaddr.sa_data);
+-
+-	close (fd);
++	hw_addr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (dev));
++	if (memcmp (old_addr, hw_addr, ETH_ALEN))
++		g_object_notify (G_OBJECT (dev), NM_DEVICE_ETHERNET_HW_ADDRESS);
+ }
+ 
+ static void
+@@ -725,10 +498,13 @@ real_update_permanent_hw_address (NMDevice *dev)
+ 	errno = 0;
+ 	ret = ioctl (fd, SIOCETHTOOL, &req);
+ 	if ((ret < 0) || !nm_ethernet_address_is_valid ((struct ether_addr *) epaddr->data)) {
++		guint8 *current_addr;
++
+ 		nm_log_err (LOGD_HW | LOGD_ETHER, "(%s): unable to read permanent MAC address (error %d)",
+ 		            nm_device_get_iface (dev), errno);
+ 		/* Fall back to current address */
+-		memcpy (epaddr->data, &priv->hw_addr, ETH_ALEN);
++		current_addr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (self));
++		memcpy (epaddr->data, current_addr, ETH_ALEN);
+ 	}
+ 
+ 	if (memcmp (&priv->perm_hw_addr, epaddr->data, ETH_ALEN)) {
+@@ -758,34 +534,6 @@ real_get_generic_capabilities (NMDevice *dev)
+ }
+ 
+ static gboolean
+-real_can_interrupt_activation (NMDevice *dev)
+-{
+-	NMDeviceEthernet *self = NM_DEVICE_ETHERNET (dev);
+-	gboolean interrupt = FALSE;
+-
+-	/* Devices that support carrier detect can interrupt activation
+-	 * if the link becomes inactive.
+-	 */
+-	if (nm_device_get_capabilities (dev) & NM_DEVICE_CAP_CARRIER_DETECT) {
+-		if (NM_DEVICE_ETHERNET_GET_PRIVATE (self)->carrier == FALSE)
+-			interrupt = TRUE;
+-	}
+-	return interrupt;
+-}
+-
+-static gboolean
+-real_is_available (NMDevice *dev)
+-{
+-	NMDeviceEthernet *self = NM_DEVICE_ETHERNET (dev);
+-
+-	/* Can't do anything if there isn't a carrier */
+-	if (!NM_DEVICE_ETHERNET_GET_PRIVATE (self)->carrier)
+-		return FALSE;
+-
+-	return TRUE;
+-}
+-
+-static gboolean
+ match_subchans (NMDeviceEthernet *self, NMSettingWired *s_wired, gboolean *try_mac)
+ {
+ 	NMDeviceEthernetPrivate *priv = NM_DEVICE_ETHERNET_GET_PRIVATE (self);
+@@ -1839,147 +1587,19 @@ wired_match_config (NMDevice *self, NMConnection *connection)
+ 	return TRUE;
+ }
+ 
+-typedef struct {
+-	int ifindex;
+-	NMIP4Address *addr;
+-	gboolean found;
+-} AddrData;
+-
+-static void
+-check_one_address (struct nl_object *object, void *user_data)
+-{
+-	AddrData *data = user_data;
+-	struct rtnl_addr *addr = (struct rtnl_addr *) object;
+-	struct nl_addr *local;
+-	struct in_addr tmp;
+-
+-	if (rtnl_addr_get_ifindex (addr) != data->ifindex)
+-		return;
+-	if (rtnl_addr_get_family (addr) != AF_INET)
+-		return;
+-
+-	if (nm_ip4_address_get_prefix (data->addr) != rtnl_addr_get_prefixlen (addr))
+-		return;
+-
+-	local = rtnl_addr_get_local (addr);
+-	if (nl_addr_get_family (local) != AF_INET)
+-		return;
+-	if (nl_addr_get_len (local) != sizeof (struct in_addr))
+-		return;
+-	if (!nl_addr_get_binary_addr (local))
+-		return;
+-
+-	memcpy (&tmp, nl_addr_get_binary_addr (local), nl_addr_get_len (local));
+-	if (tmp.s_addr != nm_ip4_address_get_address (data->addr))
+-		return;
+-
+-	/* Yay, found it */
+-	data->found = TRUE;
+-}
+-
+-static gboolean
+-ip4_match_config (NMDevice *self, NMConnection *connection)
+-{
+-	NMSettingIP4Config *s_ip4;
+-	NMSettingConnection *s_con;
+-	struct nl_handle *nlh = NULL;
+-	struct nl_cache *addr_cache = NULL;
+-	int i, num;
+-	GSList *leases, *iter;
+-	NMDHCPManager *dhcp_mgr;
+-	const char *method;
+-	int ifindex;
+-	AddrData check_data;
+-
+-	ifindex = nm_device_get_ifindex (self);
+-
+-	s_con = (NMSettingConnection *) nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION);
+-	g_assert (s_con);
+-	g_assert (nm_setting_connection_get_uuid (s_con));
+-
+-	s_ip4 = (NMSettingIP4Config *) nm_connection_get_setting (connection, NM_TYPE_SETTING_IP4_CONFIG);
+-	if (!s_ip4)
+-		return FALSE;
+-
+-	/* Read all the device's IP addresses */
+-	nlh = nm_netlink_get_default_handle ();
+-	if (!nlh)
+-		return FALSE;
+-
+-	addr_cache = rtnl_addr_alloc_cache (nlh);
+-	if (!addr_cache)
+-		return FALSE;
+-	nl_cache_mngt_provide (addr_cache);
+-
+-	/* Get any saved leases that apply to this connection */
+-	dhcp_mgr = nm_dhcp_manager_get ();
+-	leases = nm_dhcp_manager_get_lease_config (dhcp_mgr,
+-	                                           nm_device_get_iface (self),
+-	                                           nm_setting_connection_get_uuid (s_con));
+-	g_object_unref (dhcp_mgr);
+-
+-	method = nm_setting_ip4_config_get_method (s_ip4);
+-	if (!strcmp (method, NM_SETTING_IP4_CONFIG_METHOD_AUTO)) {
+-		gboolean found = FALSE;
+-
+-		/* Find at least one lease's address on the device */
+-		for (iter = leases; iter; iter = g_slist_next (iter)) {
+-			NMIP4Config *addr = iter->data;
+-
+-			memset (&check_data, 0, sizeof (check_data));
+-			check_data.ifindex = ifindex;
+-			check_data.found = FALSE;
+-			check_data.addr = nm_ip4_config_get_address (addr, 0);
+-
+-			nl_cache_foreach (addr_cache, check_one_address, &check_data);
+-			if (check_data.found) {
+-				found = TRUE; /* Yay, device has same address as a lease */
+-				break;
+-			}
+-		}
+-		g_slist_foreach (leases, (GFunc) g_object_unref, NULL);
+-		g_slist_free (leases);
+-		return found;
+-	} else {
+-		/* Maybe the connection used to be DHCP and there are stale leases; ignore them */
+-		g_slist_foreach (leases, (GFunc) g_object_unref, NULL);
+-		g_slist_free (leases);
+-	}
+-
+-	/* 'shared' and 'link-local' aren't supported methods because 'shared'
+-	 * requires too much iptables and dnsmasq state to be reclaimed, and
+-	 * avahi-autoipd isn't smart enough to allow the link-local address to be
+-	 * determined at any point other than when it was first assigned.
+-	 */
+-	if (strcmp (method, NM_SETTING_IP4_CONFIG_METHOD_MANUAL))
+-		return FALSE;
+-
+-	/* Everything below for static addressing */
+-
+-	/* Find all IP4 addresses of this connection in the device's address list */
+-	num = nm_setting_ip4_config_get_num_addresses (s_ip4);
+-	for (i = 0; i < num; i++) {
+-		memset (&check_data, 0, sizeof (check_data));
+-		check_data.ifindex = ifindex;
+-		check_data.found = FALSE;
+-		check_data.addr = nm_setting_ip4_config_get_address (s_ip4, i);
+-
+-		nl_cache_foreach (addr_cache, check_one_address, &check_data);
+-		if (!check_data.found)
+-			return FALSE;
+-	}
+-
+-	/* Success; all the connection's static IP addresses are assigned to the device */
+-	return TRUE;
+-}
+-
+ static NMConnection *
+ connection_match_config (NMDevice *self, const GSList *connections)
+ {
+-	GSList *iter;
++	const GSList *iter;
++	GSList *wired_matches;
+ 	NMSettingConnection *s_con;
++	NMConnection *match;
+ 
+-	for (iter = (GSList *) connections; iter; iter = g_slist_next (iter)) {
++	/* First narrow @connections down to those that match in their
++	 * NMSettingWired configuration.
++	 */
++	wired_matches = NULL;
++	for (iter = connections; iter; iter = iter->next) {
+ 		NMConnection *candidate = NM_CONNECTION (iter->data);
+ 
+ 		s_con = (NMSettingConnection *) nm_connection_get_setting (candidate, NM_TYPE_SETTING_CONNECTION);
+@@ -1997,13 +1617,15 @@ connection_match_config (NMDevice *self, const GSList *connections)
+ 		if (!wired_match_config (self, candidate))
+ 			continue;
+ 
+-		if (!ip4_match_config (self, candidate))
+-			continue;
+-
+-		return candidate;
++		wired_matches = g_slist_prepend (wired_matches, candidate);
+ 	}
+ 
+-	return NULL;
++	/* Now pass those to the super method, which will check IP config */
++	wired_matches = g_slist_reverse (wired_matches);
++	match = NM_DEVICE_CLASS (nm_device_ethernet_parent_class)->connection_match_config (self, wired_matches);
++	g_slist_free (wired_matches);
++
++	return match;
+ }
+ 
+ static void
+@@ -2025,22 +1647,6 @@ dispose (GObject *object)
+ 	while (priv->supplicant.mgr_tasks)
+ 		finish_supplicant_task ((SupplicantStateTask *) priv->supplicant.mgr_tasks->data, TRUE);
+ 
+-	if (priv->link_connected_id) {
+-		g_signal_handler_disconnect (priv->monitor, priv->link_connected_id);
+-		priv->link_connected_id = 0;
+-	}
+-	if (priv->link_disconnected_id) {
+-		g_signal_handler_disconnect (priv->monitor, priv->link_disconnected_id);
+-		priv->link_disconnected_id = 0;
+-	}
+-
+-	carrier_action_defer_clear (self);
+-
+-	if (priv->monitor) {
+-		g_object_unref (priv->monitor);
+-		priv->monitor = NULL;
+-	}
+-
+ 	g_free (priv->subchan1);
+ 	g_free (priv->subchan2);
+ 	g_free (priv->subchan3);
+@@ -2055,10 +1661,12 @@ get_property (GObject *object, guint prop_id,
+ {
+ 	NMDeviceEthernet *self = NM_DEVICE_ETHERNET (object);
+ 	NMDeviceEthernetPrivate *priv = NM_DEVICE_ETHERNET_GET_PRIVATE (self);
++	guint8 *current_addr;
+ 
+ 	switch (prop_id) {
+ 	case PROP_HW_ADDRESS:
+-		g_value_take_string (value, nm_ether_ntop ((struct ether_addr *) &priv->hw_addr));
++		current_addr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (self));
++		g_value_take_string (value, nm_ether_ntop ((struct ether_addr *) current_addr));
+ 		break;
+ 	case PROP_PERM_HW_ADDRESS:
+ 		g_value_take_string (value, nm_ether_ntop ((struct ether_addr *) &priv->perm_hw_addr));
+@@ -2067,7 +1675,7 @@ get_property (GObject *object, guint prop_id,
+ 		g_value_set_uint (value, nm_device_ethernet_get_speed (self));
+ 		break;
+ 	case PROP_CARRIER:
+-		g_value_set_boolean (value, priv->carrier);
++		g_value_set_boolean (value, nm_device_wired_get_carrier (NM_DEVICE_WIRED (self)));
+ 		break;
+ 	default:
+ 		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+@@ -2101,17 +1709,12 @@ nm_device_ethernet_class_init (NMDeviceEthernetClass *klass)
+ 	object_class->set_property = set_property;
+ 
+ 	parent_class->get_generic_capabilities = real_get_generic_capabilities;
+-	parent_class->hw_is_up = real_hw_is_up;
+-	parent_class->hw_bring_up = real_hw_bring_up;
+-	parent_class->hw_take_down = real_hw_take_down;
+ 	parent_class->is_up = real_is_up;
+ 	parent_class->bring_up = real_bring_up;
+ 	parent_class->take_down = real_take_down;
+-	parent_class->can_interrupt_activation = real_can_interrupt_activation;
+ 	parent_class->update_hw_address = real_update_hw_address;
+ 	parent_class->update_permanent_hw_address = real_update_permanent_hw_address;
+ 	parent_class->get_best_auto_connection = real_get_best_auto_connection;
+-	parent_class->is_available = real_is_available;
+ 	parent_class->connection_secrets_updated = real_connection_secrets_updated;
+ 	parent_class->check_connection_compatible = real_check_connection_compatible;
+ 
+diff --git a/src/nm-device-ethernet.h b/src/nm-device-ethernet.h
+index b9e2afd..7b61f8b 100644
+--- a/src/nm-device-ethernet.h
++++ b/src/nm-device-ethernet.h
+@@ -23,9 +23,8 @@
+ #define NM_DEVICE_ETHERNET_H
+ 
+ #include <glib-object.h>
+-#include <net/ethernet.h>
+ 
+-#include "nm-device.h"
++#include "nm-device-wired.h"
+ 
+ G_BEGIN_DECLS
+ 
+@@ -42,11 +41,11 @@ G_BEGIN_DECLS
+ #define NM_DEVICE_ETHERNET_CARRIER "carrier"
+ 
+ typedef struct {
+-	NMDevice parent;
++	NMDeviceWired parent;
+ } NMDeviceEthernet;
+ 
+ typedef struct {
+-	NMDeviceClass parent;
++	NMDeviceWiredClass parent;
+ 
+ 	/* Signals */
+ 	void (*properties_changed) (NMDeviceEthernet *device, GHashTable *properties);
+@@ -60,9 +59,6 @@ NMDevice *nm_device_ethernet_new (const char *udi,
+                                   const char *iface,
+                                   const char *driver);
+ 
+-void nm_device_ethernet_get_address (NMDeviceEthernet *dev,
+-                                     struct ether_addr *addr);
+-
+ G_END_DECLS
+ 
+ #endif	/* NM_DEVICE_ETHERNET_H */
+diff --git a/src/nm-device-infiniband.c b/src/nm-device-infiniband.c
+new file mode 100644
+index 0000000..ec86d61
+--- /dev/null
++++ b/src/nm-device-infiniband.c
+@@ -0,0 +1,490 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager -- Network link manager
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Copyright 2011 Red Hat, Inc.
++ */
++
++#include "config.h"
++
++#include <glib.h>
++#include <glib/gi18n.h>
++
++#include <linux/if_infiniband.h>
++#include <netinet/ether.h>
++
++#include "nm-device-infiniband.h"
++#include "nm-device-interface.h"
++#include "nm-logging.h"
++#include "nm-properties-changed-signal.h"
++#include "nm-setting-connection.h"
++#include "nm-setting-infiniband.h"
++#include "nm-utils.h"
++#include "NetworkManagerUtils.h"
++
++#include "nm-device-infiniband-glue.h"
++
++
++G_DEFINE_TYPE (NMDeviceInfiniband, nm_device_infiniband, NM_TYPE_DEVICE_WIRED)
++
++#define NM_DEVICE_INFINIBAND_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_DEVICE_INFINIBAND, NMDeviceInfinibandPrivate))
++
++typedef enum
++{
++	NM_INFINIBAND_ERROR_CONNECTION_NOT_INFINIBAND = 0,
++	NM_INFINIBAND_ERROR_CONNECTION_INVALID,
++	NM_INFINIBAND_ERROR_CONNECTION_INCOMPATIBLE,
++} NMInfinibandError;
++
++#define NM_INFINIBAND_ERROR (nm_infiniband_error_quark ())
++#define NM_TYPE_INFINIBAND_ERROR (nm_infiniband_error_get_type ()) 
++
++typedef struct {
++	int dummy;
++} NMDeviceInfinibandPrivate;
++
++enum {
++	PROPERTIES_CHANGED,
++
++	LAST_SIGNAL
++};
++
++static guint signals[LAST_SIGNAL] = { 0 };
++
++enum {
++	PROP_0,
++	PROP_HW_ADDRESS,
++	PROP_CARRIER,
++
++	LAST_PROP
++};
++
++static GQuark
++nm_infiniband_error_quark (void)
++{
++	static GQuark quark = 0;
++	if (!quark)
++		quark = g_quark_from_static_string ("nm-infiniband-error");
++	return quark;
++}
++
++/* This should really be standard. */
++#define ENUM_ENTRY(NAME, DESC) { NAME, "" #NAME "", DESC }
++
++static GType
++nm_infiniband_error_get_type (void)
++{
++	static GType etype = 0;
++
++	if (etype == 0) {
++		static const GEnumValue values[] = {
++			/* Connection was not a wired connection. */
++			ENUM_ENTRY (NM_INFINIBAND_ERROR_CONNECTION_NOT_INFINIBAND, "ConnectionNotInfiniband"),
++			/* Connection was not a valid wired connection. */
++			ENUM_ENTRY (NM_INFINIBAND_ERROR_CONNECTION_INVALID, "ConnectionInvalid"),
++			/* Connection does not apply to this device. */
++			ENUM_ENTRY (NM_INFINIBAND_ERROR_CONNECTION_INCOMPATIBLE, "ConnectionIncompatible"),
++			{ 0, 0, 0 }
++		};
++		etype = g_enum_register_static ("NMInfinibandError", values);
++	}
++	return etype;
++}
++
++static GObject*
++constructor (GType type,
++			 guint n_construct_params,
++			 GObjectConstructParam *construct_params)
++{
++	GObject *object;
++	NMDeviceInfinibandPrivate *priv;
++	NMDevice *self;
++
++	object = G_OBJECT_CLASS (nm_device_infiniband_parent_class)->constructor (type,
++	                                                                        n_construct_params,
++	                                                                        construct_params);
++	if (!object)
++		return NULL;
++
++	self = NM_DEVICE (object);
++	priv = NM_DEVICE_INFINIBAND_GET_PRIVATE (self);
++
++	nm_log_dbg (LOGD_HW | LOGD_INFINIBAND, "(%s): kernel ifindex %d",
++	            nm_device_get_iface (NM_DEVICE (self)),
++	            nm_device_get_ifindex (NM_DEVICE (self)));
++
++	return object;
++}
++
++static void
++nm_device_infiniband_init (NMDeviceInfiniband * self)
++{
++}
++
++NMDevice *
++nm_device_infiniband_new (const char *udi,
++						  const char *iface,
++						  const char *driver)
++{
++	g_return_val_if_fail (udi != NULL, NULL);
++	g_return_val_if_fail (iface != NULL, NULL);
++	g_return_val_if_fail (driver != NULL, NULL);
++
++	return (NMDevice *) g_object_new (NM_TYPE_DEVICE_INFINIBAND,
++	                                  NM_DEVICE_INTERFACE_UDI, udi,
++	                                  NM_DEVICE_INTERFACE_IFACE, iface,
++	                                  NM_DEVICE_INTERFACE_DRIVER, driver,
++	                                  NM_DEVICE_INTERFACE_TYPE_DESC, "InfiniBand",
++	                                  NM_DEVICE_INTERFACE_DEVICE_TYPE, NM_DEVICE_TYPE_INFINIBAND,
++	                                  NULL);
++}
++
++
++static void
++real_update_hw_address (NMDevice *dev)
++{
++	guint8 *hw_addr, old_addr[INFINIBAND_ALEN];
++
++	hw_addr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (dev));
++	memcpy (old_addr, hw_addr, INFINIBAND_ALEN);
++
++	NM_DEVICE_CLASS (nm_device_infiniband_parent_class)->update_hw_address (dev);
++
++	hw_addr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (dev));
++	if (memcmp (old_addr, hw_addr, INFINIBAND_ALEN))
++		g_object_notify (G_OBJECT (dev), NM_DEVICE_INFINIBAND_HW_ADDRESS);
++}
++
++static guint32
++real_get_generic_capabilities (NMDevice *dev)
++{
++	return NM_DEVICE_CAP_CARRIER_DETECT | NM_DEVICE_CAP_NM_SUPPORTED;
++}
++
++static NMConnection *
++real_get_best_auto_connection (NMDevice *dev,
++                               GSList *connections,
++                               char **specific_object)
++{
++	GSList *iter;
++
++	for (iter = connections; iter; iter = g_slist_next (iter)) {
++		NMConnection *connection = NM_CONNECTION (iter->data);
++		NMSettingConnection *s_con;
++		NMSettingInfiniband *s_infiniband;
++		const char *connection_type;
++
++		s_con = (NMSettingConnection *) nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION);
++		g_assert (s_con);
++
++		connection_type = nm_setting_connection_get_connection_type (s_con);
++
++		if (strcmp (connection_type, NM_SETTING_INFINIBAND_SETTING_NAME))
++			continue;
++		if (!nm_setting_connection_get_autoconnect (s_con))
++			continue;
++
++		s_infiniband = (NMSettingInfiniband *) nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND);
++		if (!s_infiniband)
++			continue;
++
++		if (s_infiniband) {
++			guint8 *hwaddr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (dev));
++			const GByteArray *mac;
++
++			mac = nm_setting_infiniband_get_mac_address (s_infiniband);
++			if (mac && memcmp (mac->data, hwaddr, INFINIBAND_ALEN))
++				continue;
++		}
++
++		return connection;
++	}
++	return NULL;
++}
++
++static NMActStageReturn
++real_act_stage1_prepare (NMDevice *dev, NMDeviceStateReason *reason)
++{
++	NMActRequest *req;
++	NMConnection *connection;
++	NMSettingInfiniband *s_infiniband;
++	const char *transport_mode;
++	char *mode_path, *mode_value;
++	gboolean set_mode;
++
++	g_return_val_if_fail (reason != NULL, NM_ACT_STAGE_RETURN_FAILURE);
++
++	req = nm_device_get_act_request (dev);
++	g_return_val_if_fail (req != NULL, NM_ACT_STAGE_RETURN_FAILURE);
++
++	connection = nm_act_request_get_connection (req);
++	g_assert (connection);
++	s_infiniband = (NMSettingInfiniband *) nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND);
++	g_assert (s_infiniband);
++
++	transport_mode = nm_setting_infiniband_get_transport_mode (s_infiniband);
++
++	mode_path = g_strdup_printf ("/sys/class/net/%s/mode",
++								 nm_device_get_iface (dev));
++	if (!g_file_test (mode_path, G_FILE_TEST_EXISTS)) {
++		g_free (mode_path);
++
++		if (!strcmp (transport_mode, "datagram"))
++			return NM_ACT_STAGE_RETURN_SUCCESS;
++		else {
++			*reason = NM_DEVICE_STATE_REASON_INFINIBAND_MODE;
++			return NM_ACT_STAGE_RETURN_FAILURE;
++		}
++	}
++
++	mode_value = g_strdup_printf ("%s\n", transport_mode);
++	set_mode = nm_utils_do_sysctl (mode_path, mode_value);
++	g_free (mode_value);
++	g_free (mode_path);
++
++	if (!set_mode) {
++		*reason = NM_DEVICE_STATE_REASON_CONFIG_FAILED;
++		return NM_ACT_STAGE_RETURN_FAILURE;
++	}
++
++	return NM_ACT_STAGE_RETURN_SUCCESS;
++}
++
++static NMActStageReturn
++real_act_stage4_get_ip4_config (NMDevice *device,
++                                NMIP4Config **config,
++                                NMDeviceStateReason *reason)
++{
++	NMActStageReturn ret;
++
++	g_return_val_if_fail (config != NULL, NM_ACT_STAGE_RETURN_FAILURE);
++	g_return_val_if_fail (*config == NULL, NM_ACT_STAGE_RETURN_FAILURE);
++	g_return_val_if_fail (reason != NULL, NM_ACT_STAGE_RETURN_FAILURE);
++
++	/* Chain up to parent */
++	ret = NM_DEVICE_CLASS (nm_device_infiniband_parent_class)->act_stage4_get_ip4_config (device, config, reason);
++
++	if (ret == NM_ACT_STAGE_RETURN_SUCCESS) {
++		NMConnection *connection;
++		NMSettingInfiniband *s_infiniband;
++		guint32 mtu;
++
++		connection = nm_act_request_get_connection (nm_device_get_act_request (device));
++		g_assert (connection);
++		s_infiniband = NM_SETTING_INFINIBAND (nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND));
++		g_assert (s_infiniband);
++
++		/* MTU override */
++		mtu = nm_setting_infiniband_get_mtu (s_infiniband);
++		if (mtu)
++			nm_ip4_config_set_mtu (*config, mtu);
++	}
++
++	return ret;
++}
++
++static gboolean
++real_check_connection_compatible (NMDevice *device,
++                                  NMConnection *connection,
++                                  GError **error)
++{
++	NMSettingConnection *s_con;
++	NMSettingInfiniband *s_infiniband;
++	const char *connection_type;
++	const GByteArray *mac;
++
++	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
++	g_assert (s_con);
++
++	connection_type = nm_setting_connection_get_connection_type (s_con);
++	if (strcmp (connection_type, NM_SETTING_INFINIBAND_SETTING_NAME)) {
++		g_set_error (error,
++		             NM_INFINIBAND_ERROR,
++					 NM_INFINIBAND_ERROR_CONNECTION_NOT_INFINIBAND,
++		             "The connection was not an InfiniBand connection.");
++		return FALSE;
++	}
++
++	s_infiniband = (NMSettingInfiniband *) nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND);
++	if (!s_infiniband) {
++		g_set_error (error,
++		             NM_INFINIBAND_ERROR, NM_INFINIBAND_ERROR_CONNECTION_INVALID,
++		             "The connection was not a valid infiniband connection.");
++		return FALSE;
++	}
++
++	if (s_infiniband) {
++		guint8 *hwaddr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (device));
++
++		mac = nm_setting_infiniband_get_mac_address (s_infiniband);
++		if (mac && memcmp (mac->data, hwaddr, INFINIBAND_ALEN)) {
++			g_set_error (error,
++			             NM_INFINIBAND_ERROR,
++						 NM_INFINIBAND_ERROR_CONNECTION_INCOMPATIBLE,
++			             "The connection's MAC address did not match this device.");
++			return FALSE;
++		}
++	}
++
++	return TRUE;
++}
++
++static gboolean
++spec_match_list (NMDevice *device, const GSList *specs)
++{
++	char *hwaddr;
++	gboolean matched;
++
++	hwaddr = nm_utils_hwaddr_ntoa (nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (device)), ARPHRD_INFINIBAND);
++	matched = nm_match_spec_hwaddr (specs, hwaddr);
++	g_free (hwaddr);
++
++	return matched;
++}
++
++static gboolean
++infiniband_match_config (NMDevice *self, NMConnection *connection)
++{
++	NMSettingInfiniband *s_infiniband;
++	const GByteArray *s_mac;
++
++	s_infiniband = (NMSettingInfiniband *) nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND);
++	if (!s_infiniband)
++		return FALSE;
++
++	/* MAC address check */
++	s_mac = nm_setting_infiniband_get_mac_address (s_infiniband);
++	if (s_mac && memcmp (s_mac->data, nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (self)), INFINIBAND_ALEN))
++		return FALSE;
++
++	return TRUE;
++}
++
++static NMConnection *
++connection_match_config (NMDevice *self, const GSList *connections)
++{
++	const GSList *iter;
++	GSList *infiniband_matches;
++	NMSettingConnection *s_con;
++	NMConnection *match;
++
++	/* First narrow @connections down to those that match in their
++	 * NMSettingInfiniband configuration.
++	 */
++	infiniband_matches = NULL;
++	for (iter = connections; iter; iter = iter->next) {
++		NMConnection *candidate = NM_CONNECTION (iter->data);
++
++		s_con = (NMSettingConnection *) nm_connection_get_setting (candidate, NM_TYPE_SETTING_CONNECTION);
++		g_assert (s_con);
++		if (strcmp (nm_setting_connection_get_connection_type (s_con), NM_SETTING_INFINIBAND_SETTING_NAME))
++			continue;
++
++		if (!infiniband_match_config (self, candidate))
++			continue;
++
++		infiniband_matches = g_slist_prepend (infiniband_matches, candidate);
++	}
++
++	/* Now pass those to the super method, which will check IP config */
++	infiniband_matches = g_slist_reverse (infiniband_matches);
++	match = NM_DEVICE_CLASS (nm_device_infiniband_parent_class)->connection_match_config (self, infiniband_matches);
++	g_slist_free (infiniband_matches);
++
++	return match;
++}
++
++static void
++get_property (GObject *object, guint prop_id,
++              GValue *value, GParamSpec *pspec)
++{
++	guint8 *current_addr;
++
++	switch (prop_id) {
++	case PROP_HW_ADDRESS:
++		current_addr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (object));
++		g_value_take_string (value, nm_utils_hwaddr_ntoa (current_addr, ARPHRD_INFINIBAND));
++		break;
++	case PROP_CARRIER:
++		g_value_set_boolean (value, nm_device_wired_get_carrier (NM_DEVICE_WIRED (object)));
++		break;
++	default:
++		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++		break;
++	}
++}
++
++static void
++set_property (GObject *object, guint prop_id,
++			  const GValue *value, GParamSpec *pspec)
++{
++	switch (prop_id) {
++	default:
++		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++		break;
++	}
++}
++
++static void
++nm_device_infiniband_class_init (NMDeviceInfinibandClass *klass)
++{
++	GObjectClass *object_class = G_OBJECT_CLASS (klass);
++	NMDeviceClass *parent_class = NM_DEVICE_CLASS (klass);
++
++	g_type_class_add_private (object_class, sizeof (NMDeviceInfinibandPrivate));
++
++	/* virtual methods */
++	object_class->constructor = constructor;
++	object_class->get_property = get_property;
++	object_class->set_property = set_property;
++
++	parent_class->get_generic_capabilities = real_get_generic_capabilities;
++	parent_class->update_hw_address = real_update_hw_address;
++	parent_class->get_best_auto_connection = real_get_best_auto_connection;
++	parent_class->check_connection_compatible = real_check_connection_compatible;
++
++	parent_class->act_stage1_prepare = real_act_stage1_prepare;
++	parent_class->act_stage4_get_ip4_config = real_act_stage4_get_ip4_config;
++	parent_class->spec_match_list = spec_match_list;
++	parent_class->connection_match_config = connection_match_config;
++
++	/* properties */
++	g_object_class_install_property
++		(object_class, PROP_HW_ADDRESS,
++		 g_param_spec_string (NM_DEVICE_INFINIBAND_HW_ADDRESS,
++							  "Active MAC Address",
++							  "Currently set hardware MAC address",
++							  NULL,
++							  G_PARAM_READABLE));
++
++	g_object_class_install_property
++		(object_class, PROP_CARRIER,
++		 g_param_spec_boolean (NM_DEVICE_INFINIBAND_CARRIER,
++							   "Carrier",
++							   "Carrier",
++							   FALSE,
++							   G_PARAM_READABLE));
++
++	/* Signals */
++	signals[PROPERTIES_CHANGED] = 
++		nm_properties_changed_signal_new (object_class,
++										  G_STRUCT_OFFSET (NMDeviceInfinibandClass, properties_changed));
++
++	dbus_g_object_type_install_info (G_TYPE_FROM_CLASS (klass),
++									 &dbus_glib_nm_device_infiniband_object_info);
++
++	dbus_g_error_domain_register (NM_INFINIBAND_ERROR, NULL, NM_TYPE_INFINIBAND_ERROR);
++}
+diff --git a/src/nm-device-infiniband.h b/src/nm-device-infiniband.h
+new file mode 100644
+index 0000000..d70abd9
+--- /dev/null
++++ b/src/nm-device-infiniband.h
+@@ -0,0 +1,60 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager -- Network link manager
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Copyright 2011 Red Hat, Inc.
++ */
++
++#ifndef NM_DEVICE_INFINIBAND_H
++#define NM_DEVICE_INFINIBAND_H
++
++#include <glib-object.h>
++
++#include "nm-device-wired.h"
++
++G_BEGIN_DECLS
++
++#define NM_TYPE_DEVICE_INFINIBAND			(nm_device_infiniband_get_type ())
++#define NM_DEVICE_INFINIBAND(obj)			(G_TYPE_CHECK_INSTANCE_CAST ((obj), NM_TYPE_DEVICE_INFINIBAND, NMDeviceInfiniband))
++#define NM_DEVICE_INFINIBAND_CLASS(klass)	(G_TYPE_CHECK_CLASS_CAST ((klass),  NM_TYPE_DEVICE_INFINIBAND, NMDeviceInfinibandClass))
++#define NM_IS_DEVICE_INFINIBAND(obj)		(G_TYPE_CHECK_INSTANCE_TYPE ((obj), NM_TYPE_DEVICE_INFINIBAND))
++#define NM_IS_DEVICE_INFINIBAND_CLASS(klass)	(G_TYPE_CHECK_CLASS_TYPE ((klass),  NM_TYPE_DEVICE_INFINIBAND))
++#define NM_DEVICE_INFINIBAND_GET_CLASS(obj)	(G_TYPE_INSTANCE_GET_CLASS ((obj),  NM_TYPE_DEVICE_INFINIBAND, NMDeviceInfinibandClass))
++
++#define NM_DEVICE_INFINIBAND_HW_ADDRESS "hw-address"
++#define NM_DEVICE_INFINIBAND_CARRIER "carrier"
++
++typedef struct {
++	NMDeviceWired parent;
++} NMDeviceInfiniband;
++
++typedef struct {
++	NMDeviceWiredClass parent;
++
++	/* Signals */
++	void (*properties_changed) (NMDeviceInfiniband *device, GHashTable *properties);
++} NMDeviceInfinibandClass;
++
++
++GType nm_device_infiniband_get_type (void);
++
++NMDevice *nm_device_infiniband_new (const char *udi,
++									const char *iface,
++									const char *driver);
++
++G_END_DECLS
++
++#endif	/* NM_DEVICE_INFINIBAND_H */
+diff --git a/src/nm-device-wired.c b/src/nm-device-wired.c
+new file mode 100644
+index 0000000..0df03d5
+--- /dev/null
++++ b/src/nm-device-wired.c
+@@ -0,0 +1,608 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager -- Network link manager
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Copyright (C) 2005 - 2011 Red Hat, Inc.
++ * Copyright (C) 2006 - 2008 Novell, Inc.
++ */
++
++#include "config.h"
++#include <glib.h>
++#include <errno.h>
++#include <sys/socket.h>
++#include <linux/if.h>
++#include <linux/if_infiniband.h>
++#include <netinet/ether.h>
++#include <netlink/route/addr.h>
++
++#include "nm-device-wired.h"
++#include "nm-device-interface.h"
++#include "nm-device-private.h"
++#include "nm-dhcp-manager.h"
++#include "nm-logging.h"
++#include "nm-netlink-monitor.h"
++#include "nm-setting-connection.h"
++#include "nm-system.h"
++#include "nm-utils.h"
++#include "NetworkManagerUtils.h"
++
++
++G_DEFINE_TYPE (NMDeviceWired, nm_device_wired, NM_TYPE_DEVICE)
++
++#define NM_DEVICE_WIRED_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), NM_TYPE_DEVICE_WIRED, NMDeviceWiredPrivate))
++
++#define NM_DEVICE_WIRED_LOG_LEVEL(dev) ((nm_device_get_device_type (dev) == NM_DEVICE_TYPE_INFINIBAND) ? LOGD_INFINIBAND : LOGD_ETHER)
++
++typedef struct {
++	guint8              hw_addr[NM_UTILS_HWADDR_LEN_MAX];         /* Currently set MAC address */
++	guint               hw_addr_type;
++	guint               hw_addr_len;
++	gboolean            carrier;
++
++	NMNetlinkMonitor *  monitor;
++	gulong              link_connected_id;
++	gulong              link_disconnected_id;
++	guint               carrier_action_defer_id;
++
++} NMDeviceWiredPrivate;
++
++static void
++carrier_action_defer_clear (NMDeviceWired *self)
++{
++	NMDeviceWiredPrivate *priv = NM_DEVICE_WIRED_GET_PRIVATE (self);
++
++	if (priv->carrier_action_defer_id) {
++		g_source_remove (priv->carrier_action_defer_id);
++		priv->carrier_action_defer_id = 0;
++	}
++}
++
++static gboolean
++carrier_action_defer_cb (gpointer user_data)
++{
++	NMDeviceWired *self = NM_DEVICE_WIRED (user_data);
++	NMDeviceWiredPrivate *priv = NM_DEVICE_WIRED_GET_PRIVATE (self);
++	NMDeviceState state;
++
++	priv->carrier_action_defer_id = 0;
++
++	state = nm_device_interface_get_state (NM_DEVICE_INTERFACE (self));
++	if (state == NM_DEVICE_STATE_UNAVAILABLE) {
++		if (priv->carrier)
++			nm_device_queue_state (NM_DEVICE (self), NM_DEVICE_STATE_DISCONNECTED, NM_DEVICE_STATE_REASON_CARRIER);
++	} else if (state >= NM_DEVICE_STATE_DISCONNECTED) {
++		if (!priv->carrier)
++			nm_device_queue_state (NM_DEVICE (self), NM_DEVICE_STATE_UNAVAILABLE, NM_DEVICE_STATE_REASON_CARRIER);
++	}
++
++	return FALSE;
++}
++
++static void
++set_carrier (NMDeviceWired *self,
++             const gboolean carrier,
++             const gboolean defer_action)
++{
++	NMDeviceWiredPrivate *priv;
++	NMDeviceState state;
++	guint32 caps;
++
++	g_return_if_fail (NM_IS_DEVICE (self));
++
++	priv = NM_DEVICE_WIRED_GET_PRIVATE (self);
++	if (priv->carrier == carrier)
++		return;
++
++	/* Clear any previous deferred action */
++	carrier_action_defer_clear (self);
++
++	/* Warn if we try to set carrier down on a device that
++	 * doesn't support carrier detect.  These devices assume
++	 * the carrier is always up.
++	 */
++	caps = nm_device_get_capabilities (NM_DEVICE (self));
++	g_return_if_fail (caps & NM_DEVICE_CAP_CARRIER_DETECT);
++
++	priv->carrier = carrier;
++	g_object_notify (G_OBJECT (self), "carrier");
++
++	state = nm_device_interface_get_state (NM_DEVICE_INTERFACE (self));
++	nm_log_info (LOGD_HW | NM_DEVICE_WIRED_LOG_LEVEL (NM_DEVICE (self)),
++				 "(%s): carrier now %s (device state %d%s)",
++	             nm_device_get_iface (NM_DEVICE (self)),
++	             carrier ? "ON" : "OFF",
++	             state,
++	             defer_action ? ", deferring action for 4 seconds" : "");
++
++	if (defer_action)
++		priv->carrier_action_defer_id = g_timeout_add_seconds (4, carrier_action_defer_cb, self);
++	else
++		carrier_action_defer_cb (self);
++}
++
++static void
++carrier_on (NMNetlinkMonitor *monitor,
++            int idx,
++            gpointer user_data)
++{
++	NMDevice *device = NM_DEVICE (user_data);
++	NMDeviceWired *self = NM_DEVICE_WIRED (device);
++	guint32 caps;
++
++	/* Make sure signal is for us */
++	if (idx == nm_device_get_ifindex (device)) {
++		caps = nm_device_get_capabilities (device);
++		g_return_if_fail (caps & NM_DEVICE_CAP_CARRIER_DETECT);
++
++		set_carrier (self, TRUE, FALSE);
++	}
++}
++
++static void
++carrier_off (NMNetlinkMonitor *monitor,
++             int idx,
++             gpointer user_data)
++{
++	NMDevice *device = NM_DEVICE (user_data);
++	NMDeviceWired *self = NM_DEVICE_WIRED (device);
++	guint32 caps;
++
++	/* Make sure signal is for us */
++	if (idx == nm_device_get_ifindex (device)) {
++		NMDeviceState state;
++		gboolean defer = FALSE;
++
++		caps = nm_device_get_capabilities (device);
++		g_return_if_fail (caps & NM_DEVICE_CAP_CARRIER_DETECT);
++
++		/* Defer carrier-off event actions while connected by a few seconds
++		 * so that tripping over a cable, power-cycling a switch, or breaking
++		 * off the RJ45 locking tab isn't so catastrophic.
++		 */
++		state = nm_device_interface_get_state (NM_DEVICE_INTERFACE (self));
++		if (state > NM_DEVICE_STATE_DISCONNECTED)
++			defer = TRUE;
++
++		set_carrier (self, FALSE, defer);
++	}
++}
++
++static GObject*
++constructor (GType type,
++			 guint n_construct_params,
++			 GObjectConstructParam *construct_params)
++{
++	GObject *object;
++	NMDeviceWiredPrivate *priv;
++	NMDevice *self;
++	guint32 caps;
++
++	object = G_OBJECT_CLASS (nm_device_wired_parent_class)->constructor (type,
++	                                                                        n_construct_params,
++	                                                                        construct_params);
++	if (!object)
++		return NULL;
++
++	self = NM_DEVICE (object);
++	priv = NM_DEVICE_WIRED_GET_PRIVATE (self);
++
++	if (nm_device_get_device_type (self) == NM_DEVICE_TYPE_ETHERNET) {
++		priv->hw_addr_type = ARPHRD_ETHER;
++		priv->hw_addr_len = ETH_ALEN;
++	} else if (nm_device_get_device_type (self) == NM_DEVICE_TYPE_INFINIBAND) {
++		priv->hw_addr_type = ARPHRD_INFINIBAND;
++		priv->hw_addr_len = INFINIBAND_ALEN;
++	} else
++		g_assert_not_reached ();
++
++	caps = nm_device_get_capabilities (self);
++	if (caps & NM_DEVICE_CAP_CARRIER_DETECT) {
++		GError *error = NULL;
++		guint32 ifflags = 0;
++
++		/* Only listen to netlink for cards that support carrier detect */
++		priv->monitor = nm_netlink_monitor_get ();
++
++		priv->link_connected_id = g_signal_connect (priv->monitor, "carrier-on",
++		                                            G_CALLBACK (carrier_on),
++		                                            self);
++		priv->link_disconnected_id = g_signal_connect (priv->monitor, "carrier-off",
++		                                               G_CALLBACK (carrier_off),
++		                                               self);
++
++		/* Get initial link state */
++		if (!nm_netlink_monitor_get_flags_sync (priv->monitor,
++		                                        nm_device_get_ifindex (NM_DEVICE (self)),
++		                                        &ifflags,
++		                                        &error)) {
++			nm_log_warn (LOGD_HW | NM_DEVICE_WIRED_LOG_LEVEL (NM_DEVICE (self)),
++			             "(%s): couldn't get initial carrier state: (%d) %s",
++			             nm_device_get_iface (NM_DEVICE (self)),
++			             error ? error->code : -1,
++			             (error && error->message) ? error->message : "unknown");
++			g_clear_error (&error);
++		} else
++			priv->carrier = !!(ifflags & IFF_LOWER_UP);
++
++		nm_log_info (LOGD_HW | NM_DEVICE_WIRED_LOG_LEVEL (NM_DEVICE (self)),
++		             "(%s): carrier is %s",
++		             nm_device_get_iface (NM_DEVICE (self)),
++		             priv->carrier ? "ON" : "OFF");
++
++		/* Request link state again just in case an error occurred getting the
++		 * initial link state.
++		 */
++		if (!nm_netlink_monitor_request_status (priv->monitor, &error)) {
++			nm_log_warn (LOGD_HW | NM_DEVICE_WIRED_LOG_LEVEL (NM_DEVICE (self)),
++			             "(%s): couldn't request carrier state: (%d) %s",
++			             nm_device_get_iface (NM_DEVICE (self)),
++			             error ? error->code : -1,
++			             (error && error->message) ? error->message : "unknown");
++			g_clear_error (&error);
++		}
++	} else {
++		nm_log_info (LOGD_HW | NM_DEVICE_WIRED_LOG_LEVEL (NM_DEVICE (self)),
++		             "(%s): driver '%s' does not support carrier detection.",
++		             nm_device_get_iface (self),
++		             nm_device_get_driver (self));
++		priv->carrier = TRUE;
++	}
++
++	return object;
++}
++
++static void
++nm_device_wired_init (NMDeviceWired * self)
++{
++}
++
++static gboolean
++real_hw_is_up (NMDevice *device)
++{
++	return nm_system_device_is_up (device);
++}
++
++static gboolean
++real_hw_bring_up (NMDevice *dev, gboolean *no_firmware)
++{
++	return nm_system_device_set_up_down (dev, TRUE, no_firmware);
++}
++
++static void
++real_hw_take_down (NMDevice *dev)
++{
++	nm_system_device_set_up_down (dev, FALSE, NULL);
++}
++
++static void
++real_update_hw_address (NMDevice *dev)
++{
++	NMDeviceWired *self = NM_DEVICE_WIRED (dev);
++	NMDeviceWiredPrivate *priv = NM_DEVICE_WIRED_GET_PRIVATE (self);
++	struct rtnl_link *rtnl;
++	struct nl_addr *addr;
++
++	rtnl = nm_netlink_index_to_rtnl_link (nm_device_get_ip_ifindex (dev));
++	if (!rtnl) {
++		nm_log_err (LOGD_HW | NM_DEVICE_WIRED_LOG_LEVEL (dev),
++					"(%s) failed to read hardware address (error %d)",
++					nm_device_get_iface (dev), errno);
++		return;
++	}
++
++	addr = rtnl_link_get_addr (rtnl);
++	if (!addr) {
++		nm_log_err (LOGD_HW | NM_DEVICE_WIRED_LOG_LEVEL (dev),
++					"(%s) no hardware address?",
++					nm_device_get_iface (dev));
++		rtnl_link_put (rtnl);
++		return;
++	}
++
++	if (nl_addr_get_len (addr) != priv->hw_addr_len) {
++		nm_log_err (LOGD_HW | NM_DEVICE_WIRED_LOG_LEVEL (dev),
++					"(%s) hardware address is wrong length (expected %d got %d)",
++					nm_device_get_iface (dev),
++					priv->hw_addr_len, nl_addr_get_len (addr));
++ 	} else {
++		memcpy (&priv->hw_addr, nl_addr_get_binary_addr (addr),
++				priv->hw_addr_len);
++	}
++
++	rtnl_link_put (rtnl);
++}
++
++static gboolean
++real_can_interrupt_activation (NMDevice *dev)
++{
++	NMDeviceWired *self = NM_DEVICE_WIRED (dev);
++	gboolean interrupt = FALSE;
++
++	/* Devices that support carrier detect can interrupt activation
++	 * if the link becomes inactive.
++	 */
++	if (nm_device_get_capabilities (dev) & NM_DEVICE_CAP_CARRIER_DETECT) {
++		if (NM_DEVICE_WIRED_GET_PRIVATE (self)->carrier == FALSE)
++			interrupt = TRUE;
++	}
++	return interrupt;
++}
++
++static gboolean
++real_is_available (NMDevice *dev)
++{
++	NMDeviceWired *self = NM_DEVICE_WIRED (dev);
++
++	/* Can't do anything if there isn't a carrier */
++	if (!NM_DEVICE_WIRED_GET_PRIVATE (self)->carrier)
++		return FALSE;
++
++	return TRUE;
++}
++
++typedef struct {
++	int ifindex;
++	NMIP4Address *addr;
++	gboolean found;
++} AddrData;
++
++static void
++check_one_address (struct nl_object *object, void *user_data)
++{
++	AddrData *data = user_data;
++	struct rtnl_addr *addr = (struct rtnl_addr *) object;
++	struct nl_addr *local;
++	struct in_addr tmp;
++
++	if (rtnl_addr_get_ifindex (addr) != data->ifindex)
++		return;
++	if (rtnl_addr_get_family (addr) != AF_INET)
++		return;
++
++	if (nm_ip4_address_get_prefix (data->addr) != rtnl_addr_get_prefixlen (addr))
++		return;
++
++	local = rtnl_addr_get_local (addr);
++	if (nl_addr_get_family (local) != AF_INET)
++		return;
++	if (nl_addr_get_len (local) != sizeof (struct in_addr))
++		return;
++	if (!nl_addr_get_binary_addr (local))
++		return;
++
++	memcpy (&tmp, nl_addr_get_binary_addr (local), nl_addr_get_len (local));
++	if (tmp.s_addr != nm_ip4_address_get_address (data->addr))
++		return;
++
++	/* Yay, found it */
++	data->found = TRUE;
++}
++
++static gboolean
++ip4_match_config (NMDevice *self, NMConnection *connection)
++{
++	NMSettingIP4Config *s_ip4;
++	NMSettingConnection *s_con;
++	struct nl_handle *nlh = NULL;
++	struct nl_cache *addr_cache = NULL;
++	int i, num;
++	GSList *leases, *iter;
++	NMDHCPManager *dhcp_mgr;
++	const char *method;
++	int ifindex;
++	AddrData check_data;
++
++	ifindex = nm_device_get_ifindex (self);
++
++	s_con = (NMSettingConnection *) nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION);
++	g_assert (s_con);
++	g_assert (nm_setting_connection_get_uuid (s_con));
++
++	s_ip4 = (NMSettingIP4Config *) nm_connection_get_setting (connection, NM_TYPE_SETTING_IP4_CONFIG);
++	if (!s_ip4)
++		return FALSE;
++
++	/* Read all the device's IP addresses */
++	nlh = nm_netlink_get_default_handle ();
++	if (!nlh)
++		return FALSE;
++
++	addr_cache = rtnl_addr_alloc_cache (nlh);
++	if (!addr_cache)
++		return FALSE;
++	nl_cache_mngt_provide (addr_cache);
++
++	/* Get any saved leases that apply to this connection */
++	dhcp_mgr = nm_dhcp_manager_get ();
++	leases = nm_dhcp_manager_get_lease_config (dhcp_mgr,
++	                                           nm_device_get_iface (self),
++	                                           nm_setting_connection_get_uuid (s_con));
++	g_object_unref (dhcp_mgr);
++
++	method = nm_setting_ip4_config_get_method (s_ip4);
++	if (!strcmp (method, NM_SETTING_IP4_CONFIG_METHOD_AUTO)) {
++		gboolean found = FALSE;
++
++		/* Find at least one lease's address on the device */
++		for (iter = leases; iter; iter = g_slist_next (iter)) {
++			NMIP4Config *addr = iter->data;
++
++			memset (&check_data, 0, sizeof (check_data));
++			check_data.ifindex = ifindex;
++			check_data.found = FALSE;
++			check_data.addr = nm_ip4_config_get_address (addr, 0);
++
++			nl_cache_foreach (addr_cache, check_one_address, &check_data);
++			if (check_data.found) {
++				found = TRUE; /* Yay, device has same address as a lease */
++				break;
++			}
++		}
++		g_slist_foreach (leases, (GFunc) g_object_unref, NULL);
++		g_slist_free (leases);
++		return found;
++	} else {
++		/* Maybe the connection used to be DHCP and there are stale leases; ignore them */
++		g_slist_foreach (leases, (GFunc) g_object_unref, NULL);
++		g_slist_free (leases);
++	}
++
++	/* 'shared' and 'link-local' aren't supported methods because 'shared'
++	 * requires too much iptables and dnsmasq state to be reclaimed, and
++	 * avahi-autoipd isn't smart enough to allow the link-local address to be
++	 * determined at any point other than when it was first assigned.
++	 */
++	if (strcmp (method, NM_SETTING_IP4_CONFIG_METHOD_MANUAL))
++		return FALSE;
++
++	/* Everything below for static addressing */
++
++	/* Find all IP4 addresses of this connection in the device's address list */
++	num = nm_setting_ip4_config_get_num_addresses (s_ip4);
++	for (i = 0; i < num; i++) {
++		memset (&check_data, 0, sizeof (check_data));
++		check_data.ifindex = ifindex;
++		check_data.found = FALSE;
++		check_data.addr = nm_setting_ip4_config_get_address (s_ip4, i);
++
++		nl_cache_foreach (addr_cache, check_one_address, &check_data);
++		if (!check_data.found)
++			return FALSE;
++	}
++
++	/* Success; all the connection's static IP addresses are assigned to the device */
++	return TRUE;
++}
++
++static NMConnection *
++connection_match_config (NMDevice *self, const GSList *connections)
++{
++	const GSList *iter;
++
++	for (iter = connections; iter; iter = iter->next) {
++		NMConnection *candidate = NM_CONNECTION (iter->data);
++
++		if (!ip4_match_config (self, candidate))
++			continue;
++
++		return candidate;
++	}
++
++	return NULL;
++}
++
++static void
++dispose (GObject *object)
++{
++	NMDeviceWired *self = NM_DEVICE_WIRED (object);
++	NMDeviceWiredPrivate *priv = NM_DEVICE_WIRED_GET_PRIVATE (self);
++
++	if (priv->link_connected_id) {
++		g_signal_handler_disconnect (priv->monitor, priv->link_connected_id);
++		priv->link_connected_id = 0;
++	}
++	if (priv->link_disconnected_id) {
++		g_signal_handler_disconnect (priv->monitor, priv->link_disconnected_id);
++		priv->link_disconnected_id = 0;
++	}
++
++	carrier_action_defer_clear (self);
++
++	if (priv->monitor) {
++		g_object_unref (priv->monitor);
++		priv->monitor = NULL;
++	}
++
++	G_OBJECT_CLASS (nm_device_wired_parent_class)->dispose (object);
++}
++
++static void
++nm_device_wired_class_init (NMDeviceWiredClass *klass)
++{
++	GObjectClass *object_class = G_OBJECT_CLASS (klass);
++	NMDeviceClass *parent_class = NM_DEVICE_CLASS (klass);
++
++	g_type_class_add_private (object_class, sizeof (NMDeviceWiredPrivate));
++
++	/* virtual methods */
++	object_class->constructor = constructor;
++	object_class->dispose = dispose;
++
++	parent_class->hw_is_up = real_hw_is_up;
++	parent_class->hw_bring_up = real_hw_bring_up;
++	parent_class->hw_take_down = real_hw_take_down;
++	parent_class->can_interrupt_activation = real_can_interrupt_activation;
++	parent_class->update_hw_address = real_update_hw_address;
++	parent_class->is_available = real_is_available;
++	parent_class->connection_match_config = connection_match_config;
++}
++
++/**
++ * nm_device_wired_get_hwaddr:
++ * @dev: an #NMDeviceWired
++ *
++ * Get a device's hardware address
++ *
++ * Return value: (transfer none): @dev's hardware address
++ */
++guint8 *
++nm_device_wired_get_hwaddr (NMDeviceWired *dev)
++{
++	NMDeviceWiredPrivate *priv;
++
++	g_return_val_if_fail (dev != NULL, NULL);
++
++	priv = NM_DEVICE_WIRED_GET_PRIVATE (dev);
++	return priv->hw_addr;
++}
++
++/**
++ * nm_device_wired_get_hwaddr_type:
++ * @dev: an #NMDeviceWired
++ *
++ * Get the type of a device's hardware address
++ *
++ * Return value: the type of @dev's hardware address
++ */
++int
++nm_device_wired_get_hwaddr_type (NMDeviceWired *dev)
++{
++	NMDeviceWiredPrivate *priv;
++
++	g_return_val_if_fail (dev != NULL, -1);
++
++	priv = NM_DEVICE_WIRED_GET_PRIVATE (dev);
++	return priv->hw_addr_type;
++}
++
++/**
++ * nm_device_wired_get_carrier:
++ * @dev: an #NMDeviceWired
++ *
++ * Get @dev's carrier status
++ *
++ * Return value: @dev's carrier
++ */
++gboolean
++nm_device_wired_get_carrier (NMDeviceWired *dev)
++{
++	NMDeviceWiredPrivate *priv;
++
++	g_return_val_if_fail (dev != NULL, -1);
++
++	priv = NM_DEVICE_WIRED_GET_PRIVATE (dev);
++	return priv->carrier;
++}
+diff --git a/src/nm-device-wired.h b/src/nm-device-wired.h
+new file mode 100644
+index 0000000..b2f6ee4
+--- /dev/null
++++ b/src/nm-device-wired.h
+@@ -0,0 +1,55 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager -- Network link manager
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Copyright (C) 2005 - 2010 Red Hat, Inc.
++ * Copyright (C) 2006 - 2008 Novell, Inc.
++ */
++
++#ifndef NM_DEVICE_WIRED_H
++#define NM_DEVICE_WIRED_H
++
++#include <glib-object.h>
++
++#include "nm-device.h"
++
++G_BEGIN_DECLS
++
++#define NM_TYPE_DEVICE_WIRED			(nm_device_wired_get_type ())
++#define NM_DEVICE_WIRED(obj)			(G_TYPE_CHECK_INSTANCE_CAST ((obj), NM_TYPE_DEVICE_WIRED, NMDeviceWired))
++#define NM_DEVICE_WIRED_CLASS(klass)	(G_TYPE_CHECK_CLASS_CAST ((klass),  NM_TYPE_DEVICE_WIRED, NMDeviceWiredClass))
++#define NM_IS_DEVICE_WIRED(obj)		(G_TYPE_CHECK_INSTANCE_TYPE ((obj), NM_TYPE_DEVICE_WIRED))
++#define NM_IS_DEVICE_WIRED_CLASS(klass)	(G_TYPE_CHECK_CLASS_TYPE ((klass),  NM_TYPE_DEVICE_WIRED))
++#define NM_DEVICE_WIRED_GET_CLASS(obj)	(G_TYPE_INSTANCE_GET_CLASS ((obj),  NM_TYPE_DEVICE_WIRED, NMDeviceWiredClass))
++
++typedef struct {
++	NMDevice parent;
++} NMDeviceWired;
++
++typedef struct {
++	NMDeviceClass parent;
++
++} NMDeviceWiredClass;
++
++GType nm_device_wired_get_type (void);
++
++guint8     *nm_device_wired_get_hwaddr      (NMDeviceWired *dev);
++int         nm_device_wired_get_hwaddr_type (NMDeviceWired *dev);
++gboolean    nm_device_wired_get_carrier     (NMDeviceWired *dev);
++
++G_END_DECLS
++
++#endif	/* NM_DEVICE_WIRED_H */
+diff --git a/src/nm-device.c b/src/nm-device.c
+index dbbd326..40e388f 100644
+--- a/src/nm-device.c
++++ b/src/nm-device.c
+@@ -280,12 +280,6 @@ constructor (GType type,
+ 		goto error;
+ 	}
+ 
+-	if (NM_DEVICE_GET_CLASS (dev)->update_hw_address)
+-		NM_DEVICE_GET_CLASS (dev)->update_hw_address (dev);
+-
+-	if (NM_DEVICE_GET_CLASS (dev)->update_permanent_hw_address)
+-		NM_DEVICE_GET_CLASS (dev)->update_permanent_hw_address (dev);
+-
+ 	priv->dhcp_manager = nm_dhcp_manager_get ();
+ 
+ 	update_accept_ra_save (dev);
+@@ -298,6 +292,21 @@ error:
+ 	return NULL;
+ }
+ 
++static void
++constructed (GObject *object)
++{
++	NMDevice *dev = NM_DEVICE (object);
++
++	if (NM_DEVICE_GET_CLASS (dev)->update_hw_address)
++		NM_DEVICE_GET_CLASS (dev)->update_hw_address (dev);
++
++	if (NM_DEVICE_GET_CLASS (dev)->update_permanent_hw_address)
++		NM_DEVICE_GET_CLASS (dev)->update_permanent_hw_address (dev);
++
++	if (G_OBJECT_CLASS (nm_device_parent_class)->constructed)
++		G_OBJECT_CLASS (nm_device_parent_class)->constructed (object);
++}
++
+ static gboolean
+ nm_device_hw_is_up (NMDevice *self)
+ {
+@@ -3550,6 +3559,7 @@ nm_device_class_init (NMDeviceClass *klass)
+ 	object_class->set_property = set_property;
+ 	object_class->get_property = get_property;
+ 	object_class->constructor = constructor;
++	object_class->constructed = constructed;
+ 
+ 	klass->get_type_capabilities = real_get_type_capabilities;
+ 	klass->get_generic_capabilities = real_get_generic_capabilities;
+diff --git a/src/nm-udev-manager.c b/src/nm-udev-manager.c
+index d8da128..661fed1 100644
+--- a/src/nm-udev-manager.c
++++ b/src/nm-udev-manager.c
+@@ -25,6 +25,7 @@
+ #include <stdio.h>
+ #include <sys/ioctl.h>
+ #include <unistd.h>
++#include <net/if_arp.h>
+ 
+ #include "wireless-helper.h"
+ 
+@@ -37,6 +38,7 @@
+ #include "NetworkManagerUtils.h"
+ #include "nm-device-wifi.h"
+ #include "nm-device-olpc-mesh.h"
++#include "nm-device-infiniband.h"
+ #include "nm-device-ethernet.h"
+ 
+ typedef struct {
+@@ -335,6 +337,13 @@ is_olpc_mesh (GUdevDevice *device)
+ 	return (prop != NULL);
+ }
+ 
++static gboolean
++is_infiniband (GUdevDevice *device)
++{
++	gint etype = g_udev_device_get_sysfs_attr_as_int (device, "type");
++	return etype == ARPHRD_INFINIBAND;
++}
++
+ static GObject *
+ device_creator (NMUdevManager *manager,
+                 GUdevDevice *udev_device,
+@@ -387,6 +396,8 @@ device_creator (NMUdevManager *manager,
+ 		device = (GObject *) nm_device_olpc_mesh_new (path, ifname, driver);
+ 	else if (is_wireless (udev_device))
+ 		device = (GObject *) nm_device_wifi_new (path, ifname, driver);
++	else if (is_infiniband (udev_device))
++		device = (GObject *) nm_device_infiniband_new (path, ifname, driver);
+ 	else
+ 		device = (GObject *) nm_device_ethernet_new (path, ifname, driver);
+ 
+@@ -421,7 +432,7 @@ net_add (NMUdevManager *self, GUdevDevice *device)
+ 	 * s390 CTC-type devices that report 256 for some reason.
+ 	 * FIXME: use something other than interface name to detect CTC here.
+ 	 */
+-	if ((etype != 1) && (is_ctc == FALSE)) {
++	if ((etype != ARPHRD_ETHER) && (etype != ARPHRD_INFINIBAND) && (is_ctc == FALSE)) {
+ 		nm_log_dbg (LOGD_HW, "ignoring interface with type %d", etype);
+ 		return;
+ 	}
+diff --git a/src/system-settings/nm-sysconfig-settings.c b/src/system-settings/nm-sysconfig-settings.c
+index 4bcfb04..2ffaf35 100644
+--- a/src/system-settings/nm-sysconfig-settings.c
++++ b/src/system-settings/nm-sysconfig-settings.c
+@@ -26,8 +26,7 @@
+ #include <unistd.h>
+ #include <string.h>
+ #include <gmodule.h>
+-#include <net/ethernet.h>
+-#include <netinet/ether.h>
++#include <net/if_arp.h>
+ 
+ #include <NetworkManager.h>
+ #include <nm-connection.h>
+@@ -40,6 +39,7 @@
+ #include <nm-setting-cdma.h>
+ #include <nm-setting-connection.h>
+ #include <nm-setting-gsm.h>
++#include <nm-setting-infiniband.h>
+ #include <nm-setting-ip4-config.h>
+ #include <nm-setting-ip6-config.h>
+ #include <nm-setting-olpc-mesh.h>
+@@ -50,8 +50,9 @@
+ #include <nm-setting-wired.h>
+ #include <nm-setting-wireless.h>
+ #include <nm-setting-wireless-security.h>
++#include <nm-utils.h>
+ 
+-#include "../nm-device-ethernet.h"
++#include "../nm-device-wired.h"
+ #include "nm-dbus-glib-types.h"
+ #include "nm-sysconfig-settings.h"
+ #include "nm-sysconfig-connection.h"
+@@ -1005,6 +1006,7 @@ have_connection_for_device (NMSysconfigSettings *self, GByteArray *mac)
+ 	gpointer key;
+ 	NMSettingConnection *s_con;
+ 	NMSettingWired *s_wired;
++	NMSettingInfiniband *s_infiniband;
+ 	const GByteArray *setting_mac;
+ 	gboolean ret = FALSE;
+ 
+@@ -1021,10 +1023,12 @@ have_connection_for_device (NMSysconfigSettings *self, GByteArray *mac)
+ 		connection_type = nm_setting_connection_get_connection_type (s_con);
+ 
+ 		if (   strcmp (connection_type, NM_SETTING_WIRED_SETTING_NAME)
++		    && strcmp (connection_type, NM_SETTING_INFINIBAND_SETTING_NAME)
+ 		    && strcmp (connection_type, NM_SETTING_PPPOE_SETTING_NAME))
+ 			continue;
+ 
+ 		s_wired = (NMSettingWired *) nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRED);
++		s_infiniband = (NMSettingInfiniband *) nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND);
+ 
+ 		/* No wired setting; therefore the PPPoE connection applies to any device */
+ 		if (!s_wired && !strcmp (connection_type, NM_SETTING_PPPOE_SETTING_NAME)) {
+@@ -1032,10 +1036,15 @@ have_connection_for_device (NMSysconfigSettings *self, GByteArray *mac)
+ 			break;
+ 		}
+ 
+-		setting_mac = nm_setting_wired_get_mac_address (s_wired);
++		g_assert (s_wired != NULL || s_infiniband != NULL);
++
++		setting_mac = s_wired ?
++			nm_setting_wired_get_mac_address (s_wired) :
++			nm_setting_infiniband_get_mac_address (s_infiniband);
+ 		if (setting_mac) {
+ 			/* A connection mac-locked to this device */
+-			if (!memcmp (setting_mac->data, mac->data, ETH_ALEN)) {
++			if (mac->len == setting_mac->len &&
++				!memcmp (setting_mac->data, mac->data, mac->len)) {
+ 				ret = TRUE;
+ 				break;
+ 			}
+@@ -1051,7 +1060,7 @@ have_connection_for_device (NMSysconfigSettings *self, GByteArray *mac)
+ 
+ /* Search through the list of blacklisted MAC addresses in the config file. */
+ static gboolean
+-is_mac_auto_wired_blacklisted (NMSysconfigSettings *self, const GByteArray *mac)
++is_mac_auto_wired_blacklisted (NMSysconfigSettings *self, const GByteArray *mac, int hwaddr_type)
+ {
+ 	NMSysconfigSettingsPrivate *priv = NM_SYSCONFIG_SETTINGS_GET_PRIVATE (self);
+ 	GKeyFile *config;
+@@ -1075,10 +1084,10 @@ is_mac_auto_wired_blacklisted (NMSysconfigSettings *self, const GByteArray *mac)
+ 
+ 	list = g_key_file_get_string_list (config, "main", CONFIG_KEY_NO_AUTO_DEFAULT, NULL, NULL);
+ 	for (iter = list; iter && *iter; iter++) {
+-		struct ether_addr *candidate;
++		guint8 *candidate, buffer[NM_UTILS_HWADDR_LEN_MAX];
+ 
+-		candidate = ether_aton (*iter);
+-		if (candidate && !memcmp (mac->data, candidate->ether_addr_octet, ETH_ALEN)) {
++		candidate = nm_utils_hwaddr_aton (*iter, hwaddr_type, buffer);
++		if (candidate && !memcmp (mac->data, candidate, mac->len)) {
+ 			found = TRUE;
+ 			break;
+ 		}
+@@ -1101,6 +1110,7 @@ default_wired_deleted (NMDefaultWiredConnection *wired,
+ {
+ 	NMSysconfigSettingsPrivate *priv = NM_SYSCONFIG_SETTINGS_GET_PRIVATE (self);
+ 	NMSettingConnection *s_con;
++	int hwaddr_type;
+ 	char *tmp;
+ 	GKeyFile *config;
+ 	char **list, **iter, **updated;
+@@ -1132,24 +1142,29 @@ default_wired_deleted (NMDefaultWiredConnection *wired,
+ 	if (!config)
+ 		goto cleanup;
+ 
++	if (nm_connection_get_setting (NM_CONNECTION (wired), NM_TYPE_SETTING_WIRED))
++		hwaddr_type = ARPHRD_ETHER;
++	else if (nm_connection_get_setting (NM_CONNECTION (wired), NM_TYPE_SETTING_INFINIBAND))
++		hwaddr_type = ARPHRD_INFINIBAND;
++	else
++		goto cleanup;
++
+ 	g_key_file_set_list_separator (config, ',');
+ 	g_key_file_load_from_file (config, priv->config_file, G_KEY_FILE_KEEP_COMMENTS, NULL);
+ 
+ 	list = g_key_file_get_string_list (config, "main", CONFIG_KEY_NO_AUTO_DEFAULT, &len, NULL);
+ 	/* Traverse entire list to get count of # items */
+ 	for (iter = list; iter && *iter; iter++) {
+-		struct ether_addr *candidate;
++		guint8 *candidate, buffer[NM_UTILS_HWADDR_LEN_MAX];
+ 
+-		candidate = ether_aton (*iter);
+-		if (candidate && !memcmp (mac->data, candidate->ether_addr_octet, ETH_ALEN))
++		candidate = nm_utils_hwaddr_aton (*iter, hwaddr_type, buffer);
++		if (candidate && !memcmp (mac->data, candidate, mac->len))
+ 			found = TRUE;
+ 	}
+ 
+ 	/* Add this device's MAC to the list */
+ 	if (!found) {
+-		tmp = g_strdup_printf ("%02x:%02x:%02x:%02x:%02x:%02x",
+-		                       mac->data[0], mac->data[1], mac->data[2],
+-		                       mac->data[3], mac->data[4], mac->data[5]);
++		tmp = nm_utils_hwaddr_ntoa (mac->data, hwaddr_type);
+ 
+ 		/* New list; size + 1 for the new element, + 1 again for ending NULL */
+ 		updated = g_malloc0 (sizeof (char*) * (len + 2));
+@@ -1238,13 +1253,14 @@ void
+ nm_sysconfig_settings_device_added (NMSysconfigSettings *self, NMDevice *device)
+ {
+ 	GByteArray *mac = NULL;
+-	struct ether_addr tmp;
++	guint8 *hwaddr;
++	int hwaddr_type;
+ 	NMDefaultWiredConnection *wired;
+ 	NMSettingConnection *s_con;
+ 	gboolean read_only = TRUE;
+ 	const char *id;
+ 
+-	if (nm_device_get_device_type (device) != NM_DEVICE_TYPE_ETHERNET)
++	if (!NM_IS_DEVICE_WIRED (device))
+ 		return;
+ 
+ 	/* If the device isn't managed or it already has a default wired connection,
+@@ -1254,13 +1270,14 @@ nm_sysconfig_settings_device_added (NMSysconfigSettings *self, NMDevice *device)
+ 	    || g_object_get_data (G_OBJECT (device), DEFAULT_WIRED_TAG))
+ 		return;
+ 
+-	nm_device_ethernet_get_address (NM_DEVICE_ETHERNET (device), &tmp);
+-
+-	mac = g_byte_array_sized_new (ETH_ALEN);
+-	g_byte_array_append (mac, tmp.ether_addr_octet, ETH_ALEN);
++	hwaddr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (device));
++	hwaddr_type = nm_device_wired_get_hwaddr_type (NM_DEVICE_WIRED (device));
+ 
++	mac = g_byte_array_new ();
++	g_byte_array_append (mac, hwaddr, nm_utils_hwaddr_len (hwaddr_type));
++ 
+ 	if (   have_connection_for_device (self, mac)
+-	    || is_mac_auto_wired_blacklisted (self, mac))
++		|| is_mac_auto_wired_blacklisted (self, mac, hwaddr_type))
+ 		goto ignore;
+ 
+ 	if (get_plugin (self, NM_SYSTEM_CONFIG_INTERFACE_CAP_MODIFY_CONNECTIONS))
+@@ -1295,7 +1312,7 @@ nm_sysconfig_settings_device_removed (NMSysconfigSettings *self, NMDevice *devic
+ {
+ 	NMDefaultWiredConnection *connection;
+ 
+-	if (nm_device_get_device_type (device) != NM_DEVICE_TYPE_ETHERNET)
++	if (NM_IS_DEVICE_WIRED (device))
+ 		return;
+ 
+ 	connection = (NMDefaultWiredConnection *) g_object_get_data (G_OBJECT (device), DEFAULT_WIRED_TAG);
+diff --git a/system-settings/plugins/ifcfg-rh/common.h b/system-settings/plugins/ifcfg-rh/common.h
+index e7cd93e..4bd4e31 100644
+--- a/system-settings/plugins/ifcfg-rh/common.h
++++ b/system-settings/plugins/ifcfg-rh/common.h
+@@ -41,9 +41,10 @@
+ #define IFCFG_PLUGIN_NAME "ifcfg-rh"
+ #define IFCFG_PLUGIN_INFO "(c) 2007 - 2008 Red Hat, Inc.  To report bugs please use the NetworkManager mailing list."
+ 
+-#define TYPE_ETHERNET "Ethernet"
+-#define TYPE_WIRELESS "Wireless"
+-#define TYPE_BRIDGE   "Bridge"
++#define TYPE_ETHERNET   "Ethernet"
++#define TYPE_WIRELESS   "Wireless"
++#define TYPE_INFINIBAND "InfiniBand"
++#define TYPE_BRIDGE     "Bridge"
+ 
+ #define IFCFG_PLUGIN_ERROR (ifcfg_plugin_error_quark ())
+ GQuark ifcfg_plugin_error_quark (void);
+diff --git a/system-settings/plugins/ifcfg-rh/reader.c b/system-settings/plugins/ifcfg-rh/reader.c
+index f1bf540..e8e241e 100644
+--- a/system-settings/plugins/ifcfg-rh/reader.c
++++ b/system-settings/plugins/ifcfg-rh/reader.c
+@@ -48,6 +48,7 @@
+ #include <nm-setting-ip6-config.h>
+ #include <nm-setting-wired.h>
+ #include <nm-setting-wireless.h>
++#include <nm-setting-infiniband.h>
+ #include <nm-setting-8021x.h>
+ #include <nm-utils.h>
+ 
+@@ -185,10 +186,10 @@ make_connection_setting (const char *file,
+ }
+ 
+ static gboolean
+-read_mac_address (shvarFile *ifcfg, const char *key, GByteArray **array, GError **error)
++read_mac_address (shvarFile *ifcfg, const char *key, int type,
++				  GByteArray **array, GError **error)
+ {
+ 	char *value = NULL;
+-	struct ether_addr *mac;
+ 
+ 	g_return_val_if_fail (ifcfg != NULL, FALSE);
+ 	g_return_val_if_fail (array != NULL, FALSE);
+@@ -202,17 +203,15 @@ read_mac_address (shvarFile *ifcfg, const char *key, GByteArray **array, GError
+ 		return TRUE;
+ 	}
+ 
+-	mac = ether_aton (value);
+-	if (!mac) {
+-		g_free (value);
++	*array = nm_utils_hwaddr_atoba (value, type);
++	if (!*array) {
+ 		g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
+ 		             "%s: the MAC address '%s' was invalid.", key, value);
++		g_free (value);
+ 		return FALSE;
+ 	}
+ 
+ 	g_free (value);
+-	*array = g_byte_array_sized_new (ETH_ALEN);
+-	g_byte_array_append (*array, (guint8 *) mac->ether_addr_octet, ETH_ALEN);
+ 	return TRUE;
+ }
+ 
+@@ -294,7 +293,7 @@ fill_ip4_setting_from_ibft (shvarFile *ifcfg,
+ 		goto done;
+ 	}
+ 
+-	if (!read_mac_address (ifcfg, "HWADDR", &ifcfg_mac, error))
++	if (!read_mac_address (ifcfg, "HWADDR", ARPHRD_ETHER, &ifcfg_mac, error))
+ 		goto done;
+ 	/* Ensure we got a MAC */
+ 	if (!ifcfg_mac) {
+@@ -2658,7 +2657,7 @@ make_wireless_setting (shvarFile *ifcfg,
+ 
+ 	s_wireless = NM_SETTING_WIRELESS (nm_setting_wireless_new ());
+ 
+-	if (read_mac_address (ifcfg, "HWADDR", &array, error)) {
++	if (read_mac_address (ifcfg, "HWADDR", ARPHRD_ETHER, &array, error)) {
+ 		if (array) {
+ 			g_object_set (s_wireless, NM_SETTING_WIRELESS_MAC_ADDRESS, array, NULL);
+ 
+@@ -2682,7 +2681,7 @@ make_wireless_setting (shvarFile *ifcfg,
+ 	}
+ 
+ 	array = NULL;
+-	if (read_mac_address (ifcfg, "MACADDR", &array, error)) {
++	if (read_mac_address (ifcfg, "MACADDR", ARPHRD_ETHER, &array, error)) {
+ 		if (array) {
+ 			g_object_set (s_wireless, NM_SETTING_WIRELESS_CLONED_MAC_ADDRESS, array, NULL);
+ 			g_byte_array_free (array, TRUE);
+@@ -2957,7 +2956,7 @@ make_wired_setting (shvarFile *ifcfg,
+ 		g_free (value);
+ 	}
+ 
+-	if (read_mac_address (ifcfg, "HWADDR", &mac, error)) {
++	if (read_mac_address (ifcfg, "HWADDR", ARPHRD_ETHER, &mac, error)) {
+ 		if (mac) {
+ 			g_object_set (s_wired, NM_SETTING_WIRED_MAC_ADDRESS, mac, NULL);
+ 
+@@ -3064,7 +3063,7 @@ make_wired_setting (shvarFile *ifcfg,
+ 	}
+ 
+ 	mac = NULL;
+-	if (read_mac_address (ifcfg, "MACADDR", &mac, error)) {
++	if (read_mac_address (ifcfg, "MACADDR", ARPHRD_ETHER, &mac, error)) {
+ 		if (mac) {
+ 			g_object_set (s_wired, NM_SETTING_WIRED_CLONED_MAC_ADDRESS, mac, NULL);
+ 			g_byte_array_free (mac, TRUE);
+@@ -3142,6 +3141,108 @@ wired_connection_from_ifcfg (const char *file,
+ 	return connection;
+ }
+ 
++static NMSetting *
++make_infiniband_setting (shvarFile *ifcfg,
++						 const char *file,
++						 gboolean nm_controlled,
++						 char **unmanaged,
++						 GError **error)
++{
++	NMSettingInfiniband *s_infiniband;
++	char *value = NULL;
++	GByteArray *mac = NULL;
++	int mtu;
++
++	s_infiniband = NM_SETTING_INFINIBAND (nm_setting_infiniband_new ());
++
++	value = svGetValue (ifcfg, "MTU", FALSE);
++	if (value) {
++		if (get_int (value, &mtu)) {
++			if (mtu >= 0 && mtu < 65536)
++				g_object_set (s_infiniband, NM_SETTING_INFINIBAND_MTU, mtu, NULL);
++		} else {
++			/* Shouldn't be fatal... */
++			PLUGIN_WARN (IFCFG_PLUGIN_NAME, "    warning: invalid MTU '%s'", value);
++		}
++		g_free (value);
++	}
++
++	if (read_mac_address (ifcfg, "HWADDR", ARPHRD_INFINIBAND, &mac, error)) {
++		if (mac) {
++			g_object_set (s_infiniband, NM_SETTING_INFINIBAND_MAC_ADDRESS, mac, NULL);
++
++			/* A connection can only be unmanaged if we know the MAC address */
++			if (!nm_controlled) {
++				char *mac_str = nm_utils_hwaddr_ntoa (mac->data, ARPHRD_INFINIBAND);
++				*unmanaged = g_strdup_printf ("mac:%s", mac_str);
++				g_free (mac_str);
++			}
++
++			g_byte_array_free (mac, TRUE);
++		}
++	} else {
++		g_object_unref (s_infiniband);
++		return NULL;
++	}
++
++	if (svTrueValue (ifcfg, "CONNECTED_MODE", FALSE))
++		g_object_set (s_infiniband, NM_SETTING_INFINIBAND_TRANSPORT_MODE, "connected", NULL);
++
++	if (!nm_controlled && !*unmanaged) {
++		/* If NM_CONTROLLED=no but there wasn't a MAC address, notify
++		   the user that the device cannot be unmanaged.
++		 */
++		PLUGIN_WARN (IFCFG_PLUGIN_NAME, "    warning: NM_CONTROLLED was false but HWADDR was missing; device will be managed");
++	}
++
++	return (NMSetting *) s_infiniband;
++}
++
++static NMConnection *
++infiniband_connection_from_ifcfg (const char *file,
++								  shvarFile *ifcfg,
++								  gboolean nm_controlled,
++								  char **unmanaged,
++								  GError **error)
++{
++	NMConnection *connection = NULL;
++	NMSetting *con_setting = NULL;
++	NMSetting *infiniband_setting = NULL;
++
++	g_return_val_if_fail (file != NULL, NULL);
++	g_return_val_if_fail (ifcfg != NULL, NULL);
++
++	connection = nm_connection_new ();
++	if (!connection) {
++		g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
++		             "Failed to allocate new connection for %s.", file);
++		return NULL;
++	}
++
++	con_setting = make_connection_setting (file, ifcfg, NM_SETTING_INFINIBAND_SETTING_NAME, NULL);
++	if (!con_setting) {
++		g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
++		             "Failed to create connection setting.");
++		g_object_unref (connection);
++		return NULL;
++	}
++	nm_connection_add_setting (connection, con_setting);
++
++	infiniband_setting = make_infiniband_setting (ifcfg, file, nm_controlled, unmanaged, error);
++	if (!infiniband_setting) {
++		g_object_unref (connection);
++		return NULL;
++	}
++	nm_connection_add_setting (connection, infiniband_setting);
++
++	if (!nm_connection_verify (connection, error)) {
++		g_object_unref (connection);
++		return NULL;
++	}
++
++	return connection;
++}
++
+ static gboolean
+ is_wireless_device (const char *iface)
+ {
+@@ -3316,6 +3417,8 @@ connection_from_file (const char *filename,
+ 		connection = wired_connection_from_ifcfg (filename, parsed, nm_controlled, unmanaged, &error);
+ 	else if (!strcasecmp (type, TYPE_WIRELESS))
+ 		connection = wireless_connection_from_ifcfg (filename, parsed, nm_controlled, unmanaged, &error);
++	else if (!strcasecmp (type, TYPE_INFINIBAND))
++		connection = infiniband_connection_from_ifcfg (filename, parsed, nm_controlled, unmanaged, &error);
+ 	else if (!strcasecmp (type, TYPE_BRIDGE)) {
+ 		g_set_error (&error, IFCFG_PLUGIN_ERROR, 0,
+ 		             "Bridge connections are not yet supported");
+
+
+commit ec35d472537d71e3eb9d7794f704f4a126921de6
+Author: Dan Winship <danw@gnome.org>
+Date:   Tue Jan 31 11:14:56 2012 -0500
+
+    introspection: add missing error description for INFINIBAND_MODE
+
+diff --git a/introspection/nm-device.xml b/introspection/nm-device.xml
+index 17b2ce0..7637e8d 100644
+--- a/introspection/nm-device.xml
++++ b/introspection/nm-device.xml
+@@ -501,6 +501,11 @@
+           The Bluetooth connection timed out or failed.
+         </tp:docstring>
+       </tp:enumvalue>
++      <tp:enumvalue suffix="INFINIBAND_MODE" value="49">
++        <tp:docstring>
++          InfiniBand device does not support connected mode.
++        </tp:docstring>
++      </tp:enumvalue>
+     </tp:enum>
+ 
+   </interface>
+
+
+commit c79b8085ee64acca05ac5996399feb972c082d45
+Author: Dan Winship <danw@gnome.org>
+Date:   Tue Jan 31 11:15:41 2012 -0500
+
+    ifcfg-rh: belatedly add writer support for infiniband (and tests)
+
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am b/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
+index 935d0ec..852c23d 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
+@@ -83,7 +83,8 @@ EXTRA_DIST = \
+ 	ifcfg-test-wired-ctc-static \
+ 	ifcfg-test-bridge-main \
+ 	ifcfg-test-bridge-component \
+-	ifcfg-test-vlan-interface
++	ifcfg-test-vlan-interface \
++	ifcfg-test-infiniband
+ 
+ check-local:
+ 	@for f in $(EXTRA_DIST); do \
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-infiniband b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-infiniband
+new file mode 100644
+index 0000000..b1a5743
+--- /dev/null
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-infiniband
+@@ -0,0 +1,8 @@
++TYPE=InfiniBand
++DEVICE=ib0
++HWADDR=80:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22
++CONNECTED_MODE=yes
++MTU=65520
++IPADDR=192.168.2.2
++NETMASK=255.255.255.0
++GATEWAY=192.168.2.1
+diff --git a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+index 15a3c7f..6b480ad 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
++++ b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+@@ -23,6 +23,8 @@
+ #include <unistd.h>
+ #include <string.h>
+ #include <netinet/ether.h>
++#include <linux/if_infiniband.h>
++#include <nm-setting-infiniband.h>
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
+ #include <sys/socket.h>
+@@ -11774,6 +11775,228 @@ test_read_vlan_interface (void)
+ 	        "vlan-interface-read", "unexpected success reading %s", TEST_IFCFG_VLAN_INTERFACE);
+ }
+ 
++#define TEST_IFCFG_INFINIBAND TEST_IFCFG_DIR"/network-scripts/ifcfg-test-infiniband"
++
++static void
++test_read_infiniband (void)
++{
++	NMConnection *connection;
++	NMSettingInfiniband *s_infiniband;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE;
++	GError *error = NULL;
++	const GByteArray *array;
++	char expected_mac_address[INFINIBAND_ALEN] = { 0x80, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22 };
++	const char *transport_mode;
++
++	connection = connection_from_file (TEST_IFCFG_INFINIBAND,
++	                                   NULL,
++	                                   TYPE_INFINIBAND,
++	                                   NULL,
++	                                   &unmanaged,
++	                                   &keyfile,
++	                                   &routefile,
++	                                   &route6file,
++	                                   &error,
++	                                   &ignore_error);
++	ASSERT (connection != NULL,
++	        "infiniband-read", "failed to read %s: %s", TEST_IFCFG_INFINIBAND, error->message);
++
++	ASSERT (nm_connection_verify (connection, &error),
++	        "infiniband-verify", "failed to verify %s: %s", TEST_IFCFG_INFINIBAND, error->message);
++
++	ASSERT (unmanaged == NULL,
++	        "infiniband-verify", "failed to verify %s: unexpected unmanaged value", TEST_IFCFG_INFINIBAND);
++
++	/* ===== INFINIBAND SETTING ===== */
++
++	s_infiniband = (NMSettingInfiniband *) nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND);
++	ASSERT (s_infiniband != NULL,
++	        "infiniband-verify-wired", "failed to verify %s: missing %s setting",
++	        TEST_IFCFG_INFINIBAND,
++	        NM_SETTING_INFINIBAND_SETTING_NAME);
++
++	/* MAC address */
++	array = nm_setting_infiniband_get_mac_address (s_infiniband);
++	ASSERT (array != NULL,
++	        "infiniband-verify-infiniband", "failed to verify %s: missing %s / %s key",
++	        TEST_IFCFG_INFINIBAND,
++	        NM_SETTING_INFINIBAND_SETTING_NAME,
++	        NM_SETTING_INFINIBAND_MAC_ADDRESS);
++	ASSERT (array->len == INFINIBAND_ALEN,
++	        "infiniband-verify-infiniband", "failed to verify %s: unexpected %s / %s key value length",
++	        TEST_IFCFG_INFINIBAND,
++	        NM_SETTING_INFINIBAND_SETTING_NAME,
++	        NM_SETTING_INFINIBAND_MAC_ADDRESS);
++	ASSERT (memcmp (array->data, &expected_mac_address[0], sizeof (expected_mac_address)) == 0,
++	        "infiniband-verify-infiniband", "failed to verify %s: unexpected %s / %s key value",
++	        TEST_IFCFG_INFINIBAND,
++	        NM_SETTING_INFINIBAND_SETTING_NAME,
++	        NM_SETTING_INFINIBAND_MAC_ADDRESS);
++
++	/* Transport mode */
++	transport_mode = nm_setting_infiniband_get_transport_mode (s_infiniband);
++	ASSERT (transport_mode != NULL,
++	        "infiniband-verify-infiniband", "failed to verify %s: missing %s / %s key",
++	        TEST_IFCFG_INFINIBAND,
++	        NM_SETTING_INFINIBAND_SETTING_NAME,
++	        NM_SETTING_INFINIBAND_TRANSPORT_MODE);
++	ASSERT (strcmp (transport_mode, "connected") == 0,
++	        "infiniband-verify-infiniband", "failed to verify %s: unexpected %s / %s key value",
++	        TEST_IFCFG_INFINIBAND,
++	        NM_SETTING_INFINIBAND_SETTING_NAME,
++	        NM_SETTING_INFINIBAND_TRANSPORT_MODE);
++
++	g_free (unmanaged);
++	g_free (keyfile);
++	g_free (routefile);
++	g_free (route6file);
++	g_object_unref (connection);
++}
++
++static void
++test_write_infiniband (void)
++{
++	NMConnection *connection;
++	NMConnection *reread;
++	NMSettingConnection *s_con;
++	NMSettingInfiniband *s_infiniband;
++	NMSettingIP4Config *s_ip4;
++	NMSettingIP6Config *s_ip6;
++	unsigned char tmpmac[INFINIBAND_ALEN] = { 0x80, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22 };
++	GByteArray *mac;
++	guint32 mtu = 65520;
++	char *uuid;
++	const guint32 ip1 = htonl (0x01010103);
++	const guint32 gw = htonl (0x01010101);
++	const guint32 prefix = 24;
++	NMIP4Address *addr;
++	gboolean success;
++	GError *error = NULL;
++	char *testfile = NULL;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE;
++
++	connection = nm_connection_new ();
++	ASSERT (connection != NULL,
++	        "infiniband-write", "failed to allocate new connection");
++
++	/* Connection setting */
++	s_con = (NMSettingConnection *) nm_setting_connection_new ();
++	ASSERT (s_con != NULL,
++	        "infiniband-write", "failed to allocate new %s setting",
++	        NM_SETTING_CONNECTION_SETTING_NAME);
++	nm_connection_add_setting (connection, NM_SETTING (s_con));
++
++	uuid = nm_utils_uuid_generate ();
++	g_object_set (s_con,
++	              NM_SETTING_CONNECTION_ID, "Test Write InfiniBand",
++	              NM_SETTING_CONNECTION_UUID, uuid,
++	              NM_SETTING_CONNECTION_AUTOCONNECT, TRUE,
++	              NM_SETTING_CONNECTION_TYPE, NM_SETTING_INFINIBAND_SETTING_NAME,
++	              NULL);
++	g_free (uuid);
++
++	/* InfiniBand setting */
++	s_infiniband = (NMSettingInfiniband *) nm_setting_infiniband_new ();
++	ASSERT (s_infiniband != NULL,
++	        "infiniband-write", "failed to allocate new %s setting",
++	        NM_SETTING_INFINIBAND_SETTING_NAME);
++	nm_connection_add_setting (connection, NM_SETTING (s_infiniband));
++
++	mac = g_byte_array_sized_new (sizeof (tmpmac));
++	g_byte_array_append (mac, &tmpmac[0], sizeof (tmpmac));
++
++	g_object_set (s_infiniband,
++	              NM_SETTING_INFINIBAND_MAC_ADDRESS, mac,
++	              NM_SETTING_INFINIBAND_MTU, mtu,
++	              NM_SETTING_INFINIBAND_TRANSPORT_MODE, "connected",
++	              NULL);
++	g_byte_array_free (mac, TRUE);
++
++	/* IP4 setting */
++	s_ip4 = (NMSettingIP4Config *) nm_setting_ip4_config_new ();
++	ASSERT (s_ip4 != NULL,
++			"infiniband-write", "failed to allocate new %s setting",
++			NM_SETTING_IP4_CONFIG_SETTING_NAME);
++	nm_connection_add_setting (connection, NM_SETTING (s_ip4));
++
++	g_object_set (s_ip4,
++	              NM_SETTING_IP4_CONFIG_METHOD, NM_SETTING_IP4_CONFIG_METHOD_MANUAL,
++	              NM_SETTING_IP4_CONFIG_MAY_FAIL, TRUE,
++	              NULL);
++
++	addr = nm_ip4_address_new ();
++	nm_ip4_address_set_address (addr, ip1);
++	nm_ip4_address_set_prefix (addr, prefix);
++	nm_ip4_address_set_gateway (addr, gw);
++	nm_setting_ip4_config_add_address (s_ip4, addr);
++	nm_ip4_address_unref (addr);
++
++	/* IP6 setting */
++	s_ip6 = (NMSettingIP6Config *) nm_setting_ip6_config_new ();
++	ASSERT (s_ip6 != NULL,
++	        "wired-static-write", "failed to allocate new %s setting",
++	        NM_SETTING_IP6_CONFIG_SETTING_NAME);
++	nm_connection_add_setting (connection, NM_SETTING (s_ip6));
++
++	g_object_set (s_ip6,
++	              NM_SETTING_IP6_CONFIG_METHOD, NM_SETTING_IP6_CONFIG_METHOD_IGNORE,
++	              NULL);
++
++	ASSERT (nm_connection_verify (connection, &error) == TRUE,
++	        "infiniband-write", "failed to verify connection: %s",
++	        (error && error->message) ? error->message : "(unknown)");
++
++	/* Save the ifcfg */
++	success = writer_new_connection (connection,
++	                                 TEST_SCRATCH_DIR "/network-scripts/",
++	                                 &testfile,
++	                                 &error);
++	ASSERT (success == TRUE,
++	        "infiniband-write", "failed to write connection to disk: %s",
++	        (error && error->message) ? error->message : "(unknown)");
++
++	ASSERT (testfile != NULL,
++	        "infiniband-write", "didn't get ifcfg file path back after writing connection");
++
++	/* re-read the connection for comparison */
++	reread = connection_from_file (testfile,
++	                               NULL,
++	                               TYPE_INFINIBAND,
++	                               NULL,
++	                               &unmanaged,
++	                               &keyfile,
++	                               &routefile,
++	                               &route6file,
++	                               &error,
++	                               &ignore_error);
++	unlink (testfile);
++
++	ASSERT (reread != NULL,
++	        "infiniband-write-reread", "failed to read %s: %s", testfile, error->message);
++
++	ASSERT (nm_connection_verify (reread, &error),
++	        "infiniband-write-reread-verify", "failed to verify %s: %s", testfile, error->message);
++
++	ASSERT (nm_connection_compare (connection, reread, NM_SETTING_COMPARE_FLAG_EXACT) == TRUE,
++	        "infiniband-write", "written and re-read connection weren't the same.");
++
++	g_free (testfile);
++	g_free (unmanaged);
++	g_free (keyfile);
++	g_free (routefile);
++	g_free (route6file);
++	g_object_unref (connection);
++	g_object_unref (reread);
++}
++
+ #define TEST_IFCFG_WIFI_OPEN_SSID_BAD_HEX TEST_IFCFG_DIR"/network-scripts/ifcfg-test-wifi-open-ssid-bad-hex"
+ #define TEST_IFCFG_WIFI_OPEN_SSID_LONG_QUOTED TEST_IFCFG_DIR"/network-scripts/ifcfg-test-wifi-open-ssid-long-quoted"
+ #define TEST_IFCFG_WIFI_OPEN_SSID_LONG_HEX TEST_IFCFG_DIR"/network-scripts/ifcfg-test-wifi-open-ssid-long-hex"
+@@ -11856,6 +12079,7 @@ int main (int argc, char **argv)
+ 	test_read_wifi_wep_eap_ttls_chap ();
+ 	test_read_wired_qeth_static ();
+ 	test_read_wired_ctc_static ();
++	test_read_infiniband ();
+ 
+ 	test_write_wired_static ();
+ 	test_write_wired_static_ip6_only ();
+@@ -11919,6 +12143,7 @@ int main (int argc, char **argv)
+ 	test_write_wifi_wpa_eap_ttls_mschapv2 ();
+ 	test_write_wired_qeth_dhcp ();
+ 	test_write_wired_ctc_dhcp ();
++	test_write_infiniband ();
+ 
+ 	/* iSCSI / ibft */
+ 	test_read_ibft_dhcp ();
+diff --git a/system-settings/plugins/ifcfg-rh/writer.c b/system-settings/plugins/ifcfg-rh/writer.c
+index 46793a7..3b66ada 100644
+--- a/system-settings/plugins/ifcfg-rh/writer.c
++++ b/system-settings/plugins/ifcfg-rh/writer.c
+@@ -28,6 +28,8 @@
+ #include <sys/stat.h>
+ #include <unistd.h>
+ #include <stdio.h>
++#include <netinet/ether.h>
++#include <nm-setting-infiniband.h>
+ 
+ #include <nm-setting-connection.h>
+ #include <nm-setting-wired.h>
+@@ -962,6 +963,48 @@ write_wireless_setting (NMConnection *connection,
+ }
+ 
+ static gboolean
++write_infiniband_setting (NMConnection *connection, shvarFile *ifcfg, GError **error)
++{
++	NMSettingInfiniband *s_infiniband;
++	const GByteArray *mac;
++	char *tmp;
++	const char *transport_mode;
++	guint32 mtu;
++
++	s_infiniband = (NMSettingInfiniband *) nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND);
++	if (!s_infiniband) {
++		g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
++		             "Missing '%s' setting", NM_SETTING_INFINIBAND_SETTING_NAME);
++		return FALSE;
++	}
++
++	svSetValue (ifcfg, "HWADDR", NULL, FALSE);
++	mac = nm_setting_infiniband_get_mac_address (s_infiniband);
++	if (mac) {
++		tmp = nm_utils_hwaddr_ntoa (mac->data, ARPHRD_INFINIBAND);
++		svSetValue (ifcfg, "HWADDR", tmp, FALSE);
++		g_free (tmp);
++	}
++
++	svSetValue (ifcfg, "MTU", NULL, FALSE);
++	mtu = nm_setting_infiniband_get_mtu (s_infiniband);
++	if (mtu) {
++		tmp = g_strdup_printf ("%u", mtu);
++		svSetValue (ifcfg, "MTU", tmp, FALSE);
++		g_free (tmp);
++	}
++
++	transport_mode = nm_setting_infiniband_get_transport_mode (s_infiniband);
++	svSetValue (ifcfg, "CONNECTED_MODE",
++	            strcmp (transport_mode, "connected") == 0 ? "yes" : "no",
++	            FALSE);
++
++	svSetValue (ifcfg, "TYPE", TYPE_INFINIBAND, FALSE);
++
++	return TRUE;
++}
++
++static gboolean
+ write_wired_setting (NMConnection *connection, shvarFile *ifcfg, GError **error)
+ {
+ 	NMSettingWired *s_wired;
+@@ -1792,6 +1835,9 @@ write_connection (NMConnection *connection,
+ 	} else if (!strcmp (type, NM_SETTING_WIRELESS_SETTING_NAME)) {
+ 		if (!write_wireless_setting (connection, ifcfg, &no_8021x, error))
+ 			goto out;
++	} else if (!strcmp (type, NM_SETTING_INFINIBAND_SETTING_NAME)) {
++		if (!write_infiniband_setting (connection, ifcfg, error))
++			goto out;
+ 	} else {
+ 		g_set_error (error, IFCFG_PLUGIN_ERROR, 0,
+ 		             "Can't write connection type '%s'", type);
+
+
+commit cd2603c71366ce84e0f9ebb611eecc3d7ec5a18d
+Author: Dan Williams <dcbw@redhat.com>
+Date:   Mon Feb 13 17:43:04 2012 -0600
+
+    api: fix various Infiniband introspection XML omissions
+
+diff --git a/introspection/Makefile.am b/introspection/Makefile.am
+index 7b549c1..bf09a73 100644
+--- a/introspection/Makefile.am
++++ b/introspection/Makefile.am
+@@ -10,6 +10,7 @@ EXTRA_DIST = \
+ 	nm-device-ethernet.xml \
+ 	nm-device-cdma.xml \
+ 	nm-device-gsm.xml \
++	nm-device-infiniband.xml \
+ 	nm-device-serial.xml \
+ 	nm-device.xml \
+ 	nm-ip4-config.xml \
+diff --git a/introspection/all.xml b/introspection/all.xml
+index bcb8d04..64e5fe4 100644
+--- a/introspection/all.xml
++++ b/introspection/all.xml
+@@ -34,6 +34,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.</
+ <xi:include href="nm-device-serial.xml"/>
+ <xi:include href="nm-device-bt.xml"/>
+ <xi:include href="nm-device-olpc-mesh.xml"/>
++<xi:include href="nm-device-infiniband.xml"/>
+ <xi:include href="nm-ip4-config.xml"/>
+ <xi:include href="nm-ip6-config.xml"/>
+ <xi:include href="nm-dhcp4-config.xml"/>
+diff --git a/introspection/nm-device.xml b/introspection/nm-device.xml
+index 7637e8d..08a2847 100644
+--- a/introspection/nm-device.xml
++++ b/introspection/nm-device.xml
+@@ -241,6 +241,11 @@
+           The device is a CDMA/IS-95-based cellular WAN device.
+         </tp:docstring>
+       </tp:enumvalue>
++      <tp:enumvalue suffix="INFINIBAND" value="9">
++        <tp:docstring>
++          The device is an IP-capable InfiniBand interface.
++        </tp:docstring>
++      </tp:enumvalue>
+     </tp:enum>
+ 
+     <tp:flags name="NM_DEVICE_CAP" value-prefix="NM_DEVICE_CAP" type="u">
+
+commit 8f681b9505885c3c373d56005dfaf0c278aec908
+Author: Dan Williams <dcbw@redhat.com>
+Date:   Fri Mar 9 10:48:08 2012 -0600
+
+    docs: infiniband fixups
+
+diff --git a/cli/src/connections.c b/cli/src/connections.c
+index f5343e5..025e96e 100644
+--- a/cli/src/connections.c
++++ b/cli/src/connections.c
+@@ -109,6 +109,7 @@ static NmcOutputField nmc_fields_settings_names[] = {
+ 	SETTING_FIELD (NM_SETTING_BLUETOOTH_SETTING_NAME, 0),             /* 12 */
+ 	SETTING_FIELD (NM_SETTING_OLPC_MESH_SETTING_NAME, 0),             /* 13 */
+ 	SETTING_FIELD (NM_SETTING_VPN_SETTING_NAME, 0),                   /* 14 */
++	SETTING_FIELD (NM_SETTING_INFINIBAND_SETTING_NAME, 0),            /* 15 */
+ 	{NULL, NULL, 0, NULL, 0}
+ };
+ #define NMC_FIELDS_SETTINGS_NAMES_ALL    NM_SETTING_CONNECTION_SETTING_NAME","\
+@@ -125,7 +126,8 @@ static NmcOutputField nmc_fields_settings_names[] = {
+                                          NM_SETTING_CDMA_SETTING_NAME","\
+                                          NM_SETTING_BLUETOOTH_SETTING_NAME","\
+                                          NM_SETTING_OLPC_MESH_SETTING_NAME","\
+-                                         NM_SETTING_VPN_SETTING_NAME
++                                         NM_SETTING_VPN_SETTING_NAME"," \
++                                         NM_SETTING_INFINIBAND_SETTING_NAME
+ 
+ 
+ typedef struct {
+@@ -355,6 +357,15 @@ nmc_connection_detail (NMConnection *connection, NmCli *nmc)
+ 				continue;
+ 			}
+ 		}
++
++		if (!strcasecmp (nmc_fields_settings_names[section_idx].name, nmc_fields_settings_names[15].name)) {
++			setting = nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND);
++			if (setting) {
++				setting_infiniband_details (setting, nmc);
++				was_output = TRUE;
++				continue;
++			}
++		}
+ 	}
+ 
+ 	if (print_settings_array)
+diff --git a/cli/src/settings.c b/cli/src/settings.c
+index afce1f5..62354a8 100644
+--- a/cli/src/settings.c
++++ b/cli/src/settings.c
+@@ -17,6 +17,10 @@
+  * (C) Copyright 2010 Red Hat, Inc.
+  */
+ 
++#include "config.h"
++
++#include <net/if_arp.h>
++
+ #include <glib.h>
+ #include <glib/gi18n.h>
+ #include <libnm-util/nm-utils.h>
+@@ -404,6 +408,20 @@ static NmcOutputField nmc_fields_setting_vpn[] = {
+                                        NM_SETTING_VPN_SECRETS
+ #define NMC_FIELDS_SETTING_VPN_COMMON  NMC_FIELDS_SETTING_VPN_ALL
+ 
++/* Available fields for NM_SETTING_INFINIBAND_SETTING_NAME */
++static NmcOutputField nmc_fields_setting_infiniband[] = {
++	SETTING_FIELD ("name",  12),                                       /* 0 */
++	SETTING_FIELD (NM_SETTING_INFINIBAND_MAC_ADDRESS, 61),             /* 1 */
++	SETTING_FIELD (NM_SETTING_INFINIBAND_MTU, 6),                      /* 2 */
++	SETTING_FIELD (NM_SETTING_INFINIBAND_TRANSPORT_MODE, 12),          /* 3 */
++	{NULL, NULL, 0, NULL, 0}
++};
++#define NMC_FIELDS_SETTING_INFINIBAND_ALL     "name"","\
++                                              NM_SETTING_INFINIBAND_MAC_ADDRESS","\
++                                              NM_SETTING_INFINIBAND_MTU","\
++                                              NM_SETTING_INFINIBAND_TRANSPORT_MODE
++#define NMC_FIELDS_SETTING_INFINIBAND_COMMON  NMC_FIELDS_SETTING_INFINIBAND_ALL
++
+ 
+ static char *
+ wep_key_type_to_string (NMWepKeyType type)
+@@ -1384,3 +1402,40 @@ setting_vpn_details (NMSetting *setting, NmCli *nmc)
+ 	return TRUE;
+ }
+ 
++gboolean
++setting_infiniband_details (NMSetting *setting, NmCli *nmc)
++{
++	NMSettingInfiniband *s_infiniband;
++	const GByteArray *mac;
++	char *mtu_str, *mac_str = NULL;
++	guint32 mode_flag = (nmc->print_output == NMC_PRINT_PRETTY) ? NMC_PF_FLAG_PRETTY : (nmc->print_output == NMC_PRINT_TERSE) ? NMC_PF_FLAG_TERSE : 0;
++	guint32 multiline_flag = nmc->multiline_output ? NMC_PF_FLAG_MULTILINE : 0;
++	guint32 escape_flag = nmc->escape_values ? NMC_PF_FLAG_ESCAPE : 0;
++
++	g_return_val_if_fail (NM_IS_SETTING_INFINIBAND (setting), FALSE);
++	s_infiniband = (NMSettingInfiniband *) setting;
++
++	nmc->allowed_fields = nmc_fields_setting_infiniband;
++	nmc->print_fields.indices = parse_output_fields (NMC_FIELDS_SETTING_INFINIBAND_ALL, nmc->allowed_fields, NULL);
++	nmc->print_fields.flags = multiline_flag | mode_flag | escape_flag | NMC_PF_FLAG_FIELD_NAMES;
++	print_fields (nmc->print_fields, nmc->allowed_fields);  /* Print field names */
++
++	mac = nm_setting_infiniband_get_mac_address (s_infiniband);
++	if (mac)
++		mac_str = nm_utils_hwaddr_ntoa (mac->data, ARPHRD_INFINIBAND);
++	mtu_str = g_strdup_printf ("%d", nm_setting_infiniband_get_mtu (s_infiniband));
++
++	nmc->allowed_fields[0].value = NM_SETTING_INFINIBAND_SETTING_NAME;
++	nmc->allowed_fields[1].value = mac_str;
++	nmc->allowed_fields[2].value = strcmp (mtu_str, "0") ? mtu_str : _("auto");
++	nmc->allowed_fields[3].value = nm_setting_infiniband_get_transport_mode (s_infiniband);
++
++	nmc->print_fields.flags = multiline_flag | mode_flag | escape_flag | NMC_PF_FLAG_SECTION_PREFIX;
++	print_fields (nmc->print_fields, nmc->allowed_fields); /* Print values */
++
++	g_free (mac_str);
++	g_free (mtu_str);
++
++	return TRUE;
++}
++
+diff --git a/cli/src/settings.h b/cli/src/settings.h
+index aec7155..f18b331 100644
+--- a/cli/src/settings.h
++++ b/cli/src/settings.h
+@@ -35,6 +35,7 @@
+ #include <nm-setting-bluetooth.h>
+ #include <nm-setting-olpc-mesh.h>
+ #include <nm-setting-vpn.h>
++#include <nm-setting-infiniband.h>
+ 
+ #include "nmcli.h"
+ #include "utils.h"
+@@ -55,5 +56,6 @@ gboolean setting_cdma_details (NMSetting *setting, NmCli *nmc);
+ gboolean setting_bluetooth_details (NMSetting *setting, NmCli *nmc);
+ gboolean setting_olpc_mesh_details (NMSetting *setting, NmCli *nmc);
+ gboolean setting_vpn_details (NMSetting *setting, NmCli *nmc);
++gboolean setting_infiniband_details (NMSetting *setting, NmCli *nmc);
+ 
+ #endif /* NMC_SETTINGS_H */
+diff --git a/docs/generate-settings-spec.c b/docs/generate-settings-spec.c
+index 6ec8f7c..850e203 100644
+--- a/docs/generate-settings-spec.c
++++ b/docs/generate-settings-spec.c
+@@ -35,6 +35,7 @@
+ #include <nm-setting-connection.h>
+ #include <nm-setting-gsm.h>
+ #include <nm-setting.h>
++#include <nm-setting-infiniband.h>
+ #include <nm-setting-ip4-config.h>
+ #include <nm-setting-ip6-config.h>
+ #include <nm-setting-olpc-mesh.h>
+@@ -56,6 +57,7 @@ static SettingNewFunc funcs[] = {
+ 	nm_setting_cdma_new,
+ 	nm_setting_connection_new,
+ 	nm_setting_gsm_new,
++	nm_setting_infiniband_new,
+ 	nm_setting_ip4_config_new,
+ 	nm_setting_ip6_config_new,
+ 	nm_setting_olpc_mesh_new,
+diff --git a/docs/libnm-glib/Makefile.am b/docs/libnm-glib/Makefile.am
+index 96ff66e..24b89f1 100644
+--- a/docs/libnm-glib/Makefile.am
++++ b/docs/libnm-glib/Makefile.am
+@@ -43,6 +43,7 @@ IGNORE_HFILES= \
+ 	nm-device-bt-bindings.h \
+ 	nm-device-ethernet-bindings.h \
+ 	nm-device-wifi-bindings.h \
++	nm-device-infiniband-bindings.h \
+ 	nm-dhcp4-config-bindings.h \
+ 	nm-dhcp6-config-bindings.h \
+ 	nm-exported-connection-bindings.h \
+diff --git a/docs/libnm-glib/libnm-glib-docs.sgml b/docs/libnm-glib/libnm-glib-docs.sgml
+index b4e5dac..70b94d5 100644
+--- a/docs/libnm-glib/libnm-glib-docs.sgml
++++ b/docs/libnm-glib/libnm-glib-docs.sgml
+@@ -22,6 +22,7 @@
+     <xi:include href="xml/nm-gsm-device.xml"/>
+     <xi:include href="xml/nm-cdma-device.xml"/>
+     <xi:include href="xml/nm-device-bt.xml"/>
++    <xi:include href="xml/nm-device-infiniband.xml"/>
+     <xi:include href="xml/nm-access-point.xml"/>
+     <xi:include href="xml/nm-ip4-config.xml"/>
+     <xi:include href="xml/nm-ip6-config.xml"/>
+diff --git a/docs/libnm-util/libnm-util-docs.sgml b/docs/libnm-util/libnm-util-docs.sgml
+index 78b931d..395588a 100644
+--- a/docs/libnm-util/libnm-util-docs.sgml
++++ b/docs/libnm-util/libnm-util-docs.sgml
+@@ -28,6 +28,7 @@
+     <xi:include href="xml/nm-setting-gsm.xml"/>
+     <xi:include href="xml/nm-setting-olpc-mesh.xml"/>
+     <xi:include href="xml/nm-setting-8021x.xml"/>
++    <xi:include href="xml/nm-setting-infiniband.xml"/>
+     <xi:include href="xml/nm-setting-ip4-config.xml"/>
+     <xi:include href="xml/nm-setting-ip6-config.xml"/>
+     <xi:include href="xml/nm-setting-ppp.xml"/>
+diff --git a/docs/libnm-glib/tmpl/nm-device-infiniband.sgml b/docs/libnm-glib/tmpl/nm-device-infiniband.sgml
+new file mode 100644
+index 0000000..190d74b
+--- /dev/null
++++ b/docs/libnm-glib/tmpl/nm-device-infiniband.sgml
+@@ -0,0 +1,95 @@
++<!-- ##### SECTION Title ##### -->
++NMDeviceInfiniband
++
++<!-- ##### SECTION Short_Description ##### -->
++
++
++<!-- ##### SECTION Long_Description ##### -->
++<para>
++
++</para>
++
++
++<!-- ##### SECTION See_Also ##### -->
++<para>
++
++</para>
++
++
++<!-- ##### SECTION Stability_Level ##### -->
++
++
++<!-- ##### SECTION Image ##### -->
++
++
++<!-- ##### STRUCT NMDeviceInfiniband ##### -->
++<para>
++
++</para>
++
++
++<!-- ##### ARG NMDeviceInfiniband:carrier ##### -->
++<para>
++
++</para>
++
++<!-- ##### ARG NMDeviceInfiniband:hw-address ##### -->
++<para>
++
++</para>
++
++<!-- ##### STRUCT NMDeviceInfinibandClass ##### -->
++<para>
++
++</para>
++
++@parent: 
++@_reserved1: 
++@_reserved2: 
++@_reserved3: 
++@_reserved4: 
++@_reserved5: 
++@_reserved6: 
++
++<!-- ##### MACRO NM_DEVICE_INFINIBAND_CARRIER ##### -->
++<para>
++
++</para>
++
++
++
++<!-- ##### MACRO NM_DEVICE_INFINIBAND_HW_ADDRESS ##### -->
++<para>
++
++</para>
++
++
++
++<!-- ##### FUNCTION nm_device_infiniband_get_carrier ##### -->
++<para>
++
++</para>
++
++@device: 
++@Returns: 
++
++
++<!-- ##### FUNCTION nm_device_infiniband_get_hw_address ##### -->
++<para>
++
++</para>
++
++@device: 
++@Returns: 
++
++
++<!-- ##### FUNCTION nm_device_infiniband_new ##### -->
++<para>
++
++</para>
++
++@connection: 
++@path: 
++@Returns: 
++
++
+diff --git a/docs/libnm-glib/libnm-glib-sections.txt b/docs/libnm-glib/libnm-glib-sections.txt
+index 6171547..7ef3384 100644
+--- a/docs/libnm-glib/libnm-glib-sections.txt
++++ b/docs/libnm-glib/libnm-glib-sections.txt
+@@ -406,6 +448,31 @@ NM_DEVICE_ETHERNET_GET_CLASS
+ </SECTION>
+ 
+ <SECTION>
++<FILE>nm-device-infiniband</FILE>
++<TITLE>NMDeviceInfiniband</TITLE>
++NMDeviceInfiniband
++NMDeviceInfinibandClass
++NM_DEVICE_INFINIBAND_CARRIER
++NM_DEVICE_INFINIBAND_HW_ADDRESS
++nm_device_infiniband_get_carrier
++nm_device_infiniband_get_hw_address
++nm_device_infiniband_new
++<SUBSECTION Standard>
++NM_DEVICE_INFINIBAND
++NM_DEVICE_INFINIBAND_CLASS
++NM_DEVICE_INFINIBAND_GET_CLASS
++NM_IS_DEVICE_INFINIBAND
++NM_IS_DEVICE_INFINIBAND_CLASS
++NM_TYPE_DEVICE_INFINIBAND
++nm_device_infiniband_get_type
++</SECTION>
++
++<SECTION>
++<FILE>nm-device-infiniband-bindings</FILE>
++DBUS_GLIB_CLIENT_WRAPPERS_org_freedesktop_NetworkManager_Device_Infiniband
++</SECTION>
++
++<SECTION>
+ <FILE>nm-settings-connection-interface</FILE>
+ <TITLE>NMSettingsConnection</TITLE>
+ NM_SETTINGS_CONNECTION_INTERFACE_UPDATED
+
+
+commit 8a16af2bd8659a93b995d86a352d9b57f89c9daf
+Author: Dan Williams <dcbw@redhat.com>
+Date:   Fri Nov 18 11:13:30 2011 -0600
+
+    keyfile: add support for Infiniband connections
+
+diff --git a/system-settings/plugins/keyfile/io/reader.c b/system-settings/plugins/keyfile/io/reader.c
+index f973ce8..67e3794 100644
+--- a/system-settings/plugins/keyfile/io/reader.c
++++ b/system-settings/plugins/keyfile/io/reader.c
+@@ -37,8 +37,11 @@
+ #include <nm-setting-gsm.h>
+ #include <nm-setting-cdma.h>
+ #include <nm-setting-ppp.h>
++#include <nm-setting-infiniband.h>
++#include <nm-utils.h>
+ #include <arpa/inet.h>
+ #include <netinet/ether.h>
++#include <linux/if_infiniband.h>
+ #include <string.h>
+ 
+ #include "nm-dbus-glib-types.h"
+@@ -653,12 +650,11 @@
+ mac_address_parser (NMSetting *setting, const char *key, GKeyFile *keyfile)
+ {
+ 	const char *setting_name = nm_setting_get_name (setting);
+-	struct ether_addr *eth;
+ 	char *tmp_string = NULL, *p;
+ 	gint *tmp_list;
+ 	GByteArray *array = NULL;
+ 	gsize length;
+-	int i;
++	int i, type;
+ 
+ 	p = tmp_string = g_key_file_get_string (keyfile, setting_name, key, NULL);
+ 	if (tmp_string) {
+@@ -666,43 +667,45 @@ mac_address_parser (NMSetting *setting, const char *key, GKeyFile *keyfile, cons
+ 				i++;
+ 			p++;
+ 		}
+-		if (i == 5) {
+-			/* parse as a MAC address */
+-			eth = ether_aton (tmp_string);
+-			if (eth) {
+-				g_free (tmp_string);
+-				array = g_byte_array_sized_new (ETH_ALEN);
+-				g_byte_array_append (array, eth->ether_addr_octet, ETH_ALEN);
+-				goto done;
+-			}
+-		}
++
++		/* If we found enough it's probably a string-format MAC address */
++		type = nm_utils_hwaddr_type (i + 1);
++		if (type > 0)
++			array = nm_utils_hwaddr_atoba (tmp_string, type);
+ 	}
+ 	g_free (tmp_string);
+ 
+-	/* Old format; list of ints */
+-	tmp_list = g_key_file_get_integer_list (keyfile, setting_name, key, &length, NULL);
+-	array = g_byte_array_sized_new (length);
+-	for (i = 0; i < length; i++) {
+-		int val = tmp_list[i];
+-		unsigned char v = (unsigned char) (val & 0xFF);
+-
+-		if (val < 0 || val > 255) {
+-			g_warning ("%s: %s / %s ignoring invalid byte element '%d' (not "
+-			           " between 0 and 255 inclusive)", __func__, setting_name,
+-			           key, val);
+-		} else
+-			g_byte_array_append (array, (const unsigned char *) &v, sizeof (v));
++	if (array == NULL) {
++		/* Old format; list of ints */
++		tmp_list = g_key_file_get_integer_list (keyfile, setting_name, key, &length, NULL);
++		type = nm_utils_hwaddr_type (length);
++		if (type < 0) {
++			array = g_byte_array_sized_new (length);
++			for (i = 0; i < length; i++) {
++				int val = tmp_list[i];
++				const guint8 v = (guint8) (val & 0xFF);
++
++				if (val < 0 || val > 255) {
++					g_warning ("%s: %s / %s ignoring invalid byte element '%d' (not "
++							   " between 0 and 255 inclusive)", __func__, setting_name,
++							   key, val);
++					g_byte_array_free (array, TRUE);
++					array = NULL;
++					break;
++				}
++				g_byte_array_append (array, &v, 1);
++			}
++		}
++		g_free (tmp_list);
+ 	}
+-	g_free (tmp_list);
+ 
+-done:
+-	if (array->len == ETH_ALEN) {
++	if (array) {
+ 		g_object_set (setting, key, array, NULL);
++		g_byte_array_free (array, TRUE);
+ 	} else {
+ 		g_warning ("%s: ignoring invalid MAC address for %s / %s",
+ 		           __func__, setting_name, key);
+ 	}
+-	g_byte_array_free (array, TRUE);
+ }
+ 
+ static void
+@@ -1033,6 +1038,10 @@ static KeyParser key_parsers[] = {
+ 	  NM_SETTING_BLUETOOTH_BDADDR,
+ 	  TRUE,
+ 	  mac_address_parser },
++	{ NM_SETTING_INFINIBAND_SETTING_NAME,
++	  NM_SETTING_INFINIBAND_MAC_ADDRESS,
++	  TRUE,
++	  mac_address_parser },
+ 	{ NULL, NULL, FALSE }
+ };
+ 
+diff --git a/system-settings/plugins/keyfile/tests/keyfiles/Makefile.am b/system-settings/plugins/keyfile/tests/keyfiles/Makefile.am
+index 55dda7e..e95ec86 100644
+--- a/system-settings/plugins/keyfile/tests/keyfiles/Makefile.am
++++ b/system-settings/plugins/keyfile/tests/keyfiles/Makefile.am
+@@ -13,6 +13,7 @@ KEYFILES = \
+ 	Test_Wireless_Connection \
+ 	Test_Wired_Connection_MAC_Case \
+ 	Test_Wired_Connection_IP6 \
++	Test_InfiniBand_Connection \
+ 	ATT_Data_Connect_BT \
+ 	ATT_Data_Connect_Plain
+ 
+diff --git a/system-settings/plugins/keyfile/tests/keyfiles/Test_InfiniBand_Connection b/system-settings/plugins/keyfile/tests/keyfiles/Test_InfiniBand_Connection
+new file mode 100644
+index 0000000..620df3c
+--- /dev/null
++++ b/system-settings/plugins/keyfile/tests/keyfiles/Test_InfiniBand_Connection
+@@ -0,0 +1,12 @@
++[connection]
++id=Test InfiniBand Connection
++uuid=4e80a56d-c99f-4aad-a6dd-b449bc398c57
++type=infiniband
++
++[infiniband]
++mac-address=00:11:22:33:44:55:66:77:88:99:01:12:23:34:45:56:67:78:89:90
++mtu=1400
++
++[ipv4]
++method=auto
++
+diff --git a/system-settings/plugins/keyfile/tests/test-keyfile.c b/system-settings/plugins/keyfile/tests/test-keyfile.c
+index 2859cb3..5452f4f 100644
+--- a/system-settings/plugins/keyfile/tests/test-keyfile.c
++++ b/system-settings/plugins/keyfile/tests/test-keyfile.c
+@@ -26,6 +26,7 @@
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
+ #include <sys/socket.h>
++#include <linux/if_infiniband.h>
+ 
+ #include <dbus/dbus-glib.h>
+ 
+@@ -38,6 +39,7 @@
+ #include <nm-setting-serial.h>
+ #include <nm-setting-ppp.h>
+ #include <nm-setting-gsm.h>
++#include <nm-setting-infiniband.h>
+ 
+ #include "nm-test-helpers.h"
+ 
+@@ -2828,6 +2830,131 @@ test_write_wired_8021x_tls_connection_blob (void)
+ 	g_object_unref (connection);
+ }
+ 
++#define TEST_INFINIBAND_FILE    TEST_KEYFILES_DIR"/Test_InfiniBand_Connection"
++
++static void
++test_read_infiniband_connection (void)
++{
++	NMConnection *connection;
++	NMSettingConnection *s_con;
++	NMSettingInfiniband *s_ib;
++	GError *error = NULL;
++	const GByteArray *array;
++	guint8 expected_mac[INFINIBAND_ALEN] = { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
++		0x77, 0x88, 0x99, 0x01, 0x12, 0x23, 0x34, 0x45, 0x56, 0x67, 0x78, 0x89,
++		0x90 };
++	const char *expected_id = "Test InfiniBand Connection";
++	const char *expected_uuid = "4e80a56d-c99f-4aad-a6dd-b449bc398c57";
++	gboolean success;
++
++	connection = connection_from_file (TEST_INFINIBAND_FILE);
++	g_assert (connection);
++	success = nm_connection_verify (connection, &error);
++	g_assert_no_error (error);
++	g_assert (success);
++
++	/* Connection setting */
++	s_con = nm_connection_get_setting_connection (connection);
++	g_assert (s_con);
++	g_assert_cmpstr (nm_setting_connection_get_id (s_con), ==, expected_id);
++	g_assert_cmpstr (nm_setting_connection_get_uuid (s_con), ==, expected_uuid);
++
++	/* InfiniBand setting */
++	s_ib = NM_SETTING_INFINIBAND (nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND));
++	g_assert (s_ib);
++
++	array = nm_setting_infiniband_get_mac_address (s_ib);
++	g_assert (array);
++	g_assert_cmpint (array->len, ==, INFINIBAND_ALEN);
++	g_assert_cmpint (memcmp (array->data, expected_mac, sizeof (expected_mac)), ==, 0);
++
++	g_object_unref (connection);
++}
++
++static void
++test_write_infiniband_connection (void)
++{
++	NMConnection *connection;
++	NMSettingConnection *s_con;
++	NMSettingInfiniband *s_ib;
++	NMSettingIP4Config *s_ip4;
++	NMSettingIP6Config *s_ip6;
++	char *uuid;
++	GByteArray *mac;
++	guint8 tmpmac[] = { 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0xab, 0xbc,
++		0xcd, 0xde, 0xef, 0xf0, 0x0a, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f, 0x6f, 0xba
++	};
++	gboolean success;
++	NMConnection *reread;
++	char *testfile = NULL;
++	GError *error = NULL;
++	pid_t owner_grp;
++	uid_t owner_uid;
++
++	connection = nm_connection_new ();
++	g_assert (connection);
++
++	/* Connection setting */
++
++	s_con = (NMSettingConnection *) nm_setting_connection_new ();
++	g_assert (s_con);
++	nm_connection_add_setting (connection, NM_SETTING (s_con));
++
++	uuid = nm_utils_uuid_generate ();
++	g_object_set (s_con,
++	              NM_SETTING_CONNECTION_ID, "Work InfiniBand",
++	              NM_SETTING_CONNECTION_UUID, uuid,
++	              NM_SETTING_CONNECTION_AUTOCONNECT, FALSE,
++	              NM_SETTING_CONNECTION_TYPE, NM_SETTING_INFINIBAND_SETTING_NAME,
++	              NULL);
++	g_free (uuid);
++
++	/* InfiniBand setting */
++	s_ib = (NMSettingInfiniband *) nm_setting_infiniband_new ();
++	g_assert (s_ib);
++	nm_connection_add_setting (connection, NM_SETTING (s_ib));
++
++	mac = g_byte_array_sized_new (sizeof (tmpmac));
++	g_byte_array_append (mac, &tmpmac[0], sizeof (tmpmac));
++	g_object_set (s_ib,
++	              NM_SETTING_INFINIBAND_MAC_ADDRESS, mac,
++	              NM_SETTING_INFINIBAND_MTU, 900,
++	              NULL);
++	g_byte_array_free (mac, TRUE);
++
++	/* IP4 setting */
++	s_ip4 = (NMSettingIP4Config *) nm_setting_ip4_config_new ();
++	g_assert (s_ip4);
++	nm_connection_add_setting (connection, NM_SETTING (s_ip4));
++	g_object_set (s_ip4, NM_SETTING_IP4_CONFIG_METHOD, NM_SETTING_IP4_CONFIG_METHOD_AUTO, NULL);
++
++	/* IP6 setting */
++	s_ip6 = (NMSettingIP6Config *) nm_setting_ip6_config_new ();
++	g_assert (s_ip6);
++	nm_connection_add_setting (connection, NM_SETTING (s_ip6));
++	g_object_set (s_ip6, NM_SETTING_IP6_CONFIG_METHOD, NM_SETTING_IP6_CONFIG_METHOD_AUTO, NULL);
++
++	/* Write out the connection */
++	owner_uid = geteuid ();
++	owner_grp = getegid ();
++	success = write_connection (connection, TEST_SCRATCH_DIR, owner_uid, owner_grp, &testfile, &error);
++	g_assert_no_error (error);
++	g_assert (success);
++	g_assert (testfile);
++
++	/* Read the connection back in and compare it to the one we just wrote out */
++	reread = connection_from_file (testfile);
++	g_assert (reread);
++
++	g_assert (nm_connection_compare (connection, reread, NM_SETTING_COMPARE_FLAG_EXACT));
++
++	unlink (testfile);
++	g_free (testfile);
++
++	g_object_unref (reread);
++	g_object_unref (connection);
++}
++
+ int main (int argc, char **argv)
+ {
+ 	GError *error = NULL;
+@@ -2876,6 +3005,9 @@ int main (int argc, char **argv)
+ 	test_read_gsm_connection ();
+ 	test_write_gsm_connection ();
+ 
++	test_read_infiniband_connection ();
++	test_write_infiniband_connection ();
++
+ 	base = g_path_get_basename (argv[0]);
+ 	fprintf (stdout, "%s: SUCCESS\n", base);
+ 	g_free (base);
+diff --git a/systen-settings/plugins/keyfile/io/writer.c b/system-settings/plugins/keyfile/io/writer.c
+index 3bc8260..bbd6a7c 100644
+--- a/system-settings/plugins/keyfile/io/writer.c
++++ b/system-settings/plugins/keyfile/io/writer.c
+@@ -32,6 +32,7 @@
+ #include <nm-setting-wireless.h>
+ #include <nm-setting-ip4-config.h>
+ #include <nm-setting-bluetooth.h>
++#include <nm-setting-infiniband.h>
+ #include <nm-utils.h>
+ #include <string.h>
+ #include <arpa/inet.h>
+@@ -416,7 +416,7 @@ mac_address_writer (GKeyFile *file,
+ 	GByteArray *array;
+ 	const char *setting_name = nm_setting_get_name (setting);
+ 	char *mac;
+-	struct ether_addr tmp;
++	int type;
+ 
+ 	g_return_if_fail (G_VALUE_HOLDS (value, DBUS_TYPE_G_UCHAR_ARRAY));
+ 
+@@ -424,15 +424,16 @@ mac_address_writer (GKeyFile *file,
+ 	if (!array)
+ 		return;
+ 
+-	if (array->len != ETH_ALEN) {
++	type = nm_utils_hwaddr_type (array->len);
++	if (type < 0) {
+ 		nm_warning ("%s: invalid %s / %s MAC address length %d",
+ 		            __func__, setting_name, key, array->len);
+ 		return;
+ 	}
+ 
+-	memcpy (tmp.ether_addr_octet, array->data, ETH_ALEN);
+-	mac = ether_ntoa (&tmp);
++	mac = nm_utils_hwaddr_ntoa (array->data, type);
+ 	g_key_file_set_string (file, setting_name, key, mac);
++	g_free (mac);
+ }
+ 
+ typedef struct {
+@@ -812,6 +813,9 @@ static KeyWriter key_writers[] = {
+ 	{ NM_SETTING_BLUETOOTH_SETTING_NAME,
+ 	  NM_SETTING_BLUETOOTH_BDADDR,
+ 	  mac_address_writer },
++	{ NM_SETTING_INFINIBAND_SETTING_NAME,
++	  NM_SETTING_INFINIBAND_MAC_ADDRESS,
++	  mac_address_writer },
+ 	{ NULL, NULL, NULL }
+ };
+ 

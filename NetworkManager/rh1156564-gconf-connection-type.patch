@@ -1,0 +1,73 @@
+From 63346a7a0cd3b50ab9c2fe1b0f8117ebcc35b7d5 Mon Sep 17 00:00:00 2001
+From: Lubomir Rintel <lkundrak@v3.sk>
+Date: Thu, 30 Oct 2014 17:32:48 +0100
+Subject: [PATCH 1/2] libnm: make sure there's no connection.type while the
+ connection is not complete
+
+This works around lack of transactions in GConf while adding a new connection.
+
+https://bugzilla.redhat.com/show_bug.cgi?id=1156564
+---
+ .../src/gconf-helpers/gconf-helpers.c                       | 10 ++++++++++
+ .../src/gconf-helpers/nma-gconf-connection.c                | 13 ++++++++++++-
+ 2 files changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/network-manager-applet-0.8.1/src/gconf-helpers/gconf-helpers.c b/network-manager-applet-0.8.1/src/gconf-helpers/gconf-helpers.c
+index 9163bde..f46413e 100644
+--- a/network-manager-applet-0.8.1/src/gconf-helpers/gconf-helpers.c
++++ b/network-manager-applet-0.8.1/src/gconf-helpers/gconf-helpers.c
+@@ -2515,6 +2515,12 @@ copy_one_setting_value_to_gconf (NMSetting *setting,
+ 	GType type = G_VALUE_TYPE (value);
+ 	GParamSpec *pspec;
+ 
++	/* Don't write connection.type. This is to ensure the connection is
++	 * invalid while it not complete. */
++	if (   NM_IS_SETTING_CONNECTION (setting)
++	    && !strcmp (key, NM_SETTING_CONNECTION_TYPE))
++		return;
++
+ 	/* Some VPN keys are ignored */
+ 	if (NM_IS_SETTING_VPN (setting)) {
+ 		if (string_in_list (key, vpn_ignore_keys))
+@@ -2700,6 +2706,10 @@ nm_gconf_write_connection (NMConnection *connection,
+ 	                                      copy_one_setting_value_to_gconf,
+ 	                                      &info);
+ 	remove_leftovers (&info);
++	/* Set the connection.type to signal the connection is now complete. */
++	nm_gconf_set_string_helper (client, dir, NM_SETTING_CONNECTION_TYPE,
++	                            NM_SETTING_CONNECTION_SETTING_NAME,
++	                            nm_setting_connection_get_connection_type (s_con));
+ 
+ 	/* Write/clear secrets; the caller must know whether or not to do this
+ 	 * based on how the connection was updated; if only something like the
+diff --git a/network-manager-applet-0.8.1/src/gconf-helpers/nma-gconf-connection.c b/network-manager-applet-0.8.1/src/gconf-helpers/nma-gconf-connection.c
+index 7393a78..29ce201 100644
+--- a/network-manager-applet-0.8.1/src/gconf-helpers/nma-gconf-connection.c
++++ b/network-manager-applet-0.8.1/src/gconf-helpers/nma-gconf-connection.c
+@@ -504,11 +504,22 @@ do_delete (NMSettingsConnectionInterface *connection,
+ 	NMAGConfConnectionPrivate *priv = NMA_GCONF_CONNECTION_GET_PRIVATE (connection);
+ 	gboolean success;
+ 	GError *error = NULL;
++	char *type_key;
++
++	/* Remove the connection.type first so that the connection is invalidated
++	 * and the daemon doesn't see a valid but incomplete connection. */
++	type_key = g_strdup_printf ("%s/%s/%s", priv->dir,
++	                            NM_SETTING_CONNECTION_SETTING_NAME,
++	                            NM_SETTING_CONNECTION_TYPE);
++	success = gconf_client_unset (priv->client, type_key, &error);
++	g_free (type_key);
+ 
+ 	/* Clean up keyring keys */
+ 	clear_keyring_items (NMA_GCONF_CONNECTION (connection));
+ 
+-	success = gconf_client_recursive_unset (priv->client, priv->dir, 0, &error);
++	if (success)
++		success = gconf_client_recursive_unset (priv->client, priv->dir, 0, &error);
++
+ 	if (!success) {
+ 		callback (connection, error, user_data);
+ 		g_error_free (error);
+-- 
+2.1.0
+

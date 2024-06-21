@@ -1,0 +1,811 @@
+diff -up NetworkManager-0.8.1/libnm-util/libnm-util.ver.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/libnm-util/libnm-util.ver
+--- NetworkManager-0.8.1/libnm-util/libnm-util.ver.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.237062505 -0400
++++ NetworkManager-0.8.1/libnm-util/libnm-util.ver	2014-05-08 09:06:36.259062506 -0400
+@@ -154,6 +154,7 @@ global:
+ 	nm_setting_connection_get_type;
+ 	nm_setting_connection_new;
+ 	nm_setting_connection_get_id;
++	nm_setting_connection_get_interface_name;
+ 	nm_setting_connection_get_uuid;
+ 	nm_setting_connection_get_connection_type;
+ 	nm_setting_connection_get_gateway_ping_timeout;
+diff -up NetworkManager-0.8.1/libnm-util/nm-setting-connection.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/libnm-util/nm-setting-connection.c
+--- NetworkManager-0.8.1/libnm-util/nm-setting-connection.c.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.202062502 -0400
++++ NetworkManager-0.8.1/libnm-util/nm-setting-connection.c	2014-05-08 09:06:36.259062506 -0400
+@@ -88,6 +88,7 @@ G_DEFINE_TYPE (NMSettingConnection, nm_s
+ typedef struct {
+ 	char *id;
+ 	char *uuid;
++	char *interface_name;
+ 	char *type;
+ 	char *master;
+ 	char *slave_type;
+@@ -101,6 +102,7 @@ enum {
+ 	PROP_0,
+ 	PROP_ID,
+ 	PROP_UUID,
++	PROP_INTERFACE_NAME,
+ 	PROP_TYPE,
+ 	PROP_AUTOCONNECT,
+ 	PROP_TIMESTAMP,
+@@ -157,6 +159,22 @@ nm_setting_connection_get_uuid (NMSettin
+ }
+ 
+ /**
++ * nm_setting_connection_get_interface_name:
++ * @setting: the #NMSettingConnection
++ *
++ * Returns the #NMSettingConnection:interface-name property of the connection.
++ *
++ * Returns: the connection's interface name
++ **/
++const char *
++nm_setting_connection_get_interface_name (NMSettingConnection *setting)
++{
++	g_return_val_if_fail (NM_IS_SETTING_CONNECTION (setting), NULL);
++
++	return NM_SETTING_CONNECTION_GET_PRIVATE (setting)->interface_name;
++}
++
++/**
+  * nm_setting_connection_get_connection_type:
+  * @setting: the #NMSettingConnection
+  *
+@@ -301,6 +319,7 @@ static gboolean
+ verify (NMSetting *setting, GSList *all_settings, GError **error)
+ {
+ 	NMSettingConnectionPrivate *priv = NM_SETTING_CONNECTION_GET_PRIVATE (setting);
++	GSList *iter;
+ 
+ 	if (!priv->id) {
+ 		g_set_error (error,
+@@ -330,6 +349,38 @@ verify (NMSetting *setting, GSList *all_
+ 		return FALSE;
+ 	}
+ 
++	/* If the connection has a virtual interface name, it must match
++	 * the connection setting's interface name.
++	 */
++	for (iter = all_settings; iter; iter = iter->next) {
++		const char *virtual_iface;
++
++		virtual_iface = nm_setting_get_virtual_iface_name (iter->data);
++		if (virtual_iface) {
++			if (priv->interface_name) {
++				if (strcmp (priv->interface_name, virtual_iface) != 0) {
++					g_set_error (error,
++					             NM_SETTING_CONNECTION_ERROR,
++					             NM_SETTING_CONNECTION_ERROR_INVALID_PROPERTY,
++					             NM_SETTING_CONNECTION_INTERFACE_NAME);
++					return FALSE;
++				}
++			} else
++				priv->interface_name = g_strdup (virtual_iface);
++			break;
++		}
++	}
++
++	if (priv->interface_name) {
++		if (!nm_utils_iface_valid_name (priv->interface_name)) {
++			g_set_error (error,
++			             NM_SETTING_CONNECTION_ERROR,
++			             NM_SETTING_CONNECTION_ERROR_INVALID_PROPERTY,
++			             NM_SETTING_CONNECTION_INTERFACE_NAME);
++			return FALSE;
++		}
++	}
++
+ 	if (!priv->type) {
+ 		g_set_error (error,
+ 		             NM_SETTING_CONNECTION_ERROR,
+@@ -409,6 +460,7 @@ finalize (GObject *object)
+ 
+ 	g_free (priv->id);
+ 	g_free (priv->uuid);
++	g_free (priv->interface_name);
+ 	g_free (priv->type);
+ 	g_free (priv->master);
+ 	g_free (priv->slave_type);
+@@ -431,6 +483,10 @@ set_property (GObject *object, guint pro
+ 		g_free (priv->uuid);
+ 		priv->uuid = g_value_dup_string (value);
+ 		break;
++	case PROP_INTERFACE_NAME:
++		g_free (priv->interface_name);
++		priv->interface_name = g_value_dup_string (value);
++		break;
+ 	case PROP_TYPE:
+ 		g_free (priv->type);
+ 		priv->type = g_value_dup_string (value);
+@@ -474,6 +530,9 @@ get_property (GObject *object, guint pro
+ 	case PROP_UUID:
+ 		g_value_set_string (value, nm_setting_connection_get_uuid (setting));
+ 		break;
++	case PROP_INTERFACE_NAME:
++		g_value_set_string (value, nm_setting_connection_get_interface_name (setting));
++		break;
+ 	case PROP_TYPE:
+ 		g_value_set_string (value, nm_setting_connection_get_connection_type (setting));
+ 		break;
+@@ -567,6 +626,28 @@ nm_setting_connection_class_init (NMSett
+ 						  G_PARAM_READWRITE | NM_SETTING_PARAM_SERIALIZE | NM_SETTING_PARAM_FUZZY_IGNORE));
+ 
+ 	/**
++	 * NMSettingConnection:interface-name:
++	 *
++	 * The name of the network interface this connection is bound to. If
++	 * not set, then the connection can be attached to any interface of the
++	 * appropriate type (subject to restrictions imposed by other settings).
++	 *
++	 * For connection types where interface names cannot easily be
++	 * made persistent (eg, mobile broadband or USB ethernet), this
++	 * property should not be used. Setting this property restricts
++	 * the interfaces a connection can be used with, and if interface
++	 * names change or are reordered the connection may be applied to
++	 * the wrong interface.
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_INTERFACE_NAME,
++		 g_param_spec_string (NM_SETTING_CONNECTION_INTERFACE_NAME,
++		                      "Interface name",
++		                      "Interface name to be bound to, or NULL",
++		                      NULL,
++		                      G_PARAM_READWRITE | NM_SETTING_PARAM_SERIALIZE));
++
++	/**
+ 	 * NMSettingConnection:type:
+ 	 *
+ 	 * The general hardware type of the device used for the network connection,
+diff -up NetworkManager-0.8.1/libnm-util/nm-setting-connection.h.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/libnm-util/nm-setting-connection.h
+--- NetworkManager-0.8.1/libnm-util/nm-setting-connection.h.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.202062502 -0400
++++ NetworkManager-0.8.1/libnm-util/nm-setting-connection.h	2014-05-08 09:06:36.260062507 -0400
+@@ -80,6 +80,7 @@ GQuark nm_setting_connection_error_quark
+ #define NM_SETTING_CONNECTION_MASTER      "master"
+ #define NM_SETTING_CONNECTION_SLAVE_TYPE  "slave-type"
+ #define NM_SETTING_CONNECTION_GATEWAY_PING_TIMEOUT "gateway-ping-timeout"
++#define NM_SETTING_CONNECTION_INTERFACE_NAME       "interface-name"
+ 
+ /**
+  * NMSettingConnection:
+@@ -106,6 +107,7 @@ GType nm_setting_connection_get_type (vo
+ NMSetting * nm_setting_connection_new                 (void);
+ const char *nm_setting_connection_get_id              (NMSettingConnection *setting);
+ const char *nm_setting_connection_get_uuid            (NMSettingConnection *setting);
++const char *nm_setting_connection_get_interface_name  (NMSettingConnection *setting);
+ const char *nm_setting_connection_get_connection_type (NMSettingConnection *setting);
+ gboolean    nm_setting_connection_get_autoconnect     (NMSettingConnection *setting);
+ guint64     nm_setting_connection_get_timestamp       (NMSettingConnection *setting);
+diff -up NetworkManager-0.8.1/network-manager-applet-0.8.1/src/utils/utils.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/network-manager-applet-0.8.1/src/utils/utils.c
+--- NetworkManager-0.8.1/network-manager-applet-0.8.1/src/utils/utils.c.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.185062501 -0400
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/utils/utils.c	2014-05-08 09:06:36.260062507 -0400
+@@ -609,6 +609,7 @@ utils_connection_valid_for_device (NMCon
+                                    gpointer specific_object)
+ {
+ 	NMSettingConnection *s_con;
++	const char *ifname;
+ 
+ 	g_return_val_if_fail (connection != NULL, FALSE);
+ 	g_return_val_if_fail (device != NULL, FALSE);
+@@ -617,6 +618,10 @@ utils_connection_valid_for_device (NMCon
+ 	g_return_val_if_fail (s_con != NULL, FALSE);
+ 	g_return_val_if_fail (nm_setting_connection_get_connection_type (s_con) != NULL, FALSE);
+ 
++	ifname = nm_setting_connection_get_interface_name (s_con);
++	if (ifname && strcmp (ifname, nm_device_get_iface (device)) != 0)
++		return FALSE;
++
+ 	if (NM_IS_DEVICE_ETHERNET (device))
+ 		return connection_valid_for_wired (connection, s_con, device, specific_object);
+ 	else if (NM_IS_DEVICE_WIFI (device))
+diff -up NetworkManager-0.8.1/src/modem-manager/nm-modem-cdma.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/src/modem-manager/nm-modem-cdma.c
+--- NetworkManager-0.8.1/src/modem-manager/nm-modem-cdma.c.NM_CONTROLLED-by-ifname	2010-08-06 14:59:05.000000000 -0400
++++ NetworkManager-0.8.1/src/modem-manager/nm-modem-cdma.c	2014-05-08 09:06:36.260062507 -0400
+@@ -225,6 +225,7 @@ real_get_best_auto_connection (NMModem *
+ 	for (iter = connections; iter; iter = g_slist_next (iter)) {
+ 		NMConnection *connection = NM_CONNECTION (iter->data);
+ 		NMSettingConnection *s_con;
++		const char *ifname;
+ 
+ 		s_con = (NMSettingConnection *) nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION);
+ 		g_assert (s_con);
+@@ -235,6 +236,10 @@ real_get_best_auto_connection (NMModem *
+ 		if (strcmp (nm_setting_connection_get_connection_type (s_con), NM_SETTING_CDMA_SETTING_NAME))
+ 			continue;
+ 
++		ifname = nm_setting_connection_get_interface_name (s_con);
++		if (ifname && strcmp (ifname, nm_modem_get_iface (modem)) != 0)
++			continue;
++
+ 		return connection;
+ 	}
+ 	return NULL;
+@@ -247,6 +252,7 @@ real_check_connection_compatible (NMMode
+ {
+ 	NMSettingConnection *s_con;
+ 	NMSettingCdma *s_cdma;
++	const char *ifname;
+ 
+ 	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+ 	g_assert (s_con);
+@@ -258,6 +264,14 @@ real_check_connection_compatible (NMMode
+ 		return FALSE;
+ 	}
+ 
++	ifname = nm_setting_connection_get_interface_name (s_con);
++	if (ifname && strcmp (ifname, nm_modem_get_iface (modem)) != 0) {
++		g_set_error (error,
++		             NM_CDMA_ERROR, NM_CDMA_ERROR_CONNECTION_INCOMPATIBLE,
++		             "The connection is not for this device.");
++		return FALSE;
++	}
++
+ 	s_cdma = NM_SETTING_CDMA (nm_connection_get_setting (connection, NM_TYPE_SETTING_CDMA));
+ 	if (!s_cdma) {
+ 		g_set_error (error,
+diff -up NetworkManager-0.8.1/src/modem-manager/nm-modem-gsm.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/src/modem-manager/nm-modem-gsm.c
+--- NetworkManager-0.8.1/src/modem-manager/nm-modem-gsm.c.NM_CONTROLLED-by-ifname	2010-08-06 14:59:05.000000000 -0400
++++ NetworkManager-0.8.1/src/modem-manager/nm-modem-gsm.c	2014-05-08 09:06:36.260062507 -0400
+@@ -425,6 +425,7 @@ real_get_best_auto_connection (NMModem *
+ 	for (iter = connections; iter; iter = g_slist_next (iter)) {
+ 		NMConnection *connection = NM_CONNECTION (iter->data);
+ 		NMSettingConnection *s_con;
++		const char *ifname;
+ 
+ 		s_con = (NMSettingConnection *) nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION);
+ 		g_assert (s_con);
+@@ -435,6 +436,10 @@ real_get_best_auto_connection (NMModem *
+ 		if (strcmp (nm_setting_connection_get_connection_type (s_con), NM_SETTING_GSM_SETTING_NAME))
+ 			continue;
+ 
++		ifname = nm_setting_connection_get_interface_name (s_con);
++		if (ifname && strcmp (ifname, nm_modem_get_iface (modem)) != 0)
++			continue;
++
+ 		return connection;
+ 	}
+ 	return NULL;
+@@ -447,6 +452,7 @@ real_check_connection_compatible (NMMode
+ {
+ 	NMSettingConnection *s_con;
+ 	NMSettingGsm *s_gsm;
++	const char *ifname;
+ 
+ 	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+ 	g_assert (s_con);
+@@ -458,6 +464,14 @@ real_check_connection_compatible (NMMode
+ 		return FALSE;
+ 	}
+ 
++	ifname = nm_setting_connection_get_interface_name (s_con);
++	if (ifname && strcmp (ifname, nm_modem_get_iface (modem)) != 0) {
++		g_set_error (error,
++		             NM_GSM_ERROR, NM_GSM_ERROR_CONNECTION_INCOMPATIBLE,
++		             "The connection is not for this device.");
++		return FALSE;
++	}
++
+ 	s_gsm = NM_SETTING_GSM (nm_connection_get_setting (connection, NM_TYPE_SETTING_GSM));
+ 	if (!s_gsm) {
+ 		g_set_error (error,
+diff -up NetworkManager-0.8.1/src/NetworkManagerUtils.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/src/NetworkManagerUtils.c
+--- NetworkManager-0.8.1/src/NetworkManagerUtils.c.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.216062503 -0400
++++ NetworkManager-0.8.1/src/NetworkManagerUtils.c	2014-05-08 09:06:36.260062507 -0400
+@@ -463,11 +463,24 @@ nm_utils_call_dispatcher (const char *ac
+ 	g_object_unref (dbus_mgr);
+ }
+ 
++static gboolean
++nm_match_spec_string (const GSList *specs, const char *match)
++{
++	const GSList *iter;
++
++	for (iter = specs; iter; iter = g_slist_next (iter)) {
++		if (!strcmp ((const char *) iter->data, match))
++			return TRUE;
++	}
++
++	return FALSE;
++}
++
+ gboolean
+ nm_match_spec_hwaddr (const GSList *specs, const char *hwaddr)
+ {
+-	const GSList *iter;
+ 	char *hwaddr_match, *p;
++	gboolean matched;
+ 
+ 	g_return_val_if_fail (hwaddr != NULL, FALSE);
+ 
+@@ -478,15 +491,23 @@ nm_match_spec_hwaddr (const GSList *spec
+ 		p++;
+ 	}
+ 
+-	for (iter = specs; iter; iter = g_slist_next (iter)) {
+-		if (!strcmp ((const char *) iter->data, hwaddr_match)) {
+-			g_free (hwaddr_match);
+-			return TRUE;
+-		}
+-	}
+-
++	matched = nm_match_spec_string (specs, hwaddr_match);
+ 	g_free (hwaddr_match);
+-	return FALSE;
++	return matched;
++}
++
++gboolean
++nm_match_spec_interface_name (const GSList *specs, const char *interface_name)
++{
++	char *iface_match;
++	gboolean matched;
++
++	g_return_val_if_fail (interface_name != NULL, FALSE);
++
++	iface_match = g_strdup_printf ("interface-name:%s", interface_name);
++	matched = nm_match_spec_string (specs, iface_match);
++	g_free (iface_match);
++	return matched;
+ }
+ 
+ #define BUFSIZE 10
+diff -up NetworkManager-0.8.1/src/NetworkManagerUtils.h.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/src/NetworkManagerUtils.h
+--- NetworkManager-0.8.1/src/NetworkManagerUtils.h.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.148062498 -0400
++++ NetworkManager-0.8.1/src/NetworkManagerUtils.h	2014-05-08 09:06:36.260062507 -0400
+@@ -49,6 +49,7 @@ void nm_utils_call_dispatcher (const cha
+ 
+ gboolean nm_match_spec_hwaddr (const GSList *specs, const char *hwaddr);
+ gboolean nm_match_spec_s390_subchannels (const GSList *specs, const char *subchannels);
++gboolean nm_match_spec_interface_name (const GSList *specs, const char *interface_name);
+ 
+ 
+ GHashTable *value_hash_create          (void);
+diff -up NetworkManager-0.8.1/src/nm-device-bond.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/src/nm-device-bond.c
+--- NetworkManager-0.8.1/src/nm-device-bond.c.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.199062502 -0400
++++ NetworkManager-0.8.1/src/nm-device-bond.c	2014-05-08 09:06:36.260062507 -0400
+@@ -290,6 +290,9 @@ spec_match_list (NMDevice *device, const
+ 	matched = nm_match_spec_hwaddr (specs, hwaddr);
+ 	g_free (hwaddr);
+ 
++	if (!matched)
++		matched = nm_match_spec_interface_name (specs, nm_device_get_iface (device));
++
+ 	return matched;
+ }
+ 
+diff -up NetworkManager-0.8.1/src/nm-device-bridge.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/src/nm-device-bridge.c
+--- NetworkManager-0.8.1/src/nm-device-bridge.c.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.199062502 -0400
++++ NetworkManager-0.8.1/src/nm-device-bridge.c	2014-05-08 09:06:36.260062507 -0400
+@@ -278,6 +278,9 @@ spec_match_list (NMDevice *device, const
+ 	matched = nm_match_spec_hwaddr (specs, hwaddr);
+ 	g_free (hwaddr);
+ 
++	if (!matched)
++		matched = nm_match_spec_interface_name (specs, nm_device_get_iface (device));
++
+ 	return matched;
+ }
+ 
+diff -up NetworkManager-0.8.1/src/nm-device-bt.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/src/nm-device-bt.c
+--- NetworkManager-0.8.1/src/nm-device-bt.c.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.223062504 -0400
++++ NetworkManager-0.8.1/src/nm-device-bt.c	2014-05-08 09:06:36.261062507 -0400
+@@ -206,6 +206,7 @@ real_check_connection_compatible (NMDevi
+ 	char *str;
+ 	int addr_match = FALSE;
+ 	guint32 bt_type;
++	const char *ifname;
+ 
+ 	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+ 	g_assert (s_con);
+@@ -217,6 +218,14 @@ real_check_connection_compatible (NMDevi
+ 		return FALSE;
+ 	}
+ 
++	ifname = nm_setting_connection_get_interface_name (s_con);
++	if (ifname && strcmp (ifname, nm_device_get_iface (device)) != 0) {
++		g_set_error (error,
++		             NM_BT_ERROR, NM_BT_ERROR_CONNECTION_INCOMPATIBLE,
++		             "The connection is not for this device.");
++		return FALSE;
++	}
++
+ 	s_bt = NM_SETTING_BLUETOOTH (nm_connection_get_setting (connection, NM_TYPE_SETTING_BLUETOOTH));
+ 	if (!s_bt) {
+ 		g_set_error (error,
+diff -up NetworkManager-0.8.1/src/nm-device-ethernet.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/src/nm-device-ethernet.c
+--- NetworkManager-0.8.1/src/nm-device-ethernet.c.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.254062506 -0400
++++ NetworkManager-0.8.1/src/nm-device-ethernet.c	2014-05-08 09:06:36.261062507 -0400
+@@ -601,6 +601,7 @@ real_get_best_auto_connection (NMDevice
+ 		NMSettingConnection *s_con;
+ 		NMSettingWired *s_wired;
+ 		const char *connection_type;
++		const char *ifname;
+ 		gboolean is_pppoe = FALSE;
+ 
+ 		s_con = (NMSettingConnection *) nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION);
+@@ -615,6 +616,10 @@ real_get_best_auto_connection (NMDevice
+ 		if (!nm_setting_connection_get_autoconnect (s_con))
+ 			continue;
+ 
++		ifname = nm_setting_connection_get_interface_name (s_con);
++		if (ifname && strcmp (ifname, nm_device_get_iface (dev)) != 0)
++			continue;
++
+ 		s_wired = (NMSettingWired *) nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRED);
+ 		/* Wired setting optional for PPPoE */
+ 		if (!is_pppoe && !s_wired)
+@@ -1556,6 +1561,7 @@ real_check_connection_compatible (NMDevi
+ 	NMSettingConnection *s_con;
+ 	NMSettingWired *s_wired;
+ 	const char *connection_type;
++	const char *ifname;
+ 	gboolean is_pppoe = FALSE;
+ 	const GByteArray *mac;
+ 	gboolean try_mac = TRUE;
+@@ -1575,6 +1581,14 @@ real_check_connection_compatible (NMDevi
+ 	if (!strcmp (connection_type, NM_SETTING_PPPOE_SETTING_NAME))
+ 		is_pppoe = TRUE;
+ 
++	ifname = nm_setting_connection_get_interface_name (s_con);
++	if (ifname && strcmp (ifname, nm_device_get_iface (device)) != 0) {
++		g_set_error (error,
++		             NM_ETHERNET_ERROR, NM_ETHERNET_ERROR_CONNECTION_INCOMPATIBLE,
++		             "The connection is not for this device.");
++		return FALSE;
++	}
++
+ 	s_wired = (NMSettingWired *) nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRED);
+ 	/* Wired setting is optional for PPPoE */
+ 	if (!is_pppoe && !s_wired) {
+@@ -1620,6 +1634,9 @@ spec_match_list (NMDevice *device, const
+ 	if (!matched && priv->subchannels)
+ 		matched = nm_match_spec_s390_subchannels (specs, priv->subchannels);
+ 
++	if (!matched)
++		matched = nm_match_spec_interface_name (specs, nm_device_get_iface (device));
++
+ 	return matched;
+ }
+ 
+@@ -1660,6 +1677,7 @@ connection_match_config (NMDevice *self,
+ 	wired_matches = NULL;
+ 	for (iter = connections; iter; iter = iter->next) {
+ 		NMConnection *candidate = NM_CONNECTION (iter->data);
++		const char *ifname;
+ 
+ 		s_con = (NMSettingConnection *) nm_connection_get_setting (candidate, NM_TYPE_SETTING_CONNECTION);
+ 		g_assert (s_con);
+@@ -1673,6 +1691,10 @@ connection_match_config (NMDevice *self,
+ 		    || nm_connection_get_setting (candidate, NM_TYPE_SETTING_PPPOE))
+ 			continue;
+ 
++		ifname = nm_setting_connection_get_interface_name (s_con);
++		if (ifname && strcmp (ifname, nm_device_get_iface (self)) != 0)
++			continue;
++
+ 		if (!wired_match_config (self, candidate))
+ 			continue;
+ 
+diff -up NetworkManager-0.8.1/src/nm-device-infiniband.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/src/nm-device-infiniband.c
+--- NetworkManager-0.8.1/src/nm-device-infiniband.c.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.166062499 -0400
++++ NetworkManager-0.8.1/src/nm-device-infiniband.c	2014-05-08 09:06:36.261062507 -0400
+@@ -186,6 +186,7 @@ real_get_best_auto_connection (NMDevice
+ 		NMSettingConnection *s_con;
+ 		NMSettingInfiniband *s_infiniband;
+ 		const char *connection_type;
++		const char *ifname;
+ 
+ 		s_con = (NMSettingConnection *) nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION);
+ 		g_assert (s_con);
+@@ -197,6 +198,10 @@ real_get_best_auto_connection (NMDevice
+ 		if (!nm_setting_connection_get_autoconnect (s_con))
+ 			continue;
+ 
++		ifname = nm_setting_connection_get_interface_name (s_con);
++		if (ifname && strcmp (ifname, nm_device_get_iface (dev)) != 0)
++			continue;
++
+ 		s_infiniband = (NMSettingInfiniband *) nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND);
+ 		if (!s_infiniband)
+ 			continue;
+@@ -302,6 +307,7 @@ real_check_connection_compatible (NMDevi
+ 	NMSettingConnection *s_con;
+ 	NMSettingInfiniband *s_infiniband;
+ 	const char *connection_type;
++	const char *ifname;
+ 	const GByteArray *mac;
+ 
+ 	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+@@ -316,6 +322,14 @@ real_check_connection_compatible (NMDevi
+ 		return FALSE;
+ 	}
+ 
++	ifname = nm_setting_connection_get_interface_name (s_con);
++	if (ifname && strcmp (ifname, nm_device_get_iface (device)) != 0) {
++		g_set_error (error,
++		             NM_INFINIBAND_ERROR, NM_INFINIBAND_ERROR_CONNECTION_INCOMPATIBLE,
++		             "The connection is not for this device.");
++		return FALSE;
++	}
++
+ 	s_infiniband = (NMSettingInfiniband *) nm_connection_get_setting (connection, NM_TYPE_SETTING_INFINIBAND);
+ 	if (!s_infiniband) {
+ 		g_set_error (error,
+@@ -350,6 +364,9 @@ spec_match_list (NMDevice *device, const
+ 	matched = nm_match_spec_hwaddr (specs, hwaddr);
+ 	g_free (hwaddr);
+ 
++	if (!matched)
++		matched = nm_match_spec_interface_name (specs, nm_device_get_iface (device));
++
+ 	return matched;
+ }
+ 
+@@ -385,12 +402,17 @@ connection_match_config (NMDevice *self,
+ 	infiniband_matches = NULL;
+ 	for (iter = connections; iter; iter = iter->next) {
+ 		NMConnection *candidate = NM_CONNECTION (iter->data);
++		const char *ifname;
+ 
+ 		s_con = (NMSettingConnection *) nm_connection_get_setting (candidate, NM_TYPE_SETTING_CONNECTION);
+ 		g_assert (s_con);
+ 		if (strcmp (nm_setting_connection_get_connection_type (s_con), NM_SETTING_INFINIBAND_SETTING_NAME))
+ 			continue;
+ 
++		ifname = nm_setting_connection_get_interface_name (s_con);
++		if (ifname && strcmp (ifname, nm_device_get_iface (self)) != 0)
++			continue;
++
+ 		if (!infiniband_match_config (self, candidate))
+ 			continue;
+ 
+diff -up NetworkManager-0.8.1/src/nm-device-olpc-mesh.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/src/nm-device-olpc-mesh.c
+--- NetworkManager-0.8.1/src/nm-device-olpc-mesh.c.NM_CONTROLLED-by-ifname	2010-08-06 14:59:05.000000000 -0400
++++ NetworkManager-0.8.1/src/nm-device-olpc-mesh.c	2014-05-08 09:06:36.261062507 -0400
+@@ -359,6 +359,7 @@ real_check_connection_compatible (NMDevi
+ {
+ 	NMSettingConnection *s_con;
+ 	NMSettingOlpcMesh *s_mesh;
++	const char *ifname;
+ 
+ 	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+ 	g_assert (s_con);
+@@ -370,6 +371,14 @@ real_check_connection_compatible (NMDevi
+ 		return FALSE;
+ 	}
+ 
++	ifname = nm_setting_connection_get_interface_name (s_con);
++	if (ifname && strcmp (ifname, nm_device_get_iface (device)) != 0) {
++		g_set_error (error,
++		             NM_OLPC_MESH_ERROR, NM_OLPC_MESH_ERROR_CONNECTION_INCOMPATIBLE,
++		             "The connection is not for this device.");
++		return FALSE;
++	}
++
+ 	s_mesh = NM_SETTING_OLPC_MESH (nm_connection_get_setting (connection, NM_TYPE_SETTING_OLPC_MESH));
+ 	if (!s_mesh) {
+ 		g_set_error (error,
+diff -up NetworkManager-0.8.1/src/nm-device-vlan.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/src/nm-device-vlan.c
+--- NetworkManager-0.8.1/src/nm-device-vlan.c.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.100062494 -0400
++++ NetworkManager-0.8.1/src/nm-device-vlan.c	2014-05-08 09:06:36.261062507 -0400
+@@ -391,6 +391,9 @@ spec_match_list (NMDevice *device, const
+ 	matched = nm_match_spec_hwaddr (specs, hwaddr);
+ 	g_free (hwaddr);
+ 
++	if (!matched)
++		matched = nm_match_spec_interface_name (specs, nm_device_get_iface (device));
++
+ 	return matched;
+ }
+ 
+diff -up NetworkManager-0.8.1/src/nm-device-wifi.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/src/nm-device-wifi.c
+--- NetworkManager-0.8.1/src/nm-device-wifi.c.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.254062506 -0400
++++ NetworkManager-0.8.1/src/nm-device-wifi.c	2014-05-08 09:06:36.262062507 -0400
+@@ -1273,6 +1273,7 @@ real_check_connection_compatible (NMDevi
+ 	NMSettingConnection *s_con;
+ 	NMSettingWireless *s_wireless;
+ 	const GByteArray *mac;
++	const char *ifname;
+ 
+ 	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+ 	g_assert (s_con);
+@@ -1284,6 +1285,14 @@ real_check_connection_compatible (NMDevi
+ 		return FALSE;
+ 	}
+ 
++	ifname = nm_setting_connection_get_interface_name (s_con);
++	if (ifname && strcmp (ifname, nm_device_get_iface (device)) != 0) {
++		g_set_error (error,
++		             NM_WIFI_ERROR, NM_WIFI_ERROR_CONNECTION_INCOMPATIBLE,
++		             "The connection is not for this device.");
++		return FALSE;
++	}
++
+ 	s_wireless = NM_SETTING_WIRELESS (nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS));
+ 	if (!s_wireless) {
+ 		g_set_error (error,
+@@ -1354,6 +1363,7 @@ real_get_best_auto_connection (NMDevice
+ 		const GByteArray *mac;
+ 		NMSettingIP4Config *s_ip4;
+ 		const char *method = NULL;
++		const char *ifname;
+ 
+ 		s_con = (NMSettingConnection *) nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION);
+ 		if (s_con == NULL)
+@@ -1363,6 +1373,10 @@ real_get_best_auto_connection (NMDevice
+ 		if (!nm_setting_connection_get_autoconnect (s_con))
+ 			continue;
+ 
++		ifname = nm_setting_connection_get_interface_name (s_con);
++		if (ifname && strcmp (ifname, nm_device_get_iface (dev)) != 0)
++			continue;
++
+ 		s_wireless = (NMSettingWireless *) nm_connection_get_setting (connection, NM_TYPE_SETTING_WIRELESS);
+ 		if (!s_wireless)
+ 			continue;
+@@ -3655,6 +3669,9 @@ spec_match_list (NMDevice *device, const
+ 	matched = nm_match_spec_hwaddr (specs, hwaddr);
+ 	g_free (hwaddr);
+ 
++	if (!matched)
++		matched = nm_match_spec_interface_name (specs, nm_device_get_iface (device));
++
+ 	return matched;
+ }
+ 
+diff -up NetworkManager-0.8.1/system-settings/plugins/ifcfg-rh/nm-ifcfg-connection.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/system-settings/plugins/ifcfg-rh/nm-ifcfg-connection.c
+--- NetworkManager-0.8.1/system-settings/plugins/ifcfg-rh/nm-ifcfg-connection.c.NM_CONTROLLED-by-ifname	2014-05-08 09:17:18.820113785 -0400
++++ NetworkManager-0.8.1/system-settings/plugins/ifcfg-rh/nm-ifcfg-connection.c	2014-05-08 09:16:36.321110393 -0400
+@@ -127,6 +127,7 @@ nm_ifcfg_connection_new (const char *fil
+ 	                                   NM_IFCFG_CONNECTION_FILENAME, filename,
+ 	                                   NM_IFCFG_CONNECTION_UNMANAGED, unmanaged,
+ 	                                   NULL);
++	g_free (unmanaged);
+ 	if (!object) {
+ 		g_object_unref (tmp);
+ 		return NULL;
+diff -up NetworkManager-0.8.1/system-settings/plugins/ifcfg-rh/reader.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/system-settings/plugins/ifcfg-rh/reader.c
+--- NetworkManager-0.8.1/system-settings/plugins/ifcfg-rh/reader.c.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.215062503 -0400
++++ NetworkManager-0.8.1/system-settings/plugins/ifcfg-rh/reader.c	2014-05-08 09:06:36.262062507 -0400
+@@ -194,6 +194,17 @@ make_connection_setting (const char *fil
+ 	              NULL);
+ 	g_free (uuid);
+ 
++	value = svGetValue (ifcfg, "DEVICE", FALSE);
++	if (value) {
++		if (nm_utils_iface_valid_name (value)) {
++			g_object_set (s_con,
++			              NM_SETTING_CONNECTION_INTERFACE_NAME, value,
++			              NULL);
++		} else
++			PLUGIN_WARN (IFCFG_PLUGIN_NAME, "    warning: invalid DEVICE name '%s'", value);
++		g_free (value);
++	}
++
+ 	/* Missing ONBOOT is treated as "ONBOOT=true" by the old network service */
+ 	g_object_set (s_con, NM_SETTING_CONNECTION_AUTOCONNECT,
+ 	              svTrueValue (ifcfg, "ONBOOT", TRUE),
+@@ -2883,7 +2894,6 @@ make_wireless_setting (shvarFile *ifcfg,
+ 		if (array) {
+ 			g_object_set (s_wireless, NM_SETTING_WIRELESS_MAC_ADDRESS, array, NULL);
+ 
+-			/* A connection can only be unmanaged if we know the MAC address */
+ 			if (!nm_controlled) {
+ 				*unmanaged = g_strdup_printf ("mac:%02x:%02x:%02x:%02x:%02x:%02x",
+ 				                              array->data[0], array->data[1], array->data[2],
+@@ -2891,11 +2901,6 @@ make_wireless_setting (shvarFile *ifcfg,
+ 			}
+ 
+ 			g_byte_array_free (array, TRUE);
+-		} else if (!nm_controlled) {
+-			/* If NM_CONTROLLED=no but there wasn't a MAC address, notify
+-			 * the user that the device cannot be unmanaged.
+-			 */
+-			PLUGIN_WARN (IFCFG_PLUGIN_NAME, "    warning: NM_CONTROLLED was false but HWADDR was missing; device will be managed");
+ 		}
+ 	} else {
+ 		g_object_unref (s_wireless);
+@@ -3182,7 +3187,6 @@ make_wired_setting (shvarFile *ifcfg,
+ 		if (mac) {
+ 			g_object_set (s_wired, NM_SETTING_WIRED_MAC_ADDRESS, mac, NULL);
+ 
+-			/* A connection can only be unmanaged if we know the MAC address */
+ 			if (!nm_controlled) {
+ 				*unmanaged = g_strdup_printf ("mac:%02x:%02x:%02x:%02x:%02x:%02x",
+ 				                              mac->data[0], mac->data[1], mac->data[2],
+@@ -3281,13 +3285,6 @@ make_wired_setting (shvarFile *ifcfg,
+ 	}
+ 	g_free (value);
+ 
+-	if (!nm_controlled && !*unmanaged) {
+-		/* If NM_CONTROLLED=no but there wasn't a MAC address or z/VM
+-		 * subchannels, notify the user that the device cannot be unmanaged.
+-		 */
+-		PLUGIN_WARN (IFCFG_PLUGIN_NAME, "    warning: NM_CONTROLLED was false but HWADDR or SUBCHANNELS was missing; device will be managed");
+-	}
+-
+ 	mac = NULL;
+ 	if (read_mac_address (ifcfg, "MACADDR", ARPHRD_ETHER, &mac, error)) {
+ 		if (mac) {
+@@ -3407,7 +3404,6 @@ make_infiniband_setting (shvarFile *ifcf
+ 		if (mac) {
+ 			g_object_set (s_infiniband, NM_SETTING_INFINIBAND_MAC_ADDRESS, mac, NULL);
+ 
+-			/* A connection can only be unmanaged if we know the MAC address */
+ 			if (!nm_controlled) {
+ 				char *mac_str = nm_utils_hwaddr_ntoa (mac->data, ARPHRD_INFINIBAND);
+ 				*unmanaged = g_strdup_printf ("mac:%s", mac_str);
+@@ -3424,13 +3420,6 @@ make_infiniband_setting (shvarFile *ifcf
+ 	if (svTrueValue (ifcfg, "CONNECTED_MODE", FALSE))
+ 		g_object_set (s_infiniband, NM_SETTING_INFINIBAND_TRANSPORT_MODE, "connected", NULL);
+ 
+-	if (!nm_controlled && !*unmanaged) {
+-		/* If NM_CONTROLLED=no but there wasn't a MAC address, notify
+-		   the user that the device cannot be unmanaged.
+-		 */
+-		PLUGIN_WARN (IFCFG_PLUGIN_NAME, "    warning: NM_CONTROLLED was false but HWADDR was missing; device will be managed");
+-	}
+-
+ 	return (NMSetting *) s_infiniband;
+ }
+ 
+@@ -4222,6 +4211,25 @@ vlan_connection_from_ifcfg (const char *
+ 	return connection;
+ }
+ 
++static void
++ensure_unmanaged (shvarFile *ifcfg,
++                  char **unmanaged)
++{
++	char *value;
++
++	if (*unmanaged)
++		return;
++
++	value = svGetValue (ifcfg, "DEVICE", FALSE);
++	if (value) {
++		*unmanaged = g_strdup_printf ("interface-name:%s", value);
++		g_free (value);
++		return;
++	}
++
++	PLUGIN_WARN (IFCFG_PLUGIN_NAME, "    warning: NM_CONTROLLED was false but device was not uniquely identified; device will be managed");
++}
++
+ NMConnection *
+ connection_from_file (const char *filename,
+                       const char *network_file,  /* for unit tests only */
+@@ -4354,10 +4362,8 @@ connection_from_file (const char *filena
+ 		             "Unknown connection type '%s'", type);
+ 	}
+ 
+-	if (nm_controlled) {
+-		g_free (*unmanaged);
+-		*unmanaged = NULL;
+-	}
++	if (!nm_controlled)
++		ensure_unmanaged (parsed, unmanaged);
+ 
+ 	g_free (type);
+ 
+diff -up NetworkManager-0.8.1/system-settings/plugins/ifcfg-rh/writer.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/system-settings/plugins/ifcfg-rh/writer.c
+--- NetworkManager-0.8.1/system-settings/plugins/ifcfg-rh/writer.c.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.252062506 -0400
++++ NetworkManager-0.8.1/system-settings/plugins/ifcfg-rh/writer.c	2014-05-08 09:06:36.263062507 -0400
+@@ -1313,6 +1313,7 @@ write_connection_setting (NMSettingConne
+ 
+ 	svSetValue (ifcfg, "NAME", nm_setting_connection_get_id (s_con), FALSE);
+ 	svSetValue (ifcfg, "UUID", nm_setting_connection_get_uuid (s_con), FALSE);
++	svSetValue (ifcfg, "DEVICE", nm_setting_connection_get_interface_name (s_con), FALSE);
+ 	svSetValue (ifcfg, "ONBOOT",
+ 	            nm_setting_connection_get_autoconnect (s_con) ? "yes" : "no",
+ 	            FALSE);
+diff -up NetworkManager-0.8.1/system-settings/plugins/keyfile/tests/test-keyfile.c.NM_CONTROLLED-by-ifname NetworkManager-0.8.1/system-settings/plugins/keyfile/tests/test-keyfile.c
+--- NetworkManager-0.8.1/system-settings/plugins/keyfile/tests/test-keyfile.c.NM_CONTROLLED-by-ifname	2014-05-08 09:06:36.172062500 -0400
++++ NetworkManager-0.8.1/system-settings/plugins/keyfile/tests/test-keyfile.c	2014-05-08 09:06:36.263062507 -0400
+@@ -2045,6 +2045,7 @@ test_write_bridge_main (void)
+ 	              NM_SETTING_CONNECTION_UUID, uuid,
+ 	              NM_SETTING_CONNECTION_AUTOCONNECT, TRUE,
+ 	              NM_SETTING_CONNECTION_TYPE, NM_SETTING_BRIDGE_SETTING_NAME,
++	              NM_SETTING_CONNECTION_INTERFACE_NAME, "br0",
+ 	              NULL);
+ 	g_free (uuid);
+ 

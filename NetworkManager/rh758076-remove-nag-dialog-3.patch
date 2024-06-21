@@ -1,0 +1,355 @@
+From cf373e64967f9c7a91150c93b5ecc760f118c26b Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Wed, 11 Sep 2013 15:12:42 +0200
+Subject: [PATCH 1/1] security: don't save CA cert ignore if editing is canceled
+
+(backported from commit 6aefda72e7a4a41985599ad909990ed58f5ae3e5)
+
+Previously the code would update GSettings whenever a security
+input field changed and the provided security information had
+to be re-validated. This meant the value would be saved even
+if the user canceled editing of the connection.  Fix this.
+
+Unfortunately, since only the upper-level code knows when the
+editing has been canceled, the upper-level code has to handle
+reading the initial values, and saving the new ones.  But that's
+easy to do.
+
+Signed-off-by: Thomas Haller <thaller@redhat.com>
+---
+ libnm-util/libnm-util.ver                          |    1 +
+ libnm-util/nm-connection.c                         |   17 +++
+ libnm-util/nm-connection.h                         |    2 +
+ .../src/connection-editor/nm-connection-editor.c   |    7 ++
+ network-manager-applet-0.8.1/src/wired-dialog.c    |    7 ++
+ network-manager-applet-0.8.1/src/wireless-dialog.c |    7 ++
+ .../src/wireless-security/eap-method.c             |  115 ++++++++++++++++++--
+ .../src/wireless-security/eap-method.h             |    4 +
+ 8 files changed, 151 insertions(+), 9 deletions(-)
+
+diff --git a/libnm-util/libnm-util.ver b/libnm-util/libnm-util.ver
+index c493286..9e868aa 100644
+--- a/libnm-util/libnm-util.ver
++++ b/libnm-util/libnm-util.ver
+@@ -16,6 +16,7 @@ global:
+ 	nm_connection_is_type;
+ 	nm_connection_get_scope;
+ 	nm_connection_get_setting;
++	nm_connection_get_setting_802_1x;
+ 	nm_connection_get_setting_bridge;
+ 	nm_connection_get_setting_bridge_port;
+ 	nm_connection_get_setting_by_name;
+diff --git a/libnm-util/nm-connection.c b/libnm-util/nm-connection.c
+index d9d4bf9..698169c 100644
+--- a/libnm-util/nm-connection.c
++++ b/libnm-util/nm-connection.c
+@@ -660,6 +660,23 @@ nm_connection_get_setting_infiniband (NMConnection *connection)
+ }
+ 
+ /**
++ * nm_connection_get_setting_802_1x:
++ * @connection: the #NMConnection
++ *
++ * A shortcut to return any #NMSetting8021x the connection might contain.
++ *
++ * Returns: (transfer none): an #NMSetting8021x if the connection contains one, otherwise %NULL
++ **/
++NMSetting8021x *
++nm_connection_get_setting_802_1x (NMConnection *connection)
++{
++	g_return_val_if_fail (connection != NULL, NULL);
++	g_return_val_if_fail (NM_IS_CONNECTION (connection), NULL);
++
++	return (NMSetting8021x *) nm_connection_get_setting (connection, NM_TYPE_SETTING_802_1X);
++}
++
++/**
+  * nm_connection_replace_settings:
+  * @connection: a #NMConnection
+  * @new_settings: a #GHashTable of settings
+diff --git a/libnm-util/nm-connection.h b/libnm-util/nm-connection.h
+index 433b21b..146a6be 100644
+--- a/libnm-util/nm-connection.h
++++ b/libnm-util/nm-connection.h
+@@ -38,6 +38,7 @@
+ #include <nm-setting-infiniband.h>
+ #include <nm-setting-wired.h>
+ #include <nm-setting-vlan.h>
++#include <nm-setting-8021x.h>
+ 
+ G_BEGIN_DECLS
+ 
+@@ -187,6 +188,7 @@ NMSettingBridgePort *      nm_connection_get_setting_bridge_port       (NMConnec
+ NMSettingWired *           nm_connection_get_setting_wired             (NMConnection *connection);
+ NMSettingVlan *            nm_connection_get_setting_vlan              (NMConnection *connection);
+ NMSettingInfiniband *      nm_connection_get_setting_infiniband        (NMConnection *connection);
++NMSetting8021x *           nm_connection_get_setting_802_1x            (NMConnection *connection);
+ 
+ G_END_DECLS
+ 
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c b/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
+index 14c7e40..23ace20 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
+@@ -70,6 +70,7 @@
+ #include "ce-polkit-button.h"
+ #include "vpn-helpers.h"
+ #include "new-connection.h"
++#include "eap-method.h"
+ 
+ G_DEFINE_TYPE (NMConnectionEditor, nm_connection_editor, G_TYPE_OBJECT)
+ 
+@@ -933,6 +934,9 @@ nm_connection_editor_set_connection (NMConnectionEditor *editor,
+ 	editor->orig_scope = nm_connection_get_scope (editor->connection);
+ 	nm_connection_editor_update_title (editor);
+ 
++	/* Handle CA cert ignore stuff */
++	eap_method_ca_cert_ignore_load (editor->connection);
++
+ 	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (editor->connection, NM_TYPE_SETTING_CONNECTION));
+ 	g_assert (s_con);
+ 
+@@ -1141,6 +1145,9 @@ ok_button_clicked_cb (GtkWidget *widget, gpointer user_data)
+ 
+ 	nm_connection_editor_set_busy (self, TRUE);
+ 
++	/* Save new CA cert ignore values to GSettings */
++	eap_method_ca_cert_ignore_save (self->connection);
++
+ 	if (self->is_new_connection) {
+ 		nm_settings_interface_add_connection (settings,
+ 		                                      self->orig_connection,
+diff --git a/network-manager-applet-0.8.1/src/wired-dialog.c b/network-manager-applet-0.8.1/src/wired-dialog.c
+index d09bf9b..0fe547f 100644
+--- a/network-manager-applet-0.8.1/src/wired-dialog.c
++++ b/network-manager-applet-0.8.1/src/wired-dialog.c
+@@ -34,6 +34,7 @@
+ #include "wireless-security.h"
+ #include "applet-dialogs.h"
+ #include "gconf-helpers.h"
++#include "eap-method.h"
+ 
+ static void
+ stuff_changed_cb (WirelessSecurity *sec, gpointer user_data)
+@@ -98,6 +99,9 @@ dialog_init (GtkWidget *dialog,
+ 	gtk_window_set_title (GTK_WINDOW (glade_xml_get_widget (xml, "wireless_dialog")),
+ 	                      _("Wired 802.1X authentication"));
+ 
++	 /* Handle CA cert ignore stuff */
++	eap_method_ca_cert_ignore_load (connection);
++
+ 	dialog_set_network_name (connection, GTK_ENTRY (glade_xml_get_widget (xml, "network_name_entry")));
+ 	security = dialog_set_security (connection, glade_file, GTK_BOX (glade_xml_get_widget (xml, "security_vbox")));
+ 	wireless_security_set_changed_notify (security, stuff_changed_cb, glade_xml_get_widget (xml, "ok_button"));
+@@ -183,6 +187,9 @@ nma_wired_dialog_get_connection (GtkWidget *dialog)
+ 	s_8021x = nm_connection_get_setting (tmp_connection, NM_TYPE_SETTING_802_1X);
+ 	nm_connection_add_setting (NM_CONNECTION (connection), NM_SETTING (g_object_ref (s_8021x)));
+ 
++	/* Save new CA cert ignore values to GSettings */
++	eap_method_ca_cert_ignore_save (tmp_connection);
++
+ 	g_object_unref (tmp_connection);
+ 
+ 	return connection;
+diff --git a/network-manager-applet-0.8.1/src/wireless-dialog.c b/network-manager-applet-0.8.1/src/wireless-dialog.c
+index bc5d6f9..ed6900d 100644
+--- a/network-manager-applet-0.8.1/src/wireless-dialog.c
++++ b/network-manager-applet-0.8.1/src/wireless-dialog.c
+@@ -44,6 +44,7 @@
+ #include "wireless-security.h"
+ #include "utils.h"
+ #include "gconf-helpers.h"
++#include "eap-method.h"
+ 
+ G_DEFINE_TYPE (NMAWirelessDialog, nma_wireless_dialog, GTK_TYPE_DIALOG)
+ 
+@@ -1269,6 +1270,9 @@ nma_wireless_dialog_get_connection (NMAWirelessDialog *self,
+ 		}
+ 	}
+ 
++	/* Save new CA cert ignore values to GSettings */
++	eap_method_ca_cert_ignore_save (connection);
++
+ 	/* Fill device */
+ 	combo = glade_xml_get_widget (priv->xml, "device_combo");
+ 	gtk_combo_box_get_active_iter (GTK_COMBO_BOX (combo), &iter);
+@@ -1313,6 +1317,9 @@ nma_wireless_dialog_new (NMApplet *applet,
+ 	priv->sec_combo = glade_xml_get_widget (priv->xml, "security_combo");
+ 	priv->group = gtk_size_group_new (GTK_SIZE_GROUP_HORIZONTAL);
+ 
++	/* Handle CA cert ignore stuff */
++	eap_method_ca_cert_ignore_load (connection);
++
+ 	if (!internal_init (self, connection, device, TRUE, FALSE)) {
+ 		nm_warning ("Couldn't create wireless security dialog.");
+ 		g_object_unref (self);
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
+index d07ddcb..416ffc8 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
+@@ -490,6 +490,27 @@ eap_method_ca_cert_not_required_toggled (GladeXML *xml, const char *id_ca_cert_n
+ 	g_object_set_data_full (G_OBJECT (widget), "filename-old", filename_old, g_free);
+ }
+ 
++/* Used as both GSettings keys and GObject data tags */
++#define IGNORE_CA_CERT_TAG "ignore-ca-cert"
++#define IGNORE_PHASE2_CA_CERT_TAG "ignore-phase2-ca-cert"
++
++/**
++ * eap_method_ca_cert_ignore_set:
++ * @method: the #EAPMethod object
++ * @connection: the #NMConnection
++ * @filename: the certificate file, if any
++ * @ca_cert_error: %TRUE if an error was encountered loading the given CA
++ * certificate, %FALSE if not or if a CA certificate is not present
++ * @id_ca_cert_is_not_required_checkbox: the #GtkWidget object name of the
++ * "CA certificate not required" checkbox
++ *
++ * Updates the connection's CA cert ignore value to %TRUE if the "CA certificate
++ * not required" checkbox is checked.  If @ca_cert_error is %TRUE, then the
++ * connection's CA cert ignore value will always be set to %FALSE, because it
++ * means that the user selected an invalid certificate (thus he does not want to
++ * ignore the CA cert)..
++ */
++
+ void
+ eap_method_ca_cert_ignore_set (EAPMethod *method,
+                                NMConnection *connection,
+@@ -499,28 +520,104 @@ eap_method_ca_cert_ignore_set (EAPMethod *method,
+                                const char *id_ca_cert_is_not_required_checkbox)
+ {
+ 	GtkWidget *widget;
++	NMSetting8021x *s_8021x;
++	gboolean ignore;
+ 
+ 	/* We don't really need the checkbox value here. Just assert that it is set as expected. */
+ 	widget = glade_xml_get_widget (method->xml, id_ca_cert_is_not_required_checkbox);
+ 	g_assert (widget && (ca_cert_error || !filename == gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (widget))));
+ 
+-	nm_gconf_set_ignore_ca_cert (nm_connection_get_uuid (connection),
+-	                             phase2, !ca_cert_error && filename==NULL);
++	s_8021x = nm_connection_get_setting_802_1x (connection);
++	if (s_8021x) {
++		ignore = !ca_cert_error && filename == NULL;
++		g_object_set_data (G_OBJECT (s_8021x),
++		                   phase2 ? IGNORE_PHASE2_CA_CERT_TAG : IGNORE_CA_CERT_TAG,
++		                   GUINT_TO_POINTER (ignore));
++	}
+ }
+ 
++/**
++ * eap_method_ca_cert_ignore_get:
++ * @method: the #EAPMethod object
++ * @connection: the #NMConnection
++ *
++ * Returns: %TRUE if a missing CA certificate can be ignored, %FALSE if a CA
++ * certificate should be required for the connection to be valid.
++ */
+ gboolean
+ eap_method_ca_cert_ignore_get (EAPMethod *method, NMConnection *connection, gboolean phase2)
+ {
+-	NMSettingConnection *s_con;
++	NMSetting8021x *s_8021x;
++
++	s_8021x = nm_connection_get_setting_802_1x (connection);
++	if (s_8021x) {
++		return !!g_object_get_data (G_OBJECT (s_8021x),
++		                            phase2 ? IGNORE_PHASE2_CA_CERT_TAG : IGNORE_CA_CERT_TAG);
++	}
++	return FALSE;
++}
++
++/**
++ * eap_method_ca_cert_ignore_save:
++ * @connection: the connection for which to save CA cert ignore values to GSettings
++ *
++ * Reads the CA cert ignore tags from the 802.1x setting GObject data and saves
++ * then to GSettings if present, using the connection UUID as the index.
++ */
++void
++eap_method_ca_cert_ignore_save (NMConnection *connection)
++{
++	NMSetting8021x *s_8021x;
++	gboolean ignore = FALSE, phase2_ignore = FALSE;
+ 	const char *uuid;
+ 
+-	s_con = nm_connection_get_setting_connection (connection);
+-	g_assert (s_con);
+-	uuid = nm_setting_connection_get_uuid (s_con);
+-	g_assert (uuid);
++	g_return_if_fail (connection);
++
++	s_8021x = nm_connection_get_setting_802_1x (connection);
++	if (s_8021x) {
++		ignore = !!g_object_get_data (G_OBJECT (s_8021x), IGNORE_CA_CERT_TAG);
++		phase2_ignore = !!g_object_get_data (G_OBJECT (s_8021x), IGNORE_PHASE2_CA_CERT_TAG);
++	}
++
++	uuid = nm_connection_get_uuid (connection);
++	g_return_if_fail (uuid && *uuid);
++
++	nm_gconf_set_ignore_ca_cert (uuid, FALSE, ignore);
++	nm_gconf_set_ignore_ca_cert (uuid, TRUE, phase2_ignore);
++}
++
++/**
++ * eap_method_ca_cert_ignore_load:
++ * @connection: the connection for which to load CA cert ignore values to GSettings
++ *
++ * Reads the CA cert ignore tags from the 802.1x setting GObject data and saves
++ * then to GSettings if present, using the connection UUID as the index.
++ */
++void
++eap_method_ca_cert_ignore_load (NMConnection *connection)
++{
++	NMSetting8021x *s_8021x;
++	gboolean ignore, phase2_ignore;
++	const char *uuid;
++
++	g_return_if_fail (connection);
++
++	s_8021x = nm_connection_get_setting_802_1x (connection);
++	if (!s_8021x)
++		return;
++
++	uuid = nm_connection_get_uuid (connection);
++	g_return_if_fail (uuid && *uuid);
++
++	ignore = nm_gconf_get_ignore_ca_cert (uuid, FALSE);
++	phase2_ignore = nm_gconf_get_ignore_ca_cert (uuid, TRUE);
+ 
+-	/* Figure out if the user wants to ignore missing CA cert */
+-	return nm_gconf_get_ignore_ca_cert (uuid, phase2);
++	g_object_set_data (G_OBJECT (s_8021x),
++	                   IGNORE_CA_CERT_TAG,
++	                   GUINT_TO_POINTER (ignore));
++	g_object_set_data (G_OBJECT (s_8021x),
++	                   IGNORE_PHASE2_CA_CERT_TAG,
++	                   GUINT_TO_POINTER (phase2_ignore));
+ }
+ 
+ 
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method.h b/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
+index 8a6fe37..acc6ef5 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
+@@ -120,6 +120,7 @@ gboolean eap_method_ca_cert_required (GladeXML *xml,
+ void eap_method_ca_cert_not_required_toggled (GladeXML *xml,
+                                               const char *id_ca_cert_is_not_required_checkbox,
+                                               const char *id_ca_cert_chooser);
++
+ void eap_method_ca_cert_ignore_set (EAPMethod *method,
+                                     NMConnection *connection,
+                                     const char *filename,
+@@ -128,5 +129,8 @@ void eap_method_ca_cert_ignore_set (EAPMethod *method,
+                                     const char *id_ca_cert_is_not_required_checkbox);
+ gboolean eap_method_ca_cert_ignore_get (EAPMethod *method, NMConnection *connection, gboolean phase2);
+ 
++void eap_method_ca_cert_ignore_save (NMConnection *connection);
++void eap_method_ca_cert_ignore_load (NMConnection *connection);
++
+ #endif /* EAP_METHOD_H */
+ 
+-- 
+1.7.1
+

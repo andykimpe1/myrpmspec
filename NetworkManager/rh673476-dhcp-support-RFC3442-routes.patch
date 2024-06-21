@@ -1,0 +1,1357 @@
+Backported and condensed two patches:
+59b65bb1240b0b15c423fe8926bb34876bdd6847 - the whole patch is backported
+72a0bb28ffd0b9b710611a66779c90b8ca2cf1c8 - backported just parts
+                                           dealing with "also required"
+=====
+
+commit 59b65bb1240b0b15c423fe8926bb34876bdd6847
+Author: Dan Williams <dcbw@redhat.com>
+Date:   Thu Oct 21 13:34:40 2010 -0500
+
+    dhcp: add support for Fedora dhclient RFC3442 routes (rh #639935)
+    
+    Add support for Fedora's dhclient's built-in RFC3442 classless static                                                                                                                                      
+    routes format.                                                                                                                                                                                             
+                                                                                                                                                                                                               
+    Since the Fedora format uses the same name as the dhcpcd format, we                                                                                                                                        
+    need to refactor a bunch of the code to ensure we can distinguish                                                                                                                                          
+    between the types.  Do this at runtime now by consolidating the                                                                                                                                            
+    classless static routes parsing code into the DHCP Client base class                                                                                                                                       
+    and rework the unit tests so that we can test all variations of the                                                                                                                                        
+    classless static route parsing code at the same time.                                                                                                                                                      
+                                                                                                                                                                                                               
+    This also fixes a bug with the dhcpcd classless static route                                                                                                                                               
+    gateway handling that would return the wrong gateway address.                                                                                                                                              
+                                                                                                                                                                                                               
+    Many thanks to Jiri Popelka from Red Hat for the initial patch                                                                                                                                             
+    and explanations.                                                                                                                                                                                          
+---
+ src/dhcp-manager/nm-dhcp-client.c   |  250 +++++++++++++++++-
+ src/dhcp-manager/nm-dhcp-client.h   |    9 -
+ src/dhcp-manager/nm-dhcp-dhclient.c |  131 ----------
+ src/dhcp-manager/nm-dhcp-dhcpcd.c   |   78 ------
+ src/tests/test-dhcp-options.c       |  478 +++++++++++++++++++++-------------
+ 5 files changed, 534 insertions(+), 412 deletions(-)
+
+diff --git a/src/dhcp-manager/nm-dhcp-client.c b/src/dhcp-manager/nm-dhcp-client.c
+index 28b2c78..0c7f3d4 100644
+--- a/src/dhcp-manager/nm-dhcp-client.c
++++ b/src/dhcp-manager/nm-dhcp-client.c
+@@ -17,6 +17,7 @@
+  *
+  */
+ 
++#include <ctype.h>
+ #include <glib.h>
+ #include <string.h>
+ #include <sys/types.h>
+@@ -647,6 +648,243 @@ nm_dhcp_client_foreach_option (NMDHCPClient *self,
+ 
+ /********************************************/
+ 
++static gboolean
++ip4_process_dhcpcd_rfc3442_routes (const char *str,
++                                   NMIP4Config *ip4_config,
++                                   guint32 *gwaddr)
++{
++	char **routes, **r;
++	gboolean have_routes = FALSE;
++
++	routes = g_strsplit (str, " ", 0);
++	if (g_strv_length (routes) == 0)
++		goto out;
++
++	if ((g_strv_length (routes) % 2) != 0) {
++		nm_log_warn (LOGD_DHCP4, "  classless static routes provided, but invalid");
++		goto out;
++	}
++
++	for (r = routes; *r; r += 2) {
++		char *slash;
++		NMIP4Route *route;
++		int rt_cidr = 32;
++		struct in_addr rt_addr;
++		struct in_addr rt_route;
++
++		slash = strchr(*r, '/');
++		if (slash) {
++			*slash = '\0';
++			errno = 0;
++			rt_cidr = strtol (slash + 1, NULL, 10);
++			if ((errno == EINVAL) || (errno == ERANGE)) {
++				nm_log_warn (LOGD_DHCP4, "DHCP provided invalid classless static route cidr: '%s'", slash + 1);
++				continue;
++			}
++		}
++		if (inet_pton (AF_INET, *r, &rt_addr) <= 0) {
++			nm_log_warn (LOGD_DHCP4, "DHCP provided invalid classless static route address: '%s'", *r);
++			continue;
++		}
++		if (inet_pton (AF_INET, *(r + 1), &rt_route) <= 0) {
++			nm_log_warn (LOGD_DHCP4, "DHCP provided invalid classless static route gateway: '%s'", *(r + 1));
++			continue;
++		}
++
++		have_routes = TRUE;
++		if (rt_cidr == 0 && rt_addr.s_addr == 0) {
++			/* FIXME: how to handle multiple routers? */
++			*gwaddr = rt_route.s_addr;
++		} else {
++			route = nm_ip4_route_new ();
++			nm_ip4_route_set_dest (route, (guint32) rt_addr.s_addr);
++			nm_ip4_route_set_prefix (route, rt_cidr);
++			nm_ip4_route_set_next_hop (route, (guint32) rt_route.s_addr);
++
++			nm_ip4_config_take_route (ip4_config, route);
++			nm_log_info (LOGD_DHCP4, "  classless static route %s/%d gw %s", *r, rt_cidr, *(r + 1));
++		}
++	}
++
++out:
++	g_strfreev (routes);
++	return have_routes;
++}
++
++static const char **
++process_dhclient_rfc3442_route (const char **octets, NMIP4Route **out_route)
++{
++	const char **o = octets;
++	int addr_len = 0, i = 0;
++	long int tmp;
++	NMIP4Route *route;
++	char *next_hop;
++	struct in_addr tmp_addr;
++
++	if (!*o)
++		return o; /* no prefix */
++
++	tmp = strtol (*o, NULL, 10);
++	if (tmp < 0 || tmp > 32)  /* 32 == max IP4 prefix length */
++		return o;
++
++	route = nm_ip4_route_new ();
++	nm_ip4_route_set_prefix (route, (guint32) tmp);
++	o++;
++
++	if (tmp > 0)
++		addr_len = ((tmp - 1) / 8) + 1;
++
++	/* ensure there's at least the address + next hop left */
++	if (g_strv_length ((char **) o) < addr_len + 4)
++		goto error;
++
++	if (tmp) {
++		const char *addr[4] = { "0", "0", "0", "0" };
++		char *str_addr;
++
++		for (i = 0; i < addr_len; i++)
++			addr[i] = *o++;
++
++		str_addr = g_strjoin (".", addr[0], addr[1], addr[2], addr[3], NULL);
++		if (inet_pton (AF_INET, str_addr, &tmp_addr) <= 0) {
++			g_free (str_addr);
++			goto error;
++		}
++		tmp_addr.s_addr &= nm_utils_ip4_prefix_to_netmask ((guint32) tmp);
++		nm_ip4_route_set_dest (route, tmp_addr.s_addr);
++	}
++
++	/* Handle next hop */
++	next_hop = g_strjoin (".", o[0], o[1], o[2], o[3], NULL);
++	if (inet_pton (AF_INET, next_hop, &tmp_addr) <= 0) {
++		g_free (next_hop);
++		goto error;
++	}
++	nm_ip4_route_set_next_hop (route, tmp_addr.s_addr);
++	g_free (next_hop);
++
++	*out_route = route;
++	return o + 4; /* advance to past the next hop */
++
++error:
++	nm_ip4_route_unref (route);
++	return o;
++}
++
++static gboolean
++ip4_process_dhclient_rfc3442_routes (const char *str,
++                                     NMIP4Config *ip4_config,
++                                     guint32 *gwaddr)
++{
++	char **octets, **o;
++	gboolean have_routes = FALSE;
++	NMIP4Route *route = NULL;
++
++	o = octets = g_strsplit_set (str, " .", 0);
++	if (g_strv_length (octets) < 5) {
++		nm_log_warn (LOGD_DHCP4, "ignoring invalid classless static routes '%s'", str);
++		goto out;
++	}
++
++	while (*o) {
++		route = NULL;
++		o = (char **) process_dhclient_rfc3442_route ((const char **) o, &route);
++		if (!route) {
++			nm_log_warn (LOGD_DHCP4, "ignoring invalid classless static routes");
++			break;
++		}
++
++		have_routes = TRUE;
++		if (nm_ip4_route_get_prefix (route) == 0) {
++			/* gateway passed as classless static route */
++			*gwaddr = nm_ip4_route_get_next_hop (route);
++			nm_ip4_route_unref (route);
++		} else {
++			char addr[INET_ADDRSTRLEN + 1];
++			char nh[INET_ADDRSTRLEN + 1];
++			struct in_addr tmp;
++
++			/* normal route */
++			nm_ip4_config_take_route (ip4_config, route);
++
++			tmp.s_addr = nm_ip4_route_get_dest (route);
++			inet_ntop (AF_INET, &tmp, addr, sizeof (addr));
++			tmp.s_addr = nm_ip4_route_get_next_hop (route);
++			inet_ntop (AF_INET, &tmp, nh, sizeof (nh));
++			nm_log_info (LOGD_DHCP4, "  classless static route %s/%d gw %s",
++			             addr, nm_ip4_route_get_prefix (route), nh);
++		}
++	}
++
++out:
++	g_strfreev (octets);
++	return have_routes;
++}
++
++static gboolean
++ip4_process_classless_routes (GHashTable *options,
++                              NMIP4Config *ip4_config,
++                              guint32 *gwaddr)
++{
++	const char *str, *p;
++
++	g_return_val_if_fail (options != NULL, FALSE);
++	g_return_val_if_fail (ip4_config != NULL, FALSE);
++
++	*gwaddr = 0;
++
++	/* dhcpd/dhclient in Fedora has support for rfc3442 implemented using a
++	 * slightly different format:
++	 *
++	 * option classless-static-routes = array of (destination-descriptor ip-address);
++	 *
++	 * which results in:
++	 *
++	 * 0 192.168.0.113 25.129.210.177.132 192.168.0.113 7.2 10.34.255.6
++	 *
++	 * dhcpcd supports classless static routes natively and uses this same
++	 * option identifier with the following format:
++	 *
++	 * 192.168.10.0/24 192.168.1.1 10.0.0.0/8 10.17.66.41
++	 */
++	str = g_hash_table_lookup (options, "new_classless_static_routes");
++
++	/* dhclient doesn't have actual support for rfc3442 classless static routes
++	 * upstream.  Thus, people resort to defining the option in dhclient.conf
++	 * and using arbitrary formats like so:
++	 *
++	 * option rfc3442-classless-static-routes code 121 = array of unsigned integer 8;
++	 *
++	 * See https://lists.isc.org/pipermail/dhcp-users/2008-December/007629.html
++	 */
++	if (!str)
++		str = g_hash_table_lookup (options, "new_rfc3442_classless_static_routes");
++
++	/* Microsoft version; same as rfc3442 but with a different option # (249) */
++	if (!str)
++		str = g_hash_table_lookup (options, "new_ms_classless_static_routes");
++
++	if (!str || !strlen (str))
++		return FALSE;
++
++	p = str;
++	while (*p) {
++		if (!isdigit (*p) && (*p != ' ') && (*p != '.') && (*p != '/')) {
++			nm_log_warn (LOGD_DHCP4, "ignoring invalid classless static routes '%s'", str);
++			return FALSE;
++		}
++		p++;
++	};
++
++	if (strchr (str, '/')) {
++		/* dhcpcd format */
++		return ip4_process_dhcpcd_rfc3442_routes (str, ip4_config, gwaddr);
++	}
++
++	return ip4_process_dhclient_rfc3442_routes (str, ip4_config, gwaddr);
++}
++
+ static void
+ process_classful_routes (GHashTable *options, NMIP4Config *ip4_config)
+ {
+@@ -747,7 +985,6 @@ ip4_options_to_config (NMDHCPClient *self)
+ 	NMIP4Address *addr = NULL;
+ 	char *str = NULL;
+ 	guint32 gwaddr = 0, prefix = 0;
+-	gboolean have_classless = FALSE;
+ 
+ 	g_return_val_if_fail (self != NULL, NULL);
+ 	g_return_val_if_fail (NM_IS_DHCP_CLIENT (self), NULL);
+@@ -788,17 +1025,8 @@ ip4_options_to_config (NMDHCPClient *self)
+ 	/* Routes: if the server returns classless static routes, we MUST ignore
+ 	 * the 'static_routes' option.
+ 	 */
+-	if (NM_DHCP_CLIENT_GET_CLASS (self)->ip4_process_classless_routes) {
+-		have_classless = NM_DHCP_CLIENT_GET_CLASS (self)->ip4_process_classless_routes (self,
+-		                                                                                priv->options,
+-		                                                                                ip4_config,
+-		                                                                                &gwaddr);
+-	}
+-
+-	if (!have_classless) {
+-		gwaddr = 0;  /* Ensure client code doesn't lie */
++	if (!ip4_process_classless_routes (priv->options, ip4_config, &gwaddr))
+ 		process_classful_routes (priv->options, ip4_config);
+-	}
+ 
+ 	if (gwaddr) {
+ 		char buf[INET_ADDRSTRLEN + 1];
+diff --git a/src/dhcp-manager/nm-dhcp-client.h b/src/dhcp-manager/nm-dhcp-client.h
+index 8c2d465..f357170 100644
+--- a/src/dhcp-manager/nm-dhcp-client.h
++++ b/src/dhcp-manager/nm-dhcp-client.h
+@@ -76,15 +76,6 @@ typedef struct {
+ 
+ 	/* Methods */
+ 
+-	/* Given the options table, extract any classless routes, add them to
+-	 * the IP4 config and return TRUE if any existed.  If a gateway was sent
+-	 * as a classless route return that in out_gwaddr.
+-	 */
+-	gboolean (*ip4_process_classless_routes) (NMDHCPClient *self,
+-	                                          GHashTable *options,
+-	                                          NMIP4Config *ip4_config,
+-	                                          guint32 *out_gwaddr);
+-
+ 	GPid (*ip4_start)                        (NMDHCPClient *self,
+ 	                                          NMSettingIP4Config *s_ip4,
+ 	                                          guint8 *anycast_addr,
+diff --git a/src/dhcp-manager/nm-dhcp-dhclient.c b/src/dhcp-manager/nm-dhcp-dhclient.c
+index 091ae2f..d878152 100644
+--- a/src/dhcp-manager/nm-dhcp-dhclient.c
++++ b/src/dhcp-manager/nm-dhcp-dhclient.c
+@@ -635,136 +635,6 @@ real_stop (NMDHCPClient *client)
+ 		remove (priv->pid_file);
+ }
+ 
+-static const char **
+-process_rfc3442_route (const char **octets, NMIP4Route **out_route)
+-{
+-	const char **o = octets;
+-	int addr_len = 0, i = 0;
+-	long int tmp;
+-	NMIP4Route *route;
+-	char *next_hop;
+-	struct in_addr tmp_addr;
+-
+-	if (!*o)
+-		return o; /* no prefix */
+-
+-	tmp = strtol (*o, NULL, 10);
+-	if (tmp < 0 || tmp > 32)  /* 32 == max IP4 prefix length */
+-		return o;
+-
+-	route = nm_ip4_route_new ();
+-	nm_ip4_route_set_prefix (route, (guint32) tmp);
+-	o++;
+-
+-	if (tmp > 0)
+-		addr_len = ((tmp - 1) / 8) + 1;
+-
+-	/* ensure there's at least the address + next hop left */
+-	if (g_strv_length ((char **) o) < addr_len + 4)
+-		goto error;
+-
+-	if (tmp) {
+-		const char *addr[4] = { "0", "0", "0", "0" };
+-		char *str_addr;
+-
+-		for (i = 0; i < addr_len; i++)
+-			addr[i] = *o++;
+-
+-		str_addr = g_strjoin (".", addr[0], addr[1], addr[2], addr[3], NULL);
+-		if (inet_pton (AF_INET, str_addr, &tmp_addr) <= 0) {
+-			g_free (str_addr);
+-			goto error;
+-		}
+-		tmp_addr.s_addr &= nm_utils_ip4_prefix_to_netmask ((guint32) tmp);
+-		nm_ip4_route_set_dest (route, tmp_addr.s_addr);
+-	}
+-
+-	/* Handle next hop */
+-	next_hop = g_strjoin (".", o[0], o[1], o[2], o[3], NULL);
+-	if (inet_pton (AF_INET, next_hop, &tmp_addr) <= 0) {
+-		g_free (next_hop);
+-		goto error;
+-	}
+-	nm_ip4_route_set_next_hop (route, tmp_addr.s_addr);
+-	g_free (next_hop);
+-
+-	*out_route = route;
+-	return o + 4; /* advance to past the next hop */
+-
+-error:
+-	nm_ip4_route_unref (route);
+-	return o;
+-}
+-
+-static gboolean
+-real_ip4_process_classless_routes (NMDHCPClient *client,
+-                                   GHashTable *options,
+-                                   NMIP4Config *ip4_config,
+-                                   guint32 *gwaddr)
+-{
+-	const char *str;
+-	char **octets, **o;
+-	gboolean have_routes = FALSE;
+-	NMIP4Route *route = NULL;
+-
+-	/* dhclient doesn't have actual support for rfc3442 classless static routes
+-	 * upstream.  Thus, people resort to defining the option in dhclient.conf
+-	 * and using arbitrary formats like so:
+-	 *
+-	 * option rfc3442-classless-static-routes code 121 = array of unsigned integer 8;
+-	 *
+-	 * See https://lists.isc.org/pipermail/dhcp-users/2008-December/007629.html
+-	 */
+-
+-	str = g_hash_table_lookup (options, "new_rfc3442_classless_static_routes");
+-	/* Microsoft version; same as rfc3442 but with a different option # (249) */
+-	if (!str)
+-		str = g_hash_table_lookup (options, "new_ms_classless_static_routes");
+-
+-	if (!str || !strlen (str))
+-		return FALSE;
+-
+-	o = octets = g_strsplit (str, " ", 0);
+-	if (g_strv_length (octets) < 5) {
+-		nm_log_warn (LOGD_DHCP4, "ignoring invalid classless static routes '%s'", str);
+-		goto out;
+-	}
+-
+-	while (*o) {
+-		route = NULL;
+-		o = (char **) process_rfc3442_route ((const char **) o, &route);
+-		if (!route) {
+-			nm_log_warn (LOGD_DHCP4, "ignoring invalid classless static routes");
+-			break;
+-		}
+-
+-		have_routes = TRUE;
+-		if (nm_ip4_route_get_prefix (route) == 0) {
+-			/* gateway passed as classless static route */
+-			*gwaddr = nm_ip4_route_get_next_hop (route);
+-			nm_ip4_route_unref (route);
+-		} else {
+-			char addr[INET_ADDRSTRLEN + 1];
+-			char nh[INET_ADDRSTRLEN + 1];
+-			struct in_addr tmp;
+-
+-			/* normal route */
+-			nm_ip4_config_take_route (ip4_config, route);
+-
+-			tmp.s_addr = nm_ip4_route_get_dest (route);
+-			inet_ntop (AF_INET, &tmp, addr, sizeof (addr));
+-			tmp.s_addr = nm_ip4_route_get_next_hop (route);
+-			inet_ntop (AF_INET, &tmp, nh, sizeof (nh));
+-			nm_log_info (LOGD_DHCP4, "  classless static route %s/%d gw %s",
+-			             addr, nm_ip4_route_get_prefix (route), nh);
+-		}
+-	}
+-
+-out:
+-	g_strfreev (octets);
+-	return have_routes;
+-}
+-
+ /***************************************************/
+ 
+ static void
+@@ -801,6 +671,5 @@ nm_dhcp_dhclient_class_init (NMDHCPDhclientClass *dhclient_class)
+ 	client_class->ip4_start = real_ip4_start;
+ 	client_class->ip6_start = real_ip6_start;
+ 	client_class->stop = real_stop;
+-	client_class->ip4_process_classless_routes = real_ip4_process_classless_routes;
+ }
+ 
+diff --git a/src/dhcp-manager/nm-dhcp-dhcpcd.c b/src/dhcp-manager/nm-dhcp-dhcpcd.c
+index c9fdc95..378a97b 100644
+--- a/src/dhcp-manager/nm-dhcp-dhcpcd.c
++++ b/src/dhcp-manager/nm-dhcp-dhcpcd.c
+@@ -179,83 +179,6 @@ real_stop (NMDHCPClient *client)
+ 		remove (priv->pid_file);
+ }
+ 
+-static gboolean
+-real_ip4_process_classless_routes (NMDHCPClient *client,
+-                                   GHashTable *options,
+-                                   NMIP4Config *ip4_config,
+-                                   guint32 *gwaddr)
+-{
+-	const char *str;
+-	char **routes, **r;
+-	gboolean have_routes = FALSE;
+-
+-	/* Classless static routes over-ride any static routes and routers
+-	 * provided. We should also check for MS classless static routes as
+-	 * they implemented the draft RFC using their own code.
+-	 */
+-	str = g_hash_table_lookup (options, "new_classless_static_routes");
+-	if (!str)
+-		str = g_hash_table_lookup (options, "new_ms_classless_static_routes");
+-
+-	if (!str || !strlen (str))
+-		return FALSE;
+-
+-	routes = g_strsplit (str, " ", 0);
+-	if (g_strv_length (routes) == 0)
+-		goto out;
+-
+-	if ((g_strv_length (routes) % 2) != 0) {
+-		nm_log_warn (LOGD_DHCP4, "  classless static routes provided, but invalid");
+-		goto out;
+-	}
+-
+-	for (r = routes; *r; r += 2) {
+-		char *slash;
+-		NMIP4Route *route;
+-		int rt_cidr = 32;
+-		struct in_addr rt_addr;
+-		struct in_addr rt_route;
+-
+-		slash = strchr(*r, '/');
+-		if (slash) {
+-			*slash = '\0';
+-			errno = 0;
+-			rt_cidr = strtol (slash + 1, NULL, 10);
+-			if ((errno == EINVAL) || (errno == ERANGE)) {
+-				nm_log_warn (LOGD_DHCP4, "DHCP provided invalid classless static route cidr: '%s'", slash + 1);
+-				continue;
+-			}
+-		}
+-		if (inet_pton (AF_INET, *r, &rt_addr) <= 0) {
+-			nm_log_warn (LOGD_DHCP4, "DHCP provided invalid classless static route address: '%s'", *r);
+-			continue;
+-		}
+-		if (inet_pton (AF_INET, *(r + 1), &rt_route) <= 0) {
+-			nm_log_warn (LOGD_DHCP4, "DHCP provided invalid classless static route gateway: '%s'", *(r + 1));
+-			continue;
+-		}
+-
+-		have_routes = TRUE;
+-		if (rt_cidr == 0 && rt_addr.s_addr == 0) {
+-			/* FIXME: how to handle multiple routers? */
+-			*gwaddr = rt_addr.s_addr;
+-		} else {
+-			route = nm_ip4_route_new ();
+-			nm_ip4_route_set_dest (route, (guint32) rt_addr.s_addr);
+-			nm_ip4_route_set_prefix (route, rt_cidr);
+-			nm_ip4_route_set_next_hop (route, (guint32) rt_route.s_addr);
+-
+-
+-			nm_ip4_config_take_route (ip4_config, route);
+-			nm_log_info (LOGD_DHCP4, "  classless static route %s/%d gw %s", *r, rt_cidr, *(r + 1));
+-		}
+-	}
+-
+-out:
+-	g_strfreev (routes);
+-	return have_routes;
+-}
+-
+ /***************************************************/
+ 
+ static void
+@@ -290,6 +213,5 @@ nm_dhcp_dhcpcd_class_init (NMDHCPDhcpcdClass *dhcpcd_class)
+ 	client_class->ip4_start = real_ip4_start;
+ 	client_class->ip6_start = real_ip6_start;
+ 	client_class->stop = real_stop;
+-	client_class->ip4_process_classless_routes = real_ip4_process_classless_routes;
+ }
+ 
+diff --git a/src/tests/test-dhcp-options.c b/src/tests/test-dhcp-options.c
+index dd1f914..aa85f87 100644
+--- a/src/tests/test-dhcp-options.c
++++ b/src/tests/test-dhcp-options.c
+@@ -250,300 +250,406 @@ test_wins_options (const char *client)
+ 	g_hash_table_destroy (options);
+ }
+ 
+-static Option classless_routes_options[] = {
+-	/* For dhclient */
+-	{ "new_rfc3442_classless_static_routes", "24 192 168 10 192 168 1 1 8 10 10 17 66 41" },
+-	/* For dhcpcd */
+-	{ "new_classless_static_routes", "192.168.10.0/24 192.168.1.1 10.0.0.0/8 10.17.66.41" },
+-	{ NULL, NULL }
+-};
++static void
++ip4_test_route (const char *test,
++                NMIP4Config *ip4_config,
++                guint route_num,
++                const char *expected_dest,
++                const char *expected_gw,
++                guint expected_prefix)
++{
++	NMIP4Route *route;
++	struct in_addr tmp;
++
++	route = nm_ip4_config_get_route (ip4_config, route_num);
++	ASSERT (inet_pton (AF_INET, expected_dest, &tmp) > 0,
++	        test, "couldn't convert expected route destination #1");
++	ASSERT (nm_ip4_route_get_dest (route) == tmp.s_addr,
++	        test, "unexpected route %d destination", route_num + 1);
++
++	ASSERT (inet_pton (AF_INET, expected_gw, &tmp) > 0,
++	        test, "couldn't convert expected route next hop %d",
++	        route_num + 1);
++	ASSERT (nm_ip4_route_get_next_hop (route) == tmp.s_addr,
++	        test, "unexpected route %d next hop", route_num + 1);
++
++	ASSERT (nm_ip4_route_get_prefix (route) == expected_prefix,
++	        test, "unexpected route %d prefix", route_num + 1);
++	ASSERT (nm_ip4_route_get_metric (route) == 0,
++	        test, "unexpected route %d metric", route_num + 1);
++}
+ 
+ static void
+-test_classless_static_routes (const char *client)
++ip4_test_gateway (const char *test,
++                  NMIP4Config *ip4_config,
++                  const char *expected_gw)
++{
++	NMIP4Address *addr;
++	struct in_addr tmp;
++
++	ASSERT (nm_ip4_config_get_num_addresses (ip4_config) == 1,
++	        test, "unexpected number of IP addresses");
++	addr = nm_ip4_config_get_address (ip4_config, 0);
++	ASSERT (inet_pton (AF_INET, expected_gw, &tmp) > 0,
++	        test, "couldn't convert expected IP gateway");
++	ASSERT (nm_ip4_address_get_gateway (addr) == tmp.s_addr,
++	        test, "unexpected IP gateway");
++}
++
++static void
++test_classless_static_routes_1 (const char *client)
+ {
+ 	GHashTable *options;
+ 	NMIP4Config *ip4_config;
+-	NMIP4Route *route;
+-	struct in_addr tmp;
+ 	const char *expected_route1_dest = "192.168.10.0";
+ 	const char *expected_route1_gw = "192.168.1.1";
+ 	const char *expected_route2_dest = "10.0.0.0";
+ 	const char *expected_route2_gw = "10.17.66.41";
++	static Option data[] = {
++		/* dhclient custom format */
++		{ "new_rfc3442_classless_static_routes", "24 192 168 10 192 168 1 1 8 10 10 17 66 41" },
++		{ NULL, NULL }
++	};
+ 
+ 	options = fill_table (generic_options, NULL);
+-	options = fill_table (classless_routes_options, options);
++	options = fill_table (data, options);
+ 
+ 	ip4_config = nm_dhcp_manager_test_ip4_options_to_config (client, "eth0", options, "rebind");
+ 	ASSERT (ip4_config != NULL,
+-	        "dhcp-rfc3442", "failed to parse DHCP4 options");
++	        "dhcp-classless-1", "failed to parse DHCP4 options");
+ 
+ 	/* IP4 routes */
+ 	ASSERT (nm_ip4_config_get_num_routes (ip4_config) == 2,
+-	        "dhcp-rfc3442", "unexpected number of IP routes");
++	        "dhcp-classless-1", "unexpected number of IP routes");
++	ip4_test_route ("dhcp-classless-1", ip4_config, 0,
++	                expected_route1_dest, expected_route1_gw, 24);
++	ip4_test_route ("dhcp-classless-1", ip4_config, 1,
++	                expected_route2_dest, expected_route2_gw, 8);
+ 
+-	/* Route #1 */
+-	route = nm_ip4_config_get_route (ip4_config, 0);
+-	ASSERT (inet_pton (AF_INET, expected_route1_dest, &tmp) > 0,
+-	        "dhcp-rfc3442", "couldn't convert expected route destination #1");
+-	ASSERT (nm_ip4_route_get_dest (route) == tmp.s_addr,
+-	        "dhcp-rfc3442", "unexpected route #1 destination");
+-
+-	ASSERT (inet_pton (AF_INET, expected_route1_gw, &tmp) > 0,
+-	        "dhcp-rfc3442", "couldn't convert expected route next hop #1");
+-	ASSERT (nm_ip4_route_get_next_hop (route) == tmp.s_addr,
+-	        "dhcp-rfc3442", "unexpected route #1 next hop");
++	g_hash_table_destroy (options);
++}
+ 
+-	ASSERT (nm_ip4_route_get_prefix (route) == 24,
+-	        "dhcp-rfc3442", "unexpected route #1 prefix");
+-	ASSERT (nm_ip4_route_get_metric (route) == 0,
+-	        "dhcp-rfc3442", "unexpected route #1 metric");
++static void
++test_classless_static_routes_2 (const char *client)
++{
++	GHashTable *options;
++	NMIP4Config *ip4_config;
++	const char *expected_route1_dest = "192.168.10.0";
++	const char *expected_route1_gw = "192.168.1.1";
++	const char *expected_route2_dest = "10.0.0.0";
++	const char *expected_route2_gw = "10.17.66.41";
++	static Option data[] = {
++		/* dhcpcd format */
++		{ "new_classless_static_routes", "192.168.10.0/24 192.168.1.1 10.0.0.0/8 10.17.66.41" },
++		{ NULL, NULL }
++	};
+ 
+-	/* Route #2 */
+-	route = nm_ip4_config_get_route (ip4_config, 1);
+-	ASSERT (inet_pton (AF_INET, expected_route2_dest, &tmp) > 0,
+-	        "dhcp-rfc3442", "couldn't convert expected route destination #2");
+-	ASSERT (nm_ip4_route_get_dest (route) == tmp.s_addr,
+-	        "dhcp-rfc3442", "unexpected route #2 destination");
++	options = fill_table (generic_options, NULL);
++	options = fill_table (data, options);
+ 
+-	ASSERT (inet_pton (AF_INET, expected_route2_gw, &tmp) > 0,
+-	        "dhcp-rfc3442", "couldn't convert expected route next hop #2");
+-	ASSERT (nm_ip4_route_get_next_hop (route) == tmp.s_addr,
+-	        "dhcp-rfc3442", "unexpected route #2 next hop");
++	ip4_config = nm_dhcp_manager_test_ip4_options_to_config (client, "eth0", options, "rebind");
++	ASSERT (ip4_config != NULL,
++	        "dhcp-classless-2", "failed to parse DHCP4 options");
+ 
+-	ASSERT (nm_ip4_route_get_prefix (route) == 8,
+-	        "dhcp-rfc3442", "unexpected route #2 prefix");
+-	ASSERT (nm_ip4_route_get_metric (route) == 0,
+-	        "dhcp-rfc3442", "unexpected route #2 metric");
++	/* IP4 routes */
++	ASSERT (nm_ip4_config_get_num_routes (ip4_config) == 2,
++	        "dhcp-classless-2", "unexpected number of IP routes");
++	ip4_test_route ("dhcp-classless-2", ip4_config, 0,
++	                expected_route1_dest, expected_route1_gw, 24);
++	ip4_test_route ("dhcp-classless-2", ip4_config, 1,
++	                expected_route2_dest, expected_route2_gw, 8);
+ 
+ 	g_hash_table_destroy (options);
+ }
+ 
+-static Option invalid_classless_routes1[] = {
+-	/* For dhclient */
+-	{ "new_rfc3442_classless_static_routes", "24 192 168 10 192 168 1 1 45 10 17 66 41" },
+-	/* For dhcpcd */
+-	{ "new_classless_static_routes", "192.168.10.0/24 192.168.1.1 10.0.adfadf/44 10.17.66.41" },
+-	{ NULL, NULL }
+-};
++static void
++test_fedora_dhclient_classless_static_routes (const char *client)
++{
++	GHashTable *options;
++	NMIP4Config *ip4_config;
++	const char *expected_route1_dest = "129.210.177.128";
++	const char *expected_route1_gw = "192.168.0.113";
++	const char *expected_route2_dest = "2.0.0.0";
++	const char *expected_route2_gw = "10.34.255.6";
++	const char *expected_gateway = "192.168.0.113";
++	static Option data[] = {
++		/* Fedora dhclient format */
++		{ "new_classless_static_routes", "0 192.168.0.113 25.129.210.177.132 192.168.0.113 7.2 10.34.255.6" },
++		{ NULL, NULL }
++	};
++
++	options = fill_table (generic_options, NULL);
++	options = fill_table (data, options);
++
++	ip4_config = nm_dhcp_manager_test_ip4_options_to_config (client, "eth0", options, "rebind");
++	ASSERT (ip4_config != NULL,
++	        "dhcp-fedora-dhclient-classless", "failed to parse DHCP4 options");
++
++	/* IP4 routes */
++	ASSERT (nm_ip4_config_get_num_routes (ip4_config) == 2,
++	        "dhcp-fedora-dhclient-classless", "unexpected number of IP routes");
++	ip4_test_route ("dhcp-fedora-dhclient-classless", ip4_config, 0,
++	                expected_route1_dest, expected_route1_gw, 25);
++	ip4_test_route ("dhcp-fedora-dhclient-classless", ip4_config, 1,
++	                expected_route2_dest, expected_route2_gw, 7);
++
++	/* Gateway */
++	ip4_test_gateway ("dhcp-fedora-dhclient-classless", ip4_config, expected_gateway);
++
++	g_hash_table_destroy (options);
++}
+ 
+ static void
+-test_invalid_classless_routes1 (const char *client)
++test_dhclient_invalid_classless_routes_1 (const char *client)
+ {
+ 	GHashTable *options;
+ 	NMIP4Config *ip4_config;
+-	NMIP4Route *route;
+-	struct in_addr tmp;
+ 	const char *expected_route1_dest = "192.168.10.0";
+ 	const char *expected_route1_gw = "192.168.1.1";
++	static Option data[] = {
++		/* dhclient format */
++		{ "new_rfc3442_classless_static_routes", "24 192 168 10 192 168 1 1 45 10 17 66 41" },
++		{ NULL, NULL }
++	};
+ 
+ 	options = fill_table (generic_options, NULL);
+-	options = fill_table (invalid_classless_routes1, options);
++	options = fill_table (data, options);
+ 
+ 	ip4_config = nm_dhcp_manager_test_ip4_options_to_config (client, "eth0", options, "rebind");
+ 	ASSERT (ip4_config != NULL,
+-	        "dhcp-rfc3442-invalid-1", "failed to parse DHCP4 options");
++	        "dhcp-dhclient-classless-invalid-1", "failed to parse DHCP4 options");
+ 
+ 	/* IP4 routes */
+ 	ASSERT (nm_ip4_config_get_num_routes (ip4_config) == 1,
+-	        "dhcp-rfc3442-invalid-1", "unexpected number of IP routes");
++	        "dhcp-dhclient-classless-invalid-1", "unexpected number of IP routes");
+ 
+-	/* Route #1 */
+-	route = nm_ip4_config_get_route (ip4_config, 0);
+-	ASSERT (inet_pton (AF_INET, expected_route1_dest, &tmp) > 0,
+-	        "dhcp-rfc3442-invalid-1", "couldn't convert expected route destination #1");
+-	ASSERT (nm_ip4_route_get_dest (route) == tmp.s_addr,
+-	        "dhcp-rfc3442-invalid-1", "unexpected route #1 destination");
++	ip4_test_route ("dhcp-dhclient-classless-invalid-1", ip4_config, 0,
++	                expected_route1_dest, expected_route1_gw, 24);
+ 
+-	ASSERT (inet_pton (AF_INET, expected_route1_gw, &tmp) > 0,
+-	        "dhcp-rfc3442-invalid-1", "couldn't convert expected route next hop #1");
+-	ASSERT (nm_ip4_route_get_next_hop (route) == tmp.s_addr,
+-	        "dhcp-rfc3442-invalid-1", "unexpected route #1 next hop");
++	g_hash_table_destroy (options);
++}
+ 
+-	ASSERT (nm_ip4_route_get_prefix (route) == 24,
+-	        "dhcp-rfc3442-invalid-1", "unexpected route #1 prefix");
+-	ASSERT (nm_ip4_route_get_metric (route) == 0,
+-	        "dhcp-rfc3442-invalid-1", "unexpected route #1 metric");
++static void
++test_dhcpcd_invalid_classless_routes_1 (const char *client)
++{
++	GHashTable *options;
++	NMIP4Config *ip4_config;
++	const char *expected_route1_dest = "10.1.1.5";
++	const char *expected_route1_gw = "10.1.1.1";
++	const char *expected_route2_dest = "100.99.88.56";
++	const char *expected_route2_gw = "10.1.1.1";
++	static Option data[] = {
++		/* dhcpcd format */
++		{ "new_classless_static_routes", "192.168.10.0/24 192.168.1.1 10.0.adfadf/44 10.17.66.41" },
++		{ NULL, NULL }
++	};
++
++	options = fill_table (generic_options, NULL);
++	options = fill_table (data, options);
++
++	ip4_config = nm_dhcp_manager_test_ip4_options_to_config (client, "eth0", options, "rebind");
++	ASSERT (ip4_config != NULL,
++	        "dhcp-dhcpcd-classless-invalid-1", "failed to parse DHCP4 options");
++
++	/* Test falling back to old-style static routes if the classless static
++	 * routes are invalid.
++	 */
++	ASSERT (nm_ip4_config_get_num_routes (ip4_config) == 2,
++	        "dhcp-dhcpcdp-classless-invalid-1", "unexpected number of routes");
++	ip4_test_route ("dhcp-dhcpcdp-classless-invalid-1", ip4_config, 0,
++	                expected_route1_dest, expected_route1_gw, 32);
++	ip4_test_route ("dhcp-dhcpcdp-classless-invalid-1", ip4_config, 1,
++	                expected_route2_dest, expected_route2_gw, 32);
+ 
+ 	g_hash_table_destroy (options);
+ }
+ 
+-static Option invalid_classless_routes2[] = {
+-	/* For dhclient */
+-	{ "new_rfc3442_classless_static_routes", "45 10 17 66 41 24 192 168 10 192 168 1 1" },
+-	/* For dhcpcd */
+-	{ "new_classless_static_routes", "10.0.adfadf/44 10.17.66.41 192.168.10.0/24 192.168.1.1" },
+-	{ NULL, NULL }
+-};
+-
+ static void
+-test_invalid_classless_routes2 (const char *client)
++test_dhclient_invalid_classless_routes_2 (const char *client)
+ {
+ 	GHashTable *options;
+ 	NMIP4Config *ip4_config;
+-	NMIP4Route *route;
+-	struct in_addr tmp;
+ 	const char *expected_route1_dest = "10.1.1.5";
+ 	const char *expected_route1_gw = "10.1.1.1";
+ 	const char *expected_route2_dest = "100.99.88.56";
+ 	const char *expected_route2_gw = "10.1.1.1";
++	static Option data[] = {
++		{ "new_rfc3442_classless_static_routes", "45 10 17 66 41 24 192 168 10 192 168 1 1" },
++		{ NULL, NULL }
++	};
+ 
+ 	options = fill_table (generic_options, NULL);
+-	options = fill_table (invalid_classless_routes2, options);
++	options = fill_table (data, options);
+ 
+ 	ip4_config = nm_dhcp_manager_test_ip4_options_to_config (client, "eth0", options, "rebind");
+ 	ASSERT (ip4_config != NULL,
+-	        "dhcp-rfc3442-invalid-2", "failed to parse DHCP4 options");
++	        "dhcp-dhclient-classless-invalid-2", "failed to parse DHCP4 options");
+ 
+ 	/* Test falling back to old-style static routes if the classless static
+ 	 * routes are invalid.
+ 	 */
+-
+-	/* Routes */
+ 	ASSERT (nm_ip4_config_get_num_routes (ip4_config) == 2,
+-	        "dhcp-rfc3442-invalid-2", "unexpected number of routes");
++	        "dhcp-dhclient-classless-invalid-2", "unexpected number of routes");
++	ip4_test_route ("dhcp-dhclient-classless-invalid-2", ip4_config, 0,
++	                expected_route1_dest, expected_route1_gw, 32);
++	ip4_test_route ("dhcp-dhclient-classless-invalid-2", ip4_config, 1,
++	                expected_route2_dest, expected_route2_gw, 32);
+ 
+-	/* Route #1 */
+-	route = nm_ip4_config_get_route (ip4_config, 0);
+-	ASSERT (inet_pton (AF_INET, expected_route1_dest, &tmp) > 0,
+-	        "dhcp-rfc3442-invalid-2", "couldn't convert expected route destination #1");
+-	ASSERT (nm_ip4_route_get_dest (route) == tmp.s_addr,
+-	        "dhcp-rfc3442-invalid-2", "unexpected route #1 destination");
++	g_hash_table_destroy (options);
++}
+ 
+-	ASSERT (inet_pton (AF_INET, expected_route1_gw, &tmp) > 0,
+-	        "dhcp-rfc3442-invalid-2", "couldn't convert expected route next hop #1");
+-	ASSERT (nm_ip4_route_get_next_hop (route) == tmp.s_addr,
+-	        "dhcp-rfc3442-invalid-2", "unexpected route #1 next hop");
++static void
++test_dhcpcd_invalid_classless_routes_2 (const char *client)
++{
++	GHashTable *options;
++	NMIP4Config *ip4_config;
++	const char *expected_route1_dest = "10.1.1.5";
++	const char *expected_route1_gw = "10.1.1.1";
++	const char *expected_route2_dest = "100.99.88.56";
++	const char *expected_route2_gw = "10.1.1.1";
++	static Option data[] = {
++		{ "new_classless_static_routes", "10.0.adfadf/44 10.17.66.41 192.168.10.0/24 192.168.1.1" },
++		{ NULL, NULL }
++	};
+ 
+-	ASSERT (nm_ip4_route_get_prefix (route) == 32,
+-	        "dhcp-rfc3442-invalid-2", "unexpected route #1 prefix");
+-	ASSERT (nm_ip4_route_get_metric (route) == 0,
+-	        "dhcp-rfc3442-invalid-2", "unexpected route #1 metric");
++	options = fill_table (generic_options, NULL);
++	options = fill_table (data, options);
+ 
+-	/* Route #2 */
+-	route = nm_ip4_config_get_route (ip4_config, 1);
+-	ASSERT (inet_pton (AF_INET, expected_route2_dest, &tmp) > 0,
+-	        "dhcp-rfc3442-invalid-2", "couldn't convert expected route destination #2");
+-	ASSERT (nm_ip4_route_get_dest (route) == tmp.s_addr,
+-	        "dhcp-rfc3442-invalid-2", "unexpected route #2 destination");
++	ip4_config = nm_dhcp_manager_test_ip4_options_to_config (client, "eth0", options, "rebind");
++	ASSERT (ip4_config != NULL,
++	        "dhcp-dhcpcd-classless-invalid-2", "failed to parse DHCP4 options");
+ 
+-	ASSERT (inet_pton (AF_INET, expected_route2_gw, &tmp) > 0,
+-	        "dhcp-rfc3442-invalid-2", "couldn't convert expected route next hop #2");
+-	ASSERT (nm_ip4_route_get_next_hop (route) == tmp.s_addr,
+-	        "dhcp-rfc3442-invalid-2", "unexpected route #2 next hop");
++	/* Test falling back to old-style static routes if the classless static
++	 * routes are invalid.
++	 */
+ 
+-	ASSERT (nm_ip4_route_get_prefix (route) == 32,
+-	        "dhcp-rfc3442-invalid-2", "unexpected route #2 prefix");
+-	ASSERT (nm_ip4_route_get_metric (route) == 0,
+-	        "dhcp-rfc3442-invalid-2", "unexpected route #2 metric");
++	/* Routes */
++	ASSERT (nm_ip4_config_get_num_routes (ip4_config) == 2,
++	        "dhcp-dhcpcd-classless-invalid-2", "unexpected number of routes");
++	ip4_test_route ("dhcp-dhcpcd-classless-invalid-2", ip4_config, 0,
++	                expected_route1_dest, expected_route1_gw, 32);
++	ip4_test_route ("dhcp-dhcpcd-classless-invalid-2", ip4_config, 1,
++	                expected_route2_dest, expected_route2_gw, 32);
+ 
+ 	g_hash_table_destroy (options);
+ }
+ 
+-static Option invalid_classless_routes3[] = {
+-	/* For dhclient */
+-	{ "new_rfc3442_classless_static_routes", "24 192 168 10 192 168 1 1 32 128 10 17 66 41" },
+-	/* For dhcpcd */
+-	{ "new_classless_static_routes", "192.168.10.0/24 192.168.1.1 128/32 10.17.66.41" },
+-	{ NULL, NULL }
+-};
+-
+ static void
+-test_invalid_classless_routes3 (const char *client)
++test_dhclient_invalid_classless_routes_3 (const char *client)
+ {
+ 	GHashTable *options;
+ 	NMIP4Config *ip4_config;
+-	NMIP4Route *route;
+-	struct in_addr tmp;
+ 	const char *expected_route1_dest = "192.168.10.0";
+ 	const char *expected_route1_gw = "192.168.1.1";
++	static Option data[] = {
++		{ "new_rfc3442_classless_static_routes", "24 192 168 10 192 168 1 1 32 128 10 17 66 41" },
++		{ NULL, NULL }
++	};
+ 
+ 	options = fill_table (generic_options, NULL);
+-	options = fill_table (invalid_classless_routes3, options);
++	options = fill_table (data, options);
+ 
+ 	ip4_config = nm_dhcp_manager_test_ip4_options_to_config (client, "eth0", options, "rebind");
+ 	ASSERT (ip4_config != NULL,
+-	        "dhcp-rfc3442-invalid-3", "failed to parse DHCP4 options");
++	        "dhcp-dhclient-classless-invalid-3", "failed to parse DHCP4 options");
+ 
+ 	/* IP4 routes */
+ 	ASSERT (nm_ip4_config_get_num_routes (ip4_config) == 1,
+-	        "dhcp-rfc3442-invalid-3", "unexpected number of IP routes");
++	        "dhcp-dhclient-classless-invalid-3", "unexpected number of IP routes");
++	ip4_test_route ("dhcp-dhclient-classless-invalid-3", ip4_config, 0,
++	                expected_route1_dest, expected_route1_gw, 24);
+ 
+-	/* Route #1 */
+-	route = nm_ip4_config_get_route (ip4_config, 0);
+-	ASSERT (inet_pton (AF_INET, expected_route1_dest, &tmp) > 0,
+-	        "dhcp-rfc3442-invalid-3", "couldn't convert expected route destination #1");
+-	ASSERT (nm_ip4_route_get_dest (route) == tmp.s_addr,
+-	        "dhcp-rfc3442-invalid-3", "unexpected route #1 destination");
++	g_hash_table_destroy (options);
++}
+ 
+-	ASSERT (inet_pton (AF_INET, expected_route1_gw, &tmp) > 0,
+-	        "dhcp-rfc3442-invalid-3", "couldn't convert expected route next hop #1");
+-	ASSERT (nm_ip4_route_get_next_hop (route) == tmp.s_addr,
+-	        "dhcp-rfc3442-invalid-3", "unexpected route #1 next hop");
++static void
++test_dhcpcd_invalid_classless_routes_3 (const char *client)
++{
++	GHashTable *options;
++	NMIP4Config *ip4_config;
++	const char *expected_route1_dest = "192.168.10.0";
++	const char *expected_route1_gw = "192.168.1.1";
++	static Option data[] = {
++		{ "new_classless_static_routes", "192.168.10.0/24 192.168.1.1 128/32 10.17.66.41" },
++		{ NULL, NULL }
++	};
+ 
+-	ASSERT (nm_ip4_route_get_prefix (route) == 24,
+-	        "dhcp-rfc3442-invalid-3", "unexpected route #1 prefix");
+-	ASSERT (nm_ip4_route_get_metric (route) == 0,
+-	        "dhcp-rfc3442-invalid-3", "unexpected route #1 metric");
++	options = fill_table (generic_options, NULL);
++	options = fill_table (data, options);
++
++	ip4_config = nm_dhcp_manager_test_ip4_options_to_config (client, "eth0", options, "rebind");
++	ASSERT (ip4_config != NULL,
++	        "dhcp-dhcpcd-classless-invalid-3", "failed to parse DHCP4 options");
++
++	/* IP4 routes */
++	ASSERT (nm_ip4_config_get_num_routes (ip4_config) == 1,
++	        "dhcp-dhcpcd-classless-invalid-3", "unexpected number of IP routes");
++	ip4_test_route ("dhcp-dhcpcd-classless-invalid-3", ip4_config, 0,
++	                expected_route1_dest, expected_route1_gw, 24);
+ 
+ 	g_hash_table_destroy (options);
+ }
+ 
+-static Option gw_in_classless_routes[] = {
+-	/* For dhclient */
+-	{ "new_rfc3442_classless_static_routes", "24 192 168 10 192 168 1 1 0 192 2 3 4" },
+-	/* For dhcpcd */
+-	{ "new_classless_static_routes", "192.168.10.0/24 192.168.1.1 0.0.0.0/0 192.2.3.4" },
+-	{ NULL, NULL }
+-};
+-
+ static void
+-test_gateway_in_classless_routes (const char *client)
++test_dhclient_gw_in_classless_routes (const char *client)
+ {
+ 	GHashTable *options;
+ 	NMIP4Config *ip4_config;
+-	NMIP4Address *addr;
+-	NMIP4Route *route;
+-	struct in_addr tmp;
+ 	const char *expected_route1_dest = "192.168.10.0";
+ 	const char *expected_route1_gw = "192.168.1.1";
+ 	const char *expected_gateway = "192.2.3.4";
++	static Option data[] = {
++		{ "new_rfc3442_classless_static_routes", "24 192 168 10 192 168 1 1 0 192 2 3 4" },
++		{ NULL, NULL }
++	};
+ 
+ 	options = fill_table (generic_options, NULL);
+-	options = fill_table (gw_in_classless_routes, options);
++	options = fill_table (data, options);
+ 
+ 	ip4_config = nm_dhcp_manager_test_ip4_options_to_config (client, "eth0", options, "rebind");
+ 	ASSERT (ip4_config != NULL,
+-	        "dhcp-rfc3442-gateway", "failed to parse DHCP4 options");
++	        "dhcp-dhclient-classless-gateway", "failed to parse DHCP4 options");
+ 
+ 	/* IP4 routes */
+ 	ASSERT (nm_ip4_config_get_num_routes (ip4_config) == 1,
+-	        "dhcp-rfc3442-gateway", "unexpected number of IP routes");
++	        "dhcp-dhclient-classless-gateway", "unexpected number of IP routes");
++	ip4_test_route ("dhcp-dhclient-classless-gateway", ip4_config, 0,
++	                expected_route1_dest, expected_route1_gw, 24);
+ 
+-	/* Route #1 */
+-	route = nm_ip4_config_get_route (ip4_config, 0);
+-	ASSERT (inet_pton (AF_INET, expected_route1_dest, &tmp) > 0,
+-	        "dhcp-rfc3442-gateway", "couldn't convert expected route destination #1");
+-	ASSERT (nm_ip4_route_get_dest (route) == tmp.s_addr,
+-	        "dhcp-rfc3442-gateway", "unexpected route #1 destination");
++	/* Gateway */
++	ip4_test_gateway ("dhcp-dhclient-classless-gateway", ip4_config, expected_gateway);
+ 
+-	ASSERT (inet_pton (AF_INET, expected_route1_gw, &tmp) > 0,
+-	        "dhcp-rfc3442-gateway", "couldn't convert expected route next hop #1");
+-	ASSERT (nm_ip4_route_get_next_hop (route) == tmp.s_addr,
+-	        "dhcp-rfc3442-gateway", "unexpected route #1 next hop");
++	g_hash_table_destroy (options);
++}
+ 
+-	ASSERT (nm_ip4_route_get_prefix (route) == 24,
+-	        "dhcp-rfc3442-gateway", "unexpected route #1 prefix");
+-	ASSERT (nm_ip4_route_get_metric (route) == 0,
+-	        "dhcp-rfc3442-gateway", "unexpected route #1 metric");
++static void
++test_dhcpcd_gw_in_classless_routes (const char *client)
++{
++	GHashTable *options;
++	NMIP4Config *ip4_config;
++	const char *expected_route1_dest = "192.168.10.0";
++	const char *expected_route1_gw = "192.168.1.1";
++	const char *expected_gateway = "192.2.3.4";
++	static Option data[] = {
++		{ "new_classless_static_routes", "192.168.10.0/24 192.168.1.1 0.0.0.0/0 192.2.3.4" },
++		{ NULL, NULL }
++	};
+ 
+-	/* Address */
+-	ASSERT (nm_ip4_config_get_num_addresses (ip4_config) == 1,
+-	        "dhcp-rfc3442-gateway", "unexpected number of IP addresses");
+-	addr = nm_ip4_config_get_address (ip4_config, 0);
+-	ASSERT (inet_pton (AF_INET, expected_gateway, &tmp) > 0,
+-	        "dhcp-rfc3442-gateway", "couldn't convert expected IP gateway");
+-	ASSERT (nm_ip4_address_get_gateway (addr) == tmp.s_addr,
+-	        "dhcp-rfc3442-gateway", "unexpected IP gateway");
++	options = fill_table (generic_options, NULL);
++	options = fill_table (data, options);
++
++	ip4_config = nm_dhcp_manager_test_ip4_options_to_config (client, "eth0", options, "rebind");
++	ASSERT (ip4_config != NULL,
++	        "dhcp-dhcpcd-classless-gateway", "failed to parse DHCP4 options");
++
++	/* IP4 routes */
++	ASSERT (nm_ip4_config_get_num_routes (ip4_config) == 1,
++	        "dhcp-dhcpcd-classless-gateway", "unexpected number of IP routes");
++	ip4_test_route ("dhcp-dhcpcd-classless-gateway", ip4_config, 0,
++	                expected_route1_dest, expected_route1_gw, 24);
++
++	/* Gateway */
++	ip4_test_gateway ("dhcp-dhcpcd-classless-gateway", ip4_config, expected_gateway);
+ 
+ 	g_hash_table_destroy (options);
+ }
+@@ -694,11 +800,17 @@ int main (int argc, char **argv)
+ 
+ 		test_generic_options (client);
+ 		test_wins_options (client);
+-		test_classless_static_routes (client);
+-		test_invalid_classless_routes1 (client);
+-		test_invalid_classless_routes2 (client);
+-		test_invalid_classless_routes3 (client);
+-		test_gateway_in_classless_routes (client);
++		test_classless_static_routes_1 (client);
++		test_classless_static_routes_2 (client);
++		test_fedora_dhclient_classless_static_routes (client);
++		test_dhclient_invalid_classless_routes_1 (client);
++		test_dhcpcd_invalid_classless_routes_1 (client);
++		test_dhclient_invalid_classless_routes_2 (client);
++		test_dhcpcd_invalid_classless_routes_2 (client);
++		test_dhclient_invalid_classless_routes_3 (client);
++		test_dhcpcd_invalid_classless_routes_3 (client);
++		test_dhclient_gw_in_classless_routes (client);
++		test_dhcpcd_gw_in_classless_routes (client);
+ 		test_escaped_domain_searches (client);
+ 		test_invalid_escaped_domain_searches (client);
+ 		test_ip4_missing_prefix (client, "192.168.1.10", 24);
+-- 
+1.7.7.6
+
+Only code handling "also required" was extracted from the following patch:
+
+commit 72a0bb28ffd0b9b710611a66779c90b8ca2cf1c8
+Author: Dan Williams <dcbw@redhat.com>
+Date:   Fri Dec 17 23:00:03 2010 -0600
+
+    dhclient: split out dhclient config merging and add testcases
+
+diff --git a/src/dhcp-manager/nm-dhcp-dhclient.c b/src/dhcp-manager/nm-dhcp-dhclient.c
+--- a/src/dhcp-manager/nm-dhcp-dhclient.c
++++ b/src/dhcp-manager/nm-dhcp-dhclient.c
+@@ -306,6 +306,20 @@ out:
+ #define DHCP_HOSTNAME_FORMAT DHCP_HOSTNAME_TAG " \"%s\"; # added by NetworkManager"
+ #define TIMEOUT_TAG "timeout"
+ 
++#define ALSOREQ_TAG "also request "
++
++static void
++add_also_request (GPtrArray *array, const char *item)
++{
++	int i;
++
++	for (i = 0; i < array->len; i++) {
++		if (!strcmp (g_ptr_array_index (array, i), item))
++			return;
++	}
++	g_ptr_array_add (array, g_strdup (item));
++}
++
+ static gboolean
+ merge_dhclient_config (NMDHCPClient *client,
+                        const char *iface,
+@@ -320,11 +334,14 @@ merge_dhclient_config (NMDHCPClient *cli
+ 	char *orig_contents = NULL;
+ 	gboolean success = FALSE;
+ 	int timeout = -1;
++	GPtrArray *alsoreq;
++	int i;
+ 
+ 	g_return_val_if_fail (iface != NULL, FALSE);
+ 	g_return_val_if_fail (conf_file != NULL, FALSE);
+ 
+ 	new_contents = g_string_new (_("# Created by NetworkManager\n"));
++	alsoreq = g_ptr_array_sized_new (5);
+ 
+ 	if (g_file_test (orig_path, G_FILE_TEST_EXISTS)) {
+ 		GError *read_error = NULL;
+@@ -339,12 +356,14 @@ merge_dhclient_config (NMDHCPClient *cli
+ 	/* Add existing options, if any, but ignore stuff NM will replace. */
+ 	if (orig_contents) {
+ 		char **lines = NULL, **line;
++		gboolean in_alsoreq = FALSE;
+ 
+ 		g_string_append_printf (new_contents, _("# Merged from %s\n\n"), orig_path);
+ 
+ 		lines = g_strsplit_set (orig_contents, "\n\r", 0);
+ 		for (line = lines; lines && *line; line++) {
+ 			gboolean ignore = FALSE;
++			char *p = *line;
+ 
+ 			if (!strlen (g_strstrip (*line)))
+ 				continue;
+@@ -359,6 +376,45 @@ merge_dhclient_config (NMDHCPClient *cli
+ 			    && !strncmp (*line, DHCP_HOSTNAME_TAG, strlen (DHCP_HOSTNAME_TAG)))
+ 				ignore = TRUE;
+ 
++			/* Check for "also require" */
++			if (!strncmp (p, ALSOREQ_TAG, strlen (ALSOREQ_TAG))) {
++				in_alsoreq = TRUE;
++				p += strlen (ALSOREQ_TAG);
++			}
++
++			if (in_alsoreq) {
++				char **areq, **aiter;
++
++				/* Grab each 'also require' option and save for later */
++				areq = g_strsplit_set (p, "\t ,", -1);
++				for (aiter = areq; aiter && *aiter; aiter++) {
++					if (!strlen (g_strstrip (*aiter)))
++						continue;
++
++					if (*aiter[0] == ';') {
++						/* all done */
++						in_alsoreq = FALSE;
++						break;
++					}
++
++					if (!isalnum ((*aiter)[0]))
++						continue;
++
++					if ((*aiter)[strlen (*aiter) - 1] == ';') {
++						/* Remove the EOL marker */
++						(*aiter)[strlen (*aiter) - 1] = '\0';
++						in_alsoreq = FALSE;
++					}
++
++					add_also_request (alsoreq, *aiter);
++				}
++
++				if (areq)
++					g_strfreev (areq);
++
++				ignore = TRUE;
++			}
++
+ 			if (!ignore) {
+ 				g_string_append (new_contents, *line);
+ 				g_string_append_c (new_contents, '\n');
+@@ -386,6 +442,7 @@ merge_dhclient_config (NMDHCPClient *cli
+ 	/* Add NM options from connection */
+ 	if (s_ip4) {
+ 		const char *tmp;
++		gboolean added = FALSE;
+ 
+ 		tmp = nm_setting_ip4_config_get_dhcp_client_id (s_ip4);
+ 		if (tmp) {
+@@ -408,11 +465,41 @@ merge_dhclient_config (NMDHCPClient *cli
+ 				g_string_append_printf (new_contents, DHCP_CLIENT_ID_FORMAT_OCTETS "\n", tmp);
+ 			else
+ 				g_string_append_printf (new_contents, DHCP_CLIENT_ID_FORMAT "\n", tmp);
++			added = TRUE;
+ 		}
+ 
+-		if (hostname)
++		if (hostname) {
+ 			g_string_append_printf (new_contents, DHCP_HOSTNAME_FORMAT "\n", hostname);
++			added = TRUE;
++		}
++
++		if (added)
++			g_string_append_c (new_contents, '\n');
++	}
++
++	/* Define options for classless static routes */
++	g_string_append (new_contents,
++	                 "option rfc3442-classless-static-routes code 121 = array of unsigned integer 8;\n");
++	g_string_append (new_contents,
++	                 "option ms-classless-static-routes code 249 = array of unsigned integer 8;\n");
++
++	g_string_append_c (new_contents, '\n');
++
++	/* Everything we want to request from the DHCP server */
++	add_also_request (alsoreq, "rfc3442-classless-static-routes");
++	add_also_request (alsoreq, "ms-classless-static-routes");
++	add_also_request (alsoreq, "ntp-servers");
++
++	/* And add it to the dhclient configuration */
++	for (i = 0; i < alsoreq->len; i++) {
++		char *t = g_ptr_array_index (alsoreq, i);
++
++		g_string_append_printf (new_contents, "also request %s;\n", t);
++		g_free (t);
+ 	}
++	g_ptr_array_free (alsoreq, TRUE);
++
++	g_string_append_c (new_contents, '\n');
+ 
+ 	if (anycast_addr) {
+ 		g_string_append_printf (new_contents, "interface \"%s\" {\n"
+-- 
+1.7.7.6

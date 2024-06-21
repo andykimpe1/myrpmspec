@@ -1,0 +1,85 @@
+diff --git a/system-settings/plugins/ifcfg-rh/reader.c b/system-settings/plugins/ifcfg-rh/reader.c
+index 7c9584c..c7cca0e 100644
+--- a/system-settings/plugins/ifcfg-rh/reader.c
++++ b/system-settings/plugins/ifcfg-rh/reader.c
+@@ -578,7 +578,6 @@ read_full_ip4_address (shvarFile *ifcfg,
+ 	char *ip_tag, *prefix_tag, *netmask_tag, *gw_tag;
+ 	guint32 tmp;
+ 	gboolean success = FALSE;
+-	shvarFile *network_ifcfg;
+ 	char *value;
+ 
+ 	g_return_val_if_fail (which > 0, NULL);
+@@ -614,19 +613,6 @@ read_full_ip4_address (shvarFile *ifcfg,
+ 		goto error;
+ 	if (tmp)
+ 		nm_ip4_address_set_gateway (addr, tmp);
+-	else {
+-		gboolean read_success;
+-
+-		/* If no gateway in the ifcfg, try /etc/sysconfig/network instead */
+-		network_ifcfg = svNewFile (network_file);
+-		if (network_ifcfg) {
+-			read_success = read_ip4_address (network_ifcfg, "GATEWAY", &tmp, error);
+-			svCloseFile (network_ifcfg);
+-			if (!read_success)
+-				goto error;
+-			nm_ip4_address_set_gateway (addr, tmp);
+-		}
+-	}
+ 
+ 	/* Prefix */
+ 	value = svGetValue (ifcfg, prefix_tag, FALSE);
+@@ -1202,7 +1188,8 @@ make_ip4_setting (shvarFile *ifcfg,
+ 	char *value = NULL;
+ 	char *route_path = NULL;
+ 	char *method = NM_SETTING_IP4_CONFIG_METHOD_MANUAL;
+-	guint32 i;
++	char *gateway_str = NULL;
++	guint32 i, gateway = 0;
+ 	shvarFile *network_ifcfg;
+ 	shvarFile *route_ifcfg;
+ 	gboolean never_default = FALSE, tmp_success;
+@@ -1229,6 +1216,12 @@ make_ip4_setting (shvarFile *ifcfg,
+ 		/* Get the connection ifcfg device name and the global gateway device */
+ 		value = svGetValue (ifcfg, "DEVICE", FALSE);
+ 		gatewaydev = svGetValue (network_ifcfg, "GATEWAYDEV", FALSE);
++		gateway_str = svGetValue (network_ifcfg, "GATEWAY", FALSE);
++		if (gateway_str) {
++			if (inet_pton (AF_INET, gateway_str, (void *) &gateway) <= 0)
++				gateway = 0;
++			g_free (gateway_str);
++		}
+ 
+ 		/* If there was a global gateway device specified, then only connections
+ 		 * for that device can be the default connection.
+@@ -1344,6 +1337,29 @@ make_ip4_setting (shvarFile *ifcfg,
+ 		g_free (value);
+ 	}
+ 
++	/* /etc/sysconfig/network GATEWAY handling; any static connection that does
++	 * not contain an address with a gateway of GATEWAY gets set never-default.
++	 * Obviously not done for automatic connections because we don't their
++	 * addresses at this time, plus this is better done with DEFROUTE=no
++	 * in the ifcfg anyway.
++	 */
++	if (gateway) {
++		gboolean found = FALSE;
++		guint numaddr = nm_setting_ip4_config_get_num_addresses (s_ip4);
++
++		for (i = 0; i < numaddr; i++) {
++			NMIP4Address *a = nm_setting_ip4_config_get_address (s_ip4, i);
++
++			if (nm_ip4_address_get_gateway (a) == gateway) {
++				found = TRUE;
++				break;
++			}
++		}
++
++		if (numaddr > 0)
++			g_object_set (s_ip4, NM_SETTING_IP4_CONFIG_NEVER_DEFAULT, !found, NULL);
++	}
++
+ 	/* DNS servers
+ 	 * Pick up just IPv4 addresses (IPv6 addresses are taken by make_ip6_setting())
+ 	 */

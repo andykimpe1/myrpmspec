@@ -1,0 +1,125 @@
+From 0e013c9f9d754390e6db05627631a6e19da670a5 Mon Sep 17 00:00:00 2001
+From: Jiří Klimeš <jklimes@redhat.com>
+Date: Mon, 28 May 2012 13:45:40 +0200
+Subject: [PATCH] editor: fix defaults for lcp-echo-failure and
+ lcp-echo-interval (bgo #663970)
+
+The default values have to be set in dsl_connection_new() so that the change
+only applies for new connections. ce_page_ppp_new() is called every time a
+connection is edited and thus we can't change the properties values in it. Else
+"Send PPP echo packets" won't be initialized properly for connections that have
+PPP settings all default and thus no PPP setting was present.
+
+
+From 9696aaaaff79bb5f225eb07b7e0a426b2d1d5e26 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Thu, 7 Mar 2013 14:35:36 -0600
+Subject: [PATCH] ppp: preserve connection's existing LCP echo failure and
+ interval values
+
+If LCP echo values are set before editing the connection, use those values
+whenever the "Send PPP echo packets" checkbox is checked.  The previous
+code always reset the failure/interval values to 5/30 whenever the
+checkbox was checked, even if it had never been toggled by the user.
+
+Related: 0e013c9f9d754390e6db05627631a6e19da670a5 (bgo #663970)
+
+diff -up NetworkManager-0.8.1/network-manager-applet-0.8.1/src/connection-editor/page-dsl.c.foo NetworkManager-0.8.1/network-manager-applet-0.8.1/src/connection-editor/page-dsl.c
+--- NetworkManager-0.8.1/network-manager-applet-0.8.1/src/connection-editor/page-dsl.c.foo	2013-03-07 15:15:54.816608282 -0600
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/connection-editor/page-dsl.c	2013-03-07 15:19:07.085204594 -0600
+@@ -247,6 +247,7 @@ dsl_connection_new (GtkWindow *parent,
+                     gpointer user_data)
+ {
+ 	NMConnection *connection;
++	NMSetting *setting;
+ 
+ 	connection = ce_page_new_connection (_("DSL connection %d"),
+ 	                                     NM_SETTING_PPPOE_SETTING_NAME,
+@@ -256,7 +257,13 @@ dsl_connection_new (GtkWindow *parent,
+ 	                                     user_data);
+ 	nm_connection_add_setting (connection, nm_setting_pppoe_new ());
+ 	nm_connection_add_setting (connection, nm_setting_wired_new ());
+-	nm_connection_add_setting (connection, nm_setting_ppp_new ());
++	setting = nm_setting_ppp_new ();
++	/* Set default values for lcp-echo-failure and lcp-echo-interval */
++	g_object_set (G_OBJECT (setting),
++	              NM_SETTING_PPP_LCP_ECHO_FAILURE, 5,
++	              NM_SETTING_PPP_LCP_ECHO_INTERVAL, 30,
++	              NULL);
++	nm_connection_add_setting (connection, setting);
+ 
+ 	(*result_func) (connection, FALSE, NULL, user_data);
+ }
+diff -up NetworkManager-0.8.1/network-manager-applet-0.8.1/src/connection-editor/page-ppp.c.foo NetworkManager-0.8.1/network-manager-applet-0.8.1/src/connection-editor/page-ppp.c
+--- NetworkManager-0.8.1/network-manager-applet-0.8.1/src/connection-editor/page-ppp.c.foo	2013-03-07 15:15:59.460550225 -0600
++++ NetworkManager-0.8.1/network-manager-applet-0.8.1/src/connection-editor/page-ppp.c	2013-03-07 15:22:00.953030947 -0600
+@@ -57,6 +57,9 @@ typedef struct {
+ 	gboolean refuse_mschap;
+ 	gboolean refuse_mschapv2;
+ 
++	guint orig_lcp_echo_failure;
++	guint orig_lcp_echo_interval;
++
+ 	GtkToggleButton *use_mppe;
+ 	GtkToggleButton *mppe_require_128;
+ 	GtkToggleButton *use_mppe_stateful;
+@@ -212,7 +215,6 @@ populate_ui (CEPagePpp *self, NMConnecti
+ 	CEPagePppPrivate *priv = CE_PAGE_PPP_GET_PRIVATE (self);
+ 	NMSettingPPP *setting = priv->setting;
+ 	gboolean require_mppe, require_mppe_128, mppe_stateful, nobsdcomp, nodeflate, no_vj_comp;
+-	guint32 lcp_echo_interval;
+ 
+ 	g_object_get (setting,
+ 	              NM_SETTING_PPP_REFUSE_PAP, &priv->refuse_pap,
+@@ -226,7 +228,8 @@ populate_ui (CEPagePpp *self, NMConnecti
+ 	              NM_SETTING_PPP_NOBSDCOMP, &nobsdcomp,
+ 	              NM_SETTING_PPP_NODEFLATE, &nodeflate,
+ 	              NM_SETTING_PPP_NO_VJ_COMP, &no_vj_comp,
+-	              NM_SETTING_PPP_LCP_ECHO_INTERVAL, &lcp_echo_interval,
++	              NM_SETTING_PPP_LCP_ECHO_INTERVAL, &priv->orig_lcp_echo_interval,
++	              NM_SETTING_PPP_LCP_ECHO_FAILURE, &priv->orig_lcp_echo_failure,
+ 	              NULL);
+ 
+ 	update_auth_methods_list (self);
+@@ -250,7 +253,7 @@ populate_ui (CEPagePpp *self, NMConnecti
+ 	gtk_toggle_button_set_active (priv->use_vj_comp, !no_vj_comp);
+ 	g_signal_connect_swapped (priv->use_vj_comp, "toggled", G_CALLBACK (ce_page_changed), self);
+ 
+-	gtk_toggle_button_set_active (priv->send_ppp_echo, (lcp_echo_interval > 0) ? TRUE : FALSE);
++	gtk_toggle_button_set_active (priv->send_ppp_echo, (priv->orig_lcp_echo_interval > 0) ? TRUE : FALSE);
+ 	g_signal_connect_swapped (priv->send_ppp_echo, "toggled", G_CALLBACK (ce_page_changed), self);
+ }
+ 
+@@ -335,8 +338,7 @@ ui_to_setting (CEPagePpp *self)
+ 	gboolean nobsdcomp;
+ 	gboolean nodeflate;
+ 	gboolean no_vj_comp;
+-	guint32 lcp_echo_failure;
+-	guint32 lcp_echo_interval;
++	guint lcp_echo_failure = 0, lcp_echo_interval = 0;
+ 
+ 	require_mppe = gtk_toggle_button_get_active (priv->use_mppe);
+ 	require_mppe_128 = gtk_toggle_button_get_active (priv->mppe_require_128);
+@@ -347,13 +349,16 @@ ui_to_setting (CEPagePpp *self)
+ 	no_vj_comp = !gtk_toggle_button_get_active (priv->use_vj_comp);
+ 
+ 	if (gtk_toggle_button_get_active (priv->send_ppp_echo)) {
+-		lcp_echo_failure = 5;
+-		lcp_echo_interval = 30;
+-	} else {
+-		lcp_echo_failure = 0;
+-		lcp_echo_interval = 0;
++		if (priv->orig_lcp_echo_failure && priv->orig_lcp_echo_interval) {
++			lcp_echo_failure = priv->orig_lcp_echo_failure;
++			lcp_echo_interval = priv->orig_lcp_echo_interval;
++		} else {
++			/* Set defaults */
++			lcp_echo_failure = 5;
++			lcp_echo_interval = 30;
++		}
+ 	}
+-	
++
+ 	g_object_set (priv->setting,
+ 	              NM_SETTING_PPP_REFUSE_EAP, priv->refuse_eap,
+ 	              NM_SETTING_PPP_REFUSE_PAP, priv->refuse_pap,

@@ -1,0 +1,563 @@
+To better handle broken hardware, like switches which don't pass
+traffic for a few seconds after a carrier has been negotiated,
+add a timeout to control how long to wait for successful pings
+of the gateway before giving up and proceeding with IP config.
+Default is 0, which means don't ping the gateway, just assume
+the NIC/switch aren't lying and can pass traffic immediately.
+
+Using the new gateway-ping-timeout property, send pings to the first
+gateway address until it replies or the timeout is reached, to deal
+with dumb hardware that indicates carrier on but doesn't actually
+pass traffic.
+---
+ libnm-util/libnm-util.ver                 |    1 +
+ libnm-util/nm-setting-connection.c        |   44 ++++++
+ libnm-util/nm-setting-connection.h        |    3 +
+ src/nm-device.c                           |  210 ++++++++++++++++++++++++++++-
+ src/nm-ip4-config.c                       |   18 +++
+ src/nm-ip4-config.h                       |    2 +
+ src/nm-ip6-config.c                       |   18 +++
+ src/nm-ip6-config.h                       |    4 +
+ system-settings/plugins/ifcfg-rh/reader.c |   15 ++
+ system-settings/plugins/ifcfg-rh/writer.c |    7 +
+ 10 files changed, 321 insertions(+), 1 deletions(-)
+
+diff --git a/libnm-util/libnm-util.ver b/libnm-util/libnm-util.ver
+index cd5b125..c6b84b9 100644
+--- a/libnm-util/libnm-util.ver
++++ b/libnm-util/libnm-util.ver
+@@ -154,6 +154,7 @@ global:
+ 	nm_setting_connection_get_id;
+ 	nm_setting_connection_get_uuid;
+ 	nm_setting_connection_get_connection_type;
++	nm_setting_connection_get_gateway_ping_timeout;
+ 	nm_setting_connection_get_autoconnect;
+ 	nm_setting_connection_get_timestamp;
+ 	nm_setting_connection_get_read_only;
+diff --git a/libnm-util/Makefile.am b/libnm-util/Makefile.am
+index 2aa35ef..13799ee 100644
+--- a/libnm-util/Makefile.am
++++ b/libnm-util/Makefile.am
+@@ -69,7 +69,7 @@ libnm_util_la_SOURCES=			\
+ libnm_util_la_LIBADD = $(GLIB_LIBS) $(DBUS_LIBS) $(UUID_LIBS)
+ 
+ libnm_util_la_LDFLAGS = -Wl,--version-script=$(srcdir)/libnm-util.ver \
+-	-version-info "9:0:8"
++	-version-info "10:0:9"
+ 
+ if WITH_GNUTLS
+ libnm_util_la_SOURCES += crypto_gnutls.c
+diff --git a/libnm-util/nm-setting-connection.c b/libnm-util/nm-setting-connection.c
+index 2aa35ef..13799ee 100644
+--- a/libnm-util/nm-setting-connection.c
++++ b/libnm-util/nm-setting-connection.c
+@@ -94,6 +94,7 @@ typedef struct {
+ 	gboolean autoconnect;
+ 	guint64 timestamp;
+ 	gboolean read_only;
++	guint gateway_ping_timeout;
+ } NMSettingConnectionPrivate;
+ 
+ enum {
+@@ -106,6 +107,7 @@ enum {
+ 	PROP_READ_ONLY,
+ 	PROP_MASTER,
+ 	PROP_SLAVE_TYPE,
++	PROP_GATEWAY_PING_TIMEOUT,
+ 
+ 	LAST_PROP
+ };
+@@ -268,6 +270,24 @@ nm_setting_connection_is_slave_type (NMSettingConnection *setting,
+ 	return !g_strcmp0 (NM_SETTING_CONNECTION_GET_PRIVATE (setting)->slave_type, type);
+ }
+ 
++/**
++ * nm_setting_connection_get_gateway_ping_timeout:
++ * @setting: the #NMSettingConnection
++ *
++ * Returns: the value contained in the #NMSettingConnection:gateway-ping-timeout
++ * property.
++ *
++ * Since: 0.9.10
++ **/
++guint32
++nm_setting_connection_get_gateway_ping_timeout (NMSettingConnection *setting)
++{
++	g_return_val_if_fail (NM_IS_SETTING_CONNECTION (setting), 0);
++
++	return NM_SETTING_CONNECTION_GET_PRIVATE (setting)->gateway_ping_timeout;
++}
++
++
+ static gint
+ find_setting_by_name (gconstpointer a, gconstpointer b)
+ {
+@@ -432,6 +452,9 @@ set_property (GObject *object, guint prop_id,
+ 		g_free (priv->slave_type);
+ 		priv->slave_type = g_value_dup_string (value);
+ 		break;
++	case PROP_GATEWAY_PING_TIMEOUT:
++		priv->gateway_ping_timeout = g_value_get_uint (value);
++		break;
+ 	default:
+ 		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+ 		break;
+@@ -469,6 +492,9 @@ get_property (GObject *object, guint prop_id,
+ 	case PROP_SLAVE_TYPE:
+ 		g_value_set_string (value, nm_setting_connection_get_slave_type (setting));
+ 		break;
++	case PROP_GATEWAY_PING_TIMEOUT:
++		g_value_set_uint (value, nm_setting_connection_get_gateway_ping_timeout (setting));
++		break;
+ 	default:
+ 		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+ 		break;
+@@ -646,5 +672,23 @@ nm_setting_connection_class_init (NMSettingConnectionClass *setting_class)
+ 		                      "connection is not a slave.",
+ 		                      NULL,
+ 		                      G_PARAM_READWRITE | NM_SETTING_PARAM_SERIALIZE | NM_SETTING_PARAM_FUZZY_IGNORE));
++
++	/**
++	 * NMSettingConnection:gateway-ping-timeout:
++	 *
++	 * If greater than zero, delay success of IP addressing until either the
++	 * timeout is reached, or an IP gateway replies to a ping.
++	 *
++	 * Since: 0.9.10
++	 **/
++	g_object_class_install_property
++		(object_class, PROP_GATEWAY_PING_TIMEOUT,
++		 g_param_spec_uint (NM_SETTING_CONNECTION_GATEWAY_PING_TIMEOUT,
++		                    "Gateway Ping Timeout",
++		                    "If greater than zero, delay success of IP "
++		                    "addressing until either the timeout is reached, or "
++		                    "an IP gateway replies to a ping.",
++		                    0, 30, 0,
++		                    G_PARAM_READWRITE | G_PARAM_CONSTRUCT | NM_SETTING_PARAM_SERIALIZE));
+ }
+ 
+diff --git a/libnm-util/nm-setting-connection.h b/libnm-util/nm-setting-connection.h
+index c38776e..df2ef24 100644
+--- a/libnm-util/nm-setting-connection.h
++++ b/libnm-util/nm-setting-connection.h
+@@ -79,6 +79,7 @@ GQuark nm_setting_connection_error_quark (void);
+ #define NM_SETTING_CONNECTION_READ_ONLY   "read-only"
+ #define NM_SETTING_CONNECTION_MASTER      "master"
+ #define NM_SETTING_CONNECTION_SLAVE_TYPE  "slave-type"
++#define NM_SETTING_CONNECTION_GATEWAY_PING_TIMEOUT "gateway-ping-timeout"
+ 
+ /**
+  * NMSettingConnection:
+@@ -114,6 +115,8 @@ gboolean    nm_setting_connection_is_slave_type        (NMSettingConnection *set
+ 							const char *type);
+ const char *nm_setting_connection_get_slave_type       (NMSettingConnection *setting);
+ 
++guint32     nm_setting_connection_get_gateway_ping_timeout (NMSettingConnection *setting);
++
+ G_END_DECLS
+ 
+ #endif /* NM_SETTING_CONNECTION_H */
+diff --git a/src/nm-device.c b/src/nm-device.c
+index 22f3740..6ff6bf5 100644
+--- a/src/nm-device.c
++++ b/src/nm-device.c
+@@ -88,6 +88,13 @@ typedef struct {
+ } SlaveInfo;
+ 
+ typedef struct {
++	guint log_domain;
++	guint timeout;
++	guint watch;
++	GPid pid;
++} PingInfo;
++
++typedef struct {
+ 	gboolean disposed;
+ 	gboolean initialized;
+ 
+@@ -133,6 +140,8 @@ typedef struct {
+ 	gulong          dhcp4_timeout_sigid;
+ 	NMDHCP4Config * dhcp4_config;
+ 
++	PingInfo        gw_ping;
++
+ 	/* dnsmasq stuff for shared connections */
+ 	NMDnsMasqManager *dnsmasq_manager;
+ 	gulong            dnsmasq_state_id;
+@@ -204,6 +213,9 @@ static void addrconf6_cleanup (NMDevice *self);
+ static void dhcp6_cleanup (NMDevice *self, gboolean stop);
+ static void dhcp4_cleanup (NMDevice *self, gboolean stop);
+ 
++static void nm_device_start_ip_check (NMDevice *self);
++static void ip_check_gw_ping_cleanup (NMDevice *self);
++
+ 
+ static void
+ device_interface_init (NMDeviceInterface *device_interface_class)
+@@ -2967,7 +2979,7 @@ nm_device_activate_stage5_ip_config_commit (gpointer user_data)
+ 		}
+ 	}
+ 
+-	nm_device_state_changed (self, NM_DEVICE_STATE_ACTIVATED, NM_DEVICE_STATE_REASON_NONE);
++	nm_device_start_ip_check (self);
+ 
+ out:
+ 	nm_log_info (LOGD_DEVICE, "Activation (%s) Stage 5 of 5 (IP Configure Commit) complete.",
+@@ -3160,6 +3172,8 @@ nm_device_deactivate_quickly (NMDevice *self)
+ 
+ 	priv = NM_DEVICE_GET_PRIVATE (self);
+ 
++	ip_check_gw_ping_cleanup (self);
++
+ 	/* Break the activation chain */
+ 	activation_source_clear (self, TRUE, AF_INET);
+ 	activation_source_clear (self, TRUE, AF_INET6);
+@@ -3585,6 +3599,197 @@ nm_device_get_ip6_config (NMDevice *self)
+ 	return NM_DEVICE_GET_PRIVATE (self)->ip6_config;
+ }
+ 
++/****************************************************************/
++
++static void
++ip_check_gw_ping_cleanup (NMDevice *self)
++{
++	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
++
++	if (priv->gw_ping.watch) {
++		g_source_remove (priv->gw_ping.watch);
++		priv->gw_ping.watch = 0;
++	}
++	if (priv->gw_ping.timeout) {
++		g_source_remove (priv->gw_ping.timeout);
++		priv->gw_ping.timeout = 0;
++	}
++
++	if (priv->gw_ping.pid) {
++		guint count = 20;
++		int status;
++
++		kill (priv->gw_ping.pid, SIGKILL);
++		do {
++			if (waitpid (priv->gw_ping.pid, &status, WNOHANG) != 0)
++				break;
++			g_usleep (G_USEC_PER_SEC / 20);
++		} while (count--);
++
++		priv->gw_ping.pid = 0;
++	}
++}
++
++static void
++ip_check_ping_watch_cb (GPid pid, gint status, gpointer user_data)
++{
++	NMDevice *self = NM_DEVICE (user_data);
++	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
++	const char *iface;
++	guint log_domain = priv->gw_ping.log_domain;
++
++	if (!priv->gw_ping.watch)
++		return;
++	priv->gw_ping.watch = 0;
++	priv->gw_ping.pid = 0;
++
++	iface = nm_device_get_iface (self);
++
++	if (WIFEXITED (status)) {
++		if (WEXITSTATUS (status) == 0) {
++			nm_log_dbg (log_domain, "(%s): gateway ping succeeded", iface);
++		} else {
++			nm_log_warn (log_domain, "(%s): gateway ping failed with error code %d",
++				         iface, WEXITSTATUS (status));
++		}
++	} else
++		nm_log_warn (log_domain, "(%s): ping stopped unexpectedly with status %d", iface, status);
++
++	/* We've got connectivity, proceed to IP config commit */
++	ip_check_gw_ping_cleanup (self);
++	nm_device_state_changed (self, NM_DEVICE_STATE_ACTIVATED, NM_DEVICE_STATE_REASON_NONE);
++}
++
++static gboolean
++ip_check_ping_timeout_cb (gpointer user_data)
++{
++	NMDevice *self = NM_DEVICE (user_data);
++	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
++
++	priv->gw_ping.timeout = 0;
++
++	nm_log_warn (priv->gw_ping.log_domain, "(%s): gateway ping timed out",
++	             nm_device_get_iface (self));
++
++	ip_check_gw_ping_cleanup (self);
++	nm_device_state_changed (self, NM_DEVICE_STATE_ACTIVATED, NM_DEVICE_STATE_REASON_NONE);
++	return FALSE;
++}
++
++static void
++ping_child_setup (gpointer user_data G_GNUC_UNUSED)
++{
++	/* We are in the child process at this point */
++	pid_t pid = getpid ();
++	setpgid (pid, pid);
++}
++
++static gboolean
++spawn_ping (NMDevice *self,
++            guint log_domain,
++            const char *binary,
++            const char *address,
++            guint timeout)
++{
++	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
++	const char *args[] = { binary, "-I", nm_device_get_ip_iface (self), "-c", "1", "-w", NULL, address, NULL };
++	GError *error = NULL;
++	char *str_timeout, *cmd;
++	gboolean success;
++
++	g_return_val_if_fail (priv->gw_ping.watch == 0, FALSE);
++	g_return_val_if_fail (priv->gw_ping.timeout == 0, FALSE);
++
++	args[6] = str_timeout = g_strdup_printf ("%u", timeout);
++
++	if (nm_logging_level_enabled (LOGL_DEBUG)) {
++		cmd = g_strjoinv (" ", (gchar **) args);
++		nm_log_dbg (log_domain, "(%s): running '%s'",
++		            nm_device_get_iface (self),
++		            cmd);
++		g_free (cmd);
++	}
++
++	success = g_spawn_async ("/",
++	                         (gchar **) args,
++	                         NULL,
++	                         G_SPAWN_DO_NOT_REAP_CHILD,
++	                         ping_child_setup,
++	                         NULL,
++	                         &priv->gw_ping.pid,
++	                         &error);
++	if (success) {
++		priv->gw_ping.log_domain = log_domain;
++		priv->gw_ping.watch = g_child_watch_add (priv->gw_ping.pid, ip_check_ping_watch_cb, self);
++		priv->gw_ping.timeout = g_timeout_add_seconds (timeout + 1, ip_check_ping_timeout_cb, self);
++	} else {
++		nm_log_warn (log_domain, "could not spawn %s: %s", binary, error->message);
++		g_clear_error (&error);
++	}
++
++	g_free (str_timeout);
++	return success;
++}
++
++static void
++nm_device_start_ip_check (NMDevice *self)
++{
++	NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE (self);
++	NMConnection *connection;
++	NMSettingConnection *s_con;
++	guint timeout = 0;
++	const char *ping_binary = NULL;
++	char buf[INET6_ADDRSTRLEN] = { 0 };
++	guint log_domain = LOGD_IP4;
++
++	/* Shouldn't be any active ping here, since IP_CHECK happens after the
++	 * first IP method completes.  Any subsequently completing IP method doesn't
++	 * get checked.
++	 */
++	g_assert (!priv->gw_ping.watch);
++	g_assert (!priv->gw_ping.timeout);
++	g_assert (!priv->gw_ping.pid);
++	g_assert (priv->ip4_ready || priv->ip6_ready);
++
++	connection = nm_device_get_connection (self);
++	g_assert (connection);
++
++	s_con = nm_connection_get_setting_connection (connection);
++	g_assert (s_con);
++	timeout = nm_setting_connection_get_gateway_ping_timeout (s_con);
++
++	if (timeout) {
++		if (priv->ip4_config && priv->ip4_ready) {
++			guint gw = 0;
++
++			ping_binary = "/bin/ping";
++			log_domain = LOGD_IP4;
++
++			gw = nm_ip4_config_get_gateway (priv->ip4_config);
++			if (gw && !inet_ntop (AF_INET, &gw, buf, sizeof (buf)))
++				buf[0] = '\0';
++		} else if (priv->ip6_config && priv->ip6_ready) {
++			const struct in6_addr *gw = NULL;
++
++			ping_binary = "/bin/ping6";
++			log_domain = LOGD_IP6;
++
++			gw = nm_ip6_config_get_gateway (priv->ip6_config);
++			if (gw && !inet_ntop (AF_INET6, gw, buf, sizeof (buf)))
++				buf[0] = '\0';
++		}
++	}
++
++	if (buf[0])
++		spawn_ping (self, log_domain, ping_binary, buf, timeout);
++
++	/* If no ping was started, just advance to IP config commit */
++	if (!priv->gw_ping.pid)
++		nm_device_state_changed (self, NM_DEVICE_STATE_ACTIVATED, NM_DEVICE_STATE_REASON_NONE);
++}
++
++/****************************************************************/
++
+ static gboolean
+ nm_device_is_up (NMDevice *self)
+ {
+@@ -3734,6 +3939,8 @@ dispose (GObject *object)
+ 		}
+ 	}
+ 
++	ip_check_gw_ping_cleanup (self);
++
+ 	/* Clear any queued transitions */
+ 	queued_state_clear (self);
+ 
+@@ -4164,6 +4371,7 @@ nm_device_state_changed (NMDevice *device,
+ 		}
+ 		break;
+ 	case NM_DEVICE_STATE_ACTIVATED:
++		ip_check_gw_ping_cleanup (device);
+ 		nm_log_info (LOGD_DEVICE, "Activation (%s) successful, device activated.",
+ 		             nm_device_get_iface (device));
+ 		nm_utils_call_dispatcher ("up", nm_act_request_get_connection (req), device, NULL);
+diff --git a/src/nm-ip4-config.c b/src/nm-ip4-config.c
+index 0ae3d1b..e1ce500 100644
+--- a/src/nm-ip4-config.c
++++ b/src/nm-ip4-config.c
+@@ -183,6 +183,24 @@ guint32 nm_ip4_config_get_num_addresses (NMIP4Config *config)
+ 	return g_slist_length (NM_IP4_CONFIG_GET_PRIVATE (config)->addresses);
+ }
+ 
++/* Return the first gateway we find */
++guint32
++nm_ip4_config_get_gateway (NMIP4Config *config)
++{
++	GSList *iter;
++	guint32 gw;
++
++	for (iter = NM_IP4_CONFIG_GET_PRIVATE (config)->addresses; iter; iter = iter->next) {
++		NMIP4Address *addr = iter->data;
++
++		gw = nm_ip4_address_get_gateway (addr);
++		if (gw)
++			return gw;
++	}
++
++	return 0;
++}
++
+ guint32 nm_ip4_config_get_ptp_address (NMIP4Config *config)
+ {
+ 	g_return_val_if_fail (NM_IS_IP4_CONFIG (config), 0);
+diff --git a/src/nm-ip4-config.h b/src/nm-ip4-config.h
+index 2d27acf..5e4763c 100644
+--- a/src/nm-ip4-config.h
++++ b/src/nm-ip4-config.h
+@@ -60,6 +60,8 @@ void          nm_ip4_config_replace_address     (NMIP4Config *config, guint32 i,
+ NMIP4Address *nm_ip4_config_get_address         (NMIP4Config *config, guint32 i);
+ guint32       nm_ip4_config_get_num_addresses   (NMIP4Config *config);
+ 
++guint32       nm_ip4_config_get_gateway         (NMIP4Config *config);
++
+ guint32       nm_ip4_config_get_ptp_address     (NMIP4Config *config);
+ void          nm_ip4_config_set_ptp_address     (NMIP4Config *config, guint32 ptp_addr);
+ 
+diff --git a/src/nm-ip6-config.c b/src/nm-ip6-config.c
+index 4c6c5c6..d0a5a37 100644
+--- a/src/nm-ip6-config.c
++++ b/src/nm-ip6-config.c
+@@ -176,6 +176,24 @@ guint32 nm_ip6_config_get_num_addresses (NMIP6Config *config)
+ 	return g_slist_length (NM_IP6_CONFIG_GET_PRIVATE (config)->addresses);
+ }
+ 
++/* Return the first gateway we find */
++const struct in6_addr *
++nm_ip6_config_get_gateway (NMIP6Config *config)
++{
++	GSList *iter;
++	const struct in6_addr *gw;
++
++	for (iter = NM_IP6_CONFIG_GET_PRIVATE (config)->addresses; iter; iter = iter->next) {
++		NMIP6Address *addr = iter->data;
++
++		gw = nm_ip6_address_get_gateway (addr);
++		if (gw && !IN6_IS_ADDR_UNSPECIFIED (gw))
++			return gw;
++	}
++
++	return NULL;
++}
++
+ const struct in6_addr *nm_ip6_config_get_ptp_address (NMIP6Config *config)
+ {
+ 	g_return_val_if_fail (NM_IS_IP6_CONFIG (config), 0);
+diff --git a/src/nm-ip6-config.h b/src/nm-ip6-config.h
+index 1e75a12..50d5057 100644
+--- a/src/nm-ip6-config.h
++++ b/src/nm-ip6-config.h
+@@ -59,6 +59,8 @@ void          nm_ip6_config_replace_address     (NMIP6Config *config, guint32 i,
+ NMIP6Address *nm_ip6_config_get_address         (NMIP6Config *config, guint32 i);
+ guint32       nm_ip6_config_get_num_addresses   (NMIP6Config *config);
+ 
++const struct in6_addr *nm_ip6_config_get_gateway (NMIP6Config *config);
++
+ const struct in6_addr *nm_ip6_config_get_ptp_address (NMIP6Config *config);
+ void          nm_ip6_config_set_ptp_address     (NMIP6Config *config, const struct in6_addr *ptp_addr);
+ 
+
+diff --git a/system-settings/plugins/ifcfg-rh/reader.c b/system-settings/plugins/ifcfg-rh/reader.c
+index df09787..cc78f54 100644
+--- a/system-settings/plugins/ifcfg-rh/reader.c
++++ b/system-settings/plugins/ifcfg-rh/reader.c
+@@ -231,6 +231,21 @@ make_connection_setting (const char *file,
+ 		g_free (value);
+ 	}
+ 
++	value = svGetValue (ifcfg, "GATEWAY_PING_TIMEOUT", FALSE);
++	if (value) {
++		long int tmp;
++		guint32 timeout;
++
++		errno = 0;
++		tmp = strtol (value, NULL, 10);
++		if (errno == 0 && tmp >= 0 && tmp <= 30) {
++			timeout = (guint32) tmp;
++			g_object_set (s_con, NM_SETTING_CONNECTION_GATEWAY_PING_TIMEOUT, timeout, NULL);
++		} else
++			PLUGIN_WARN (IFCFG_PLUGIN_NAME, "    warning: invalid GATEWAY_PING_TIMEOUT time '%s'", value);
++		g_free (value);
++	}
++
+ 	return NM_SETTING (s_con);
+ }
+ 
+diff --git a/system-settings/plugins/ifcfg-rh/writer.c b/system-settings/plugins/ifcfg-rh/writer.c
+index 6ab3325..5161877 100644
+--- a/system-settings/plugins/ifcfg-rh/writer.c
++++ b/system-settings/plugins/ifcfg-rh/writer.c
+@@ -1331,6 +1331,13 @@ write_connection_setting (NMSettingConnection *s_con, shvarFile *ifcfg)
+ 		else if (nm_setting_connection_is_slave_type (s_con, NM_SETTING_BRIDGE_SETTING_NAME))
+ 			svSetValue (ifcfg, "BRIDGE", master, FALSE);
+ 	}
++
++	svSetValue (ifcfg, "GATEWAY_PING_TIMEOUT", NULL, FALSE);
++	if (nm_setting_connection_get_gateway_ping_timeout (s_con)) {
++		tmp = g_strdup_printf ("%" G_GUINT32_FORMAT, nm_setting_connection_get_gateway_ping_timeout (s_con));
++		svSetValue (ifcfg, "GATEWAY_PING_TIMEOUT", tmp, FALSE);
++		g_free (tmp);
++	}
+ }
+ 
+ static gboolean
+-- 
+1.7.1
+
+
+

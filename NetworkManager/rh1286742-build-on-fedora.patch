@@ -1,0 +1,1011 @@
+From 5171c2d69dd941e10c6fb9a630bf0a90bdfd85f5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Wed, 28 Mar 2012 16:42:24 +0200
+Subject: [PATCH 01/15] ppp: don't use struct ifpppstatsreq that was removed
+ from linux/ip_ppp.h
+
+in recent kernels.
+
+We can use ifreq and ppp_stats structures separately. They needn't have to
+to be packed in a structure.
+
+(cherry picked from commit 6b64e4db2f3c9cfc0e0e240cf0bc58f3b3e90c1f)
+---
+ src/ppp-manager/nm-ppp-manager.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/src/ppp-manager/nm-ppp-manager.c b/src/ppp-manager/nm-ppp-manager.c
+index 517eb65..ed08520 100644
+--- a/src/ppp-manager/nm-ppp-manager.c
++++ b/src/ppp-manager/nm-ppp-manager.c
+@@ -290,18 +290,20 @@ monitor_cb (gpointer user_data)
+ {
+ 	NMPPPManager *manager = NM_PPP_MANAGER (user_data);
+ 	NMPPPManagerPrivate *priv = NM_PPP_MANAGER_GET_PRIVATE (manager);
+-	struct ifpppstatsreq req;
++	struct ifreq req;
++	struct ppp_stats stats;
+ 
+ 	memset (&req, 0, sizeof (req));
+-	req.stats_ptr = (caddr_t) &req.stats;
++	memset (&stats, 0, sizeof (stats));
++	req.ifr_data = (caddr_t) &stats;
+ 
+-	strncpy (req.ifr__name, priv->ip_iface, sizeof (req.ifr__name));
++	strncpy (req.ifr_name, priv->ip_iface, sizeof (req.ifr_name));
+ 	if (ioctl (priv->monitor_fd, SIOCGPPPSTATS, &req) < 0) {
+ 		nm_log_warn (LOGD_PPP, "could not read ppp stats: %s", strerror (errno));
+ 	} else {
+ 		g_signal_emit (manager, signals[STATS], 0, 
+-		               req.stats.p.ppp_ibytes,
+-		               req.stats.p.ppp_obytes);
++		               stats.p.ppp_ibytes,
++		               stats.p.ppp_obytes);
+ 	}
+ 
+ 	return TRUE;
+-- 
+2.5.0
+
+
+From ba6aa3689c7ed6bbacd548fc72f20f0619e2024d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ji=C5=99=C3=AD=20Klime=C5=A1?= <jklimes@redhat.com>
+Date: Mon, 31 Oct 2011 11:50:28 +0100
+Subject: [PATCH 02/15] core: fix building for GLib thread API changes (GLib >=
+ 2.31.0) (bgo #662695)
+
+(cherry picked from commit 4d1d3b9935fca45ff98e1e705ce74540d234c41b)
+---
+ src/main.c               |  9 +++++++++
+ src/nm-policy-hostname.c | 45 ++++++++++++++++++++++++++++++++++-----------
+ 2 files changed, 43 insertions(+), 11 deletions(-)
+
+diff --git a/src/main.c b/src/main.c
+index bbb651a..cdfb58e 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -625,9 +625,18 @@ main (int argc, char *argv[])
+ 	umask (022);
+ 
+ 	g_type_init ();
++
++/*
++ * Threading is always enabled starting from GLib 2.31.0.
++ * See also http://developer.gnome.org/glib/2.31/glib-Deprecated-Thread-APIs.html.
++ */
++#if !GLIB_CHECK_VERSION (2,31,0)
+ 	if (!g_thread_supported ())
+ 		g_thread_init (NULL);
+ 	dbus_g_thread_init ();
++#else
++	dbus_threads_init_default ();
++#endif
+ 
+ #ifndef HAVE_DBUS_GLIB_DISABLE_LEGACY_PROP_ACCESS
+ #error HAVE_DBUS_GLIB_DISABLE_LEGACY_PROP_ACCESS not defined
+diff --git a/src/nm-policy-hostname.c b/src/nm-policy-hostname.c
+index 4fe69c5..f98aa9c 100644
+--- a/src/nm-policy-hostname.c
++++ b/src/nm-policy-hostname.c
+@@ -15,7 +15,7 @@
+  * with this program; if not, write to the Free Software Foundation, Inc.,
+  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+  *
+- * Copyright (C) 2004 - 2010 Red Hat, Inc.
++ * Copyright (C) 2004 - 2011 Red Hat, Inc.
+  * Copyright (C) 2007 - 2008 Novell, Inc.
+  */
+ 
+@@ -36,7 +36,11 @@
+ struct HostnameThread {
+ 	GThread *thread;
+ 
++#if GLIB_CHECK_VERSION (2,31,0)
++	GMutex lock;
++#else
+ 	GMutex *lock;
++#endif
+ 	gboolean dead;
+ 	int ret;
+ 
+@@ -50,6 +54,25 @@ struct HostnameThread {
+ 	gpointer user_data;
+ };
+ 
++/*
++ * GMutex API has changed:
++ * http://developer.gnome.org/glib/2.31/glib-Threads.html#GMutex
++ * http://developer.gnome.org/glib/2.31/glib-Deprecated-Thread-APIs.html
++*/
++#if GLIB_CHECK_VERSION (2,31,0)
++#define X_MUTEX_LOCK(mutex)        g_mutex_lock   (&(mutex))
++#define X_MUTEX_UNLOCK(mutex)      g_mutex_unlock (&(mutex))
++#define X_MUTEX_INIT(mutex)        g_mutex_init   (&(mutex))
++#define X_MUTEX_CLEAR(mutex)       g_mutex_clear  (&(mutex))
++#define X_THREAD_CREATE(func,data) g_thread_try_new ("hostname-thread", func, data, NULL);
++#else
++#define X_MUTEX_LOCK(mutex)        g_mutex_lock   (mutex)
++#define X_MUTEX_UNLOCK(mutex)      g_mutex_unlock (mutex)
++#define X_MUTEX_INIT(mutex)        mutex = g_mutex_new ()
++#define X_MUTEX_CLEAR(mutex)       g_mutex_free (mutex)
++#define X_THREAD_CREATE(func,data) g_thread_create (func, data, FALSE, NULL);
++#endif
++
+ static gboolean
+ hostname_thread_run_cb (gpointer user_data)
+ {
+@@ -72,12 +95,12 @@ hostname_thread_worker (gpointer data)
+ 
+ 	nm_log_dbg (LOGD_DNS, "(%p) starting address reverse-lookup", ht);
+ 
+-	g_mutex_lock (ht->lock);
++	X_MUTEX_LOCK (ht->lock);
+ 	if (ht->dead) {
+-		g_mutex_unlock (ht->lock);
++		X_MUTEX_UNLOCK (ht->lock);
+ 		return (gpointer) NULL;
+ 	}
+-	g_mutex_unlock (ht->lock);
++	X_MUTEX_UNLOCK (ht->lock);
+ 
+ 	ht->ret = getnameinfo (ht->addr, ht->addr_size, ht->hostname, NI_MAXHOST, NULL, 0, NI_NAMEREQD);
+ 	if (ht->ret == 0) {
+@@ -106,7 +129,7 @@ hostname_thread_free (HostnameThread *ht)
+ 
+ 	nm_log_dbg (LOGD_DNS, "(%p) freeing reverse-lookup thread", ht);
+ 
+-	g_mutex_free (ht->lock);
++	X_MUTEX_CLEAR (ht->lock);
+ 	memset (ht, 0, sizeof (HostnameThread));
+ 	g_free (ht);
+ }
+@@ -123,7 +146,7 @@ hostname4_thread_new (guint32 ip4_addr,
+ 	ht = g_malloc0 (sizeof (HostnameThread));
+ 	g_assert (ht);
+ 
+-	ht->lock = g_mutex_new ();
++	X_MUTEX_INIT (ht->lock);
+ 	ht->callback = callback;
+ 	ht->user_data = user_data;
+ 
+@@ -132,7 +155,7 @@ hostname4_thread_new (guint32 ip4_addr,
+ 	ht->addr = (struct sockaddr *) &ht->addr4;
+ 	ht->addr_size = sizeof (ht->addr4);
+ 
+-	ht->thread = g_thread_create (hostname_thread_worker, ht, FALSE, NULL);
++	ht->thread = X_THREAD_CREATE (hostname_thread_worker, ht);
+ 	if (!ht->thread) {
+ 		hostname_thread_free (ht);
+ 		return NULL;
+@@ -158,7 +181,7 @@ hostname6_thread_new (const struct in6_addr *ip6_addr,
+ 	ht = g_malloc0 (sizeof (HostnameThread));
+ 	g_assert (ht);
+ 
+-	ht->lock = g_mutex_new ();
++	X_MUTEX_INIT (ht->lock);
+ 	ht->callback = callback;
+ 	ht->user_data = user_data;
+ 
+@@ -167,7 +190,7 @@ hostname6_thread_new (const struct in6_addr *ip6_addr,
+ 	ht->addr = (struct sockaddr *) &ht->addr6;
+ 	ht->addr_size = sizeof (ht->addr6);
+ 
+-	ht->thread = g_thread_create (hostname_thread_worker, ht, FALSE, NULL);
++	ht->thread = X_THREAD_CREATE (hostname_thread_worker, ht);
+ 	if (!ht->thread) {
+ 		hostname_thread_free (ht);
+ 		return NULL;
+@@ -189,9 +212,9 @@ hostname_thread_kill (HostnameThread *ht)
+ 
+ 	nm_log_dbg (LOGD_DNS, "(%p) stopping reverse-lookup thread", ht);
+ 
+-	g_mutex_lock (ht->lock);
++	X_MUTEX_LOCK (ht->lock);
+ 	ht->dead = TRUE;
+-	g_mutex_unlock (ht->lock);
++	X_MUTEX_UNLOCK (ht->lock);
+ }
+ 
+ gboolean
+-- 
+2.5.0
+
+
+From 50b44256566d867898a5eb969624c431cbdcfc55 Mon Sep 17 00:00:00 2001
+From: Dan Winship <danw@gnome.org>
+Date: Sun, 24 Feb 2013 13:01:08 +0100
+Subject: [PATCH 03/15] build: avoid GValueArray deprecation warnings
+
+Avoid warnings about GValueArray being deprecated by adding macros
+that wrap G_GNUC_BEGIN_IGNORE_DEPRECATIONS /
+G_GNUC_END_IGNORE_DEPRECATIONS around the GValueArray calls.
+
+(cherry picked from commit ed9e2d8377ed308a141aac982bd5b417d1ccdc1b)
+---
+ callouts/nm-dispatcher-action.c |   1 +
+ include/Makefile.am             |   1 +
+ include/nm-glib-compat.h        |   2 +
+ include/nm-gvaluearray-compat.h | 112 ++++++++++++++++++++++++++++++++++++++++
+ libnm-util/nm-utils.c           |   1 +
+ libnm-util/tests/test-general.c |   1 +
+ 6 files changed, 118 insertions(+)
+ create mode 100644 include/nm-gvaluearray-compat.h
+
+diff --git a/callouts/nm-dispatcher-action.c b/callouts/nm-dispatcher-action.c
+index 8040853..7cbfd8c 100644
+--- a/callouts/nm-dispatcher-action.c
++++ b/callouts/nm-dispatcher-action.c
+@@ -44,6 +44,7 @@
+ #include <libnm-glib/nm-device.h>
+ 
+ #include "nm-dispatcher-action.h"
++#include "nm-glib-compat.h"
+ 
+ #define NMD_SCRIPT_DIR    SYSCONFDIR "/NetworkManager/dispatcher.d"
+ 
+diff --git a/include/Makefile.am b/include/Makefile.am
+index 54c4d1d..fec5693 100644
+--- a/include/Makefile.am
++++ b/include/Makefile.am
+@@ -4,6 +4,7 @@ EXTRA_DIST = \
+      wireless-helper.h \
+      nm-dbus-glib-types.h \
+      nm-glib-compat.h \
++     nm-gvaluearray-compat.h \
+      nm-test-helpers.h
+ 
+ NetworkManagerincludedir=$(includedir)/NetworkManager
+diff --git a/include/nm-glib-compat.h b/include/nm-glib-compat.h
+index 9c1fe34..38adf2c 100644
+--- a/include/nm-glib-compat.h
++++ b/include/nm-glib-compat.h
+@@ -24,6 +24,8 @@
+ 
+ #include <glib.h>
+ 
++#include "nm-gvaluearray-compat.h"
++
+ #if !GLIB_CHECK_VERSION(2,14,0)
+ 
+ #define g_timeout_add_seconds(i, f, d) \
+diff --git a/include/nm-gvaluearray-compat.h b/include/nm-gvaluearray-compat.h
+new file mode 100644
+index 0000000..2281350
+--- /dev/null
++++ b/include/nm-gvaluearray-compat.h
+@@ -0,0 +1,112 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager -- Network link manager
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Copyright 2013 Red Hat, Inc.
++ */
++
++#ifndef NM_GVALUEARRAY_COMPAT_H
++#define NM_GVALUEARRAY_COMPAT_H
++
++#include <glib.h>
++
++#if GLIB_CHECK_VERSION (2, 32, 0)
++
++#include <glib-object.h>
++
++#define g_value_array_get_type() \
++  G_GNUC_EXTENSION ({ \
++    G_GNUC_BEGIN_IGNORE_DEPRECATIONS \
++    g_value_array_get_type (); \
++    G_GNUC_END_IGNORE_DEPRECATIONS \
++  })
++
++static inline GValue*
++_g_value_array_get_nth (GValueArray *value_array,
++                        guint        index)
++{
++	G_GNUC_BEGIN_IGNORE_DEPRECATIONS
++	return g_value_array_get_nth (value_array, index);
++	G_GNUC_END_IGNORE_DEPRECATIONS
++}
++#define g_value_array_get_nth _g_value_array_get_nth
++
++#define g_value_array_new(n_prealloced) \
++  G_GNUC_EXTENSION ({ \
++    G_GNUC_BEGIN_IGNORE_DEPRECATIONS \
++    g_value_array_new (n_prealloced); \
++    G_GNUC_END_IGNORE_DEPRECATIONS \
++  })
++
++#define g_value_array_free(value_array) \
++  G_GNUC_EXTENSION ({ \
++    G_GNUC_BEGIN_IGNORE_DEPRECATIONS \
++    g_value_array_free (value_array); \
++    G_GNUC_END_IGNORE_DEPRECATIONS \
++  })
++
++#define g_value_array_copy(value_array) \
++  G_GNUC_EXTENSION ({ \
++    G_GNUC_BEGIN_IGNORE_DEPRECATIONS \
++    g_value_array_copy (value_array); \
++    G_GNUC_END_IGNORE_DEPRECATIONS \
++  })
++
++#define g_value_array_prepend(value_array, value) \
++  G_GNUC_EXTENSION ({ \
++    G_GNUC_BEGIN_IGNORE_DEPRECATIONS \
++    g_value_array_prepend (value_array, value); \
++    G_GNUC_END_IGNORE_DEPRECATIONS \
++  })
++
++#define g_value_array_append(value_array, value) \
++  G_GNUC_EXTENSION ({ \
++    G_GNUC_BEGIN_IGNORE_DEPRECATIONS \
++    g_value_array_append (value_array, value); \
++    G_GNUC_END_IGNORE_DEPRECATIONS \
++  })
++
++#define g_value_array_insert(value_array, index_, value) \
++  G_GNUC_EXTENSION ({ \
++    G_GNUC_BEGIN_IGNORE_DEPRECATIONS \
++    g_value_array_insert (value_array, index_, value); \
++    G_GNUC_END_IGNORE_DEPRECATIONS \
++  })
++
++#define g_value_array_remove(value_array, index_) \
++  G_GNUC_EXTENSION ({ \
++    G_GNUC_BEGIN_IGNORE_DEPRECATIONS \
++    g_value_array_remove (value_array, index_); \
++    G_GNUC_END_IGNORE_DEPRECATIONS \
++  })
++
++#define g_value_array_sort(value_array, compare_func) \
++  G_GNUC_EXTENSION ({ \
++    G_GNUC_BEGIN_IGNORE_DEPRECATIONS \
++    g_value_array_sort (value_array, compare_func); \
++    G_GNUC_END_IGNORE_DEPRECATIONS \
++  })
++
++#define g_value_array_sort_with_data(value_array, compare_func, user_data) \
++  G_GNUC_EXTENSION ({ \
++    G_GNUC_BEGIN_IGNORE_DEPRECATIONS \
++    g_value_array_sort_with_data (value_array, compare_func, user_data); \
++    G_GNUC_END_IGNORE_DEPRECATIONS \
++  })
++
++#endif
++
++#endif  /* NM_GVALUEARRAY_COMPAT_H */
+diff --git a/libnm-util/nm-utils.c b/libnm-util/nm-utils.c
+index f478b42..1cf3f2d 100644
+--- a/libnm-util/nm-utils.c
++++ b/libnm-util/nm-utils.c
+@@ -44,6 +44,7 @@
+ #include "nm-utils.h"
+ #include "nm-utils-private.h"
+ #include "NetworkManager.h"
++#include "nm-glib-compat.h"
+ #include "nm-dbus-glib-types.h"
+ #include "nm-setting-ip4-config.h"
+ #include "nm-setting-ip6-config.h"
+diff --git a/libnm-util/tests/test-general.c b/libnm-util/tests/test-general.c
+index ac67b91..257791f 100644
+--- a/libnm-util/tests/test-general.c
++++ b/libnm-util/tests/test-general.c
+@@ -31,6 +31,7 @@
+ #include "nm-setting-gsm.h"
+ #include "nm-setting-ip6-config.h"
+ #include "nm-dbus-glib-types.h"
++#include "nm-glib-compat.h"
+ 
+ static void
+ vpn_check_func (const char *key, const char *value, gpointer user_data)
+-- 
+2.5.0
+
+
+From d2c79fff9c9cce08fbf23d46386645dbb318282c Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Tue, 26 Apr 2011 13:55:52 -0500
+Subject: [PATCH 04/15] build: don't use -Wstrict-prototypes (bgo #584947)
+
+First, -Wstrict-prototypes wasn't actually getting used because
+-Werror was already in CFLAGS and AC_TRY_COMPILE doesn't produce
+main() functions with valid strict prototypes.  Suck.  But even
+fixing that, the WiMAX SDK won't build with the flag, so just rip
+it out.
+
+(cherry picked from commit db9b1df0e47996ff8aaea468a11e1e97f64ee126)
+---
+ m4/compiler_warnings.m4 | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/m4/compiler_warnings.m4 b/m4/compiler_warnings.m4
+index 6cea2f7..fc41bbb 100644
+--- a/m4/compiler_warnings.m4
++++ b/m4/compiler_warnings.m4
+@@ -2,13 +2,13 @@ AC_DEFUN([NM_COMPILER_WARNINGS],
+ [AC_ARG_ENABLE(more-warnings,
+ 	AS_HELP_STRING([--enable-more-warnings], [Maximum compiler warnings]),
+ 	set_more_warnings="$enableval",set_more_warnings=yes)
+-AC_MSG_CHECKING(for more warnings, including -Werror)
++AC_MSG_CHECKING(for more warnings)
+ if test "$GCC" = "yes" -a "$set_more_warnings" != "no"; then
+ 	AC_MSG_RESULT(yes)
+-	CFLAGS="-Wall -Werror -std=gnu89 $CFLAGS"
++	CFLAGS="-Wall -std=gnu89 $CFLAGS"
+ 
+ 	for option in -Wshadow -Wmissing-declarations -Wmissing-prototypes \
+-		      -Wdeclaration-after-statement -Wstrict-prototypes \
++		      -Wdeclaration-after-statement \
+ 		      -Wfloat-equal -Wno-unused-parameter -Wno-sign-compare \
+ 		      -fno-strict-aliasing; do
+ 		SAVE_CFLAGS="$CFLAGS"
+@@ -25,6 +25,7 @@ if test "$GCC" = "yes" -a "$set_more_warnings" != "no"; then
+ 		unset SAVE_CFLAGS
+ 	done
+ 	unset option
++	CFLAGS="$CFLAGS -Werror"
+ else
+ 	AC_MSG_RESULT(no)
+ fi
+-- 
+2.5.0
+
+
+From d2b5dbee082ef132f15d6b3265431e2d6df28868 Mon Sep 17 00:00:00 2001
+From: Colin Walters <walters@verbum.org>
+Date: Sun, 29 Jan 2012 16:01:56 -0500
+Subject: [PATCH 05/15] build: allow --set-more-warnings=no|yes|error
+
+For the GNOME autobuilders, we want compiler warnings, but don't want
+-Werror.  For developer compatibility, the default value is "error".
+
+https://bugzilla.gnome.org/show_bug.cgi?id=668974
+(cherry picked from commit e4f51d19684c55abd1cdad839254e27d1cd095fa)
+---
+ m4/compiler_warnings.m4 | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/m4/compiler_warnings.m4 b/m4/compiler_warnings.m4
+index fc41bbb..0c1024c 100644
+--- a/m4/compiler_warnings.m4
++++ b/m4/compiler_warnings.m4
+@@ -1,7 +1,7 @@
+ AC_DEFUN([NM_COMPILER_WARNINGS],
+ [AC_ARG_ENABLE(more-warnings,
+-	AS_HELP_STRING([--enable-more-warnings], [Maximum compiler warnings]),
+-	set_more_warnings="$enableval",set_more_warnings=yes)
++	AS_HELP_STRING([--enable-more-warnings], [Possible values: no/yes/error]),
++	set_more_warnings="$enableval",set_more_warnings=error)
+ AC_MSG_CHECKING(for more warnings)
+ if test "$GCC" = "yes" -a "$set_more_warnings" != "no"; then
+ 	AC_MSG_RESULT(yes)
+@@ -25,7 +25,9 @@ if test "$GCC" = "yes" -a "$set_more_warnings" != "no"; then
+ 		unset SAVE_CFLAGS
+ 	done
+ 	unset option
+-	CFLAGS="$CFLAGS -Werror"
++	if test "x$set_more_warnings" = xerror; then
++		CFLAGS="$CFLAGS -Werror"
++	fi
+ else
+ 	AC_MSG_RESULT(no)
+ fi
+-- 
+2.5.0
+
+
+From 0bfbd058cfeb92a61cdbac1af7f75540374192ee Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Mon, 30 Nov 2015 18:20:25 +0100
+Subject: [PATCH 06/15] libnm-util: fix passing string value to format-string
+
+---
+ libnm-util/nm-setting-bridge.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/libnm-util/nm-setting-bridge.c b/libnm-util/nm-setting-bridge.c
+index da19352..39541b2 100644
+--- a/libnm-util/nm-setting-bridge.c
++++ b/libnm-util/nm-setting-bridge.c
+@@ -257,10 +257,10 @@ check_range (guint32 val,
+              GError **error)
+ {
+ 	if ((val != 0) && (val < min || val > max)) {
+-		g_set_error (error,
+-		             NM_SETTING_BRIDGE_ERROR,
+-		             NM_SETTING_BRIDGE_ERROR_INVALID_PROPERTY,
+-		             prop);
++		g_set_error_literal (error,
++		                     NM_SETTING_BRIDGE_ERROR,
++		                     NM_SETTING_BRIDGE_ERROR_INVALID_PROPERTY,
++		                     prop);
+ 		return FALSE;
+ 	}
+ 	return TRUE;
+-- 
+2.5.0
+
+
+From 0b24bc784ba266d121ed7cfbf02ff4c6fe5bbcdf Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Mon, 30 Nov 2015 18:32:38 +0100
+Subject: [PATCH 07/15] ppp: fix compiler warning about initialized variable
+ @pppoe_binary
+
+This case should never hit, as asserted below. However,
+the assertion might fail to trigger due to missing initialization.
+---
+ src/ppp-manager/nm-ppp-manager.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/ppp-manager/nm-ppp-manager.c b/src/ppp-manager/nm-ppp-manager.c
+index ed08520..460edcb 100644
+--- a/src/ppp-manager/nm-ppp-manager.c
++++ b/src/ppp-manager/nm-ppp-manager.c
+@@ -741,7 +741,7 @@ create_pppd_cmd_line (NMPPPManager *self,
+                       GError **err)
+ {
+ 	NMPPPManagerPrivate *priv = NM_PPP_MANAGER_GET_PRIVATE (self);
+-	const char *ppp_binary, *pppoe_binary;
++	const char *ppp_binary, *pppoe_binary = NULL;
+ 	NMCmdLine *cmd;
+ 	const char *ppp_debug;
+ 
+-- 
+2.5.0
+
+
+From 27285e92d7e12e97ae813f222e5ece5a264ccc58 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Mon, 30 Nov 2015 19:00:45 +0100
+Subject: [PATCH 08/15] ifcfg-rh/writer: ensure initialized variable in
+ write_wired_setting()
+
+Complier warns about this too.
+---
+ system-settings/plugins/ifcfg-rh/writer.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/system-settings/plugins/ifcfg-rh/writer.c b/system-settings/plugins/ifcfg-rh/writer.c
+index 53d790c..0d37195 100644
+--- a/system-settings/plugins/ifcfg-rh/writer.c
++++ b/system-settings/plugins/ifcfg-rh/writer.c
+@@ -968,7 +968,8 @@ write_wired_setting (NMConnection *connection, shvarFile *ifcfg, GError **error)
+ 				                   (const char *) g_ptr_array_index (s390_subchannels, 0),
+ 				                   (const char *) g_ptr_array_index (s390_subchannels, 1),
+ 				                   (const char *) g_ptr_array_index (s390_subchannels, 2));
+-		}
++		} else
++			tmp = NULL;
+ 		svSetValue (ifcfg, "SUBCHANNELS", tmp, FALSE);
+ 		g_free (tmp);
+ 	}
+-- 
+2.5.0
+
+
+From 4a8bf117d910fe847decd90c0f5cfe7a612ef09c Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Mon, 30 Nov 2015 18:59:24 +0100
+Subject: [PATCH 09/15] build: avoid deprecation warning for g_type_init()
+
+---
+ docs/generate-settings-spec.c                          | 2 ++
+ libnm-util/tests/test-general.c                        | 6 ++++--
+ libnm-util/tests/test-need-secrets.c                   | 6 ++++--
+ libnm-util/tests/test-setting-8021x.c                  | 6 ++++--
+ libnm-util/tests/test-settings-defaults.c              | 6 ++++--
+ src/main.c                                             | 2 ++
+ src/supplicant-manager/tests/test-supplicant-config.c  | 6 ++++--
+ src/tests/test-dhcp-options.c                          | 6 ++++--
+ system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c | 6 ++++--
+ 9 files changed, 32 insertions(+), 14 deletions(-)
+
+diff --git a/docs/generate-settings-spec.c b/docs/generate-settings-spec.c
+index 2f7c7a8..40266c1 100644
+--- a/docs/generate-settings-spec.c
++++ b/docs/generate-settings-spec.c
+@@ -178,7 +178,9 @@ main (int argc, char *argv[])
+ 		_exit (1);
+ 	}
+ 
++#if !GLIB_CHECK_VERSION (2, 36, 0)
+ 	g_type_init ();
++#endif
+ 
+ 	if (!nm_utils_init (&error)) {
+ 		fprintf (stderr, "ERR: failed to initialize libnm-util: %s", error->message);
+diff --git a/libnm-util/tests/test-general.c b/libnm-util/tests/test-general.c
+index 257791f..0fa2ce8 100644
+--- a/libnm-util/tests/test-general.c
++++ b/libnm-util/tests/test-general.c
+@@ -393,11 +393,13 @@ test_nm_utils_dns_option_find_idx (void)
+ int main (int argc, char **argv)
+ {
+ 	GError *error = NULL;
+-	DBusGConnection *bus;
+ 	char *base;
+ 
++#if !GLIB_CHECK_VERSION (2, 36, 0)
+ 	g_type_init ();
+-	bus = dbus_g_bus_get (DBUS_BUS_SESSION, NULL);
++#endif
++
++	dbus_g_bus_get (DBUS_BUS_SESSION, NULL);
+ 
+ 	if (!nm_utils_init (&error))
+ 		FAIL ("nm-utils-init", "failed to initialize libnm-util: %s", error->message);
+diff --git a/libnm-util/tests/test-need-secrets.c b/libnm-util/tests/test-need-secrets.c
+index 144ed90..6caafce 100644
+--- a/libnm-util/tests/test-need-secrets.c
++++ b/libnm-util/tests/test-need-secrets.c
+@@ -555,11 +555,13 @@ test_need_tls_phase2_secrets_blob (void)
+ int main (int argc, char **argv)
+ {
+ 	GError *error = NULL;
+-	DBusGConnection *bus;
+ 	char *base;
+ 
++#if !GLIB_CHECK_VERSION (2, 36, 0)
+ 	g_type_init ();
+-	bus = dbus_g_bus_get (DBUS_BUS_SESSION, NULL);
++#endif
++
++	dbus_g_bus_get (DBUS_BUS_SESSION, NULL);
+ 
+ 	if (!nm_utils_init (&error))
+ 		FAIL ("nm-utils-init", "failed to initialize libnm-util: %s", error->message);
+diff --git a/libnm-util/tests/test-setting-8021x.c b/libnm-util/tests/test-setting-8021x.c
+index 6d1e3bd..f119566 100644
+--- a/libnm-util/tests/test-setting-8021x.c
++++ b/libnm-util/tests/test-setting-8021x.c
+@@ -407,14 +407,16 @@ test_clear_phase2_private_key (const char *path, const char *password)
+ int main (int argc, char **argv)
+ {
+ 	GError *error = NULL;
+-	DBusGConnection *bus;
+ 	char *base;
+ 
+ 	if (argc < 3)
+ 		FAIL ("init", "need at least two arguments: <path> <password>");
+ 
++#if !GLIB_CHECK_VERSION (2, 36, 0)
+ 	g_type_init ();
+-	bus = dbus_g_bus_get (DBUS_BUS_SESSION, NULL);
++#endif
++
++	dbus_g_bus_get (DBUS_BUS_SESSION, NULL);
+ 
+ 	if (!nm_utils_init (&error))
+ 		FAIL ("nm-utils-init", "failed to initialize libnm-util: %s", error->message);
+diff --git a/libnm-util/tests/test-settings-defaults.c b/libnm-util/tests/test-settings-defaults.c
+index 9f38a14..ed65075 100644
+--- a/libnm-util/tests/test-settings-defaults.c
++++ b/libnm-util/tests/test-settings-defaults.c
+@@ -103,11 +103,13 @@ test_defaults (GType type, const char *name)
+ int main (int argc, char **argv)
+ {
+ 	GError *error = NULL;
+-	DBusGConnection *bus;
+ 	char *base;
+ 
++#if !GLIB_CHECK_VERSION (2, 36, 0)
+ 	g_type_init ();
+-	bus = dbus_g_bus_get (DBUS_BUS_SESSION, NULL);
++#endif
++
++	dbus_g_bus_get (DBUS_BUS_SESSION, NULL);
+ 
+ 	if (!nm_utils_init (&error))
+ 		FAIL ("nm-utils-init", "failed to initialize libnm-util: %s", error->message);
+diff --git a/src/main.c b/src/main.c
+index cdfb58e..7240a6e 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -624,7 +624,9 @@ main (int argc, char *argv[])
+ 	 */
+ 	umask (022);
+ 
++#if !GLIB_CHECK_VERSION (2, 36, 0)
+ 	g_type_init ();
++#endif
+ 
+ /*
+  * Threading is always enabled starting from GLib 2.31.0.
+diff --git a/src/supplicant-manager/tests/test-supplicant-config.c b/src/supplicant-manager/tests/test-supplicant-config.c
+index b74214e..3544184 100644
+--- a/src/supplicant-manager/tests/test-supplicant-config.c
++++ b/src/supplicant-manager/tests/test-supplicant-config.c
+@@ -498,11 +498,13 @@ test_wifi_wpa_psk_types (void)
+ int main (int argc, char **argv)
+ {
+ 	GError *error = NULL;
+-	DBusGConnection *bus;
+ 	char *base;
+ 
++#if !GLIB_CHECK_VERSION (2, 36, 0)
+ 	g_type_init ();
+-	bus = dbus_g_bus_get (DBUS_BUS_SESSION, NULL);
++#endif
++
++	dbus_g_bus_get (DBUS_BUS_SESSION, NULL);
+ 
+ 	if (!nm_utils_init (&error))
+ 		FAIL ("nm-utils-init", "failed to initialize libnm-util: %s", error->message);
+diff --git a/src/tests/test-dhcp-options.c b/src/tests/test-dhcp-options.c
+index aa85f87..0e0ab86 100644
+--- a/src/tests/test-dhcp-options.c
++++ b/src/tests/test-dhcp-options.c
+@@ -779,13 +779,15 @@ test_ip4_prefix_classless (const char *client)
+ int main (int argc, char **argv)
+ {
+ 	GError *error = NULL;
+-	DBusGConnection *bus;
+ 	char *base;
+ 	const char *clients[2][2] = { {DHCLIENT_PATH, "dhclient"}, {DHCPCD_PATH, "dhcpcd"} };
+ 	guint32 i;
+ 
++#if !GLIB_CHECK_VERSION (2, 36, 0)
+ 	g_type_init ();
+-	bus = dbus_g_bus_get (DBUS_BUS_SESSION, NULL);
++#endif
++
++	dbus_g_bus_get (DBUS_BUS_SESSION, NULL);
+ 
+ 	if (!nm_utils_init (&error))
+ 		FAIL ("nm-utils-init", "failed to initialize libnm-util: %s", error->message);
+diff --git a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+index a240f34..813b8b9 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
++++ b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+@@ -11952,11 +11952,13 @@ test_read_vlan_trailing_spaces (void)
+ int main (int argc, char **argv)
+ {
+ 	GError *error = NULL;
+-	DBusGConnection *bus;
+ 	char *base;
+ 
++#if !GLIB_CHECK_VERSION (2, 36, 0)
+ 	g_type_init ();
+-	bus = dbus_g_bus_get (DBUS_BUS_SESSION, NULL);
++#endif
++
++	dbus_g_bus_get (DBUS_BUS_SESSION, NULL);
+ 
+ 	if (!nm_utils_init (&error))
+ 		FAIL ("nm-utils-init", "failed to initialize libnm-util: %s", error->message);
+-- 
+2.5.0
+
+
+From 7736267434d51ab54ea958e69f31e8db1f9c4223 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Mon, 30 Nov 2015 19:06:43 +0100
+Subject: [PATCH 10/15] device: avoid use of uninitialized variable in
+ _update_s390_subchannels()
+
+---
+ src/nm-device-ethernet.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/nm-device-ethernet.c b/src/nm-device-ethernet.c
+index 310f0b6..615cea0 100644
+--- a/src/nm-device-ethernet.c
++++ b/src/nm-device-ethernet.c
+@@ -201,7 +201,7 @@ _update_s390_subchannels (NMDeviceEthernet *self)
+ 	const char *iface;
+ 	GUdevClient *client;
+ 	GUdevDevice *dev;
+-	GUdevDevice *parent;
++	GUdevDevice *parent = NULL;
+ 	const char *parent_path, *item, *driver;
+ 	const char *subsystems[] = { "net", NULL };
+ 	GDir *dir;
+-- 
+2.5.0
+
+
+From ab5808decd28148785a5788e13897eada6989999 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Fri, 5 Nov 2010 13:26:49 -0500
+Subject: [PATCH 11/15] core: fixes for libnotify >= 0.7 (bgo #632327)
+
+(cherry picked from commit 68459b6b864ad45a842bfd1bdc80f126829ef596)
+---
+ network-manager-applet-0.8.1/configure.ac |  6 ++++++
+ network-manager-applet-0.8.1/src/applet.c | 10 ++++++++--
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/configure.ac b/network-manager-applet-0.8.1/configure.ac
+index e488f53..e923ba8 100644
+--- a/network-manager-applet-0.8.1/configure.ac
++++ b/network-manager-applet-0.8.1/configure.ac
+@@ -99,6 +99,12 @@ PKG_CHECK_MODULES(GNOME_BLUETOOTH,
+ 		  have_gbt=yes, have_gbt=no)
+ AM_CONDITIONAL(HAVE_GBT, test x"$have_gbt" = "xyes")
+ 
++# Check for libnotify >= 0.7
++PKG_CHECK_MODULES(LIBNOTIFY_07, [libnotify >= 0.7], [have_libnotify_07=yes],[have_libnotify_07=no])
++if test x"$have_libnotify_07" = "xyes"; then
++	AC_DEFINE(HAVE_LIBNOTIFY_07, 1, [Define if you have libnotify 0.7 or later])
++fi
++
+ AC_PATH_PROG(GLIB_GENMARSHAL, glib-genmarshal)
+ 
+ dnl GConf stuff
+diff --git a/network-manager-applet-0.8.1/src/applet.c b/network-manager-applet-0.8.1/src/applet.c
+index e2184c7..32cd3d9 100644
+--- a/network-manager-applet-0.8.1/src/applet.c
++++ b/network-manager-applet-0.8.1/src/applet.c
+@@ -673,12 +673,18 @@ applet_do_notify (NMApplet *applet,
+ 	escaped = utils_escape_notify_message (message);
+ 	notify = notify_notification_new (summary,
+ 	                                  escaped,
+-	                                  icon ? icon : GTK_STOCK_NETWORK,
+-	                                  NULL);
++	                                  icon ? icon : GTK_STOCK_NETWORK
++#if HAVE_LIBNOTIFY_07
++	                                  );
++#else
++	                                  , NULL);
++#endif
+ 	g_free (escaped);
+ 	applet->notification = notify;
+ 
++#if !HAVE_LIBNOTIFY_07
+ 	notify_notification_attach_to_status_icon (notify, applet->status_icon);
++#endif
+ 	notify_notification_set_urgency (notify, urgency);
+ 	notify_notification_set_timeout (notify, NOTIFY_EXPIRES_DEFAULT);
+ 
+-- 
+2.5.0
+
+
+From 42b7c22f9d28fa0d00c2bd72ac0828049c97f058 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Mon, 30 Nov 2015 18:00:25 +0100
+Subject: [PATCH 12/15] applet/bluetooth: fix configure check to only enable
+ gnome-bluetooth when having v2.x
+
+---
+ network-manager-applet-0.8.1/configure.ac | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/network-manager-applet-0.8.1/configure.ac b/network-manager-applet-0.8.1/configure.ac
+index e923ba8..816ac05 100644
+--- a/network-manager-applet-0.8.1/configure.ac
++++ b/network-manager-applet-0.8.1/configure.ac
+@@ -95,7 +95,8 @@ AC_SUBST(DBUS_SYS_DIR)
+ dnl Check for gnome-bluetooth
+ PKG_CHECK_MODULES(GNOME_BLUETOOTH,
+ 		  gconf-2.0
+-		  gnome-bluetooth-1.0 >= 2.27.6,
++		  gnome-bluetooth-1.0 >= 2.27.6
++		  gnome-bluetooth-1.0 < 3,
+ 		  have_gbt=yes, have_gbt=no)
+ AM_CONDITIONAL(HAVE_GBT, test x"$have_gbt" = "xyes")
+ 
+-- 
+2.5.0
+
+
+From cf5ad35fd6082e959eb0d1427b9a906fff252df9 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Mon, 30 Nov 2015 18:33:49 +0100
+Subject: [PATCH 13/15] applet: don't pass non-static string as format string
+
+---
+ .../src/connection-editor/nm-connection-editor.c                     | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c b/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
+index 1543ac7..43d41b9 100644
+--- a/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
++++ b/network-manager-applet-0.8.1/src/connection-editor/nm-connection-editor.c
+@@ -500,7 +500,10 @@ info_bar_response (GtkWidget *bar,
+ 	                                 GTK_MESSAGE_INFO,
+ 	                                 GTK_BUTTONS_OK,
+ 	                                 _("Bridging, bonding, and VLAN functionality not enabled"));
+-	gtk_message_dialog_format_secondary_markup (GTK_MESSAGE_DIALOG (dialog), help_text);
++	if (help_text)
++		gtk_message_dialog_format_secondary_markup (GTK_MESSAGE_DIALOG (dialog), "%s", help_text);
++	else
++		gtk_message_dialog_format_secondary_markup (GTK_MESSAGE_DIALOG (dialog), NULL);
+ 	gtk_dialog_run (GTK_DIALOG (dialog));
+ 	gtk_widget_destroy (dialog);
+ }
+-- 
+2.5.0
+
+
+From 6d992089b2915f867141d5c99e1337a4540a0dab Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Tue, 1 Dec 2015 10:15:53 +0100
+Subject: [PATCH 14/15] applet/build: disable -Wstrict-prototypes
+
+The warning was anyway disabled, because the configure script tests
+the warning with an invalid main() function that issues the warning.
+---
+ network-manager-applet-0.8.1/m4/compiler_warnings.m4 | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/network-manager-applet-0.8.1/m4/compiler_warnings.m4 b/network-manager-applet-0.8.1/m4/compiler_warnings.m4
+index 6cea2f7..d5bd2f7 100644
+--- a/network-manager-applet-0.8.1/m4/compiler_warnings.m4
++++ b/network-manager-applet-0.8.1/m4/compiler_warnings.m4
+@@ -8,7 +8,7 @@ if test "$GCC" = "yes" -a "$set_more_warnings" != "no"; then
+ 	CFLAGS="-Wall -Werror -std=gnu89 $CFLAGS"
+ 
+ 	for option in -Wshadow -Wmissing-declarations -Wmissing-prototypes \
+-		      -Wdeclaration-after-statement -Wstrict-prototypes \
++		      -Wdeclaration-after-statement \
+ 		      -Wfloat-equal -Wno-unused-parameter -Wno-sign-compare \
+ 		      -fno-strict-aliasing; do
+ 		SAVE_CFLAGS="$CFLAGS"
+-- 
+2.5.0
+
+
+From da6fd60fa8aa27f6edc34890f84f60cfab93c79f Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Fri, 2 Mar 2012 13:53:32 -0600
+Subject: [PATCH 15/15] build: more flexible build-time warnings and errors
+ options
+
+(cherry picked from commit 58f3f9a5f5705ba3370312a13e863cc54df79264)
+---
+ network-manager-applet-0.8.1/m4/compiler_warnings.m4 | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/m4/compiler_warnings.m4 b/network-manager-applet-0.8.1/m4/compiler_warnings.m4
+index d5bd2f7..33766be 100644
+--- a/network-manager-applet-0.8.1/m4/compiler_warnings.m4
++++ b/network-manager-applet-0.8.1/m4/compiler_warnings.m4
+@@ -1,16 +1,16 @@
+ AC_DEFUN([NM_COMPILER_WARNINGS],
+ [AC_ARG_ENABLE(more-warnings,
+-	AS_HELP_STRING([--enable-more-warnings], [Maximum compiler warnings]),
+-	set_more_warnings="$enableval",set_more_warnings=yes)
+-AC_MSG_CHECKING(for more warnings, including -Werror)
++	AS_HELP_STRING([--enable-more-warnings], [Possible values: no/yes/error]),
++	set_more_warnings="$enableval",set_more_warnings=error)
++AC_MSG_CHECKING(for more warnings)
+ if test "$GCC" = "yes" -a "$set_more_warnings" != "no"; then
+ 	AC_MSG_RESULT(yes)
+-	CFLAGS="-Wall -Werror -std=gnu89 $CFLAGS"
++	CFLAGS="-Wall -std=gnu89 $CFLAGS"
+ 
+ 	for option in -Wshadow -Wmissing-declarations -Wmissing-prototypes \
+ 		      -Wdeclaration-after-statement \
+ 		      -Wfloat-equal -Wno-unused-parameter -Wno-sign-compare \
+-		      -fno-strict-aliasing; do
++		      -fno-strict-aliasing -Wno-unused-but-set-variable; do
+ 		SAVE_CFLAGS="$CFLAGS"
+ 		CFLAGS="$CFLAGS $option"
+ 		AC_MSG_CHECKING([whether gcc understands $option])
+@@ -25,6 +25,9 @@ if test "$GCC" = "yes" -a "$set_more_warnings" != "no"; then
+ 		unset SAVE_CFLAGS
+ 	done
+ 	unset option
++	if test "x$set_more_warnings" = xerror; then
++		CFLAGS="$CFLAGS -Werror"
++	fi
+ else
+ 	AC_MSG_RESULT(no)
+ fi
+-- 
+2.5.0
+

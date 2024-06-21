@@ -1,0 +1,136 @@
+From 49560efa2f8badd4ddb53d05354fc9b6a94be087 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Thu, 22 May 2014 11:09:36 -0500
+Subject: [PATCH] ifcfg-rh: strip trailing whitespace from ifcfg files (rh
+ #1102642)
+
+shvar.c has apparently never stripped trailing whitespace, but
+obviously a shell doesn't care.  Unfortunately NM does.  Strip
+trailing whitespace before unescaping, to preserve quoted
+whitespace.
+
+https://bugzilla.redhat.com/show_bug.cgi?id=1102642
+
+Base on upstream commit 941897cc9721997d106e2ab7ac438dafe441fb4e.
+
+---
+ system-settings/plugins/ifcfg-rh/shvar.c           |  3 +-
+ .../ifcfg-rh/tests/network-scripts/Makefile.am     |  3 +-
+ .../ifcfg-test-vlan-trailing-spaces                | 11 +++++
+ .../plugins/ifcfg-rh/tests/test-ifcfg-rh.c         | 47 ++++++++++++++++++++++
+ 4 files changed, 62 insertions(+), 2 deletions(-)
+ create mode 100644 system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-vlan-trailing-spaces
+
+diff --git a/system-settings/plugins/ifcfg-rh/shvar.c b/system-settings/plugins/ifcfg-rh/shvar.c
+index 0e4db0d..4a9d545 100644
+--- a/system-settings/plugins/ifcfg-rh/shvar.c
++++ b/system-settings/plugins/ifcfg-rh/shvar.c
+@@ -204,7 +204,8 @@ svGetValue(shvarFile *s, const char *key, gboolean verbatim)
+     for (s->current = s->lineList; s->current; s->current = s->current->next) {
+ 	line = s->current->data;
+ 	if (!strncmp(keyString, line, len)) {
+-	    value = g_strdup(line + len);
++	    /* Strip trailing spaces before unescaping to preserve spaces quoted whitespace */
++	    value = g_strchomp (g_strdup (line + len));
+ 	    if (!verbatim)
+ 	      svUnescape(value);
+ 	    break;
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am b/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
+index 0362ce3..2c87415 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/Makefile.am
+@@ -76,7 +76,8 @@ EXTRA_DIST = \
+ 	ifcfg-test-vlan-only-device \
+ 	ifcfg-test-infiniband \
+ 	ifcfg-test-wifi-dynamic-wep-leap \
+-	keys-test-wifi-dynamic-wep-leap
++	keys-test-wifi-dynamic-wep-leap \
++	ifcfg-test-vlan-trailing-spaces
+ 
+ check-local:
+ 	@for f in $(EXTRA_DIST); do \
+diff --git a/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-vlan-trailing-spaces b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-vlan-trailing-spaces
+new file mode 100644
+index 0000000..4a31e47
+--- /dev/null
++++ b/system-settings/plugins/ifcfg-rh/tests/network-scripts/ifcfg-test-vlan-trailing-spaces
+@@ -0,0 +1,11 @@
++DEVICE="vlan201"  
++ONBOOT=yes  
++NETBOOT=yes  
++BOOTPROTO=none   
++IPADDR="10.130.70.7" 
++NETMASK="255.255.0.0" 
++TYPE=Vlan   
++NAME="vlan201" 
++VLAN=yes 
++PHYSDEV="enccw0.0.fb00" 
++
+diff --git a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+index 106db94..2c828a6 100644
+--- a/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
++++ b/system-settings/plugins/ifcfg-rh/tests/test-ifcfg-rh.c
+@@ -11464,6 +11464,52 @@ test_write_bond_slave (void)
+ 	g_object_unref (reread);
+ }
+ 
++static void
++test_read_vlan_trailing_spaces (void)
++{
++	const char *testfile = TEST_IFCFG_DIR"/network-scripts/ifcfg-test-vlan-trailing-spaces";
++	NMConnection *connection;
++	gboolean success;
++	char *unmanaged = NULL;
++	char *keyfile = NULL;
++	char *routefile = NULL;
++	char *route6file = NULL;
++	gboolean ignore_error = FALSE;
++	GError *error = NULL;
++	NMSettingVlan *s_vlan;
++	char *contents = NULL;
++
++	/* Ensure there is whitespace at the end of the VLAN interface name,
++	 * to prevent the whitespace getting stripped off and committed mistakenly
++	 * by something in the future.
++	 */
++	success = g_file_get_contents (testfile, &contents, NULL, &error);
++	g_assert_no_error (error);
++	g_assert (success);
++	g_assert (contents && contents[0]);
++	g_assert (strstr (contents, "DEVICE=\"vlan201\"  \n"));
++	g_free (contents);
++
++	connection = connection_from_file (testfile, NULL, TYPE_ETHERNET, NULL, &unmanaged,
++	                                   &keyfile, &routefile, &route6file, &error, &ignore_error);
++	g_assert_no_error (error);
++	g_assert (connection != NULL);
++
++	s_vlan = nm_connection_get_setting_vlan (connection);
++	g_assert (s_vlan);
++
++	g_assert_cmpstr (nm_setting_vlan_get_interface_name (s_vlan), ==, "vlan201");
++	g_assert_cmpstr (nm_setting_vlan_get_parent (s_vlan), ==, "enccw0.0.fb00");
++	g_assert_cmpint (nm_setting_vlan_get_id (s_vlan), ==, 201);
++	g_assert_cmpint (nm_setting_vlan_get_flags (s_vlan), ==, 0);
++
++	g_free (unmanaged);
++	g_free (keyfile);
++	g_free (routefile);
++	g_free (route6file);
++	g_object_unref (connection);
++}
++
+ #define TEST_IFCFG_WIFI_OPEN_SSID_BAD_HEX TEST_IFCFG_DIR"/network-scripts/ifcfg-test-wifi-open-ssid-bad-hex"
+ #define TEST_IFCFG_WIFI_OPEN_SSID_LONG_QUOTED TEST_IFCFG_DIR"/network-scripts/ifcfg-test-wifi-open-ssid-long-quoted"
+ #define TEST_IFCFG_WIFI_OPEN_SSID_LONG_HEX TEST_IFCFG_DIR"/network-scripts/ifcfg-test-wifi-open-ssid-long-hex"
+@@ -11487,6 +11533,7 @@ int main (int argc, char **argv)
+ 		FAIL ("nm-utils-init", "failed to initialize libnm-util: %s", error->message);
+ 
+ 	/* The tests */
++	test_read_vlan_trailing_spaces ();
+ 	test_read_unmanaged ();
+ 	test_read_minimal ();
+ 	test_read_wired_static (TEST_IFCFG_WIRED_STATIC, "System test-wired-static");
+-- 
+1.7.11.7
+

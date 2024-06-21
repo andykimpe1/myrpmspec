@@ -1,0 +1,759 @@
+From c47e8c36212386f73f78f9507a9bc85916bec5c8 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Tue, 10 Sep 2013 16:51:37 +0200
+Subject: [PATCH 1/1] applet: remove the ca cert nag dialog.
+
+(backported from commit 0d8fb4dea08198663c454143779ef082dccdff4e and
+e21d598896ccd2c52850f52d21fe1d5aaa4e5410)
+
+The previous commit introduced a new flag "No CA certificate required".
+This change of the UI replaces the warning dialog (nag_dialog).
+
+Remove all parts of the nag dialog from the code and translation files.
+
+Signed-off-by: Thomas Haller <thaller@redhat.com>
+---
+ .../src/applet-device-wifi.c                       |   66 -------
+ network-manager-applet-0.8.1/src/applet.glade      |  185 --------------------
+ network-manager-applet-0.8.1/src/wireless-dialog.c |   28 +---
+ .../src/wireless-security/eap-method-peap.c        |    6 -
+ .../src/wireless-security/eap-method-tls.c         |    6 -
+ .../src/wireless-security/eap-method-ttls.c        |    6 -
+ .../src/wireless-security/eap-method.c             |  140 ---------------
+ .../src/wireless-security/eap-method.h             |   10 -
+ .../src/wireless-security/wireless-security.c      |   28 ---
+ .../src/wireless-security/wireless-security.h      |    6 -
+ .../src/wireless-security/ws-dynamic-wep.c         |    8 -
+ .../src/wireless-security/ws-wpa-eap.c             |    8 -
+ 12 files changed, 1 insertions(+), 496 deletions(-)
+
+diff --git a/network-manager-applet-0.8.1/src/applet-device-wifi.c b/network-manager-applet-0.8.1/src/applet-device-wifi.c
+index 95409af..4d6548a 100644
+--- a/network-manager-applet-0.8.1/src/applet-device-wifi.c
++++ b/network-manager-applet-0.8.1/src/applet-device-wifi.c
+@@ -1329,36 +1329,6 @@ activate_device_cb (gpointer user_data, const char *path, GError *error)
+ 	applet_schedule_update_icon (NM_APPLET (user_data));
+ }
+ 
+-static gboolean
+-wireless_dialog_close (gpointer user_data)
+-{
+-	GtkWidget *dialog = GTK_WIDGET (user_data);
+-
+-	gtk_dialog_response (GTK_DIALOG (dialog), GTK_RESPONSE_OK);
+-	return FALSE;
+-}
+-
+-static void
+-wireless_dialog_destroyed (gpointer data, GObject *dialog_ptr)
+-{
+-	/* remove the idle function; for not to call wireless_dialog_close() on invalid pointer */
+-	g_idle_remove_by_data (dialog_ptr);
+-}
+-
+-static void
+-nag_dialog_response_cb (GtkDialog *nag_dialog,
+-                        gint response,
+-                        gpointer user_data)
+-{
+-	NMAWirelessDialog *wireless_dialog = NMA_WIRELESS_DIALOG (user_data);
+-
+-	if (response == GTK_RESPONSE_NO) {  /* user opted not to correct the warning */
+-		nma_wireless_dialog_set_nag_ignored (wireless_dialog, TRUE);
+-		g_idle_add (wireless_dialog_close, wireless_dialog);
+-		g_object_weak_ref (G_OBJECT (wireless_dialog), wireless_dialog_destroyed, NULL);
+-	}
+-}
+-
+ static void
+ update_cb (NMSettingsConnectionInterface *connection,
+            GError *error,
+@@ -1385,22 +1355,6 @@ wireless_dialog_response_cb (GtkDialog *foo,
+ 	if (response != GTK_RESPONSE_OK)
+ 		goto done;
+ 
+-	if (!nma_wireless_dialog_get_nag_ignored (dialog)) {
+-		GtkWidget *nag_dialog;
+-
+-		/* Nag the user about certificates or whatever.  Only destroy the dialog
+-		 * if no nagging was done.
+-		 */
+-		nag_dialog = nma_wireless_dialog_nag_user (dialog);
+-		if (nag_dialog) {
+-			gtk_window_set_transient_for (GTK_WINDOW (nag_dialog), GTK_WINDOW (dialog));
+-			g_signal_connect (nag_dialog, "response",
+-			                  G_CALLBACK (nag_dialog_response_cb),
+-			                  dialog);
+-			return;
+-		}
+-	}
+-
+ 	/* nma_wireless_dialog_get_connection() returns a connection with the
+ 	 * refcount incremented, so the caller must remember to unref it.
+ 	 */
+@@ -1567,7 +1521,6 @@ typedef struct {
+ 	NMApplet *applet;
+ 	NMActiveConnection *active_connection;
+ 	GtkWidget *dialog;
+-	GtkWidget *nag_dialog;
+ 	NMANewSecretsRequestedFunc callback;
+ 	gpointer callback_data;
+ 	char *setting_name;
+@@ -1598,25 +1551,6 @@ get_secrets_dialog_response_cb (GtkDialog *foo,
+ 	const char *key_mgmt, *auth_alg;
+ 	GError *error = NULL;
+ 
+-	/* Handle the nag dialog specially; don't want to clear the NMActiveConnection
+-	 * destroy handler yet if the main dialog isn't going away.
+-	 */
+-	if ((response == GTK_RESPONSE_OK) && !nma_wireless_dialog_get_nag_ignored (dialog)) {
+-		GtkWidget *widget;
+-
+-		/* Nag the user about certificates or whatever.  Only destroy the dialog
+-		 * if no nagging was done.
+-		 */
+-		widget = nma_wireless_dialog_nag_user (dialog);
+-		if (widget) {
+-			gtk_window_set_transient_for (GTK_WINDOW (widget), GTK_WINDOW (dialog));
+-			g_signal_connect (widget, "response",
+-			                  G_CALLBACK (nag_dialog_response_cb),
+-			                  dialog);
+-			return;
+-		}
+-	}
+-
+ 	/* Got a user response, clear the NMActiveConnection destroy handler for
+ 	 * this dialog since this function will now take over dialog destruction.
+ 	 */
+diff --git a/network-manager-applet-0.8.1/src/applet.glade b/network-manager-applet-0.8.1/src/applet.glade
+index 21c0ede..31fb3ad 100644
+--- a/network-manager-applet-0.8.1/src/applet.glade
++++ b/network-manager-applet-0.8.1/src/applet.glade
+@@ -1720,191 +1720,6 @@ Both</property>
+       </widget>
+     </child>
+   </widget>
+-  <widget class="GtkDialog" id="nag_user_dialog">
+-    <property name="border_width">5</property>
+-    <property name="modal">True</property>
+-    <property name="window_position">center</property>
+-    <property name="type_hint">dialog</property>
+-    <property name="has_separator">False</property>
+-    <child internal-child="vbox">
+-      <widget class="GtkVBox" id="dialog-vbox2">
+-        <property name="visible">True</property>
+-        <property name="orientation">vertical</property>
+-        <property name="spacing">14</property>
+-        <child>
+-          <widget class="GtkHBox" id="hbox5">
+-            <property name="visible">True</property>
+-            <property name="border_width">5</property>
+-            <property name="spacing">12</property>
+-            <child>
+-              <widget class="GtkImage" id="image4">
+-                <property name="visible">True</property>
+-                <property name="yalign">0</property>
+-                <property name="stock">gtk-dialog-warning</property>
+-                <property name="icon-size">6</property>
+-              </widget>
+-              <packing>
+-                <property name="expand">False</property>
+-                <property name="position">0</property>
+-              </packing>
+-            </child>
+-            <child>
+-              <widget class="GtkVBox" id="content_vbox">
+-                <property name="visible">True</property>
+-                <property name="orientation">vertical</property>
+-                <property name="spacing">12</property>
+-                <child>
+-                  <widget class="GtkLabel" id="content_label">
+-                    <property name="visible">True</property>
+-                    <property name="xalign">0</property>
+-                    <property name="yalign">0</property>
+-                    <property name="label">alert text</property>
+-                    <property name="use_markup">True</property>
+-                    <property name="wrap">True</property>
+-                  </widget>
+-                  <packing>
+-                    <property name="position">0</property>
+-                  </packing>
+-                </child>
+-                <child>
+-                  <widget class="GtkCheckButton" id="ignore_checkbox">
+-                    <property name="label" translatable="yes">Don't _warn me again</property>
+-                    <property name="visible">True</property>
+-                    <property name="can_focus">True</property>
+-                    <property name="receives_default">False</property>
+-                    <property name="use_underline">True</property>
+-                    <property name="draw_indicator">True</property>
+-                  </widget>
+-                  <packing>
+-                    <property name="expand">False</property>
+-                    <property name="fill">False</property>
+-                    <property name="position">1</property>
+-                  </packing>
+-                </child>
+-              </widget>
+-              <packing>
+-                <property name="position">1</property>
+-              </packing>
+-            </child>
+-          </widget>
+-          <packing>
+-            <property name="position">1</property>
+-          </packing>
+-        </child>
+-        <child internal-child="action_area">
+-          <widget class="GtkHButtonBox" id="dialog-action_area2">
+-            <property name="visible">True</property>
+-            <property name="layout_style">end</property>
+-            <child>
+-              <widget class="GtkButton" id="ignore_button">
+-                <property name="response_id">-9</property>
+-                <property name="visible">True</property>
+-                <property name="can_focus">True</property>
+-                <property name="can_default">True</property>
+-                <property name="receives_default">False</property>
+-                <child>
+-                  <widget class="GtkAlignment" id="alignment3">
+-                    <property name="visible">True</property>
+-                    <property name="xscale">0</property>
+-                    <property name="yscale">0</property>
+-                    <child>
+-                      <widget class="GtkHBox" id="hbox4">
+-                        <property name="visible">True</property>
+-                        <property name="spacing">2</property>
+-                        <child>
+-                          <widget class="GtkImage" id="image3">
+-                            <property name="visible">True</property>
+-                            <property name="stock">gtk-no</property>
+-                          </widget>
+-                          <packing>
+-                            <property name="expand">False</property>
+-                            <property name="fill">False</property>
+-                            <property name="position">0</property>
+-                          </packing>
+-                        </child>
+-                        <child>
+-                          <widget class="GtkLabel" id="label57">
+-                            <property name="visible">True</property>
+-                            <property name="label" translatable="yes">No</property>
+-                            <property name="use_underline">True</property>
+-                          </widget>
+-                          <packing>
+-                            <property name="expand">False</property>
+-                            <property name="fill">False</property>
+-                            <property name="position">1</property>
+-                          </packing>
+-                        </child>
+-                      </widget>
+-                    </child>
+-                  </widget>
+-                </child>
+-              </widget>
+-              <packing>
+-                <property name="expand">False</property>
+-                <property name="fill">False</property>
+-                <property name="position">0</property>
+-              </packing>
+-            </child>
+-            <child>
+-              <widget class="GtkButton" id="change_button">
+-                <property name="response_id">-8</property>
+-                <property name="visible">True</property>
+-                <property name="can_focus">True</property>
+-                <property name="can_default">True</property>
+-                <property name="receives_default">False</property>
+-                <child>
+-                  <widget class="GtkAlignment" id="alignment2">
+-                    <property name="visible">True</property>
+-                    <property name="xscale">0</property>
+-                    <property name="yscale">0</property>
+-                    <child>
+-                      <widget class="GtkHBox" id="hbox3">
+-                        <property name="visible">True</property>
+-                        <property name="spacing">2</property>
+-                        <child>
+-                          <widget class="GtkImage" id="image2">
+-                            <property name="visible">True</property>
+-                            <property name="stock">gtk-ok</property>
+-                          </widget>
+-                          <packing>
+-                            <property name="expand">False</property>
+-                            <property name="fill">False</property>
+-                            <property name="position">0</property>
+-                          </packing>
+-                        </child>
+-                        <child>
+-                          <widget class="GtkLabel" id="label56">
+-                            <property name="visible">True</property>
+-                            <property name="label" translatable="yes">Yes</property>
+-                            <property name="use_underline">True</property>
+-                          </widget>
+-                          <packing>
+-                            <property name="expand">False</property>
+-                            <property name="fill">False</property>
+-                            <property name="position">1</property>
+-                          </packing>
+-                        </child>
+-                      </widget>
+-                    </child>
+-                  </widget>
+-                </child>
+-              </widget>
+-              <packing>
+-                <property name="expand">False</property>
+-                <property name="fill">False</property>
+-                <property name="position">1</property>
+-              </packing>
+-            </child>
+-          </widget>
+-          <packing>
+-            <property name="expand">False</property>
+-            <property name="pack_type">end</property>
+-            <property name="position">0</property>
+-          </packing>
+-        </child>
+-      </widget>
+-    </child>
+-  </widget>
+   <widget class="GtkWindow" id="eap_peap_widget">
+     <property name="visible">True</property>
+     <property name="title">eap_peap_widget</property>
+diff --git a/network-manager-applet-0.8.1/src/wireless-dialog.c b/network-manager-applet-0.8.1/src/wireless-dialog.c
+index d312744..bc5d6f9 100644
+--- a/network-manager-applet-0.8.1/src/wireless-dialog.c
++++ b/network-manager-applet-0.8.1/src/wireless-dialog.c
+@@ -73,7 +73,6 @@ typedef struct {
+ 	GtkSizeGroup *group;
+ 	GtkWidget *sec_combo;
+ 
+-	gboolean nag_ignored;
+ 	gboolean network_name_focus;
+ 
+ 	gboolean auth_only;
+@@ -102,17 +101,12 @@ static void ssid_entry_changed (GtkWidget *entry, gpointer user_data);
+ void
+ nma_wireless_dialog_set_nag_ignored (NMAWirelessDialog *self, gboolean ignored)
+ {
+-	g_return_if_fail (self != NULL);
+-
+-	NMA_WIRELESS_DIALOG_GET_PRIVATE (self)->nag_ignored = ignored;
+ }
+ 
+ gboolean
+ nma_wireless_dialog_get_nag_ignored (NMAWirelessDialog *self)
+ {
+-	g_return_val_if_fail (self != NULL, FALSE);
+-
+-	return NMA_WIRELESS_DIALOG_GET_PRIVATE (self)->nag_ignored;
++	return TRUE;
+ }
+ 
+ static void
+@@ -1371,26 +1365,6 @@ nma_wireless_dialog_new_for_create (NMApplet *applet)
+ GtkWidget *
+ nma_wireless_dialog_nag_user (NMAWirelessDialog *self)
+ {
+-	NMAWirelessDialogPrivate *priv;
+-	GtkWidget *combo;
+-	GtkTreeModel *model;
+-	GtkTreeIter iter;
+-	WirelessSecurity *sec = NULL;
+-
+-	g_return_val_if_fail (self != NULL, NULL);
+-
+-	priv = NMA_WIRELESS_DIALOG_GET_PRIVATE (self);
+-
+-	combo = glade_xml_get_widget (priv->xml, "security_combo");
+-	g_return_val_if_fail (combo != NULL, NULL);
+-
+-	/* Ask the security method if it wants to nag the user. */
+-	model = gtk_combo_box_get_model (GTK_COMBO_BOX (combo));
+-	gtk_combo_box_get_active_iter (GTK_COMBO_BOX (combo), &iter);
+-	gtk_tree_model_get (model, &iter, S_SEC_COLUMN, &sec, -1);
+-	if (sec)
+-		return wireless_security_nag_user (sec);
+-
+ 	return NULL;
+ }
+ 
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-peap.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-peap.c
+index 0208247..f6ef9e0 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-peap.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-peap.c
+@@ -361,12 +361,6 @@ eap_method_peap_new (const char *glade_file,
+ 	                 widget,
+ 	                 "eap_peap_anon_identity_entry");
+ 
+-	eap_method_nag_init (EAP_METHOD (method),
+-	                     glade_file,
+-	                     "eap_peap_ca_cert_button",
+-	                     connection,
+-	                     FALSE);
+-
+ 	method->sec_parent = parent;
+ 	method->is_editor = is_editor;
+ 
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-tls.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-tls.c
+index 68c66bd..92e8973 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-tls.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-tls.c
+@@ -446,12 +446,6 @@ eap_method_tls_new (const char *glade_file,
+ 	                 widget,
+ 	                 "eap_tls_identity_entry");
+ 
+-	eap_method_nag_init (EAP_METHOD (method),
+-	                     glade_file,
+-	                     "eap_tls_ca_cert_button",
+-	                     connection,
+-	                     phase2);
+-
+ 	method->phase2 = phase2;
+ 
+ 	if (connection)
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method-ttls.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method-ttls.c
+index 80d94e5..6459639 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method-ttls.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method-ttls.c
+@@ -360,12 +360,6 @@ eap_method_ttls_new (const char *glade_file,
+ 	                 widget,
+ 	                 "eap_ttls_anon_identity_entry");
+ 
+-	eap_method_nag_init (EAP_METHOD (method),
+-	                     glade_file,
+-	                     "eap_ttls_ca_cert_button",
+-	                     connection,
+-	                     FALSE);
+-
+ 	method->sec_parent = parent;
+ 	method->is_editor = is_editor;
+ 
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method.c b/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
+index d901201..d07ddcb 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method.c
+@@ -103,143 +103,7 @@ typedef struct {
+ 	NMConnection *connection;
+ } NagDialogResponseInfo;
+ 
+-static void
+-nag_dialog_destroyed (gpointer data, GObject *dialog_ptr)
+-{
+-	NagDialogResponseInfo *info = (NagDialogResponseInfo *) data;
+-
+-	memset (info, '\0', sizeof (NagDialogResponseInfo));
+-	g_free (info);
+-}
+-
+-static void
+-nag_dialog_response_cb (GtkDialog *nag_dialog,
+-                        gint response,
+-                        gpointer user_data)
+-{
+-	NagDialogResponseInfo *info = (NagDialogResponseInfo *) user_data;
+-	EAPMethod *method = (EAPMethod *) info->method;
+-	NMConnection *connection = (NMConnection *) info->connection;
+-	GtkWidget *widget;
+-
+-	if (response == GTK_RESPONSE_NO) {
+-		/* Grab the value of the "don't bother me" checkbox */
+-		widget = glade_xml_get_widget (method->nag_dialog_xml, "ignore_checkbox");
+-		g_assert (widget);
+-
+-		method->ignore_ca_cert = gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (widget));
+-
+-		/* Set the value to connection. It will be stored when connection is written (in nm_gconf_write_connection()) */
+-		g_object_set_data (G_OBJECT (connection), IGNORE_CA_CERT_TAG, GUINT_TO_POINTER (method->ignore_ca_cert));
+-	}
+-
+-	gtk_widget_hide (GTK_WIDGET (nag_dialog));
+-}
+-
+-static gboolean 
+-nag_dialog_delete_event_cb (GtkDialog *nag_dialog, GdkEvent *e, gpointer user_data) 
+-{ 
+-	// FIXME?: By emitting response signal, dismissing nag dialog with upper right "x" icon,
+-	// Alt-F4, or Esc would have the same behaviour as clicking "Ignore" button.
+-	//g_signal_emit_by_name (nag_dialog, "response", GTK_RESPONSE_NO, user_data);
+-	return TRUE;  /* do not destroy */
+-} 
+- 
+-
+ 
+-GtkWidget *
+-eap_method_nag_user (EAPMethod *method)
+-{
+-	GtkWidget *widget;
+-	char *filename = NULL;
+-
+-	g_return_val_if_fail (method != NULL, NULL);
+-
+-	if (!method->nag_dialog || method->ignore_ca_cert)
+-		return NULL;
+-
+-	/* Checkbox should be unchecked each time dialog comes up */
+-	widget = glade_xml_get_widget (method->nag_dialog_xml, "ignore_checkbox");
+-	g_assert (widget);
+-	gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (widget), FALSE);
+-
+-	/* Nag the user if the CA Cert is blank, since it's a security risk. */
+-	widget = glade_xml_get_widget (method->xml, method->ca_cert_chooser);
+-	g_assert (widget);
+-	filename = gtk_file_chooser_get_filename (GTK_FILE_CHOOSER (widget));
+-	if (filename != NULL) {
+-		g_free (filename);
+-		return NULL;
+-	}
+-
+-	gtk_window_present (GTK_WINDOW (method->nag_dialog));
+-	return method->nag_dialog;
+-}
+-
+-gboolean
+-eap_method_nag_init (EAPMethod *method,
+-                     const char *glade_file,
+-                     const char *ca_cert_chooser,
+-                     NMConnection *connection,
+-                     gboolean phase2)
+-{
+-	GtkWidget *dialog, *widget;
+-	char *text;
+-	NagDialogResponseInfo *info;
+-
+-	g_return_val_if_fail (method != NULL, FALSE);
+-	g_return_val_if_fail (glade_file != NULL, FALSE);
+-	g_return_val_if_fail (ca_cert_chooser != NULL, FALSE);
+-
+-	method->nag_dialog_xml = glade_xml_new (glade_file, "nag_user_dialog", NULL);
+-	if (method->nag_dialog_xml == NULL) {
+-		g_warning ("Couldn't get nag_user_dialog from glade xml");
+-		return FALSE;
+-	}
+-
+-	method->ca_cert_chooser = g_strdup (ca_cert_chooser);
+-	if (connection) {
+-		NMSettingConnection *s_con;
+-		const char *uuid;
+-
+-		s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));
+-		g_assert (s_con);
+-		uuid = nm_setting_connection_get_uuid (s_con);
+-		g_assert (uuid);
+-
+-		method->ignore_ca_cert = nm_gconf_get_ignore_ca_cert (uuid, phase2);
+-	}
+-
+-	info = g_malloc0 (sizeof (NagDialogResponseInfo));
+-	info->method = method;
+-	info->connection = connection;
+-
+-	dialog = glade_xml_get_widget (method->nag_dialog_xml, "nag_user_dialog");
+-	g_assert (dialog);
+-	g_signal_connect (dialog, "response", G_CALLBACK (nag_dialog_response_cb), info);
+-	g_signal_connect (dialog, "delete-event", G_CALLBACK (nag_dialog_delete_event_cb), info);
+-	g_object_weak_ref (G_OBJECT (dialog), nag_dialog_destroyed, info);
+-
+-	widget = glade_xml_get_widget (method->nag_dialog_xml, "content_label");
+-	g_assert (widget);
+-
+-	text = g_strdup_printf ("<span weight=\"bold\" size=\"larger\">%s</span>\n\n%s",
+-	                        _("No Certificate Authority certificate chosen"),
+-	                        _("Not using a Certificate Authority (CA) certificate can result in connections to insecure, rogue wireless networks.  Would you like to choose a Certificate Authority certificate?"));
+-	gtk_label_set_markup (GTK_LABEL (widget), text);
+-	g_free (text);
+-
+-	widget = glade_xml_get_widget (method->nag_dialog_xml, "ignore_button");
+-	gtk_button_set_label (GTK_BUTTON (widget), _("Ignore"));
+-	g_assert (widget);
+-
+-	widget = glade_xml_get_widget (method->nag_dialog_xml, "change_button");
+-	gtk_button_set_label (GTK_BUTTON (widget), _("Choose CA Certificate"));
+-	g_assert (widget);
+-
+-	method->nag_dialog = dialog;
+-	return TRUE;
+-}
+ 
+ gboolean
+ eap_method_get_ignore_ca_cert (EAPMethod *method)
+@@ -326,10 +190,6 @@ eap_method_unref (EAPMethod *method)
+ 
+ 	method->refcount--;
+ 	if (method->refcount == 0) {
+-		if (method->nag_dialog)
+-			gtk_widget_destroy (method->nag_dialog);
+-		if (method->nag_dialog_xml)
+-			g_object_unref (method->nag_dialog_xml);
+ 		g_free (method->ca_cert_chooser);
+ 		g_object_unref (method->xml);
+ 		g_object_unref (method->ui_widget);
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/eap-method.h b/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
+index 5c0cf8f..8a6fe37 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
++++ b/network-manager-applet-0.8.1/src/wireless-security/eap-method.h
+@@ -43,10 +43,8 @@ struct _EAPMethod {
+ 	GladeXML *xml;
+ 	GtkWidget *ui_widget;
+ 
+-	GladeXML *nag_dialog_xml;
+ 	char *ca_cert_chooser;
+ 	const char *default_field;
+-	GtkWidget *nag_dialog;
+ 
+ 	gboolean ignore_ca_cert;
+ 
+@@ -70,8 +68,6 @@ void eap_method_fill_connection (EAPMethod *method, NMConnection *connection);
+ 
+ void eap_method_update_secrets (EAPMethod *method, NMConnection *connection);
+ 
+-GtkWidget * eap_method_nag_user (EAPMethod *method);
+-
+ EAPMethod *eap_method_ref (EAPMethod *method);
+ 
+ void eap_method_unref (EAPMethod *method);
+@@ -111,12 +107,6 @@ gboolean eap_method_validate_filepicker (GladeXML *xml,
+                                          const char *password,
+                                          NMSetting8021xCKFormat *out_format);
+ 
+-gboolean eap_method_nag_init (EAPMethod *method,
+-                              const char *glade_file,
+-                              const char *ca_cert_chooser,
+-                              NMConnection *connection,
+-                              gboolean phase2);
+-
+ gboolean eap_method_get_ignore_ca_cert (EAPMethod *method);
+ 
+ void eap_method_phase2_update_secrets_helper (EAPMethod *method,
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c b/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c
+index acef441..95f2318 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/wireless-security.c
+@@ -174,16 +174,6 @@ wireless_security_init (WirelessSecurity *sec,
+ 	sec->default_field = default_field;
+ }
+ 
+-GtkWidget *
+-wireless_security_nag_user (WirelessSecurity *sec)
+-{
+-	g_return_val_if_fail (sec != NULL, NULL);
+-
+-	if (sec->nag_user)
+-		return (*(sec->nag_user)) (sec);
+-	return NULL;
+-}
+-
+ void
+ wireless_security_set_userpass (WirelessSecurity *sec,
+                                 const char *user,
+@@ -487,24 +477,6 @@ ws_802_1x_update_secrets (WirelessSecurity *sec,
+ 	}
+ }
+ 
+-GtkWidget *
+-ws_802_1x_nag_user (WirelessSecurity *sec,
+-                    const char *combo_name)
+-{
+-	GtkTreeModel *model;
+-	GtkTreeIter iter;
+-	EAPMethod *eap = NULL;
+-	GtkWidget *widget;	
+-
+-	widget = glade_xml_get_widget (sec->xml, combo_name);
+-	model = gtk_combo_box_get_model (GTK_COMBO_BOX (widget));
+-	gtk_combo_box_get_active_iter (GTK_COMBO_BOX (widget), &iter);
+-	gtk_tree_model_get (model, &iter, AUTH_METHOD_COLUMN, &eap, -1);
+-	g_return_val_if_fail (eap != NULL, NULL);
+-
+-	return eap_method_nag_user (eap);
+-}
+-
+ #define PROTO_NAME_COLUMN 0
+ #define PROTO_VAL_COLUMN  1
+ 
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h b/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h
+index 3eaae2a..655d2d3 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h
++++ b/network-manager-applet-0.8.1/src/wireless-security/wireless-security.h
+@@ -56,7 +56,6 @@ struct _WirelessSecurity {
+ 	WSFillConnectionFunc fill_connection;
+ 	WSUpdateSecretsFunc update_secrets;
+ 	WSValidateFunc validate;
+-	WSNagUserFunc nag_user;
+ 	WSDestroyFunc destroy;
+ };
+ 
+@@ -80,8 +79,6 @@ void wireless_security_fill_connection (WirelessSecurity *sec,
+ void wireless_security_update_secrets (WirelessSecurity *sec,
+                                        NMConnection *connection);
+ 
+-GtkWidget * wireless_security_nag_user (WirelessSecurity *sec);
+-
+ void wireless_security_set_userpass (WirelessSecurity *sec,
+                                      const char *user,
+                                      const char *password,
+@@ -157,8 +154,5 @@ void ws_802_1x_update_secrets (WirelessSecurity *sec,
+                                const char *combo_name,
+                                NMConnection *connection);
+ 
+-GtkWidget * ws_802_1x_nag_user (WirelessSecurity *sec,
+-                                const char *combo_name);
+-
+ #endif /* WIRELESS_SECURITY_H */
+ 
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/ws-dynamic-wep.c b/network-manager-applet-0.8.1/src/wireless-security/ws-dynamic-wep.c
+index 5e0ea6d..f5c2d39 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/ws-dynamic-wep.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/ws-dynamic-wep.c
+@@ -91,12 +91,6 @@ auth_combo_changed_cb (GtkWidget *combo, gpointer user_data)
+ 	                              sec->size_group);
+ }
+ 
+-static GtkWidget *
+-nag_user (WirelessSecurity *parent)
+-{
+-	return ws_802_1x_nag_user (parent, "dynamic_wep_auth_combo");
+-}
+-
+ static void
+ update_secrets (WirelessSecurity *parent, NMConnection *connection)
+ {
+@@ -141,8 +135,6 @@ ws_dynamic_wep_new (const char *glade_file,
+ 	                        widget,
+ 	                        NULL);
+ 
+-	WIRELESS_SECURITY (sec)->nag_user = nag_user;
+-
+ 	widget = ws_802_1x_auth_combo_init (WIRELESS_SECURITY (sec),
+ 	                                    glade_file,
+ 	                                    "dynamic_wep_auth_combo",
+diff --git a/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.c b/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.c
+index 55e0b3e..49a4ed4 100644
+--- a/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.c
++++ b/network-manager-applet-0.8.1/src/wireless-security/ws-wpa-eap.c
+@@ -91,12 +91,6 @@ auth_combo_changed_cb (GtkWidget *combo, gpointer user_data)
+ 	                              sec->size_group);
+ }
+ 
+-static GtkWidget *
+-nag_user (WirelessSecurity *parent)
+-{
+-	return ws_802_1x_nag_user (parent, "wpa_eap_auth_combo");
+-}
+-
+ static void
+ update_secrets (WirelessSecurity *parent, NMConnection *connection)
+ {
+@@ -142,8 +136,6 @@ ws_wpa_eap_new (const char *glade_file,
+ 	                        widget,
+ 	                        NULL);
+ 
+-	WIRELESS_SECURITY (sec)->nag_user = nag_user;
+-
+ 	widget = ws_802_1x_auth_combo_init (WIRELESS_SECURITY (sec),
+ 	                                    glade_file,
+ 	                                    "wpa_eap_auth_combo",
+-- 
+1.7.1
+

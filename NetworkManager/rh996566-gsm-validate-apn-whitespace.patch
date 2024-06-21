@@ -1,0 +1,433 @@
+From 7afab6ec28ded75a185a7ff4d19f6542f10050f6 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Wed, 22 Sep 2010 13:20:02 -0500
+Subject: [PATCH 1/5] libnm-util: enforce APN character restrictions
+
+APNs can only contain alphanumeric characters, '.', and '-'.  To be
+helpful we strip spaces off before setting the APN internally so that
+previously (and incorrectly) valid APNs don't cause the whole
+connection to fail validation and thus disappear.  The only case seen
+in the wild was a Pelephone IL APN which erroneously had a trailing
+space in the mobile broadband provider database.  Bad characters
+cause the connection to fail with vague error messages about being
+unable to activate the PDP context during PPP negotiation.
+
+(cherry picked from commit 0ec9bf2c73c9c73cbbe6e757c0857c67be971575)
+---
+ libnm-util/nm-setting-gsm.c     | 39 +++++++++++++++++------
+ libnm-util/tests/test-general.c | 69 +++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 99 insertions(+), 9 deletions(-)
+
+diff --git a/libnm-util/nm-setting-gsm.c b/libnm-util/nm-setting-gsm.c
+index 4b4560c..575f94d 100644
+--- a/libnm-util/nm-setting-gsm.c
++++ b/libnm-util/nm-setting-gsm.c
+@@ -231,12 +231,30 @@ verify (NMSetting *setting, GSList *all_settings, GError **error)
+ 		return FALSE;
+ 	}
+ 
+-	if (priv->apn && (strlen (priv->apn) < 1 || strchr (priv->apn, '"'))) {
+-		g_set_error (error,
+-		             NM_SETTING_GSM_ERROR,
+-		             NM_SETTING_GSM_ERROR_INVALID_PROPERTY,
+-		             NM_SETTING_GSM_APN);
+-		return FALSE;
++	if (priv->apn) {
++		guint32 apn_len = strlen (priv->apn);
++		guint32 i;
++
++		if (apn_len < 1 || apn_len > 20) {
++			g_set_error (error,
++			             NM_SETTING_GSM_ERROR,
++			             NM_SETTING_GSM_ERROR_INVALID_PROPERTY,
++			             NM_SETTING_GSM_APN);
++			return FALSE;
++		}
++
++		/* APNs roughly follow the same rules as DNS domain names.  Allowed
++		 * characters are a-z, 0-9, . and -.  GSM 03.60 Section 14.9.
++		 */
++		for (i = 0; i < apn_len; i++) {
++			if (!isalnum (priv->apn[i]) && (priv->apn[i] != '.') && (priv->apn[i] != '-')) {
++				g_set_error (error,
++				             NM_SETTING_GSM_ERROR,
++				             NM_SETTING_GSM_ERROR_INVALID_PROPERTY,
++				             NM_SETTING_GSM_APN);
++				return FALSE;
++			}
++		}
+ 	}
+ 
+ 	if (priv->username && !strlen (priv->username)) {
+@@ -342,11 +360,11 @@ set_property (GObject *object, guint prop_id,
+ 		break;
+ 	case PROP_APN:
+ 		g_free (priv->apn);
+-		priv->apn = g_value_dup_string (value);
++		priv->apn = g_strstrip (g_value_dup_string (value));
+ 		break;
+ 	case PROP_NETWORK_ID:
+ 		g_free (priv->network_id);
+-		priv->network_id = g_value_dup_string (value);
++		priv->network_id = g_strstrip (g_value_dup_string (value));
+ 		break;
+ 	case PROP_NETWORK_TYPE:
+ 		priv->network_type = g_value_get_int (value);
+@@ -503,6 +521,8 @@ nm_setting_gsm_class_init (NMSettingGsmClass *setting_class)
+ 	 * the user will be billed for their network usage and whether the user has
+ 	 * access to the Internet or just a provider-specific walled-garden, so it
+ 	 * is important to use the correct APN for the user's mobile broadband plan.
++	 * The APN may only be composed of the characters a-z, 0-9, ., and - per
++	 * GSM 03.60 Section 14.9.
+ 	 **/
+ 	g_object_class_install_property
+ 		(object_class, PROP_APN,
+@@ -515,7 +535,8 @@ nm_setting_gsm_class_init (NMSettingGsmClass *setting_class)
+ 						  "user has access to the Internet or just a provider-"
+ 						  "specific walled-garden, so it is important to use "
+ 						  "the correct APN for the user's mobile broadband "
+-						  "plan.",
++						  "plan.  The APN may only be composed of the characters "
++						  "a-z, 0-9, ., and - per GSM 03.60 Section 14.9.",
+ 						  NULL,
+ 						  G_PARAM_READWRITE | NM_SETTING_PARAM_SERIALIZE));
+ 
+diff --git a/libnm-util/tests/test-general.c b/libnm-util/tests/test-general.c
+index 9530445..855ee08 100644
+--- a/libnm-util/tests/test-general.c
++++ b/libnm-util/tests/test-general.c
+@@ -28,6 +28,7 @@
+ 
+ #include "nm-setting-connection.h"
+ #include "nm-setting-vpn.h"
++#include "nm-setting-gsm.h"
+ #include "nm-setting-ip6-config.h"
+ #include "nm-dbus-glib-types.h"
+ 
+@@ -222,6 +223,72 @@ test_setting_ip6_config_old_address_array (void)
+ 	g_object_unref (s_ip6);
+ }
+ 
++static void
++test_setting_gsm_apn_spaces (void)
++{
++	NMSettingGsm *s_gsm;
++	const char *tmp;
++
++	s_gsm = (NMSettingGsm *) nm_setting_gsm_new ();
++	ASSERT (s_gsm != NULL,
++	        "gsm-apn-spaces",
++	        "error creating GSM setting");
++
++	/* Trailing space */
++	g_object_set (s_gsm, NM_SETTING_GSM_APN, "foobar ", NULL);
++	tmp = nm_setting_gsm_get_apn (s_gsm);
++	ASSERT (tmp != NULL,
++	        "gsm-apn-spaces", "empty APN");
++	ASSERT (strcmp (tmp, "foobar") == 0,
++	        "gsm-apn-spaces", "unexpected APN");
++
++	/* Leading space */
++	g_object_set (s_gsm, NM_SETTING_GSM_APN, " foobar", NULL);
++	tmp = nm_setting_gsm_get_apn (s_gsm);
++	ASSERT (tmp != NULL,
++	        "gsm-apn-spaces", "empty APN");
++	ASSERT (strcmp (tmp, "foobar") == 0,
++	        "gsm-apn-spaces", "unexpected APN");
++}
++
++static void
++test_setting_gsm_apn_bad_chars (void)
++{
++	NMSettingGsm *s_gsm;
++
++	s_gsm = (NMSettingGsm *) nm_setting_gsm_new ();
++	ASSERT (s_gsm != NULL,
++	        "gsm-apn-bad-chars",
++	        "error creating GSM setting");
++
++	g_object_set (s_gsm, NM_SETTING_GSM_NUMBER, "*99#", NULL);
++
++	/* Make sure a valid APN works */
++	g_object_set (s_gsm, NM_SETTING_GSM_APN, "foobar123.-baz", NULL);
++	ASSERT (nm_setting_verify (NM_SETTING (s_gsm), NULL, NULL) == TRUE,
++	        "gsm-apn-bad-chars", "unexpectedly invalid GSM setting");
++
++	/* Random invalid chars */
++	g_object_set (s_gsm, NM_SETTING_GSM_APN, "@#%$@#%@#%", NULL);
++	ASSERT (nm_setting_verify (NM_SETTING (s_gsm), NULL, NULL) == FALSE,
++	        "gsm-apn-bad-chars", "unexpectedly valid GSM setting");
++
++	/* Spaces */
++	g_object_set (s_gsm, NM_SETTING_GSM_APN, "foobar baz", NULL);
++	ASSERT (nm_setting_verify (NM_SETTING (s_gsm), NULL, NULL) == FALSE,
++	        "gsm-apn-bad-chars", "unexpectedly valid GSM setting");
++
++	/* 0 characters long */
++	g_object_set (s_gsm, NM_SETTING_GSM_APN, "", NULL);
++	ASSERT (nm_setting_verify (NM_SETTING (s_gsm), NULL, NULL) == FALSE,
++	        "gsm-apn-bad-chars", "unexpectedly valid GSM setting");
++
++	/* 21-character long */
++	g_object_set (s_gsm, NM_SETTING_GSM_APN, "abcdefghijklmnopqrstu", NULL);
++	ASSERT (nm_setting_verify (NM_SETTING (s_gsm), NULL, NULL) == FALSE,
++	        "gsm-apn-bad-chars", "unexpectedly valid GSM setting");
++}
++
+ int main (int argc, char **argv)
+ {
+ 	GError *error = NULL;
+@@ -237,6 +304,8 @@ int main (int argc, char **argv)
+ 	/* The tests */
+ 	test_setting_vpn_items ();
+ 	test_setting_ip6_config_old_address_array ();
++	test_setting_gsm_apn_spaces ();
++	test_setting_gsm_apn_bad_chars ();
+ 
+ 	base = g_path_get_basename (argv[0]);
+ 	fprintf (stdout, "%s: SUCCESS\n", base);
+-- 
+1.9.3
+
+
+From e2e1127f227291d40aeb6120b5727ecb3f1fafd1 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Wed, 3 Nov 2010 14:58:02 -0500
+Subject: [PATCH 2/5] libnm-util: silence warning
+
+(cherry picked from commit 389a29757142111f6824894fc92b7cbd7980ed87)
+---
+ libnm-util/nm-setting-gsm.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/libnm-util/nm-setting-gsm.c b/libnm-util/nm-setting-gsm.c
+index 575f94d..413e8a0 100644
+--- a/libnm-util/nm-setting-gsm.c
++++ b/libnm-util/nm-setting-gsm.c
+@@ -344,6 +344,7 @@ set_property (GObject *object, guint prop_id,
+ {
+ 	NMSettingGsmPrivate *priv = NM_SETTING_GSM_GET_PRIVATE (object);
+ 	const char *str;
++	char *tmp;
+ 
+ 	switch (prop_id) {
+ 	case PROP_NUMBER:
+@@ -360,11 +361,17 @@ set_property (GObject *object, guint prop_id,
+ 		break;
+ 	case PROP_APN:
+ 		g_free (priv->apn);
+-		priv->apn = g_strstrip (g_value_dup_string (value));
++		priv->apn = NULL;
++		tmp = g_value_dup_string (value);
++		if (tmp)
++			priv->apn = g_strstrip (tmp);
+ 		break;
+ 	case PROP_NETWORK_ID:
+ 		g_free (priv->network_id);
+-		priv->network_id = g_strstrip (g_value_dup_string (value));
++		priv->network_id = NULL;
++		tmp = g_value_dup_string (value);
++		if (tmp)
++			priv->network_id = g_strstrip (tmp);
+ 		break;
+ 	case PROP_NETWORK_TYPE:
+ 		priv->network_type = g_value_get_int (value);
+-- 
+1.9.3
+
+
+From 9461132a6c78d50c82826b8c5d4da5296acdcfd7 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Wed, 22 Sep 2010 13:43:23 -0500
+Subject: [PATCH 3/5] libnm-util: fix max APN length
+
+It's not 20, it's DNS domain name length.
+
+(cherry picked from commit a1731c60644432cdec94841a033340bfc88568ec)
+---
+ libnm-util/nm-setting-gsm.c     | 2 +-
+ libnm-util/tests/test-general.c | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/libnm-util/nm-setting-gsm.c b/libnm-util/nm-setting-gsm.c
+index 413e8a0..9f24265 100644
+--- a/libnm-util/nm-setting-gsm.c
++++ b/libnm-util/nm-setting-gsm.c
+@@ -235,7 +235,7 @@ verify (NMSetting *setting, GSList *all_settings, GError **error)
+ 		guint32 apn_len = strlen (priv->apn);
+ 		guint32 i;
+ 
+-		if (apn_len < 1 || apn_len > 20) {
++		if (apn_len < 1 || apn_len > 64) {
+ 			g_set_error (error,
+ 			             NM_SETTING_GSM_ERROR,
+ 			             NM_SETTING_GSM_ERROR_INVALID_PROPERTY,
+diff --git a/libnm-util/tests/test-general.c b/libnm-util/tests/test-general.c
+index 855ee08..e91e2b5 100644
+--- a/libnm-util/tests/test-general.c
++++ b/libnm-util/tests/test-general.c
+@@ -283,8 +283,8 @@ test_setting_gsm_apn_bad_chars (void)
+ 	ASSERT (nm_setting_verify (NM_SETTING (s_gsm), NULL, NULL) == FALSE,
+ 	        "gsm-apn-bad-chars", "unexpectedly valid GSM setting");
+ 
+-	/* 21-character long */
+-	g_object_set (s_gsm, NM_SETTING_GSM_APN, "abcdefghijklmnopqrstu", NULL);
++	/* 65-character long */
++	g_object_set (s_gsm, NM_SETTING_GSM_APN, "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkl1", NULL);
+ 	ASSERT (nm_setting_verify (NM_SETTING (s_gsm), NULL, NULL) == FALSE,
+ 	        "gsm-apn-bad-chars", "unexpectedly valid GSM setting");
+ }
+-- 
+1.9.3
+
+
+From 46b0ca08d8e09f6c12160c83bf234c97a344c519 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Tue, 17 May 2011 10:49:44 -0500
+Subject: [PATCH 4/5] libnm-util: allow _ as a valid character for GSM APNs
+
+The ETSI specs state that valid characters are only ASCII alphanumeric
+characters, but then state that APNs should generally follow DNS
+naming rules.  Well, that means a lot more characters are allowed,
+but modems don't like many of them.  So let's slowly allow more
+characters as people find ones that actually are used.  The restriction
+was originally put in place to disallow spaces, because they
+certainly aren't allowed APN characters and modems and the
+network puke when they see spaces.
+
+(cherry picked from commit 7b41be489c5ca702ea3e69add8650a33752eaa58)
+
+Conflicts:
+	libnm-util/tests/test-general.c
+---
+ libnm-util/nm-setting-gsm.c     | 22 ++++++++++++++++++++--
+ libnm-util/tests/test-general.c | 20 ++++++++++++++++++++
+ 2 files changed, 40 insertions(+), 2 deletions(-)
+
+diff --git a/libnm-util/nm-setting-gsm.c b/libnm-util/nm-setting-gsm.c
+index 9f24265..2153344 100644
+--- a/libnm-util/nm-setting-gsm.c
++++ b/libnm-util/nm-setting-gsm.c
+@@ -244,10 +244,28 @@ verify (NMSetting *setting, GSList *all_settings, GError **error)
+ 		}
+ 
+ 		/* APNs roughly follow the same rules as DNS domain names.  Allowed
+-		 * characters are a-z, 0-9, . and -.  GSM 03.60 Section 14.9.
++		 * characters are a-z, 0-9, . and -.  GSM 03.03 Section 9.1 states:
++		 *
++		 *   The syntax of the APN shall follow the Name Syntax defined in
++		 *   RFC 2181 [14] and RFC 1035 [15]. The APN consists of one or
++		 *   more labels. Each label is coded as one octet length field
++		 *   followed by that number of octets coded as 8 bit ASCII characters.
++		 *   Following RFC 1035 [15] the labels should consist only of the
++		 *   alphabetic characters (A-Z and a-z), digits (0-9) and the
++		 *   dash (-). The case of alphabetic characters is not significant.
++		 *
++		 * A dot (.) is commonly used to separate parts of the APN, and
++		 * apparently the underscore (_) is used as well.  RFC 2181 indicates
++		 * that no restrictions of any kind are placed on DNS labels, and thus
++		 * it would appear that none are placed on APNs either, but many modems
++		 * and networks will fail to accept APNs that include odd characters
++		 * like space ( ) and such.
+ 		 */
+ 		for (i = 0; i < apn_len; i++) {
+-			if (!isalnum (priv->apn[i]) && (priv->apn[i] != '.') && (priv->apn[i] != '-')) {
++			if (   !isalnum (priv->apn[i])
++			    && (priv->apn[i] != '.')
++			    && (priv->apn[i] != '_')
++			    && (priv->apn[i] != '-')) {
+ 				g_set_error (error,
+ 				             NM_SETTING_GSM_ERROR,
+ 				             NM_SETTING_GSM_ERROR_INVALID_PROPERTY,
+diff --git a/libnm-util/tests/test-general.c b/libnm-util/tests/test-general.c
+index e91e2b5..2ecafdc 100644
+--- a/libnm-util/tests/test-general.c
++++ b/libnm-util/tests/test-general.c
+@@ -289,6 +289,25 @@ test_setting_gsm_apn_bad_chars (void)
+ 	        "gsm-apn-bad-chars", "unexpectedly valid GSM setting");
+ }
+ 
++static void
++test_setting_gsm_apn_underscore (void)
++{
++	NMSettingGsm *s_gsm;
++	GError *error = NULL;
++	gboolean success;
++
++	s_gsm = (NMSettingGsm *) nm_setting_gsm_new ();
++	g_assert (s_gsm);
++
++	g_object_set (s_gsm, NM_SETTING_GSM_NUMBER, "*99#", NULL);
++
++	/* 65-character long */
++	g_object_set (s_gsm, NM_SETTING_GSM_APN, "foobar_baz", NULL);
++	success = nm_setting_verify (NM_SETTING (s_gsm), NULL, &error);
++	g_assert_no_error (error);
++	g_assert (success == TRUE);
++}
++
+ int main (int argc, char **argv)
+ {
+ 	GError *error = NULL;
+@@ -306,6 +325,7 @@ int main (int argc, char **argv)
+ 	test_setting_ip6_config_old_address_array ();
+ 	test_setting_gsm_apn_spaces ();
+ 	test_setting_gsm_apn_bad_chars ();
++	test_setting_gsm_apn_underscore ();
+ 
+ 	base = g_path_get_basename (argv[0]);
+ 	fprintf (stdout, "%s: SUCCESS\n", base);
+-- 
+1.9.3
+
+
+From 1cf0484f3bfabb20355ec920af7146669a980057 Mon Sep 17 00:00:00 2001
+From: Dan Winship <danw@gnome.org>
+Date: Tue, 25 Sep 2012 10:44:23 -0400
+Subject: [PATCH 5/5] all: Don't use ctype.h macros
+
+The ctype macros (eg, isalnum(), tolower()) are locale-dependent. Use
+glib's ASCII-only versions instead.
+
+Also, replace isascii() with g_ascii_isprint(), since isascii()
+accepts control characters, which isn't what the code wanted in any of
+the places where it was using it.
+
+(partially cherry picked from commit 6878d20ac430207b49f46c6fafe705747c02e199)
+---
+ libnm-util/nm-setting-gsm.c | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/libnm-util/nm-setting-gsm.c b/libnm-util/nm-setting-gsm.c
+index 2153344..cdd9f58 100644
+--- a/libnm-util/nm-setting-gsm.c
++++ b/libnm-util/nm-setting-gsm.c
+@@ -24,7 +24,6 @@
+  */
+ 
+ #include <string.h>
+-#include <ctype.h>
+ #include "nm-setting-gsm.h"
+ #include "nm-setting-serial.h"
+ #include "nm-utils.h"
+@@ -262,7 +261,7 @@ verify (NMSetting *setting, GSList *all_settings, GError **error)
+ 		 * like space ( ) and such.
+ 		 */
+ 		for (i = 0; i < apn_len; i++) {
+-			if (   !isalnum (priv->apn[i])
++			if (   !g_ascii_isalnum (priv->apn[i])
+ 			    && (priv->apn[i] != '.')
+ 			    && (priv->apn[i] != '_')
+ 			    && (priv->apn[i] != '-')) {
+@@ -305,7 +304,7 @@ verify (NMSetting *setting, GSList *all_settings, GError **error)
+ 		}
+ 
+ 		for (i = 0; i < nid_len; i++) {
+-			if (!isdigit (priv->network_id[i])) {
++			if (!g_ascii_isdigit (priv->network_id[i])) {
+ 				g_set_error (error,
+ 				             NM_SETTING_GSM_ERROR,
+ 				             NM_SETTING_GSM_ERROR_INVALID_PROPERTY,
+-- 
+1.9.3
+

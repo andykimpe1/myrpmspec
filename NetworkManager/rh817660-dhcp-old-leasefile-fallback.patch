@@ -1,0 +1,79 @@
+diff -up NetworkManager-0.8.1/src/dhcp-manager/nm-dhcp-dhclient.c.foo NetworkManager-0.8.1/src/dhcp-manager/nm-dhcp-dhclient.c
+--- NetworkManager-0.8.1/src/dhcp-manager/nm-dhcp-dhclient.c.foo	2012-04-30 15:47:23.534954153 -0500
++++ NetworkManager-0.8.1/src/dhcp-manager/nm-dhcp-dhclient.c	2012-04-30 15:50:19.023688757 -0500
+@@ -93,6 +93,16 @@ get_leasefile_for_iface (const char * if
+ 	                        iface);
+ }
+ 
++static char *
++get_fallback_leasefile_for_iface (const char *iface, gboolean ipv6)
++{
++	return g_strdup_printf ("%s/dhclient%s-%s.lease",
++	                        NM_DHCLIENT_LEASE_DIR,
++	                        ipv6 ? "6" : "",
++	                        iface);
++}
++
++
+ static void
+ add_lease_option (GHashTable *hash, char *line)
+ {
+@@ -146,8 +156,17 @@ nm_dhcp_dhclient_get_lease_config (const
+ 	if (!leasefile)
+ 		return NULL;
+ 
+-	if (!g_file_test (leasefile, G_FILE_TEST_EXISTS))
+-		goto out;
++	if (!g_file_test (leasefile, G_FILE_TEST_EXISTS)) {
++		g_free (leasefile);
++
++		/* The initrd may not be updated to put the UUID in the leasefile name */
++		leasefile = get_fallback_leasefile_for_iface (iface, FALSE);
++		if (!leasefile)
++			return NULL;
++
++		if (!g_file_test (leasefile, G_FILE_TEST_EXISTS))
++			goto out;
++	}
+ 
+ 	if (!g_file_get_contents (leasefile, &contents, NULL, NULL))
+ 		goto out;
+@@ -609,6 +628,7 @@ dhclient_start (NMDHCPClient *client,
+ 	char *binary_name, *cmd_str;
+ 	gboolean ipv6;
+ 	guint log_domain;
++	char *fallback_leasefile = NULL, *contents = NULL;
+ 
+ 	g_return_val_if_fail (priv->pid_file == NULL, -1);
+ 	g_return_val_if_fail (ip_opt != NULL, -1);
+@@ -643,6 +663,30 @@ dhclient_start (NMDHCPClient *client,
+ 		return -1;
+ 	}
+ 
++	if (!g_file_test (priv->lease_file, G_FILE_TEST_EXISTS)) {
++		/* The initrd may not be updated to put the UUID in the leasefile name */
++		fallback_leasefile = get_fallback_leasefile_for_iface (iface, ipv6);
++		if (g_file_test (fallback_leasefile, G_FILE_TEST_EXISTS)) {
++			/* Copy the fallback leasefile to the actual leasefile location */
++			if (g_file_get_contents (fallback_leasefile, &contents, NULL, &error)) {
++				if (!g_file_set_contents (priv->lease_file, contents, -1, &error)) {
++					nm_log_warn (log_domain, "(%s): failed to copy leasefile to %s: (%d) %s",
++					             iface, priv->lease_file,
++					             error ? error->code : -1,
++					             error && error->message ? error->message : "(unknown)");
++				}
++				g_free (contents);
++			} else {
++				nm_log_warn (log_domain, "(%s): failed to get contents of leasefile %s: (%d) %s",
++				             iface, fallback_leasefile,
++				             error ? error->code : -1,
++				             error && error->message ? error->message : "(unknown)");
++			}
++			g_clear_error (&error);
++		}
++		g_free (fallback_leasefile);
++	}
++
+ 	argv = g_ptr_array_new ();
+ 	g_ptr_array_add (argv, (gpointer) priv->path);
+ 

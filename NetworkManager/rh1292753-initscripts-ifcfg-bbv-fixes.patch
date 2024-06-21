@@ -1,0 +1,134 @@
+From 2781dcb969bc404dfc024addd1ad41b4f1817e82 Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Fri, 18 Dec 2015 10:13:18 +0100
+Subject: [PATCH 1/2] ifcfg-rh: reload connection during GetIfcfgDetails() to
+ fix potential race
+
+https://bugzilla.redhat.com/show_bug.cgi?id=1224740
+---
+ system-settings/plugins/ifcfg-rh/plugin.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/system-settings/plugins/ifcfg-rh/plugin.c b/system-settings/plugins/ifcfg-rh/plugin.c
+index d8d1be7..0258f5e 100644
+--- a/system-settings/plugins/ifcfg-rh/plugin.c
++++ b/system-settings/plugins/ifcfg-rh/plugin.c
+@@ -615,6 +615,22 @@ impl_ifcfgrh_get_ifcfg_details (SCPluginIfcfg *plugin,
+ 	}
+ 
+ 	connection = g_hash_table_lookup (priv->connections, in_ifcfg);
++
++	if (   !connection
++	    && g_file_test (in_ifcfg, G_FILE_TEST_EXISTS)) {
++		/* When an external application creates ifcfg files and calls ifup, there
++		 * is a race between initscripts asking GetIfcfgDetails and loading the
++		 * connection. Avoid that, by possibly reloading the connection early.
++		 *
++		 * On master this is not neccessary becase:
++		 *   - file-monitoring is disabled by default (thus, a GetIfcfgDetails call should
++		 *     not load the file).
++		 *   - initscripts call LoadConnections before GetIfcfgDetails thus solving
++		 *     this race. */
++		handle_connection_remove_or_new (plugin, in_ifcfg, NULL, FALSE, TRUE);
++		connection = g_hash_table_lookup (priv->connections, in_ifcfg);
++	}
++
+ 	if (!connection || nm_ifcfg_connection_get_unmanaged_spec (connection)) {
+ 		g_set_error (error,
+ 		             NM_SETTINGS_INTERFACE_ERROR,
+-- 
+2.5.0
+
+
+From 901339537472609b2d43a3267fbc888a9112b39a Mon Sep 17 00:00:00 2001
+From: Thomas Haller <thaller@redhat.com>
+Date: Fri, 18 Dec 2015 10:29:02 +0100
+Subject: [PATCH 2/2] ifcfg-rh: fail GetIfcfgDetails for unhandled
+ bridge/bond/vlan connections
+
+If bridge/bond/vlan handling is disabled, GetIfcfgDetails should not
+claim to handle the connection. Instead it should fail so that initscripts
+handles the connection itself.
+
+https://bugzilla.redhat.com/show_bug.cgi?id=1224740
+---
+ src/nm-manager.c                          | 12 +++++++++++-
+ src/nm-manager.h                          |  2 ++
+ system-settings/plugins/ifcfg-rh/plugin.c | 13 +++++++++++++
+ 3 files changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/src/nm-manager.c b/src/nm-manager.c
+index 701b6ee..3986eac 100644
+--- a/src/nm-manager.c
++++ b/src/nm-manager.c
+@@ -5293,6 +5293,17 @@ out:
+ 	return DBUS_HANDLER_RESULT_HANDLED;
+ }
+ 
++static NMManager *singleton = NULL;
++
++gboolean
++nm_manager_get_bbv_enabled (void)
++{
++	if (!singleton)
++		return FALSE;
++
++	return NM_MANAGER_GET_PRIVATE (singleton)->bbv_enabled;
++}
++
+ NMManager *
+ nm_manager_get (const char *config_file,
+                 const char *plugins,
+@@ -5302,7 +5313,6 @@ nm_manager_get (const char *config_file,
+                 gboolean initial_wwan_enabled,
+                 GError **error)
+ {
+-	static NMManager *singleton = NULL;
+ 	NMManagerPrivate *priv;
+ 	DBusGConnection *bus;
+ 	DBusConnection *dbus_connection;
+diff --git a/src/nm-manager.h b/src/nm-manager.h
+index 0f6b714..f9545c6 100644
+--- a/src/nm-manager.h
++++ b/src/nm-manager.h
+@@ -126,4 +126,6 @@ NMConnection * nm_manager_get_connection_by_object_path (NMManager *manager,
+ GPtrArray * nm_manager_get_active_connections_by_connection (NMManager *manager,
+                                                              NMConnection *connection);
+ 
++gboolean nm_manager_get_bbv_enabled (void);
++
+ #endif /* NM_MANAGER_H */
+diff --git a/system-settings/plugins/ifcfg-rh/plugin.c b/system-settings/plugins/ifcfg-rh/plugin.c
+index 0258f5e..90e4266 100644
+--- a/system-settings/plugins/ifcfg-rh/plugin.c
++++ b/system-settings/plugins/ifcfg-rh/plugin.c
+@@ -53,6 +53,8 @@
+ #define DBUS_SERVICE_NAME "com.redhat.ifcfgrh1"
+ #define DBUS_OBJECT_PATH "/com/redhat/ifcfgrh1"
+ 
++gboolean nm_manager_get_bbv_enabled (void);
++
+ static gboolean impl_ifcfgrh_get_ifcfg_details (SCPluginIfcfg *plugin,
+                                                 const char *in_ifcfg,
+                                                 const char **out_uuid,
+@@ -666,6 +668,17 @@ impl_ifcfgrh_get_ifcfg_details (SCPluginIfcfg *plugin,
+ 		return FALSE;
+ 	}
+ 
++	if (   (   nm_connection_is_type ((NMConnection *) connection, NM_SETTING_VLAN_SETTING_NAME)
++	        || nm_connection_is_type ((NMConnection *) connection, NM_SETTING_BRIDGE_SETTING_NAME)
++	        || nm_connection_is_type ((NMConnection *) connection, NM_SETTING_BOND_SETTING_NAME))
++	    && !nm_manager_get_bbv_enabled ()) {
++		g_set_error (error,
++		             NM_SETTINGS_INTERFACE_ERROR,
++		             NM_SETTINGS_INTERFACE_ERROR_INTERNAL_ERROR,
++		             "Connection exists but NM_BOND_BRIDGE_VLAN_ENABLED not set");
++		return FALSE;
++	}
++
+ 	*out_uuid = g_strdup (uuid);
+ 	*out_path = g_strdup (path);
+ 
+-- 
+2.5.0
+

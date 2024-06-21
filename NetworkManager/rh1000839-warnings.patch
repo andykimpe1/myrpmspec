@@ -1,0 +1,78 @@
+From ef302981b410c6546c2a93eae694d0ef6ee95f81 Mon Sep 17 00:00:00 2001
+From: Dan Williams <dcbw@redhat.com>
+Date: Fri, 5 Apr 2013 13:06:22 -0500
+Subject: [PATCH] core: silence warning about failure to read permanent MAC
+ address (rh #907912)
+
+Not all drivers support reporting their permanent MAC address, and some
+don't have one at all (no EEPROM) so it's pointless to warn about it.
+---
+ src/nm-device-ethernet.c | 2 +-
+ src/nm-device-wifi.c     | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+From c1d3d3f2e905c96ed9b811d46d972f8b097f6cf8 Mon Sep 17 00:00:00 2001
+From: Colin Walters <walters@verbum.org>
+Date: Wed, 19 Jun 2013 14:56:26 -0400
+Subject: [PATCH] device: queuing two transitions to the same state is not an
+ error
+
+Just ignore this, since it happens in the current code and is
+harmless.  While we're here, improve the warning in the case where it
+does occur to say whiich state we're overwriting.  This should help
+debug any future cases.
+---
+ src/devices/nm-device.c | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff -up NetworkManager-0.8.1/src/nm-device-ethernet.c.warnings NetworkManager-0.8.1/src/nm-device-ethernet.c
+--- NetworkManager-0.8.1/src/nm-device-ethernet.c.warnings	2013-09-26 10:44:56.308129622 -0400
++++ NetworkManager-0.8.1/src/nm-device-ethernet.c	2013-09-26 10:45:19.718130891 -0400
+@@ -521,7 +521,7 @@ real_update_permanent_hw_address (NMDevi
+ 	if ((ret < 0) || !nm_ethernet_address_is_valid ((struct ether_addr *) epaddr->data)) {
+ 		guint8 *current_addr;
+ 
+-		nm_log_err (LOGD_HW | LOGD_ETHER, "(%s): unable to read permanent MAC address (error %d)",
++		nm_log_dbg (LOGD_HW | LOGD_ETHER, "(%s): unable to read permanent MAC address (error %d)",
+ 		            nm_device_get_iface (dev), errno);
+ 		/* Fall back to current address */
+ 		current_addr = nm_device_wired_get_hwaddr (NM_DEVICE_WIRED (self));
+diff -up NetworkManager-0.8.1/src/nm-device-wifi.c.warnings NetworkManager-0.8.1/src/nm-device-wifi.c
+--- NetworkManager-0.8.1/src/nm-device-wifi.c.warnings	2013-09-26 10:44:56.310129622 -0400
++++ NetworkManager-0.8.1/src/nm-device-wifi.c	2013-09-26 10:45:32.396131578 -0400
+@@ -3152,7 +3152,7 @@ real_update_permanent_hw_address (NMDevi
+ 	errno = 0;
+ 	ret = ioctl (fd, SIOCETHTOOL, &req);
+ 	if ((ret < 0) || !nm_ethernet_address_is_valid ((struct ether_addr *) epaddr->data)) {
+-		nm_log_err (LOGD_HW | LOGD_ETHER, "(%s): unable to read permanent MAC address (error %d)",
++		nm_log_dbg (LOGD_HW | LOGD_ETHER, "(%s): unable to read permanent MAC address (error %d)",
+ 		            nm_device_get_iface (dev), errno);
+ 		/* Fall back to current address */
+ 		memcpy (epaddr->data, &priv->hw_addr, ETH_ALEN);
+diff -up NetworkManager-0.8.1/src/nm-device.c.warnings NetworkManager-0.8.1/src/nm-device.c
+--- NetworkManager-0.8.1/src/nm-device.c.warnings	2013-09-26 10:44:56.312129622 -0400
++++ NetworkManager-0.8.1/src/nm-device.c	2013-09-26 10:49:08.740143305 -0400
+@@ -4444,7 +4444,11 @@ nm_device_queue_state (NMDevice *self,
+ 
+ 	/* We should only ever have one delayed state transition at a time */
+ 	if (priv->queued_state.id) {
+-		g_warn_if_fail (priv->queued_state.id == 0);
++		if (priv->queued_state.state == state)
++			return;
++		nm_log_warn (LOGD_DEVICE, "(%s): overwriting previously queued state change to %d",
++		             nm_device_get_iface (self),
++		             priv->queued_state.state);
+ 		queued_state_clear (self);
+ 	}
+ 
+@@ -4452,8 +4456,8 @@ nm_device_queue_state (NMDevice *self,
+ 	priv->queued_state.reason = reason;
+ 	priv->queued_state.id = g_idle_add (queued_set_state, self);
+ 
+-	nm_log_dbg (LOGD_DEVICE, "(%s): queued state change to (id %d)",
+-	            nm_device_get_iface (self), priv->queued_state.id);
++	nm_log_dbg (LOGD_DEVICE, "(%s): queued state change to %d (id %d)",
++	            nm_device_get_iface (self), priv->queued_state.state, priv->queued_state.id);
+ }
+ 
+ NMDeviceState

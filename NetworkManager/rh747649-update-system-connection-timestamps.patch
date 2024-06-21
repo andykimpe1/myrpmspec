@@ -1,0 +1,494 @@
+This is a condensed patch of the following commits:
+
+commit 5e54122f4c243a4df64c9d3804d0a08f5a1e3a8e
+Author: Jiří Klimeš <jklimes@redhat.com>
+Date:   Tue Oct 19 11:10:17 2010 +0200
+
+    core: update timestamp in active system connections every 5 mins (bgo #583756)
+    
+    This patch updates timestamps in system connections. The update occurs on
+    connection activation and then periodically every 5 mins while the connection
+    is active. It only works for plugins having write support and for writable
+    connections (not read-only).
+
+commit 5ba3122cdcbfe7c56f3f196bab1e290290744ed2
+Author: Martin Pitt <martin.pitt@ubuntu.com>
+Date:   Wed Oct 6 17:14:54 2010 -0500
+
+    system-settings: add timestamp to default auto wired connections (bgo #583756)
+
+commit b8ff25eb43c9fa5eb534495a501c73169649d0a6
+Author: Jiří Klimeš <jklimes@redhat.com>
+Date:   Tue Nov 23 19:06:58 2010 +0100
+
+    core: correct TIMESTAMP type; fixes potential crash when time() is 32bit
+    
+    The Crash appeared on some platforms in glib while processing variable
+    arguments.
+
+commit 7d707bd2138561fc7b435719c0906b025f2075e2
+Author: Jiří Klimeš <jklimes@redhat.com>
+Date:   Thu Feb 24 15:44:31 2011 +0100
+
+    core/libnm-glib: don't touch files in /etc when updating timestamps
+    
+    NM updates timestamp for active connections every 5 min. We don't
+    want to touch files in /etc due to this. This commit solves that
+    by not updating timestamp in the connection's property. Rather it
+    stores the timestamp as data associated with connection object. All
+    timestamps are also kept externally in /var/lib/NetworkManager/timestamps
+    file.
+    When settings are requested via D-Bus GetSettings(), the proper
+    timestamp is put in the setting before they are returned.
+
+commit 3194cb907dbfc6f4de2f4518decb0177ee7eac0e
+Author: Jiří Klimeš <jklimes@redhat.com>
+Date:   Wed Mar 2 09:22:50 2011 +0100
+
+    core: fix sorting connections after timestamps handling change
+    
+    7d707bd2138561fc7b435719c0906b025f2075e2 changes dealing with timestamps
+    for system connections. But it missed to update connections sorting, which
+    is necessary for proper auto activation.
+
+commit aee725fe9f9fc956bd5a75a37ef1c7f2ca168702
+Author: Dan Williams <dcbw@redhat.com>
+Date:   Thu Mar 3 01:32:26 2011 -0600
+
+    core: fix some code that required glib 2.26
+    
+    Stable branch must be compatible with glib 2.18 or later.  Thus
+    we can't use g_key_file_set_uint64().
+
+commit e173df7e3a29a17a7158c9c39117c1fcd9c6ed85
+Author: Dan Williams <dcbw@redhat.com>
+Date:   Thu Mar 3 01:19:09 2011 -0600
+
+    settings: fix some code that required glib 2.26
+    
+    Stable branch must be compatible with glib 2.18 or later.  Thus
+    we can't use g_key_file_get_uint64().
+
+===============================================================================
+
+diff --git a/libnm-glib/nm-exported-connection.c b/libnm-glib/nm-exported-connection.c
+index 3a8e51c..b0e974c 100644
+--- a/libnm-glib/nm-exported-connection.c
++++ b/libnm-glib/nm-exported-connection.c
+@@ -17,7 +17,7 @@
+  * Boston, MA 02110-1301 USA.
+  *
+  * (C) Copyright 2008 Novell, Inc.
+- * (C) Copyright 2008 - 2009 Red Hat, Inc.
++ * (C) Copyright 2008 - 2011 Red Hat, Inc.
+  */
+ 
+ #include <NetworkManager.h>
+@@ -64,11 +64,16 @@ typedef struct {
+ 
+ /**************************************************************/
+ 
++/* Has to be the same as NM_SYSCONFIG_SETTINGS_TIMESTAMP_TAG in nm-sysconfig-settings.h */
++#define CONNECTION_TIMESTAMP_TAG "timestamp-tag"
++
+ static GHashTable *
+ real_get_settings (NMExportedConnection *self, GError **error)
+ {
+ 	NMConnection *no_secrets;
+ 	GHashTable *settings;
++	NMSettingConnection *s_con;
++	guint64 *timestamp;
+ 
+ 	/* Secrets should *never* be returned by the GetSettings method, they
+ 	 * get returned by the GetSecrets method which can be better
+@@ -77,6 +82,20 @@ real_get_settings (NMExportedConnection *self, GError **error)
+ 	no_secrets = nm_connection_duplicate (NM_CONNECTION (self));
+ 	g_assert (no_secrets);
+ 	nm_connection_clear_secrets (no_secrets);
++
++	/* Timestamp is not updated internally in connection's 'timestamp'
++	 * property, because it would force updating the connection and in turn
++	 * writing to /etc periodically, which we want to avoid. Rather real
++	 * timestamps are kept track of in data associated with GObject.
++	 * Here we substitute connection's timestamp with the real one.
++	 */
++	timestamp = (guint64 *) g_object_get_data (G_OBJECT (self), CONNECTION_TIMESTAMP_TAG);
++	if (timestamp) {
++		s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (NM_CONNECTION (no_secrets), NM_TYPE_SETTING_CONNECTION));
++		g_assert (s_con);
++		g_object_set (s_con, NM_SETTING_CONNECTION_TIMESTAMP, *timestamp, NULL);
++	}
++
+ 	settings = nm_connection_to_hash (no_secrets);
+ 	g_assert (settings);
+ 	g_object_unref (no_secrets);
+diff --git a/src/nm-manager.c b/src/nm-manager.c
+index 487232b..521d540 100644
+--- a/src/nm-manager.c
++++ b/src/nm-manager.c
+@@ -16,7 +16,7 @@
+  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+  *
+  * Copyright (C) 2007 - 2009 Novell, Inc.
+- * Copyright (C) 2007 - 2010 Red Hat, Inc.
++ * Copyright (C) 2007 - 2011 Red Hat, Inc.
+  */
+ 
+ #include <netinet/ether.h>
+@@ -230,6 +230,8 @@ typedef struct {
+ 	guint fw_monitor_id;
+ 	guint fw_changed_id;
+ 
++	guint timestamp_update_id;
++
+ 	gboolean disposed;
+ } NMManagerPrivate;
+ 
+@@ -447,6 +449,66 @@ nm_manager_update_state (NMManager *manager)
+ }
+ 
+ static void
++update_active_connection_timestamp (NMManager *manager, NMDevice *device)
++{
++	NMActRequest *req;
++	NMConnection *connection;
++	NMSettingConnection *s_con;
++	NMManagerPrivate *priv;
++	const char *connection_uuid;
++	guint64 timestamp;
++	guint64 *ts_ptr;
++	GKeyFile *timestamps_file;
++	char *data;
++	gsize len;
++	GError *error = NULL;
++
++	g_return_if_fail (NM_IS_DEVICE (device));
++
++	priv = NM_MANAGER_GET_PRIVATE (manager);
++	req = nm_device_get_act_request (device);
++	if (!req)
++		return;
++
++	connection = nm_act_request_get_connection (req);
++	g_assert (connection);
++
++	if (nm_connection_get_scope (connection) != NM_CONNECTION_SCOPE_SYSTEM)
++		return;
++
++	/* Update timestamp in connection's object data */
++	timestamp = (guint64) time (NULL);
++	ts_ptr = g_new (guint64, 1);
++	*ts_ptr = timestamp;
++	g_object_set_data_full (G_OBJECT (connection), NM_SYSCONFIG_SETTINGS_TIMESTAMP_TAG, ts_ptr, g_free);
++
++	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (NM_CONNECTION (connection), NM_TYPE_SETTING_CONNECTION));
++	g_assert (s_con);
++	connection_uuid = nm_setting_connection_get_uuid (s_con);
++
++	/* Save timestamp to timestamps database file */
++	timestamps_file = g_key_file_new ();
++	if (!g_key_file_load_from_file (timestamps_file, NM_SYSCONFIG_SETTINGS_TIMESTAMPS_FILE, G_KEY_FILE_KEEP_COMMENTS, &error)) {
++		if (!(error->domain == G_FILE_ERROR && error->code == G_FILE_ERROR_NOENT))
++			nm_log_warn (LOGD_SYS_SET, "error parsing timestamps file '%s': %s", NM_SYSCONFIG_SETTINGS_TIMESTAMPS_FILE, error->message);
++		g_clear_error (&error);
++	}
++
++	g_key_file_set_uint64 (timestamps_file, "timestamps", connection_uuid, timestamp);
++
++	data = g_key_file_to_data (timestamps_file, &len, &error);
++	if (data) {
++		g_file_set_contents (NM_SYSCONFIG_SETTINGS_TIMESTAMPS_FILE, data, len, &error);
++		g_free (data);
++	}
++	if (error) {
++		nm_log_warn (LOGD_SYS_SET, "error saving timestamp: %s", error->message);
++		g_error_free (error);
++	}
++	g_key_file_free (timestamps_file);
++}
++
++static void
+ manager_device_state_changed (NMDevice *device,
+                               NMDeviceState new_state,
+                               NMDeviceState old_state,
+@@ -468,6 +530,9 @@ manager_device_state_changed (NMDevice *device,
+ 	}
+ 
+ 	nm_manager_update_state (manager);
++
++	if (new_state == NM_DEVICE_STATE_ACTIVATED)
++		update_active_connection_timestamp (manager, device);
+ }
+ 
+ /* Removes a device from a device list; returns the start of the new device list */
+@@ -3815,6 +3880,23 @@ nm_manager_auto_user_connections_allowed (NMManager *self)
+ 	       && priv->user_con_perm == NM_AUTH_CALL_RESULT_YES;
+ }
+ 
++static guint64
++get_connection_timestamp (NMConnection *connection)
++{
++	if (nm_connection_get_scope (connection) == NM_CONNECTION_SCOPE_SYSTEM) {
++		guint64 *ts_p;
++
++		ts_p = (guint64 *) g_object_get_data (G_OBJECT (connection), NM_SYSCONFIG_SETTINGS_TIMESTAMP_TAG);
++		return ts_p != NULL ? *ts_p : 0;
++	} else {
++		NMSettingConnection *s_con;
++
++		s_con = (NMSettingConnection *) nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION);
++		g_assert (s_con);
++		return nm_setting_connection_get_timestamp (s_con);
++	}
++}
++
+ static int
+ connection_sort (gconstpointer pa, gconstpointer pb)
+ {
+@@ -3822,6 +3904,7 @@ connection_sort (gconstpointer pa, gconstpointer pb)
+ 	NMSettingConnection *con_a;
+ 	NMConnection *b = NM_CONNECTION (pb);
+ 	NMSettingConnection *con_b;
++	guint64 ts_a, ts_b;
+ 
+ 	con_a = (NMSettingConnection *) nm_connection_get_setting (a, NM_TYPE_SETTING_CONNECTION);
+ 	g_assert (con_a);
+@@ -3834,10 +3917,13 @@ connection_sort (gconstpointer pa, gconstpointer pb)
+ 		return 1;
+ 	}
+ 
+-	if (nm_setting_connection_get_timestamp (con_a) > nm_setting_connection_get_timestamp (con_b))
++	ts_a = get_connection_timestamp (a);
++	ts_b = get_connection_timestamp (b);
++	if (ts_a > ts_b)
+ 		return -1;
+-	else if (nm_setting_connection_get_timestamp (con_a) == nm_setting_connection_get_timestamp (con_b))
++	else if (ts_a == ts_b)
+ 		return 0;
++
+ 	return 1;
+ }
+ 
+@@ -4360,6 +4446,11 @@ dispose (GObject *object)
+ 		g_object_unref (priv->fw_monitor);
+ 	}
+ 
++	if (priv->timestamp_update_id) {
++		g_source_remove (priv->timestamp_update_id);
++		priv->timestamp_update_id = 0;
++	}
++
+ 	G_OBJECT_CLASS (nm_manager_parent_class)->dispose (object);
+ }
+ 
+@@ -4469,6 +4560,28 @@ get_property (GObject *object, guint prop_id,
+ 	}
+ }
+ 
++static gboolean
++periodic_update_active_connection_timestamps (gpointer user_data)
++{
++	NMManager *manager = NM_MANAGER (user_data);
++	GPtrArray *active;
++	int i;
++
++	active = get_active_connections (manager, NULL);
++
++	for (i = 0; i < active->len; i++) {
++		const char *active_path = g_ptr_array_index (active, i);
++		NMActRequest *req;
++		NMDevice *device = NULL;
++
++		req = nm_manager_get_act_request_by_path (manager, active_path, &device);
++		if (device && nm_device_get_state (device) == NM_DEVICE_STATE_ACTIVATED)
++			update_active_connection_timestamp (manager, device);
++	}
++
++	return TRUE;
++}
++
+ static void
+ nm_manager_init (NMManager *manager)
+ {
+@@ -4584,6 +4697,9 @@ nm_manager_init (NMManager *manager)
+ 		nm_log_warn (LOGD_CORE, "failed to monitor kernel firmware directory '%s'.",
+ 		             KERNEL_FIRMWARE_DIR);
+ 	}
++
++	/* Update timestamps in active connections */
++	priv->timestamp_update_id = g_timeout_add_seconds (300, (GSourceFunc) periodic_update_active_connection_timestamps, manager);
+ }
+ 
+ static void
+diff --git a/src/system-settings/nm-default-wired-connection.c b/src/system-settings/nm-default-wired-connection.c
+index 54e00d6..0d19dea 100644
+--- a/src/system-settings/nm-default-wired-connection.c
++++ b/src/system-settings/nm-default-wired-connection.c
+@@ -163,6 +163,7 @@ constructor (GType type,
+ 		      NM_SETTING_CONNECTION_AUTOCONNECT, TRUE,
+ 		      NM_SETTING_CONNECTION_UUID, uuid,
+ 		      NM_SETTING_CONNECTION_READ_ONLY, priv->read_only,
++		      NM_SETTING_CONNECTION_TIMESTAMP, (guint64) time (NULL),
+ 		      NULL);
+ 
+ 	g_free (id);
+diff --git a/src/system-settings/nm-sysconfig-settings.c b/src/system-settings/nm-sysconfig-settings.c
+index 4bcfb04..f01c451 100644
+--- a/src/system-settings/nm-sysconfig-settings.c
++++ b/src/system-settings/nm-sysconfig-settings.c
+@@ -19,7 +19,7 @@
+  * with this program; if not, write to the Free Software Foundation, Inc.,
+  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+  *
+- * (C) Copyright 2007 - 2010 Red Hat, Inc.
++ * (C) Copyright 2007 - 2011 Red Hat, Inc.
+  * (C) Copyright 2008 Novell, Inc.
+  */
+ 
+@@ -479,8 +479,35 @@ connection_removed (NMSettingsConnectionInterface *connection,
+                     gpointer user_data)
+ {
+ 	NMSysconfigSettingsPrivate *priv = NM_SYSCONFIG_SETTINGS_GET_PRIVATE (user_data);
++	NMSettingConnection *s_con;
++	GKeyFile *timestamps_file;
++	const char *connection_uuid;
++	char *data;
++	gsize len;
++	GError *error = NULL;
+ 
++	/* Remove connection from the table */
+ 	g_hash_table_remove (priv->connections, connection);
++
++	/* Remove timestamp from timestamps database file */
++	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (NM_CONNECTION (connection), NM_TYPE_SETTING_CONNECTION));
++	g_assert (s_con);
++	connection_uuid = nm_setting_connection_get_uuid (s_con);
++
++	timestamps_file = g_key_file_new ();
++	if (g_key_file_load_from_file (timestamps_file, NM_SYSCONFIG_SETTINGS_TIMESTAMPS_FILE, G_KEY_FILE_KEEP_COMMENTS, NULL)) {
++		g_key_file_remove_key (timestamps_file, "timestamps", connection_uuid, NULL);
++		data = g_key_file_to_data (timestamps_file, &len, &error);
++		if (data) {
++			g_file_set_contents (NM_SYSCONFIG_SETTINGS_TIMESTAMPS_FILE, data, len, &error);
++			g_free (data);
++		}
++		if (error) {
++			nm_log_warn (LOGD_SYS_SET, "error writing timestamps file '%s': %s", NM_SYSCONFIG_SETTINGS_TIMESTAMPS_FILE, error->message);
++			g_error_free (error);
++		}
++	}
++	g_key_file_free (timestamps_file);
+ }
+ 
+ static void
+@@ -490,6 +517,12 @@ claim_connection (NMSysconfigSettings *self,
+ {
+ 	NMSysconfigSettingsPrivate *priv = NM_SYSCONFIG_SETTINGS_GET_PRIVATE (self);
+ 
++	NMSettingConnection *s_con;
++	const char *connection_uuid;
++	guint64 timestamp;
++	GKeyFile *timestamps_file;
++	GError *err = NULL;
++
+ 	g_return_if_fail (NM_IS_SYSCONFIG_SETTINGS (self));
+ 	g_return_if_fail (NM_IS_SETTINGS_CONNECTION_INTERFACE (connection));
+ 
+@@ -497,6 +530,28 @@ claim_connection (NMSysconfigSettings *self,
+ 		/* A plugin is lying to us. */
+ 		return;
+ 
++	/* Read timestamp from database file and store it into connection's object data */
++	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (NM_CONNECTION (connection), NM_TYPE_SETTING_CONNECTION));
++	g_assert (s_con);
++	connection_uuid = nm_setting_connection_get_uuid (s_con);
++
++	timestamps_file = g_key_file_new ();
++	g_key_file_load_from_file (timestamps_file, NM_SYSCONFIG_SETTINGS_TIMESTAMPS_FILE, G_KEY_FILE_KEEP_COMMENTS, NULL);
++	timestamp = g_key_file_get_uint64 (timestamps_file, "timestamps", connection_uuid, &err);
++
++	/* Update connection's timestamp */
++	if (!err) {
++		guint64 *ts_ptr = g_new (guint64, 1);
++
++		*ts_ptr = timestamp;
++		g_object_set_data_full (G_OBJECT (connection), NM_SYSCONFIG_SETTINGS_TIMESTAMP_TAG, ts_ptr, g_free);
++	} else {
++		nm_log_dbg (LOGD_SYS_SET, "failed to read connection timestamp for '%s': (%d) %s",
++		            connection_uuid, err->code, err->message);
++		g_clear_error (&err);
++	}
++	g_key_file_free (timestamps_file);
++
+ 	g_hash_table_insert (priv->connections, g_object_ref (connection), GINT_TO_POINTER (1));
+ 	g_signal_connect (connection,
+ 	                  NM_SETTINGS_CONNECTION_INTERFACE_REMOVED,
+diff --git a/src/system-settings/nm-sysconfig-settings.h b/src/system-settings/nm-sysconfig-settings.h
+index ae2ba68..8b2622a 100644
+--- a/src/system-settings/nm-sysconfig-settings.h
++++ b/src/system-settings/nm-sysconfig-settings.h
+@@ -41,6 +41,8 @@
+ #define NM_SYSCONFIG_SETTINGS_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS ((obj),  NM_TYPE_SYSCONFIG_SETTINGS, NMSysconfigSettingsClass))
+ 
+ #define NM_SYSCONFIG_SETTINGS_UNMANAGED_SPECS "unmanaged-specs"
++#define NM_SYSCONFIG_SETTINGS_TIMESTAMPS_FILE LOCALSTATEDIR"/lib/NetworkManager/timestamps"
++#define NM_SYSCONFIG_SETTINGS_TIMESTAMP_TAG   "timestamp-tag"
+ 
+ typedef struct {
+ 	NMSettingsService parent_instance;
+diff --git a/src/nm-manager.c b/src/nm-manager.c
+index 8cb28c6..8b24aa5 100644
+--- a/src/nm-manager.c
++++ b/src/nm-manager.c
+@@ -474,7 +474,7 @@ update_active_connection_timestamp (NMManager *manager, NMDevice *device)
+ 	guint64 timestamp;
+ 	guint64 *ts_ptr;
+ 	GKeyFile *timestamps_file;
+-	char *data;
++	char *data, *tmp;
+ 	gsize len;
+ 	GError *error = NULL;
+ 
+@@ -509,7 +509,9 @@ update_active_connection_timestamp (NMManager *manager, NMDevice *device)
+ 		g_clear_error (&error);
+ 	}
+ 
+-	g_key_file_set_uint64 (timestamps_file, "timestamps", connection_uuid, timestamp);
++	tmp = g_strdup_printf ("%" G_GUINT64_FORMAT, timestamp);
++	g_key_file_set_value (timestamps_file, "timestamps", connection_uuid, tmp);
++	g_free (tmp);
+ 
+ 	data = g_key_file_to_data (timestamps_file, &len, &error);
+ 	if (data) {
+diff --git a/src/system-settings/nm-sysconfig-settings.c b/src/system-settings/nm-sysconfig-settings.c
+index 49b903e..75ac987 100644
+--- a/src/system-settings/nm-sysconfig-settings.c
++++ b/src/system-settings/nm-sysconfig-settings.c
+@@ -520,9 +520,10 @@ claim_connection (NMSysconfigSettings *self,
+ 
+ 	NMSettingConnection *s_con;
+ 	const char *connection_uuid;
+-	guint64 timestamp;
++	guint64 timestamp = 0;
+ 	GKeyFile *timestamps_file;
+ 	GError *err = NULL;
++	char *tmp_str;
+ 
+ 	g_return_if_fail (NM_IS_SYSCONFIG_SETTINGS (self));
+ 	g_return_if_fail (NM_IS_SETTINGS_CONNECTION_INTERFACE (connection));
+@@ -538,7 +539,11 @@ claim_connection (NMSysconfigSettings *self,
+ 
+ 	timestamps_file = g_key_file_new ();
+ 	g_key_file_load_from_file (timestamps_file, NM_SYSCONFIG_SETTINGS_TIMESTAMPS_FILE, G_KEY_FILE_KEEP_COMMENTS, NULL);
+-	timestamp = g_key_file_get_uint64 (timestamps_file, "timestamps", connection_uuid, &err);
++	tmp_str = g_key_file_get_value (timestamps_file, "timestamps", connection_uuid, &err);
++	if (tmp_str) {
++		timestamp = g_ascii_strtoull (tmp_str, NULL, 10);
++		g_free (tmp_str);
++	}
+ 
+ 	/* Update connection's timestamp */
+ 	if (!err) {
+-- 
+1.7.7.6
+

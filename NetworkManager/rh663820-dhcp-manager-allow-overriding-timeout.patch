@@ -1,0 +1,161 @@
+Backport of the following patch to RHEL-6.3 (NM 0.8.1):
+-----
+From bbeef0f292bd01d97a79d4f617da666014537afb Mon Sep 17 00:00:00 2001
+From: Dan Winship <danw@gnome.org>
+Date: Tue, 14 Feb 2012 12:20:58 -0500
+Subject: [PATCH] dhcp-manager: allow overriding timeout
+
+If the dhclient*.conf file overrides the default timeout, make
+NMDHCPClient respect that as well (rather than always killing it after
+NM's default timeout).
+
+https://bugzilla.redhat.com/show_bug.cgi?id=663820
+---
+ src/dhcp-manager/nm-dhcp-client.c           |   21 ++++++++++++++-------
+ src/dhcp-manager/nm-dhcp-dhclient-utils.c   |   20 +++++++++++++++++++-
+ src/dhcp-manager/nm-dhcp-dhclient-utils.h   |    3 ++-
+ src/dhcp-manager/nm-dhcp-dhclient.c         |   19 ++++++++++++++-----
+ src/dhcp-manager/tests/test-dhcp-dhclient.c |    3 ++-
+ 5 files changed, 51 insertions(+), 15 deletions(-)
+-----
+
+diff --git a/src/dhcp-manager/nm-dhcp-client.c b/src/dhcp-manager/nm-dhcp-client.c
+index 16c6dd7..a5de9e5 100644
+--- a/src/dhcp-manager/nm-dhcp-client.c
++++ b/src/dhcp-manager/nm-dhcp-client.c
+@@ -306,12 +306,15 @@ nm_dhcp_client_start_ip4 (NMDHCPClient *self,
+ 	g_return_val_if_fail (priv->ipv6 == FALSE, FALSE);
+ 	g_return_val_if_fail (priv->uuid != NULL, FALSE);
+ 
+-	nm_log_info (LOGD_DHCP, "Activation (%s) Beginning DHCPv4 transaction (timeout in %d seconds)",
+-	             priv->iface, priv->timeout);
++	nm_log_info (LOGD_DHCP, "Activation (%s) Beginning DHCPv4 transaction",
++	             priv->iface);
+ 
+ 	priv->pid = NM_DHCP_CLIENT_GET_CLASS (self)->ip4_start (self, s_ip4, dhcp_anycast_addr, hostname);
+-	if (priv->pid)
++	if (priv->pid) {
++		nm_log_info (LOGD_DHCP, "Activation (%s) DHCPv4 will time out in %d seconds",
++					 priv->iface, priv->timeout);
+ 		start_monitor (self);
++	}
+ 
+ 	return priv->pid ? TRUE : FALSE;
+ }
+@@ -335,12 +338,16 @@ nm_dhcp_client_start_ip6 (NMDHCPClient *self,
+ 
+ 	priv->info_only = info_only;
+ 
+-	nm_log_info (LOGD_DHCP, "Activation (%s) Beginning DHCPv6 transaction (timeout in %d seconds)",
+-	             priv->iface, priv->timeout);
++	nm_log_info (LOGD_DHCP, "Activation (%s) Beginning DHCPv6 transaction",
++	             priv->iface);
+ 
+ 	priv->pid = NM_DHCP_CLIENT_GET_CLASS (self)->ip6_start (self, s_ip6, dhcp_anycast_addr, hostname, info_only);
+-	if (priv->pid > 0)
++
++	if (priv->pid > 0) {
++		nm_log_info (LOGD_DHCP, "Activation (%s) DHCPv6 will time out in %d seconds",
++					 priv->iface, priv->timeout);
+ 		start_monitor (self);
++	}
+ 
+ 	return priv->pid ? TRUE : FALSE;
+ }
+@@ -1212,7 +1219,7 @@ nm_dhcp_client_class_init (NMDHCPClientClass *client_class)
+ 		                    "timeout",
+ 		                    "Timeout",
+ 		                    0, G_MAXUINT, 45,
+-		                    G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY));
++		                    G_PARAM_READWRITE | G_PARAM_CONSTRUCT));
+ 
+ 	/* signals */
+ 	signals[STATE_CHANGED] =
+diff --git a/src/dhcp-manager/nm-dhcp-dhclient.c b/src/dhcp-manager/nm-dhcp-dhclient.c
+--- a/src/dhcp-manager/nm-dhcp-dhclient.c
++++ b/src/dhcp-manager/nm-dhcp-dhclient.c
+@@ -304,9 +304,11 @@ out:
+ 
+ #define DHCP_HOSTNAME_TAG "send host-name"
+ #define DHCP_HOSTNAME_FORMAT DHCP_HOSTNAME_TAG " \"%s\"; # added by NetworkManager"
++#define TIMEOUT_TAG "timeout"
+ 
+ static gboolean
+-merge_dhclient_config (const char *iface,
++merge_dhclient_config (NMDHCPClient *client,
++                       const char *iface,
+                        const char *conf_file,
+                        NMSettingIP4Config *s_ip4,
+                        guint8 *anycast_addr,
+@@ -317,6 +319,7 @@ merge_dhclient_config (const char *iface,
+ 	GString *new_contents;
+ 	char *orig_contents = NULL;
+ 	gboolean success = FALSE;
++	int timeout = -1;
+ 
+ 	g_return_val_if_fail (iface != NULL, FALSE);
+ 	g_return_val_if_fail (conf_file != NULL, FALSE);
+@@ -360,6 +363,18 @@ merge_dhclient_config (const char *iface,
+ 				g_string_append (new_contents, *line);
+ 				g_string_append_c (new_contents, '\n');
+ 			}
++
++			/* Check for timeout */
++			if (   strncmp (*line, TIMEOUT_TAG, strlen (TIMEOUT_TAG)) == 0
++			    && g_ascii_isspace ((*line)[strlen (TIMEOUT_TAG)])) {
++				timeout = strtoul (*line + strlen (TIMEOUT_TAG) + 1, NULL, 10);
++				if (timeout <= 0) {
++					/* Actual "timeout 0;" or negative wouldn't make sense, so assume it's an error */
++					nm_log_warn (LOGD_DHCP, "(%s): Failed to parse '%s'",
++					             iface, *line);
++					timeout = -1;
++				}
++			}
+ 		}
+ 
+ 		if (lines)
+@@ -413,6 +428,13 @@ merge_dhclient_config (const char *iface
+ 	success = g_file_set_contents (conf_file, new_contents->str, -1, error);
+ 
+ 	g_string_free (new_contents, TRUE);
++
++	if (success && timeout != -1) {
++		g_object_set (G_OBJECT (client),
++		              NM_DHCP_CLIENT_TIMEOUT, timeout,
++		              NULL);
++	}
++
+ 	return success;
+ }
+ 
+@@ -423,7 +445,8 @@ merge_dhclient_config (const char *iface
+  * config file along with the NM options.
+  */
+ static char *
+-create_dhclient_config (const char *iface,
++create_dhclient_config (NMDHCPClient *client,
++                        const char *iface,
+                         NMSettingIP4Config *s_ip4,
+                         guint8 *dhcp_anycast_addr,
+                         const char *hostname)
+@@ -464,7 +487,7 @@ create_dhclient_config (const char *ifac
+ 	g_free (tmp);
+ 
+ 	error = NULL;
+-	success = merge_dhclient_config (iface, conf_file, s_ip4, dhcp_anycast_addr, hostname, orig, &error);
++	success = merge_dhclient_config (client, iface, conf_file, s_ip4, dhcp_anycast_addr, hostname, orig, &error);
+ 	if (!success) {
+ 		nm_log_warn (LOGD_DHCP, "(%s): error creating dhclient configuration: %s",
+ 		             iface, error->message);
+@@ -585,7 +608,7 @@ real_ip4_start (NMDHCPClient *client,
+ 
+ 	iface = nm_dhcp_client_get_iface (client);
+ 
+-	priv->conf_file = create_dhclient_config (iface, s_ip4, dhcp_anycast_addr, hostname);
++	priv->conf_file = create_dhclient_config (client, iface, s_ip4, dhcp_anycast_addr, hostname);
+ 	if (!priv->conf_file) {
+ 		nm_log_warn (LOGD_DHCP4, "(%s): error creating dhclient configuration file.", iface);
+ 		return -1;
+-- 
+1.7.7.6
+
