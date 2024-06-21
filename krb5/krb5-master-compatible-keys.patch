@@ -1,0 +1,56 @@
+commit 4f99c75eb6b1a53d78b26648e39309261e37755c
+Author: Nalin Dahyabhai <nalin@dahyabhai.net>
+Date:   Tue Mar 18 16:39:47 2014 -0400
+
+    Try compatible keys in rd_req_dec "any" path
+    
+    When we go to decrypt a ticket using a keytab, we have two code paths.
+    
+    In the first (traditional) one, we try to read an entry that exactly
+    matches the principal name, enctype, and kvno from the ticket, and then
+    attempt to decrypt the ticket using the entry's key.  The keytab
+    routines helpfully return an entry so long as it's of a key type that's
+    compatible with the ticket being decrypted, fixing up the enctype in the
+    entry structure while doing so, allowing us to decrypt a DES-CBC-CRC
+    ticket with a DES-CBC-MD5 key.
+    
+    In the second code path, we try the key of every entry which loosely
+    matches the principal name from the ticket and which exactly matches its
+    enctype, meaning that the ticket/keytab pair above won't work if the
+    principal name is one which suggests we shouldn't be matching entries
+    exactly.
+    
+    This change modifies the "any" path to also try to decrypt the ticket
+    with compatible keys.
+    
+    [ghudson@mit.edu: avoid stuffing too much logic in one conditional]
+    
+    ticket: 7883 (new)
+
+diff --git a/src/lib/krb5/krb/rd_req_dec.c b/src/lib/krb5/krb/rd_req_dec.c
+index 4b952f5..fbd088d 100644
+--- a/src/lib/krb5/krb/rd_req_dec.c
++++ b/src/lib/krb5/krb/rd_req_dec.c
+@@ -167,6 +167,8 @@ decrypt_ticket(krb5_context context, const krb5_ap_req *req,
+     krb5_error_code ret;
+     krb5_keytab_entry ent;
+     krb5_kt_cursor cursor;
++    krb5_boolean similar;
++    krb5_enctype req_etype = req->ticket->enc_part.enctype;
+ 
+ #ifdef LEAN_CLIENT
+     return KRB5KRB_AP_WRONG_PRINC;
+@@ -189,8 +191,12 @@ decrypt_ticket(krb5_context context, const krb5_ap_req *req,
+         goto cleanup;
+ 
+     while ((ret = krb5_kt_next_entry(context, keytab, &ent, &cursor)) == 0) {
+-        if (ent.key.enctype == req->ticket->enc_part.enctype &&
++        ret = krb5_c_enctype_compare(context, ent.key.enctype, req_etype,
++                                     &similar);
++        if (ret == 0 && similar &&
+             krb5_sname_match(context, server, ent.principal)) {
++            /* Coerce inexact matches to the request enctype. */
++            ent.key.enctype = req_etype;
+             ret = try_one_entry(context, req, &ent, keyblock_out);
+             if (ret == 0) {
+                 TRACE_RD_REQ_DECRYPT_ANY(context, ent.principal, &ent.key);

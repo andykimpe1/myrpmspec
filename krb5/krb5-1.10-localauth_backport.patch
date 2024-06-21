@@ -1,0 +1,2787 @@
+# From 4216fb5b0e0abb80a3ccd8251abddc18435d81f3 Mon Sep 17 00:00:00 2001
+# From: Greg Hudson <ghudson@mit.edu>
+# Date: Wed, 13 Feb 2013 15:29:48 -0500
+# Subject: [PATCH] Add localauth pluggable interface
+# 
+# Add a new pluggable interface for local authorization, and replace the
+# existing krb5_aname_to_localname and krb5_kuserok implementations with
+# implementations based on the pluggable interface.
+# 
+#
+# The patch has been backported to krb5-1.10
+# Major changes include:
+# - Included fragments of |k5memdup0()|&&co. API
+#   (see https://github.com/krb5/krb5/commit/7905cd6a2eddbf264242bb2a85f811878b2da7ab)
+# - Adjustments for kbuf modernisation
+#   (see http://marc.info/?l=krb5-cvs&m=136086021407145)
+# - Added glue to install "localauth_plugin.h" which was missing
+#   in the initial upstream commit
+# - Misc. other adjustments
+#
+
+# |k5memdup0()| stolen from
+# https://github.com/krb5/krb5/commit/7905cd6a2eddbf264242bb2a85f811878b2da7ab
+diff --git a/src/include/k5-int.h b/src/include/k5-int.h
+index 9da1b63..9136bfc 100644
+--- a/src/include/k5-int.h
++++ b/src/include/k5-int.h
+@@ -2571,6 +2571,28 @@ k5alloc(size_t len, krb5_error_code *code)
+     return ptr;
+ }
+ 
++/* Return a copy of the len bytes of memory at in; set *code to 0 or ENOMEM. */
++static inline void *
++k5memdup(const void *in, size_t len, krb5_error_code *code)
++{
++    void *ptr = k5alloc(len, code);
++
++    if (ptr != NULL)
++        memcpy(ptr, in, len);
++    return ptr;
++}
++
++/* Like k5memdup, but add a final null byte. */
++static inline void *
++k5memdup0(const void *in, size_t len, krb5_error_code *code)
++{
++    void *ptr = k5alloc(len + 1, code);
++
++    if (ptr != NULL)
++        memcpy(ptr, in, len);
++    return ptr;
++}
++
+ krb5_error_code KRB5_CALLCONV
+ krb5_get_credentials_for_user(krb5_context context, krb5_flags options,
+                               krb5_ccache ccache,
+diff -N -r -u orig/krb5-1.10.3/src/include/k5-int.h krb5-1.10.3/src/include/k5-int.h
+--- a/src/include/k5-int.h	2012-08-09 00:27:55.000000000 +0200
++++ b/src/include/k5-int.h	2015-02-26 16:23:42.573609623 +0100
+@@ -1388,7 +1388,8 @@
+ #define PLUGIN_INTERFACE_CLPREAUTH   2
+ #define PLUGIN_INTERFACE_KDCPREAUTH  3
+ #define PLUGIN_INTERFACE_CCSELECT    4
+-#define PLUGIN_NUM_INTERFACES        5
++#define PLUGIN_INTERFACE_LOCALAUTH   5
++#define PLUGIN_NUM_INTERFACES        6
+ 
+ /* Retrieve the plugin module of type interface_id and name modname,
+  * storing the result into module. */
+@@ -1429,6 +1430,7 @@
+ struct _kdb_log_context;
+ typedef struct krb5_preauth_context_st krb5_preauth_context;
+ struct ccselect_module_handle;
++struct localauth_module_handle;
+ struct _krb5_context {
+     krb5_magic      magic;
+     krb5_enctype    *in_tkt_etypes;
+@@ -1472,6 +1474,9 @@
+     /* cache module stuff */
+     struct ccselect_module_handle **ccselect_handles;
+ 
++    /* localauth module stuff */
++    struct localauth_module_handle **localauth_handles;
++
+     /* error detail info */
+     struct errinfo err;
+ 
+diff -N -r -u orig/krb5-1.10.3/src/include/k5-trace.h krb5-1.10.3/src/include/k5-trace.h
+--- a/src/include/k5-trace.h	2012-08-09 00:27:55.000000000 +0200
++++ b/src/include/k5-trace.h	2015-02-26 16:23:42.575609600 +0100
+@@ -207,6 +207,14 @@
+               "enctype {etype}) with result: {kerr}", princ, keytab,    \
+               (int) vno, enctype, err))
+ 
++#define TRACE_LOCALAUTH_INIT_CONFLICT(c, type, oldname, newname)        \
++    TRACE(c, (c, "Ignoring localauth module {str} because it conflicts "    \
++          "with an2ln type {str} from module {str}", newname, type, oldname))
++#define TRACE_LOCALAUTH_VTINIT_FAIL(c, ret)                             \
++    TRACE(c, (c, "localauth module failed to init vtable: {kerr}", ret))
++#define TRACE_LOCALAUTH_INIT_FAIL(c, name, ret)                         \
++    TRACE(c, (c, "localauth module {str} failed to init: {kerr}", name, ret))
++
+ #define TRACE_MK_REP(c, ctime, cusec, subkey, seqnum)                   \
+     TRACE(c, (c, "Creating AP-REP, time {long}.{int}, subkey {keyblock}, " \
+               "seqnum {int}", (long) ctime, (int) cusec, subkey, (int) seqnum))
+diff -N -r -u orig/krb5-1.10.3/src/include/krb5/localauth_plugin.h krb5-1.10.3/src/include/krb5/localauth_plugin.h
+--- a/src/include/krb5/localauth_plugin.h	1970-01-01 01:00:00.000000000 +0100
++++ b/src/include/krb5/localauth_plugin.h	2015-02-26 16:23:42.575609600 +0100
+@@ -0,0 +1,139 @@
++/* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/*
++ * Copyright (C) 2013 by the Massachusetts Institute of Technology.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * * Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ *
++ * * Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in
++ *   the documentation and/or other materials provided with the
++ *   distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
++ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/*
++ * Declarations for localauth plugin module implementors.
++ *
++ * The localauth pluggable interface currently has only one supported major
++ * version, which is 1.  Major version 1 has a current minor version number of
++ * 1.
++ *
++ * Localauth plugin modules should define a function named
++ * localauth_<modulename>_initvt, matching the signature:
++ *
++ *   krb5_error_code
++ *   localauth_modname_initvt(krb5_context context, int maj_ver, int min_ver,
++ *                            krb5_plugin_vtable vtable);
++ *
++ * The initvt function should:
++ *
++ * - Check that the supplied maj_ver number is supported by the module, or
++ *   return KRB5_PLUGIN_VER_NOTSUPP if it is not.
++ *
++ * - Cast the vtable pointer as appropriate for maj_ver:
++ *     maj_ver == 1: Cast to krb5_localauth_vtable
++ *
++ * - Initialize the methods of the vtable, stopping as appropriate for the
++ *   supplied min_ver.  Optional methods may be left uninitialized.
++ *
++ * Memory for the vtable is allocated by the caller, not by the module.
++ */
++
++#ifndef KRB5_LOCALAUTH_PLUGIN_H
++#define KRB5_LOCALAUTH_PLUGIN_H
++
++#include <krb5/krb5.h>
++#include <krb5/plugin.h>
++#include <kadm5/admin.h>
++
++/* An abstract type for localauth module data. */
++typedef struct krb5_localauth_moddata_st *krb5_localauth_moddata;
++
++/*** Method type declarations ***/
++
++/* Optional: Initialize module data. */
++typedef krb5_error_code
++(*krb5_localauth_init_fn)(krb5_context context,
++                          krb5_localauth_moddata *data);
++
++/* Optional: Release resources used by module data. */
++typedef void
++(*krb5_localauth_fini_fn)(krb5_context context, krb5_localauth_moddata data);
++
++/*
++ * Optional: Determine whether aname is authorized to log in as the local
++ * account lname.  Return 0 if aname is authorized, EPERM if aname is
++ * authoritatively not authorized, KRB5_PLUGIN_NO_HANDLE if the module cannot
++ * determine whether aname is authorized, and any other error code for a
++ * serious failure to process the request.  aname will be considered authorized
++ * if at least one module returns 0 and all other modules return
++ * KRB5_PLUGIN_NO_HANDLE.
++ */
++typedef krb5_error_code
++(*krb5_localauth_userok_fn)(krb5_context context, krb5_localauth_moddata data,
++                            krb5_const_principal aname, const char *lname);
++
++/*
++ * Optional (mandatory if an2ln_types is set): Determine the local account name
++ * corresponding to aname.  Return 0 and set *lname_out if a mapping can be
++ * determined; the contents of *lname_out will later be released with a call to
++ * the module's free_string method.  Return KRB5_LNAME_NOTRANS if no mapping
++ * can be determined.  Return any other error code for a serious failure to
++ * process the request; this will halt the krb5_aname_to_localname operation.
++ *
++ * If the module's an2ln_types field is set, this method will only be invoked
++ * when a profile "auth_to_local" value references one of the module's types.
++ * type and residual will be set to the type and residual of the auth_to_local
++ * value.
++ *
++ * If the module's an2ln_types field is not set but the an2ln method is
++ * implemented, this method will be invoked independently of the profile's
++ * auth_to_local settings, with type and residual set to NULL.  If multiple
++ * modules are registered with an2ln methods but no an2ln_types field, the
++ * order of invocation is not defined, but all such modules will be consulted
++ * before the built-in mechanisms are tried.
++ */
++typedef krb5_error_code
++(*krb5_localauth_an2ln_fn)(krb5_context context, krb5_localauth_moddata data,
++                           const char *type, const char *residual,
++                           krb5_const_principal aname, char **lname_out);
++
++/*
++ * Optional (mandatory if an2ln is implemented): Release the memory returned by
++ * an invocation of an2ln.
++ */
++typedef void
++(*krb5_localauth_free_string_fn)(krb5_context context,
++                                 krb5_localauth_moddata data, char *str);
++
++/* localauth vtable for major version 1. */
++typedef struct krb5_localauth_vtable_st {
++    const char *name;           /* Mandatory: name of module. */
++    const char **an2ln_types;   /* Optional: uppercase auth_to_local types */
++    krb5_localauth_init_fn init;
++    krb5_localauth_fini_fn fini;
++    krb5_localauth_userok_fn userok;
++    krb5_localauth_an2ln_fn an2ln;
++    krb5_localauth_free_string_fn free_string;
++    /* Minor version 1 ends here. */
++} *krb5_localauth_vtable;
++
++#endif /* KRB5_LOCALAUTH_PLUGIN_H */
+diff -N -r -u orig/krb5-1.10.3/src/lib/krb5/krb/plugin.c krb5-1.10.3/src/lib/krb5/krb/plugin.c
+--- a/src/lib/krb5/krb/plugin.c	2012-08-09 00:27:56.000000000 +0200
++++ b/src/lib/krb5/krb/plugin.c	2015-02-26 16:23:42.576609585 +0100
+@@ -31,7 +31,8 @@
+     "kadm5_hook",
+     "clpreauth",
+     "kdcpreauth",
+-    "ccselect"
++    "ccselect",
++    "localauth"
+ };
+ 
+ /* Return the context's interface structure for id, or NULL if invalid. */
+diff -N -r -u orig/krb5-1.10.3/src/lib/krb5/os/an_to_ln.c krb5-1.10.3/src/lib/krb5/os/an_to_ln.c
+--- a/src/lib/krb5/os/an_to_ln.c	2012-08-09 00:27:56.000000000 +0200
++++ b/src/lib/krb5/os/an_to_ln.c	1970-01-01 01:00:00.000000000 +0100
+@@ -1,808 +0,0 @@
+-/* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
+-/* lib/krb5/os/an_to_ln.c */
+-/*
+- * Copyright 1990,1991,2007,2008 by the Massachusetts Institute of Technology.
+- * All Rights Reserved.
+- *
+- * Export of this software from the United States of America may
+- *   require a specific license from the United States Government.
+- *   It is the responsibility of any person or organization contemplating
+- *   export to obtain such a license before exporting.
+- *
+- * WITHIN THAT CONSTRAINT, permission to use, copy, modify, and
+- * distribute this software and its documentation for any purpose and
+- * without fee is hereby granted, provided that the above copyright
+- * notice appear in all copies and that both that copyright notice and
+- * this permission notice appear in supporting documentation, and that
+- * the name of M.I.T. not be used in advertising or publicity pertaining
+- * to distribution of the software without specific, written prior
+- * permission.  Furthermore if you modify this software you must label
+- * your software as modified software and not distribute it in such a
+- * fashion that it might be confused with the original M.I.T. software.
+- * M.I.T. makes no representations about the suitability of
+- * this software for any purpose.  It is provided "as is" without express
+- * or implied warranty.
+- */
+-
+-/*
+- * We're only to AN_TO_LN rules at this point, and not doing the
+- * database lookup  (moved from configure script)
+- */
+-#define AN_TO_LN_RULES
+-
+-#include "k5-int.h"
+-#include <ctype.h>
+-#if     HAVE_REGEX_H
+-#include <regex.h>
+-#endif  /* HAVE_REGEX_H */
+-#include <string.h>
+-/*
+- * Use compile(3) if no regcomp present.
+- */
+-#if     !defined(HAVE_REGCOMP) && defined(HAVE_REGEXPR_H) && defined(HAVE_COMPILE)
+-#define RE_BUF_SIZE     1024
+-#include <regexpr.h>
+-#endif  /* !HAVE_REGCOMP && HAVE_REGEXP_H && HAVE_COMPILE */
+-
+-#define MAX_FORMAT_BUFFER       ((size_t)1024)
+-#ifndef min
+-#define min(a,b)        ((a>b) ? b : a)
+-#endif  /* min */
+-#ifdef ANAME_DB
+-/*
+- * Use standard DBM code.
+- */
+-#define KDBM_OPEN(db, fl, mo)   dbm_open(db, fl, mo)
+-#define KDBM_CLOSE(db)          dbm_close(db)
+-#define KDBM_FETCH(db, key)     dbm_fetch(db, key)
+-#endif /*ANAME_DB*/
+-
+-/*
+- * Find the portion of the flattened principal name that we use for mapping.
+- */
+-static char *
+-aname_full_to_mapping_name(char *fprincname)
+-{
+-    char        *atp;
+-    size_t      mlen;
+-    char        *mname;
+-
+-    mname = (char *) NULL;
+-    if (fprincname) {
+-        atp = strrchr(fprincname, '@');
+-        if (!atp)
+-            atp = &fprincname[strlen(fprincname)];
+-        mlen = (size_t) (atp - fprincname);
+-
+-        if ((mname = (char *) malloc(mlen+1))) {
+-            strncpy(mname, fprincname, mlen);
+-            mname[mlen] = '\0';
+-        }
+-    }
+-    return(mname);
+-}
+-
+-#ifdef ANAME_DB
+-/*
+- * Implementation:  This version uses a DBM database, indexed by aname,
+- * to generate a lname.
+- *
+- * The entries in the database are normal C strings, and include the trailing
+- * null in the DBM datum.size.
+- */
+-static krb5_error_code
+-db_an_to_ln(context, dbname, aname, lnsize, lname)
+-    krb5_context context;
+-    char *dbname;
+-    krb5_const_principal aname;
+-    const unsigned int lnsize;
+-    char *lname;
+-{
+-#if !defined(_WIN32)
+-    DBM *db;
+-    krb5_error_code retval;
+-    datum key, contents;
+-    char *princ_name;
+-
+-    if ((retval = krb5_unparse_name(context, aname, &princ_name)))
+-        return(retval);
+-    key.dptr = princ_name;
+-    key.dsize = strlen(princ_name)+1;   /* need to store the NULL for
+-                                           decoding */
+-
+-    db = KDBM_OPEN(dbname, O_RDONLY, 0600);
+-    if (!db) {
+-        free(princ_name);
+-        return KRB5_LNAME_CANTOPEN;
+-    }
+-
+-    contents = KDBM_FETCH(db, key);
+-
+-    free(princ_name);
+-
+-    if (contents.dptr == NULL) {
+-        retval = KRB5_LNAME_NOTRANS;
+-    } else {
+-        strncpy(lname, contents.dptr, lnsize);
+-        if (lnsize < contents.dsize)
+-            retval = KRB5_CONFIG_NOTENUFSPACE;
+-        else if (lname[contents.dsize-1] != '\0')
+-            retval = KRB5_LNAME_BADFORMAT;
+-        else
+-            retval = 0;
+-    }
+-    /* can't close until we copy the contents. */
+-    (void) KDBM_CLOSE(db);
+-    return retval;
+-#else   /* !_WIN32 && !MACINTOSH */
+-    /*
+-     * If we don't have support for a database mechanism, then we can't
+-     * translate this now, can we?
+-     */
+-    return KRB5_LNAME_NOTRANS;
+-#endif  /* !_WIN32 && !MACINTOSH */
+-}
+-#endif /*ANAME_DB*/
+-
+-#ifdef  AN_TO_LN_RULES
+-/*
+- * Format and transform a principal name to a local name.  This is particularly
+- * useful when Kerberos principals and local user names are formatted to
+- * some particular convention.
+- *
+- * There are three parts to each rule:
+- * First part - formulate the string to perform operations on:  If not present
+- * then the string defaults to the fully flattened principal minus the realm
+- * name.  Otherwise the syntax is as follows:
+- *      "[" <ncomps> ":" <format> "]"
+- *              Where:
+- *                      <ncomps> is the number of expected components for this
+- *                      rule.  If the particular principal does not have this
+- *                      many components, then this rule does not apply.
+- *
+- *                      <format> is a string of <component> or verbatim
+- *                      characters to be inserted.
+- *
+- *                      <component> is of the form "$"<number> to select the
+- *                      <number>th component.  <number> begins from 1.
+- *
+- * Second part - select rule validity:  If not present, then this rule may
+- * apply to all selections.  Otherwise the syntax is as follows:
+- *      "(" <regexp> ")"
+- *              Where:  <regexp> is a selector regular expression.  If this
+- *                      regular expression matches the whole pattern generated
+- *                      from the first part, then this rule still applies.
+- *
+- * Last part - Transform rule:  If not present, then the selection string
+- * is passed verbatim and is matched.  Otherwise, the syntax is as follows:
+- *      <rule> ...
+- *              Where:  <rule> is of the form:
+- *                      "s/" <regexp> "/" <text> "/" ["g"]
+- *
+- * In order to be able to select rule validity, the native system must support
+- * one of compile(3), re_comp(3) or regcomp(3).  In order to be able to
+- * transform (e.g. substitute), the native system must support regcomp(3) or
+- * compile(3).
+- */
+-
+-/*
+- * aname_do_match()     - Does our name match the parenthesized regular
+- *                        expression?
+- *
+- * Chew up the match portion of the regular expression and update *contextp.
+- * If no re_comp() or regcomp(), then always return a match.
+- */
+-static krb5_error_code
+-aname_do_match(char *string, char **contextp)
+-{
+-    krb5_error_code     kret;
+-    char                *regexp, *startp, *endp = 0;
+-    size_t              regexlen;
+-#if     HAVE_REGCOMP
+-    regex_t             match_exp;
+-    regmatch_t          match_match;
+-#elif   HAVE_REGEXPR_H
+-    char                regexp_buffer[RE_BUF_SIZE];
+-#endif  /* HAVE_REGEXP_H */
+-
+-    kret = 0;
+-    /*
+-     * Is this a match expression?
+-     */
+-    if (**contextp == '(') {
+-        kret = KRB5_CONFIG_BADFORMAT;
+-        startp = (*contextp) + 1;
+-        endp = strchr(startp, ')');
+-        /* Find the end of the match expression. */
+-        if (endp) {
+-            regexlen = (size_t) (endp - startp);
+-            regexp = (char *) malloc((size_t) regexlen+1);
+-            kret = ENOMEM;
+-            if (regexp) {
+-                strncpy(regexp, startp, regexlen);
+-                regexp[regexlen] = '\0';
+-                kret = KRB5_LNAME_NOTRANS;
+-                /*
+-                 * Perform the match.
+-                 */
+-#if     HAVE_REGCOMP
+-                if (!regcomp(&match_exp, regexp, REG_EXTENDED) &&
+-                    !regexec(&match_exp, string, 1, &match_match, 0)) {
+-                    if ((match_match.rm_so == 0) &&
+-                        ((unsigned int) match_match.rm_eo == strlen(string)))
+-                        kret = 0;
+-                }
+-                regfree(&match_exp);
+-#elif   HAVE_REGEXPR_H
+-                compile(regexp,
+-                        regexp_buffer,
+-                        &regexp_buffer[RE_BUF_SIZE]);
+-                if (step(string, regexp_buffer)) {
+-                    if ((loc1 == string) &&
+-                        (loc2 == &string[strlen(string)]))
+-                        kret = 0;
+-                }
+-#elif   HAVE_RE_COMP
+-                if (!re_comp(regexp) && re_exec(string))
+-                    kret = 0;
+-#else   /* HAVE_RE_COMP */
+-                kret = 0;
+-#endif  /* HAVE_RE_COMP */
+-                free(regexp);
+-            }
+-            endp++;
+-        }
+-        else
+-            endp = startp;
+-    }
+-    *contextp = endp;
+-    return(kret);
+-}
+-
+-/*
+- * do_replacement()     - Replace the regular expression with the specified
+- *                        replacement.
+- *
+- * If "doall" is set, it's a global replacement, otherwise, just a oneshot
+- * deal.
+- * If no regcomp() then just return the input string verbatim in the output
+- * string.
+- */
+-#define use_bytes(x)                                    \
+-    out_used += (x);                                    \
+-    if (out_used > MAX_FORMAT_BUFFER) goto mem_err
+-
+-static int
+-do_replacement(char *regexp, char *repl, int doall, char *in, char *out)
+-{
+-    size_t out_used = 0;
+-#if     HAVE_REGCOMP
+-    regex_t     match_exp;
+-    regmatch_t  match_match;
+-    int         matched;
+-    char        *cp;
+-    char        *op;
+-
+-    if (!regcomp(&match_exp, regexp, REG_EXTENDED)) {
+-        cp = in;
+-        op = out;
+-        matched = 0;
+-        do {
+-            if (!regexec(&match_exp, cp, 1, &match_match, 0)) {
+-                if (match_match.rm_so) {
+-                    use_bytes(match_match.rm_so);
+-                    strncpy(op, cp, match_match.rm_so);
+-                    op += match_match.rm_so;
+-                }
+-                use_bytes(strlen(repl));
+-                strncpy(op, repl, MAX_FORMAT_BUFFER - 1 - (op - out));
+-                op += strlen(op);
+-                cp += match_match.rm_eo;
+-                if (!doall) {
+-                    use_bytes(strlen(cp));
+-                    strncpy(op, cp, MAX_FORMAT_BUFFER - 1 - (op - out));
+-                }
+-                matched = 1;
+-            }
+-            else {
+-                use_bytes(strlen(cp));
+-                strncpy(op, cp, MAX_FORMAT_BUFFER - 1 - (op - out));
+-                matched = 0;
+-            }
+-        } while (doall && matched);
+-        regfree(&match_exp);
+-    }
+-#elif   HAVE_REGEXPR_H
+-    int         matched;
+-    char        *cp;
+-    char        *op;
+-    char        regexp_buffer[RE_BUF_SIZE];
+-    size_t      sdispl, edispl;
+-
+-    compile(regexp,
+-            regexp_buffer,
+-            &regexp_buffer[RE_BUF_SIZE]);
+-    cp = in;
+-    op = out;
+-    matched = 0;
+-    do {
+-        if (step(cp, regexp_buffer)) {
+-            sdispl = (size_t) (loc1 - cp);
+-            edispl = (size_t) (loc2 - cp);
+-            if (sdispl) {
+-                use_bytes(sdispl);
+-                strncpy(op, cp, sdispl);
+-                op += sdispl;
+-            }
+-            use_bytes(strlen(repl));
+-            strncpy(op, repl, MAX_FORMAT_BUFFER - 1 - (op - out));
+-            op += strlen(repl);
+-            cp += edispl;
+-            if (!doall) {
+-                use_bytes(strlen(cp));
+-                strncpy(op, cp, MAX_FORMAT_BUFFER - 1 - (op - out));
+-            }
+-            matched = 1;
+-        }
+-        else {
+-            use_bytes(strlen(cp));
+-            strncpy(op, cp, MAX_FORMAT_BUFFER - 1 - (op - out));
+-            matched = 0;
+-        }
+-    } while (doall && matched);
+-#else   /* HAVE_REGEXP_H */
+-    memcpy(out, in, MAX_FORMAT_BUFFER);
+-#endif  /* HAVE_REGCOMP */
+-    return 1;
+-mem_err:
+-#ifdef HAVE_REGCMP
+-    regfree(&match_exp);
+-#endif
+-    return 0;
+-
+-}
+-#undef use_bytes
+-
+-/*
+- * aname_replacer()     - Perform the specified substitutions on the input
+- *                        string and return the result.
+- *
+- * This routine enforces the "s/<pattern>/<replacement>/[g]" syntax.
+- */
+-static krb5_error_code
+-aname_replacer(char *string, char **contextp, char **result)
+-{
+-    krb5_error_code     kret;
+-    char                *in = NULL, *out = NULL, *rule = NULL, *repl = NULL;
+-    char                *cp, *ep, *tp;
+-    size_t              rule_size, repl_size;
+-    int                 doglobal;
+-
+-    *result = NULL;
+-
+-    /* Allocate the formatting buffers */
+-    in = malloc(MAX_FORMAT_BUFFER);
+-    if (!in)
+-        return ENOMEM;
+-    out = malloc(MAX_FORMAT_BUFFER);
+-    if (!out) {
+-        kret = ENOMEM;
+-        goto cleanup;
+-    }
+-
+-    /*
+-     * Prime the buffers.  Copy input string to "out" to simulate it
+-     * being the result of an initial iteration.
+-     */
+-    strlcpy(out, string, MAX_FORMAT_BUFFER);
+-    in[0] = '\0';
+-    kret = 0;
+-    /*
+-     * Pound through the expression until we're done.
+-     */
+-    for (cp = *contextp; *cp; ) {
+-        /* Skip leading whitespace */
+-        while (isspace((int) (*cp)))
+-            cp++;
+-
+-        /*
+-         * Find our separators.  First two characters must be "s/"
+-         * We must also find another "/" followed by another "/".
+-         */
+-        if (!((cp[0] == 's') &&
+-              (cp[1] == '/') &&
+-              (ep = strchr(&cp[2], '/')) &&
+-              (tp = strchr(&ep[1], '/')))) {
+-            /* Bad syntax */
+-            kret = KRB5_CONFIG_BADFORMAT;
+-            goto cleanup;
+-        }
+-
+-        /* Figure out sizes of strings and allocate them */
+-        rule_size = (size_t) (ep - &cp[2]);
+-        repl_size = (size_t) (tp - &ep[1]);
+-        rule = malloc(rule_size + 1);
+-        if (!rule) {
+-            kret = ENOMEM;
+-            goto cleanup;
+-        }
+-        repl = malloc(repl_size + 1);
+-        if (!repl) {
+-            kret = ENOMEM;
+-            goto cleanup;
+-        }
+-
+-        /* Copy the strings */
+-        memcpy(rule, &cp[2], rule_size);
+-        memcpy(repl, &ep[1], repl_size);
+-        rule[rule_size] = repl[repl_size] = '\0';
+-
+-        /* Check for trailing "g" */
+-        doglobal = (tp[1] == 'g') ? 1 : 0;
+-        if (doglobal)
+-            tp++;
+-
+-        /* Swap previous in and out buffers */
+-        ep = in;
+-        in = out;
+-        out = ep;
+-
+-        /* Do the replacemenbt */
+-        memset(out, '\0', MAX_FORMAT_BUFFER);
+-        if (!do_replacement(rule, repl, doglobal, in, out)) {
+-            kret = KRB5_LNAME_NOTRANS;
+-            goto cleanup;
+-        }
+-        free(rule);
+-        free(repl);
+-        rule = repl = NULL;
+-
+-        /* If we have no output buffer left, this can't be good */
+-        if (strlen(out) == 0) {
+-            kret = KRB5_LNAME_NOTRANS;
+-            goto cleanup;
+-        }
+-
+-        /* Advance past trailer */
+-        cp = &tp[1];
+-    }
+-    free(in);
+-    *result = out;
+-    return 0;
+-cleanup:
+-    free(in);
+-    free(out);
+-    free(repl);
+-    free(rule);
+-    return kret;
+-}
+-
+-/*
+- * Compute selection string for RULE rules.
+- *
+- * Advance *contextp to the string position after the selectring
+- * string part if present, and set *result to the selection string.
+- */
+-static krb5_error_code
+-aname_get_selstring(krb5_context context, krb5_const_principal aname,
+-                    char **contextp, char **result)
+-{
+-    krb5_error_code kret;
+-    char *fprincname, *current, *str;
+-    long num_comps, compind;
+-    const krb5_data *datap;
+-    struct k5buf selstring;
+-    size_t nlit;
+-
+-    *result = NULL;
+-    if (**contextp != '[') {
+-        /* No selstring part; use the full flattened principal name. */
+-        kret = krb5_unparse_name(context, aname, &fprincname);
+-        if (kret)
+-            return kret;
+-        str = aname_full_to_mapping_name(fprincname);
+-        free(fprincname);
+-        if (!str)
+-            return ENOMEM;
+-        *result = str;
+-        return 0;
+-    }
+-
+-    /* Advance past the '[' and read the number of components. */
+-    current = *contextp + 1;
+-    errno = 0;
+-    num_comps = strtol(current, &current, 10);
+-    if (errno != 0 || num_comps < 0 || *current != ':')
+-        return KRB5_CONFIG_BADFORMAT;
+-    if (num_comps != aname->length)
+-        return KRB5_LNAME_NOTRANS;
+-    current++;
+-
+-    krb5int_buf_init_dynamic(&selstring);
+-    while (1) {
+-        /* Copy in literal characters up to the next $ or ]. */
+-        nlit = strcspn(current, "$]");
+-        krb5int_buf_add_len(&selstring, current, nlit);
+-        current += nlit;
+-        if (*current != '$')
+-            break;
+-
+-        /* Expand $ substitution to a principal component. */
+-        errno = 0;
+-        compind = strtol(current + 1, &current, 10);
+-        if (errno || compind > num_comps)
+-            break;
+-        datap = (compind > 0)
+-            ? krb5_princ_component(context, aname, compind - 1)
+-            : krb5_princ_realm(context, aname);
+-        if (!datap)
+-            break;
+-        krb5int_buf_add_len(&selstring, datap->data, datap->length);
+-    }
+-
+-    /* Check that we hit a ']' and not the end of the string. */
+-    if (*current != ']') {
+-        krb5int_free_buf(&selstring);
+-        return KRB5_CONFIG_BADFORMAT;
+-    }
+-
+-    str = krb5int_buf_data(&selstring);
+-    if (str == NULL)
+-        return ENOMEM;
+-
+-    *contextp = current + 1;
+-    *result = str;
+-    return 0;
+-}
+-
+-/* Handle aname to lname translations for RULE rules. */
+-static krb5_error_code
+-rule_an_to_ln(krb5_context context, char *rule, krb5_const_principal aname,
+-              const unsigned int lnsize, char *lname)
+-{
+-    krb5_error_code kret;
+-    char *current, *selstring = 0, *outstring = 0;
+-
+-    /* Compute the selection string. */
+-    current = rule;
+-    kret = aname_get_selstring(context, aname, &current, &selstring);
+-    if (kret)
+-        return kret;
+-
+-    /* Check the selection string against the regexp, if present. */
+-    if (*current == '(') {
+-        kret = aname_do_match(selstring, &current);
+-        if (kret)
+-            goto cleanup;
+-    }
+-
+-    /* Perform the substitution. */
+-    outstring = NULL;
+-    kret = aname_replacer(selstring, &current, &outstring);
+-    if (kret)
+-        goto cleanup;
+-
+-    /* Copy out the value if there's enough room. */
+-    if (strlcpy(lname, outstring, lnsize) >= lnsize)
+-        kret = KRB5_CONFIG_NOTENUFSPACE;
+-
+-cleanup:
+-    free(selstring);
+-    free(outstring);
+-    return kret;
+-}
+-#endif  /* AN_TO_LN_RULES */
+-
+-/*
+- * Implementation:  This version checks the realm to see if it is the local
+- * realm; if so, and there is exactly one non-realm component to the name,
+- * that name is returned as the lname.
+- */
+-static krb5_error_code
+-default_an_to_ln(krb5_context context, krb5_const_principal aname, const unsigned int lnsize, char *lname)
+-{
+-    krb5_error_code retval;
+-    char *def_realm;
+-    unsigned int realm_length;
+-
+-    realm_length = krb5_princ_realm(context, aname)->length;
+-
+-    if ((retval = krb5_get_default_realm(context, &def_realm))) {
+-        return(retval);
+-    }
+-    if (!data_eq_string(*krb5_princ_realm(context, aname), def_realm)) {
+-        free(def_realm);
+-        return KRB5_LNAME_NOTRANS;
+-    }
+-
+-    if (krb5_princ_size(context, aname) != 1) {
+-        if (krb5_princ_size(context, aname) == 2 ) {
+-            /* Check to see if 2nd component is the local realm. */
+-            if ( strncmp(krb5_princ_component(context, aname,1)->data,def_realm,
+-                         realm_length) ||
+-                 realm_length != krb5_princ_component(context, aname,1)->length)
+-                return KRB5_LNAME_NOTRANS;
+-        }
+-        else
+-            /* no components or more than one component to non-realm part of name
+-               --no translation. */
+-            return KRB5_LNAME_NOTRANS;
+-    }
+-
+-    free(def_realm);
+-    strncpy(lname, krb5_princ_component(context, aname,0)->data,
+-            min(krb5_princ_component(context, aname,0)->length,lnsize));
+-    if (lnsize <= krb5_princ_component(context, aname,0)->length ) {
+-        retval = KRB5_CONFIG_NOTENUFSPACE;
+-    } else {
+-        lname[krb5_princ_component(context, aname,0)->length] = '\0';
+-        retval = 0;
+-    }
+-    return retval;
+-}
+-
+-/*
+-  Converts an authentication name to a local name suitable for use by
+-  programs wishing a translation to an environment-specific name (e.g.
+-  user account name).
+-
+-  lnsize specifies the maximum length name that is to be filled into
+-  lname.
+-  The translation will be null terminated in all non-error returns.
+-
+-  returns system errors, NOT_ENOUGH_SPACE
+-*/
+-
+-krb5_error_code KRB5_CALLCONV
+-krb5_aname_to_localname(krb5_context context, krb5_const_principal aname, int lnsize_in, char *lname)
+-{
+-    krb5_error_code     kret;
+-    char                *realm;
+-    char                *pname;
+-    char                *mname;
+-    const char          *hierarchy[5];
+-    char                **mapping_values;
+-    int                 i, nvalid;
+-    char                *cp, *s;
+-    char                *typep, *argp;
+-    unsigned int        lnsize;
+-
+-    if (lnsize_in < 0)
+-        return KRB5_CONFIG_NOTENUFSPACE;
+-
+-    lnsize = lnsize_in; /* Unsigned */
+-
+-    /*
+-     * First get the default realm.
+-     */
+-    if (!(kret = krb5_get_default_realm(context, &realm))) {
+-        /* Flatten the name */
+-        if (!(kret = krb5_unparse_name(context, aname, &pname))) {
+-            if ((mname = aname_full_to_mapping_name(pname))) {
+-                /*
+-                 * Search first for explicit mappings of the form:
+-                 *
+-                 * [realms]->realm->"auth_to_local_names"->mapping_name
+-                 */
+-                hierarchy[0] = KRB5_CONF_REALMS;
+-                hierarchy[1] = realm;
+-                hierarchy[2] = KRB5_CONF_AUTH_TO_LOCAL_NAMES;
+-                hierarchy[3] = mname;
+-                hierarchy[4] = (char *) NULL;
+-                if (!(kret = profile_get_values(context->profile,
+-                                                hierarchy,
+-                                                &mapping_values))) {
+-                    /* We found one or more explicit mappings. */
+-                    for (nvalid=0; mapping_values[nvalid]; nvalid++);
+-
+-                    /* Just use the last one. */
+-                    /* Trim the value. */
+-                    s = mapping_values[nvalid-1];
+-                    cp = s + strlen(s);
+-                    while (cp > s) {
+-                        cp--;
+-                        if (!isspace((int)(*cp)))
+-                            break;
+-                        *cp = '\0';
+-                    }
+-
+-                    /* Copy out the value if there's enough room */
+-                    if (strlcpy(lname, mapping_values[nvalid-1],
+-                                lnsize) >= lnsize)
+-                        kret = KRB5_CONFIG_NOTENUFSPACE;
+-
+-                    /* Free residue */
+-                    profile_free_list(mapping_values);
+-                }
+-                else {
+-                    /*
+-                     * OK - There's no explicit mapping.  Now check for
+-                     * general auth_to_local rules of the form:
+-                     *
+-                     * [realms]->realm->"auth_to_local"
+-                     *
+-                     * This can have one or more of the following kinds of
+-                     * values:
+-                     *  DB:<filename>   - Look up principal in aname database.
+-                     *  RULE:<sed-exp>  - Formulate lname from sed-exp.
+-                     *  DEFAULT         - Use default rule.
+-                     * The first rule to find a match is used.
+-                     */
+-                    hierarchy[0] = KRB5_CONF_REALMS;
+-                    hierarchy[1] = realm;
+-                    hierarchy[2] = KRB5_CONF_AUTH_TO_LOCAL;
+-                    hierarchy[3] = (char *) NULL;
+-                    if (!(kret = profile_get_values(context->profile,
+-                                                    hierarchy,
+-                                                    &mapping_values))) {
+-                        /*
+-                         * Loop through all the mapping values.
+-                         */
+-                        for (i=0; mapping_values[i]; i++) {
+-                            typep = mapping_values[i];
+-                            argp = strchr(typep, ':');
+-                            if (argp) {
+-                                *argp = '\0';
+-                                argp++;
+-                            }
+-#ifdef ANAME_DB
+-                            if (!strcmp(typep, "DB") && argp) {
+-                                kret = db_an_to_ln(context,
+-                                                   argp,
+-                                                   aname,
+-                                                   lnsize,
+-                                                   lname);
+-                                if (kret != KRB5_LNAME_NOTRANS)
+-                                    break;
+-                            }
+-                            else
+-#endif
+-#ifdef  AN_TO_LN_RULES
+-                                if (!strcmp(typep, "RULE") && argp) {
+-                                    kret = rule_an_to_ln(context,
+-                                                         argp,
+-                                                         aname,
+-                                                         lnsize,
+-                                                         lname);
+-                                    if (kret != KRB5_LNAME_NOTRANS)
+-                                        break;
+-                                }
+-                                else
+-#endif  /* AN_TO_LN_RULES */
+-                                    if (!strcmp(typep, "DEFAULT") && !argp) {
+-                                        kret = default_an_to_ln(context,
+-                                                                aname,
+-                                                                lnsize,
+-                                                                lname);
+-                                        if (kret != KRB5_LNAME_NOTRANS)
+-                                            break;
+-                                    }
+-                                    else {
+-                                        kret = KRB5_CONFIG_BADFORMAT;
+-                                        break;
+-                                    }
+-                        }
+-
+-                        /* We're done, clean up the droppings. */
+-                        profile_free_list(mapping_values);
+-                    }
+-                    else {
+-                        /*
+-                         * No profile relation found, try default mapping.
+-                         */
+-                        kret = default_an_to_ln(context,
+-                                                aname,
+-                                                lnsize,
+-                                                lname);
+-                    }
+-                }
+-                free(mname);
+-            }
+-            else
+-                kret = ENOMEM;
+-            free(pname);
+-        }
+-        free(realm);
+-    }
+-    return(kret);
+-}
+diff -N -r -u orig/krb5-1.10.3/src/lib/krb5/os/deps krb5-1.10.3/src/lib/krb5/os/deps
+--- a/src/lib/krb5/os/deps	2012-08-09 00:27:56.000000000 +0200
++++ b/src/lib/krb5/os/deps	2015-02-26 16:47:01.938395978 +0100
+@@ -13,17 +13,6 @@
+   $(top_srcdir)/include/krb5/plugin.h $(top_srcdir)/include/krb5/preauth_plugin.h \
+   $(top_srcdir)/include/port-sockets.h $(top_srcdir)/include/socket-utils.h \
+   accessor.c os-proto.h
+-an_to_ln.so an_to_ln.po $(OUTPRE)an_to_ln.$(OBJEXT): \
+-  $(BUILDTOP)/include/autoconf.h $(BUILDTOP)/include/krb5/krb5.h \
+-  $(BUILDTOP)/include/osconf.h $(BUILDTOP)/include/profile.h \
+-  $(COM_ERR_DEPS) $(top_srcdir)/include/k5-buf.h $(top_srcdir)/include/k5-err.h \
+-  $(top_srcdir)/include/k5-gmt_mktime.h $(top_srcdir)/include/k5-int-pkinit.h \
+-  $(top_srcdir)/include/k5-int.h $(top_srcdir)/include/k5-platform.h \
+-  $(top_srcdir)/include/k5-plugin.h $(top_srcdir)/include/k5-thread.h \
+-  $(top_srcdir)/include/k5-trace.h $(top_srcdir)/include/krb5.h \
+-  $(top_srcdir)/include/krb5/authdata_plugin.h $(top_srcdir)/include/krb5/plugin.h \
+-  $(top_srcdir)/include/krb5/preauth_plugin.h $(top_srcdir)/include/port-sockets.h \
+-  $(top_srcdir)/include/socket-utils.h an_to_ln.c
+ c_ustime.so c_ustime.po $(OUTPRE)c_ustime.$(OBJEXT): \
+   $(BUILDTOP)/include/autoconf.h $(BUILDTOP)/include/krb5/krb5.h \
+   $(BUILDTOP)/include/osconf.h $(BUILDTOP)/include/profile.h \
+@@ -237,17 +226,6 @@
+   $(top_srcdir)/include/krb5/authdata_plugin.h $(top_srcdir)/include/krb5/plugin.h \
+   $(top_srcdir)/include/krb5/preauth_plugin.h $(top_srcdir)/include/port-sockets.h \
+   $(top_srcdir)/include/socket-utils.h ktdefname.c
+-kuserok.so kuserok.po $(OUTPRE)kuserok.$(OBJEXT): $(BUILDTOP)/include/autoconf.h \
+-  $(BUILDTOP)/include/krb5/krb5.h $(BUILDTOP)/include/osconf.h \
+-  $(BUILDTOP)/include/profile.h $(COM_ERR_DEPS) $(top_srcdir)/include/k5-buf.h \
+-  $(top_srcdir)/include/k5-err.h $(top_srcdir)/include/k5-gmt_mktime.h \
+-  $(top_srcdir)/include/k5-int-pkinit.h $(top_srcdir)/include/k5-int.h \
+-  $(top_srcdir)/include/k5-platform.h $(top_srcdir)/include/k5-plugin.h \
+-  $(top_srcdir)/include/k5-thread.h $(top_srcdir)/include/k5-trace.h \
+-  $(top_srcdir)/include/krb5.h $(top_srcdir)/include/krb5/authdata_plugin.h \
+-  $(top_srcdir)/include/krb5/plugin.h $(top_srcdir)/include/krb5/preauth_plugin.h \
+-  $(top_srcdir)/include/port-sockets.h $(top_srcdir)/include/socket-utils.h \
+-  kuserok.c
+ mk_faddr.so mk_faddr.po $(OUTPRE)mk_faddr.$(OBJEXT): \
+   $(BUILDTOP)/include/autoconf.h $(BUILDTOP)/include/krb5/krb5.h \
+   $(BUILDTOP)/include/osconf.h $(BUILDTOP)/include/profile.h \
+@@ -272,6 +250,110 @@
+   $(top_srcdir)/include/krb5/authdata_plugin.h $(top_srcdir)/include/krb5/plugin.h \
+   $(top_srcdir)/include/krb5/preauth_plugin.h $(top_srcdir)/include/port-sockets.h \
+   $(top_srcdir)/include/socket-utils.h localaddr.c
++localauth.so localauth.po $(OUTPRE)localauth.$(OBJEXT): \
++  $(BUILDTOP)/include/autoconf.h $(BUILDTOP)/include/gssapi.h \
++  $(BUILDTOP)/include/gssrpc/types.h $(BUILDTOP)/lib/kadm5/admin.h \
++  \
++  $(BUILDTOP)/include/krb5/krb5.h $(BUILDTOP)/include/osconf.h \
++  $(BUILDTOP)/include/profile.h $(COM_ERR_DEPS) $(top_srcdir)/include/gssrpc/auth.h \
++  $(top_srcdir)/include/gssrpc/auth_gss.h $(top_srcdir)/include/gssrpc/auth_unix.h \
++  $(top_srcdir)/include/gssrpc/clnt.h $(top_srcdir)/include/gssrpc/rename.h \
++  $(top_srcdir)/include/gssrpc/rpc.h $(top_srcdir)/include/gssrpc/rpc_msg.h \
++  $(top_srcdir)/include/gssrpc/svc.h $(top_srcdir)/include/gssrpc/svc_auth.h \
++  $(top_srcdir)/include/gssrpc/xdr.h $(top_srcdir)/include/k5-buf.h \
++  $(top_srcdir)/include/k5-err.h $(top_srcdir)/include/k5-gmt_mktime.h \
++  $(top_srcdir)/include/k5-int-pkinit.h $(top_srcdir)/include/k5-int.h \
++  $(top_srcdir)/include/k5-platform.h $(top_srcdir)/include/k5-plugin.h \
++  $(top_srcdir)/include/k5-thread.h $(top_srcdir)/include/k5-trace.h \
++  $(top_srcdir)/include/kdb.h $(top_srcdir)/include/krb5.h \
++  $(top_srcdir)/include/krb5/authdata_plugin.h \
++  $(top_srcdir)/include/krb5/localauth_plugin.h $(top_srcdir)/include/krb5/locate_plugin.h \
++  $(top_srcdir)/include/krb5/plugin.h $(top_srcdir)/include/port-sockets.h \
++  $(top_srcdir)/include/socket-utils.h localauth.c os-proto.h
++localauth_an2ln.so localauth_an2ln.po $(OUTPRE)localauth_an2ln.$(OBJEXT): \
++  $(BUILDTOP)/include/autoconf.h $(BUILDTOP)/include/gssapi.h \
++  $(BUILDTOP)/include/gssrpc/types.h $(BUILDTOP)/lib/kadm5/admin.h \
++  \
++  $(BUILDTOP)/include/krb5/krb5.h $(BUILDTOP)/include/osconf.h \
++  $(BUILDTOP)/include/profile.h $(COM_ERR_DEPS) $(top_srcdir)/include/gssrpc/auth.h \
++  $(top_srcdir)/include/gssrpc/auth_gss.h $(top_srcdir)/include/gssrpc/auth_unix.h \
++  $(top_srcdir)/include/gssrpc/clnt.h $(top_srcdir)/include/gssrpc/rename.h \
++  $(top_srcdir)/include/gssrpc/rpc.h $(top_srcdir)/include/gssrpc/rpc_msg.h \
++  $(top_srcdir)/include/gssrpc/svc.h $(top_srcdir)/include/gssrpc/svc_auth.h \
++  $(top_srcdir)/include/gssrpc/xdr.h $(top_srcdir)/include/k5-buf.h \
++  $(top_srcdir)/include/k5-err.h $(top_srcdir)/include/k5-gmt_mktime.h \
++  $(top_srcdir)/include/k5-int-pkinit.h $(top_srcdir)/include/k5-int.h \
++  $(top_srcdir)/include/k5-platform.h $(top_srcdir)/include/k5-plugin.h \
++  $(top_srcdir)/include/k5-thread.h $(top_srcdir)/include/k5-trace.h \
++  $(top_srcdir)/include/kdb.h $(top_srcdir)/include/krb5.h \
++  $(top_srcdir)/include/krb5/authdata_plugin.h \
++  $(top_srcdir)/include/krb5/localauth_plugin.h $(top_srcdir)/include/krb5/locate_plugin.h \
++  $(top_srcdir)/include/krb5/plugin.h $(top_srcdir)/include/port-sockets.h \
++  $(top_srcdir)/include/socket-utils.h localauth_an2ln.c \
++  os-proto.h
++localauth_k5login.so localauth_k5login.po $(OUTPRE)localauth_k5login.$(OBJEXT): \
++  $(BUILDTOP)/include/autoconf.h $(BUILDTOP)/include/gssapi.h \
++  $(BUILDTOP)/include/gssrpc/types.h $(BUILDTOP)/lib/kadm5/admin.h \
++  \
++  $(BUILDTOP)/include/krb5/krb5.h $(BUILDTOP)/include/osconf.h \
++  $(BUILDTOP)/include/profile.h $(COM_ERR_DEPS) $(top_srcdir)/include/gssrpc/auth.h \
++  $(top_srcdir)/include/gssrpc/auth_gss.h $(top_srcdir)/include/gssrpc/auth_unix.h \
++  $(top_srcdir)/include/gssrpc/clnt.h $(top_srcdir)/include/gssrpc/rename.h \
++  $(top_srcdir)/include/gssrpc/rpc.h $(top_srcdir)/include/gssrpc/rpc_msg.h \
++  $(top_srcdir)/include/gssrpc/svc.h $(top_srcdir)/include/gssrpc/svc_auth.h \
++  $(top_srcdir)/include/gssrpc/xdr.h $(top_srcdir)/include/k5-buf.h \
++  $(top_srcdir)/include/k5-err.h $(top_srcdir)/include/k5-gmt_mktime.h \
++  $(top_srcdir)/include/k5-int-pkinit.h $(top_srcdir)/include/k5-int.h \
++  $(top_srcdir)/include/k5-platform.h $(top_srcdir)/include/k5-plugin.h \
++  $(top_srcdir)/include/k5-thread.h $(top_srcdir)/include/k5-trace.h \
++  $(top_srcdir)/include/kdb.h $(top_srcdir)/include/krb5.h \
++  $(top_srcdir)/include/krb5/authdata_plugin.h \
++  $(top_srcdir)/include/krb5/localauth_plugin.h $(top_srcdir)/include/krb5/locate_plugin.h \
++  $(top_srcdir)/include/krb5/plugin.h $(top_srcdir)/include/port-sockets.h \
++  $(top_srcdir)/include/socket-utils.h localauth_k5login.c \
++  os-proto.h
++localauth_names.so localauth_names.po $(OUTPRE)localauth_names.$(OBJEXT): \
++  $(BUILDTOP)/include/autoconf.h $(BUILDTOP)/include/gssapi.h \
++  $(BUILDTOP)/include/gssrpc/types.h $(BUILDTOP)/lib/kadm5/admin.h \
++  \
++  $(BUILDTOP)/include/krb5/krb5.h $(BUILDTOP)/include/osconf.h \
++  $(BUILDTOP)/include/profile.h $(COM_ERR_DEPS) $(top_srcdir)/include/gssrpc/auth.h \
++  $(top_srcdir)/include/gssrpc/auth_gss.h $(top_srcdir)/include/gssrpc/auth_unix.h \
++  $(top_srcdir)/include/gssrpc/clnt.h $(top_srcdir)/include/gssrpc/rename.h \
++  $(top_srcdir)/include/gssrpc/rpc.h $(top_srcdir)/include/gssrpc/rpc_msg.h \
++  $(top_srcdir)/include/gssrpc/svc.h $(top_srcdir)/include/gssrpc/svc_auth.h \
++  $(top_srcdir)/include/gssrpc/xdr.h $(top_srcdir)/include/k5-buf.h \
++  $(top_srcdir)/include/k5-err.h $(top_srcdir)/include/k5-gmt_mktime.h \
++  $(top_srcdir)/include/k5-int-pkinit.h $(top_srcdir)/include/k5-int.h \
++  $(top_srcdir)/include/k5-platform.h $(top_srcdir)/include/k5-plugin.h \
++  $(top_srcdir)/include/k5-thread.h $(top_srcdir)/include/k5-trace.h \
++  $(top_srcdir)/include/kdb.h $(top_srcdir)/include/krb5.h \
++  $(top_srcdir)/include/krb5/authdata_plugin.h \
++  $(top_srcdir)/include/krb5/localauth_plugin.h $(top_srcdir)/include/krb5/locate_plugin.h \
++  $(top_srcdir)/include/krb5/plugin.h $(top_srcdir)/include/port-sockets.h \
++  $(top_srcdir)/include/socket-utils.h localauth_names.c \
++  os-proto.h
++localauth_rule.so localauth_rule.po $(OUTPRE)localauth_rule.$(OBJEXT): \
++  $(BUILDTOP)/include/autoconf.h $(BUILDTOP)/include/gssapi.h \
++  $(BUILDTOP)/include/gssrpc/types.h $(BUILDTOP)/lib/kadm5/admin.h \
++  \
++  $(BUILDTOP)/include/krb5/krb5.h $(BUILDTOP)/include/osconf.h \
++  $(BUILDTOP)/include/profile.h $(COM_ERR_DEPS) $(top_srcdir)/include/gssrpc/auth.h \
++  $(top_srcdir)/include/gssrpc/auth_gss.h $(top_srcdir)/include/gssrpc/auth_unix.h \
++  $(top_srcdir)/include/gssrpc/clnt.h $(top_srcdir)/include/gssrpc/rename.h \
++  $(top_srcdir)/include/gssrpc/rpc.h $(top_srcdir)/include/gssrpc/rpc_msg.h \
++  $(top_srcdir)/include/gssrpc/svc.h $(top_srcdir)/include/gssrpc/svc_auth.h \
++  $(top_srcdir)/include/gssrpc/xdr.h $(top_srcdir)/include/k5-buf.h \
++  $(top_srcdir)/include/k5-err.h $(top_srcdir)/include/k5-gmt_mktime.h \
++  $(top_srcdir)/include/k5-int-pkinit.h $(top_srcdir)/include/k5-int.h \
++  $(top_srcdir)/include/k5-platform.h $(top_srcdir)/include/k5-plugin.h \
++  $(top_srcdir)/include/k5-thread.h $(top_srcdir)/include/k5-trace.h \
++  $(top_srcdir)/include/kdb.h $(top_srcdir)/include/krb5.h \
++  $(top_srcdir)/include/krb5/authdata_plugin.h \
++  $(top_srcdir)/include/krb5/localauth_plugin.h $(top_srcdir)/include/krb5/locate_plugin.h \
++  $(top_srcdir)/include/krb5/plugin.h $(top_srcdir)/include/port-sockets.h \
++  $(top_srcdir)/include/socket-utils.h localauth_rule.c \
++  os-proto.h
+ locate_kdc.so locate_kdc.po $(OUTPRE)locate_kdc.$(OBJEXT): \
+   $(BUILDTOP)/include/autoconf.h $(BUILDTOP)/include/krb5/krb5.h \
+   $(BUILDTOP)/include/osconf.h $(BUILDTOP)/include/profile.h \
+@@ -500,9 +582,6 @@
+   $(top_srcdir)/include/krb5/plugin.h $(top_srcdir)/include/krb5/preauth_plugin.h \
+   $(top_srcdir)/include/port-sockets.h $(top_srcdir)/include/socket-utils.h \
+   os-proto.h write_msg.c
+-t_an_to_ln.so t_an_to_ln.po $(OUTPRE)t_an_to_ln.$(OBJEXT): \
+-  $(BUILDTOP)/include/krb5/krb5.h $(COM_ERR_DEPS) $(top_srcdir)/include/krb5.h \
+-  t_an_to_ln.c
+ t_gifconf.so t_gifconf.po $(OUTPRE)t_gifconf.$(OBJEXT): \
+   t_gifconf.c
+ t_locate_kdc.so t_locate_kdc.po $(OUTPRE)t_locate_kdc.$(OBJEXT): \
+diff -N -r -u orig/krb5-1.10.3/src/lib/krb5/os/kuserok.c krb5-1.10.3/src/lib/krb5/os/kuserok.c
+--- a/src/lib/krb5/os/kuserok.c	2012-08-09 00:27:56.000000000 +0200
++++ b/src/lib/krb5/os/kuserok.c	1970-01-01 01:00:00.000000000 +0100
+@@ -1,203 +0,0 @@
+-/* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
+-/* lib/krb5/os/kuserok.c */
+-/*
+- * Copyright 1990,1993,2007 by the Massachusetts Institute of Technology.
+- * All Rights Reserved.
+- *
+- * Export of this software from the United States of America may
+- *   require a specific license from the United States Government.
+- *   It is the responsibility of any person or organization contemplating
+- *   export to obtain such a license before exporting.
+- *
+- * WITHIN THAT CONSTRAINT, permission to use, copy, modify, and
+- * distribute this software and its documentation for any purpose and
+- * without fee is hereby granted, provided that the above copyright
+- * notice appear in all copies and that both that copyright notice and
+- * this permission notice appear in supporting documentation, and that
+- * the name of M.I.T. not be used in advertising or publicity pertaining
+- * to distribution of the software without specific, written prior
+- * permission.  Furthermore if you modify this software you must label
+- * your software as modified software and not distribute it in such a
+- * fashion that it might be confused with the original M.I.T. software.
+- * M.I.T. makes no representations about the suitability of
+- * this software for any purpose.  It is provided "as is" without express
+- * or implied warranty.
+- */
+-
+-#include "k5-int.h"
+-#if !defined(_WIN32)            /* Not yet for Windows */
+-#include <stdio.h>
+-#include <pwd.h>
+-
+-#if defined(_AIX) && defined(_IBMR2)
+-#include <sys/access.h>
+-/* xlc has a bug with "const" */
+-#define getpwnam(user) getpwnam((char *)user)
+-#endif
+-
+-#define MAX_USERNAME 65
+-
+-#if defined(__APPLE__) && defined(__MACH__)
+-#include <hfs/hfs_mount.h>      /* XXX */
+-#define FILE_OWNER_OK(UID)  ((UID) == 0 || (UID) == UNKNOWNUID)
+-#else
+-#define FILE_OWNER_OK(UID)  ((UID) == 0)
+-#endif
+-
+-enum result { ACCEPT, REJECT, PASS };
+-
+-/*
+- * Find the k5login filename for luser, either in the user's homedir or in a
+- * configured directory under the username.
+- */
+-static krb5_error_code
+-get_k5login_filename(krb5_context context, const char *luser,
+-                     const char *homedir, char **filename_out)
+-{
+-    krb5_error_code ret;
+-    char *dir, *filename;
+-
+-    *filename_out = NULL;
+-    ret = profile_get_string(context->profile, KRB5_CONF_LIBDEFAULTS,
+-                             KRB5_CONF_K5LOGIN_DIRECTORY, NULL, NULL, &dir);
+-    if (ret != 0)
+-        return ret;
+-
+-    if (dir == NULL) {
+-        /* Look in the user's homedir. */
+-        if (asprintf(&filename, "%s/.k5login", homedir) < 0)
+-            return ENOMEM;
+-    } else {
+-        /* Look in the configured directory. */
+-        if (asprintf(&filename, "%s/%s", dir, luser) < 0)
+-            ret = ENOMEM;
+-        profile_release_string(dir);
+-        if (ret)
+-            return ret;
+-    }
+-    *filename_out = filename;
+-    return 0;
+-}
+-
+-/*
+- * Determine whether principal is authorized to log in as luser according to
+- * the user's k5login file.  Return ACCEPT if the k5login file authorizes the
+- * principal, PASS if the k5login file does not exist, or REJECT if the k5login
+- * file exists but does not authorize the principal.  If k5login files are
+- * configured to be non-authoritative, pass instead of rejecting.
+- */
+-static enum result
+-k5login_ok(krb5_context context, krb5_principal principal, const char *luser)
+-{
+-    int authoritative = TRUE, gobble;
+-    enum result result = REJECT;
+-    char *filename = NULL, *princname = NULL;
+-    char *newline, linebuf[BUFSIZ], pwbuf[BUFSIZ];
+-    struct stat sbuf;
+-    struct passwd pwx, *pwd;
+-    FILE *fp = NULL;
+-
+-    if (profile_get_boolean(context->profile, KRB5_CONF_LIBDEFAULTS,
+-                            KRB5_CONF_K5LOGIN_AUTHORITATIVE, NULL, TRUE,
+-                            &authoritative) != 0)
+-        goto cleanup;
+-
+-    /* Get the local user's homedir and uid. */
+-    if (k5_getpwnam_r(luser, &pwx, pwbuf, sizeof(pwbuf), &pwd) != 0)
+-        goto cleanup;
+-
+-    if (get_k5login_filename(context, luser, pwd->pw_dir, &filename) != 0)
+-        goto cleanup;
+-
+-    if (access(filename, F_OK) != 0) {
+-        result = PASS;
+-        goto cleanup;
+-    }
+-
+-    if (krb5_unparse_name(context, principal, &princname) != 0)
+-        goto cleanup;
+-
+-    fp = fopen(filename, "r");
+-    if (fp == NULL)
+-        goto cleanup;
+-    set_cloexec_file(fp);
+-
+-    /* For security reasons, the .k5login file must be owned either by
+-     * the user or by root. */
+-    if (fstat(fileno(fp), &sbuf))
+-        goto cleanup;
+-    if (sbuf.st_uid != pwd->pw_uid && !FILE_OWNER_OK(sbuf.st_uid))
+-        goto cleanup;
+-
+-    /* Check each line. */
+-    while (result != ACCEPT && (fgets(linebuf, sizeof(linebuf), fp) != NULL)) {
+-        newline = strrchr(linebuf, '\n');
+-        if (newline != NULL)
+-            *newline = '\0';
+-        if (strcmp(linebuf, princname) == 0)
+-            result = ACCEPT;
+-        /* Clean up the rest of the line if necessary. */
+-        if (newline == NULL)
+-            while (((gobble = getc(fp)) != EOF) && gobble != '\n');
+-    }
+-
+-cleanup:
+-    free(princname);
+-    free(filename);
+-    if (fp != NULL)
+-        fclose(fp);
+-    /* If k5login files are non-authoritative, never reject. */
+-    return (!authoritative && result == REJECT) ? PASS : result;
+-}
+-
+-/*
+- * Determine whether principal is authorized to log in as luser according to
+- * aname-to-localname translation.  Return ACCEPT if principal translates to
+- * luser or PASS if it does not.
+- */
+-static enum result
+-an2ln_ok(krb5_context context, krb5_principal principal, const char *luser)
+-{
+-    krb5_error_code ret;
+-    char kuser[MAX_USERNAME];
+-
+-    ret = krb5_aname_to_localname(context, principal, sizeof(kuser), kuser);
+-    if (ret != 0)
+-        return PASS;
+-    return (strcmp(kuser, luser) == 0) ? ACCEPT : PASS;
+-}
+-
+-krb5_boolean KRB5_CALLCONV
+-krb5_kuserok(krb5_context context, krb5_principal principal, const char *luser)
+-{
+-    enum result result;
+-
+-    result = k5login_ok(context, principal, luser);
+-    if (result == PASS)
+-        result = an2ln_ok(context, principal, luser);
+-    return (result == ACCEPT) ? TRUE : FALSE;
+-}
+-
+-#else /* _WIN32 */
+-
+-/*
+- * If the given Kerberos name "server" translates to the same name as "luser"
+- * (using * krb5_aname_to_lname()), returns TRUE.
+- */
+-krb5_boolean KRB5_CALLCONV
+-krb5_kuserok(context, principal, luser)
+-    krb5_context context;
+-    krb5_principal principal;
+-    const char *luser;
+-{
+-    char kuser[50];
+-
+-    if (krb5_aname_to_localname(context, principal, sizeof(kuser), kuser))
+-        return FALSE;
+-
+-    if (strcmp(kuser, luser) == 0)
+-        return TRUE;
+-
+-    return FALSE;
+-}
+-#endif /* _WIN32 */
+diff -N -r -u orig/krb5-1.10.3/src/lib/krb5/os/localauth_an2ln.c krb5-1.10.3/src/lib/krb5/os/localauth_an2ln.c
+--- a/src/lib/krb5/os/localauth_an2ln.c	1970-01-01 01:00:00.000000000 +0100
++++ b/src/lib/krb5/os/localauth_an2ln.c	2015-02-26 16:23:47.038612232 +0100
+@@ -0,0 +1,59 @@
++/* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/* lib/krb5/os/localauth_an2ln.c - an2ln localauth module */
++/*
++ * Copyright (C) 2013 by the Massachusetts Institute of Technology.  All rights
++ * reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * * Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ *
++ * * Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in
++ *   the documentation and/or other materials provided with the
++ *   distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
++ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "k5-int.h"
++#include "os-proto.h"
++#include <krb5/localauth_plugin.h>
++
++#define MAX_USERNAME 65
++
++static krb5_error_code
++an2ln_userok(krb5_context context, krb5_localauth_moddata data,
++             krb5_const_principal aname, const char *lname)
++{
++    krb5_error_code ret;
++    char kuser[MAX_USERNAME];
++
++    ret = krb5_aname_to_localname(context, aname, sizeof(kuser), kuser);
++    return (ret == 0 && strcmp(kuser, lname) == 0) ? 0 : KRB5_PLUGIN_NO_HANDLE;
++}
++
++krb5_error_code
++localauth_an2ln_initvt(krb5_context context, int maj_ver, int min_ver,
++                       krb5_plugin_vtable vtable)
++{
++    krb5_localauth_vtable vt = (krb5_localauth_vtable)vtable;
++
++    vt->name = "an2ln";
++    vt->userok = an2ln_userok;
++    return 0;
++}
+diff -N -r -u orig/krb5-1.10.3/src/lib/krb5/os/localauth.c krb5-1.10.3/src/lib/krb5/os/localauth.c
+--- a/src/lib/krb5/os/localauth.c	1970-01-01 01:00:00.000000000 +0100
++++ b/src/lib/krb5/os/localauth.c	2015-02-26 16:23:47.037612222 +0100
+@@ -0,0 +1,455 @@
++/* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/* lib/krb5/os/localauth.c - Authorize access to local accounts */
++/*
++ * Copyright (C) 2013 by the Massachusetts Institute of Technology.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * * Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ *
++ * * Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in
++ *   the documentation and/or other materials provided with the
++ *   distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
++ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "k5-int.h"
++#include "os-proto.h"
++#include <krb5/localauth_plugin.h>
++
++struct localauth_module_handle {
++    struct krb5_localauth_vtable_st vt;
++    krb5_localauth_moddata data;
++};
++
++static krb5_error_code
++localauth_auth_to_local_initvt(krb5_context context, int maj_ver, int min_ver,
++                               krb5_plugin_vtable vtable);
++static krb5_error_code
++localauth_default_initvt(krb5_context context, int maj_ver, int min_ver,
++                         krb5_plugin_vtable vtable);
++
++/* Release a list of localauth module handles. */
++static void
++free_handles(krb5_context context, struct localauth_module_handle **handles)
++{
++    struct localauth_module_handle *h, **hp;
++
++    if (handles == NULL)
++        return;
++    for (hp = handles; *hp != NULL; hp++) {
++        h = *hp;
++        if (h->vt.fini != NULL)
++            h->vt.fini(context, h->data);
++        free(h);
++    }
++    free(handles);
++}
++
++/* Find a localauth module whose an2ln_types contains a match for type. */
++static struct localauth_module_handle *
++find_typed_module(struct localauth_module_handle **handles, const char *type)
++{
++    struct localauth_module_handle **hp, *h;
++    const char **tp;
++
++    for (hp = handles; *hp != NULL; hp++) {
++        h = *hp;
++        for (tp = h->vt.an2ln_types; tp != NULL && *tp != NULL; tp++) {
++            if (strcmp(*tp, type) == 0)
++                return h;
++        }
++    }
++    return NULL;
++}
++
++/* Generate a trace log and return 1 if the an2ln_types of handle conflicts
++ * with any of the handles in list.  Return 0 otherwise. */
++static int
++check_conflict(krb5_context context, struct localauth_module_handle **list,
++               struct localauth_module_handle *handle)
++{
++    struct localauth_module_handle *conflict;
++    const char **tp;
++
++    for (tp = handle->vt.an2ln_types; tp != NULL && *tp != NULL; tp++) {
++        conflict = find_typed_module(list, *tp);
++        if (conflict != NULL) {
++            TRACE_LOCALAUTH_INIT_CONFLICT(context, *tp, handle->vt.name,
++                                          conflict->vt.name);
++            return 1;
++        }
++    }
++    return 0;
++}
++
++/* If mod is in list, move it to the back. */
++static void
++move_to_back(krb5_plugin_initvt_fn *list, krb5_plugin_initvt_fn mod)
++{
++    for (; *list != NULL && *list != mod; list++);
++    if (*list == NULL)
++        return;
++    for (; *list != NULL; list++)
++        *list = *(list + 1);
++    *(list - 1) = mod;
++}
++
++/* Get the registered localauth modules including all built-in modules, in the
++ * proper order. */
++static krb5_error_code
++get_modules(krb5_context context, krb5_plugin_initvt_fn **modules_out)
++{
++    krb5_error_code ret;
++    const int intf = PLUGIN_INTERFACE_LOCALAUTH;
++
++    *modules_out = NULL;
++
++    /* Register built-in modules. */
++    ret = k5_plugin_register(context, intf, "auth_to_local",
++                             localauth_auth_to_local_initvt);
++    if (ret)
++        return ret;
++    ret = k5_plugin_register(context, intf, "names", localauth_names_initvt);
++    if (ret)
++        return ret;
++    ret = k5_plugin_register(context, intf, "default",
++                             localauth_default_initvt);
++    if (ret)
++        return ret;
++    ret = k5_plugin_register(context, intf, "rule", localauth_rule_initvt);
++    if (ret)
++        return ret;
++    ret = k5_plugin_register(context, intf, "k5login",
++                             localauth_k5login_initvt);
++    if (ret)
++        return ret;
++    ret = k5_plugin_register(context, intf, "an2ln", localauth_an2ln_initvt);
++    if (ret)
++        return ret;
++
++    ret = k5_plugin_load_all(context, intf, modules_out);
++    if (ret)
++        return ret;
++
++    /* Move built-in userok and untyped an2ln localauth modules to back so we
++     * try loaded modules first. */
++    move_to_back(*modules_out, localauth_names_initvt);
++    move_to_back(*modules_out, localauth_auth_to_local_initvt);
++    move_to_back(*modules_out, localauth_k5login_initvt);
++    move_to_back(*modules_out, localauth_an2ln_initvt);
++
++    return 0;
++}
++
++/* Initialize context->localauth_handles with a list of module handles. */
++static krb5_error_code
++load_localauth_modules(krb5_context context)
++{
++    krb5_error_code ret;
++    struct localauth_module_handle **list = NULL, *handle;
++    krb5_plugin_initvt_fn *modules = NULL, *mod;
++    size_t count;
++
++    ret = get_modules(context, &modules);
++    if (ret != 0)
++        goto cleanup;
++
++    /* Allocate a large enough list of handles. */
++    for (count = 0; modules[count] != NULL; count++);
++    list = k5alloc((count + 1) * sizeof(*list), &ret);
++    if (list == NULL)
++        goto cleanup;
++
++    /* Initialize each module, ignoring ones that fail. */
++    count = 0;
++    for (mod = modules; *mod != NULL; mod++) {
++        handle = k5alloc(sizeof(*handle), &ret);
++        if (handle == NULL)
++            goto cleanup;
++        ret = (*mod)(context, 1, 1, (krb5_plugin_vtable)&handle->vt);
++        if (ret != 0) {
++            TRACE_LOCALAUTH_VTINIT_FAIL(context, ret);
++            free(handle);
++            continue;
++        }
++
++        if (check_conflict(context, list, handle))
++            continue;
++
++        handle->data = NULL;
++        if (handle->vt.init != NULL) {
++            ret = handle->vt.init(context, &handle->data);
++            if (ret != 0) {
++                TRACE_LOCALAUTH_INIT_FAIL(context, handle->vt.name, ret);
++                free(handle);
++                continue;
++            }
++        }
++        list[count++] = handle;
++        list[count] = NULL;
++    }
++    list[count] = NULL;
++
++    ret = 0;
++    context->localauth_handles = list;
++    list = NULL;
++
++cleanup:
++    k5_plugin_free_modules(context, modules);
++    free_handles(context, list);
++    return ret;
++}
++
++/* Invoke a module's userok method, if it has one. */
++static krb5_error_code
++userok(krb5_context context, struct localauth_module_handle *h,
++       krb5_const_principal aname, const char *lname)
++{
++    if (h->vt.userok == NULL)
++        return KRB5_PLUGIN_NO_HANDLE;
++    return h->vt.userok(context, h->data, aname, lname);
++}
++
++/* Invoke a module's an2ln method, if it has one. */
++static krb5_error_code
++an2ln(krb5_context context, struct localauth_module_handle *h,
++      const char *type, const char *residual, krb5_const_principal aname,
++      char **lname_out)
++{
++    if (h->vt.an2ln == NULL)
++        return KRB5_LNAME_NOTRANS;
++    return h->vt.an2ln(context, h->data, type, residual, aname, lname_out);
++}
++
++/* Invoke a module's free_string method. */
++static void
++free_lname(krb5_context context, struct localauth_module_handle *h, char *str)
++{
++    h->vt.free_string(context, h->data, str);
++}
++
++/* Parse a TYPE or TYPE:residual string into its components. */
++static krb5_error_code
++parse_mapping_value(const char *value, char **type_out, char **residual_out)
++{
++    krb5_error_code ret;
++    const char *p;
++    char *type, *residual;
++
++    *type_out = NULL;
++    *residual_out = NULL;
++    p = strchr(value, ':');
++    if (p == NULL) {
++        type = strdup(value);
++        if (type == NULL)
++            return ENOMEM;
++        residual = NULL;
++    } else {
++        type = k5memdup0(value, p - value, &ret);
++        if (type == NULL)
++            return ret;
++        residual = strdup(p + 1);
++        if (residual == NULL) {
++            free(type);
++            return ENOMEM;
++        }
++    }
++    *type_out = type;
++    *residual_out = residual;
++    return 0;
++}
++
++/* Apply the default an2ln method, which translates name@defaultrealm or
++ * name/defaultrealm@defaultrealm to name. */
++static krb5_error_code
++an2ln_default(krb5_context context, krb5_localauth_moddata data,
++              const char *type, const char *residual,
++              krb5_const_principal aname, char **lname_out)
++{
++    krb5_error_code ret;
++    char *def_realm;
++
++    *lname_out = NULL;
++
++    ret = krb5_get_default_realm(context, &def_realm);
++    if (ret)
++        return KRB5_LNAME_NOTRANS;
++
++    if (!data_eq_string(aname->realm, def_realm)) {
++        ret = KRB5_LNAME_NOTRANS;
++    } else if (aname->length == 2) {
++        /* Allow a second component if it is the local realm. */
++        if (!data_eq_string(aname->data[1], def_realm))
++            ret = KRB5_LNAME_NOTRANS;
++    } else if (aname->length != 1) {
++        ret = KRB5_LNAME_NOTRANS;
++    }
++    free(def_realm);
++    if (ret)
++        return ret;
++
++    *lname_out = k5memdup0(aname->data[0].data, aname->data[0].length, &ret);
++    return ret;
++}
++
++/*
++ * Perform aname-to-lname translation using the auth_to_local values in the
++ * default realm's profile section.  If no values exist, fall back to the
++ * default method.
++ */
++static krb5_error_code
++an2ln_auth_to_local(krb5_context context, krb5_localauth_moddata data,
++                    const char *type_arg, const char *residual_arg,
++                    krb5_const_principal aname, char **lname_out)
++{
++    krb5_error_code ret;
++    struct localauth_module_handle *h;
++    char *realm = NULL, **mapping_values = NULL, *type, *residual, *lname;
++    const char *hierarchy[4];
++    size_t i;
++
++    *lname_out = NULL;
++
++    /* Fetch the profile values for realms-><defaultrealm>->auth_to_local. */
++    ret = krb5_get_default_realm(context, &realm);
++    if (ret)
++        return KRB5_LNAME_NOTRANS;
++    hierarchy[0] = KRB5_CONF_REALMS;
++    hierarchy[1] = realm;
++    hierarchy[2] = KRB5_CONF_AUTH_TO_LOCAL;
++    hierarchy[3] = NULL;
++    ret = profile_get_values(context->profile, hierarchy, &mapping_values);
++    if (ret) {
++        /* Use default method if there are no auth_to_local values. */
++        ret = an2ln_default(context, data, NULL, NULL, aname, lname_out);
++        goto cleanup;
++    }
++
++    ret = KRB5_LNAME_NOTRANS;
++    for (i = 0; mapping_values[i] != NULL && ret == KRB5_LNAME_NOTRANS; i++) {
++        ret = parse_mapping_value(mapping_values[i], &type, &residual);
++        if (ret)
++            goto cleanup;
++        h = find_typed_module(context->localauth_handles, type);
++        if (h != NULL) {
++            ret = an2ln(context, h, type, residual, aname, &lname);
++            if (ret == 0) {
++                *lname_out = strdup(lname);
++                if (*lname_out == NULL)
++                    ret = ENOMEM;
++                free_lname(context, h, lname);
++            }
++        } else {
++            ret = KRB5_CONFIG_BADFORMAT;
++        }
++        free(type);
++        free(residual);
++    }
++
++cleanup:
++    free(realm);
++    profile_free_list(mapping_values);
++    return ret;
++}
++
++static void
++freestr(krb5_context context, krb5_localauth_moddata data, char *str)
++{
++    free(str);
++}
++
++static krb5_error_code
++localauth_auth_to_local_initvt(krb5_context context, int maj_ver, int min_ver,
++                               krb5_plugin_vtable vtable)
++{
++    krb5_localauth_vtable vt = (krb5_localauth_vtable)vtable;
++
++    vt->name = "auth_to_local";
++    vt->an2ln = an2ln_auth_to_local;
++    vt->free_string = freestr;
++    return 0;
++}
++
++static krb5_error_code
++localauth_default_initvt(krb5_context context, int maj_ver, int min_ver,
++                         krb5_plugin_vtable vtable)
++{
++    krb5_localauth_vtable vt = (krb5_localauth_vtable)vtable;
++    static const char *types[] = { "DEFAULT", NULL };
++
++    vt->name = "default";
++    vt->an2ln_types = types;
++    vt->an2ln = an2ln_default;
++    vt->free_string = freestr;
++    return 0;
++}
++
++krb5_boolean KRB5_CALLCONV
++krb5_kuserok(krb5_context context, krb5_principal aname, const char *lname)
++{
++    krb5_error_code ret;
++    struct localauth_module_handle **hp;
++    krb5_boolean accepted = FALSE;
++
++    if (context->localauth_handles == NULL && load_localauth_modules(context))
++        return FALSE;
++
++    /* If any module denies access, return false immediately.  Otherwise,
++     * consult all modules and return true if one of them allows access. */
++    for (hp = context->localauth_handles; *hp != NULL; hp++) {
++        ret = userok(context, *hp, aname, lname);
++        if (ret == 0)
++            accepted = TRUE;
++        else if (ret != KRB5_PLUGIN_NO_HANDLE)
++            return FALSE;
++    }
++    return accepted;
++}
++
++krb5_error_code KRB5_CALLCONV
++krb5_aname_to_localname(krb5_context context, krb5_const_principal aname,
++                        int lnsize, char *lname_out)
++{
++    krb5_error_code ret;
++    struct localauth_module_handle **hp;
++    char *lname;
++    size_t sz;
++
++    if (context->localauth_handles == NULL) {
++        ret = load_localauth_modules(context);
++        if (ret)
++            return ret;
++    }
++
++    for (hp = context->localauth_handles; *hp != NULL; hp++) {
++        if ((*hp)->vt.an2ln_types != NULL)
++            continue;
++        ret = an2ln(context, *hp, NULL, NULL, aname, &lname);
++        if (ret == 0) {
++            sz = strlcpy(lname_out, lname, lnsize);
++            free_lname(context, *hp, lname);
++            return sz >= (size_t)lnsize ? KRB5_CONFIG_NOTENUFSPACE : 0;
++        } else if (ret != KRB5_LNAME_NOTRANS) {
++            return ret;
++        }
++    }
++    return KRB5_LNAME_NOTRANS;
++}
+diff -N -r -u orig/krb5-1.10.3/src/lib/krb5/os/localauth_k5login.c krb5-1.10.3/src/lib/krb5/os/localauth_k5login.c
+--- a/src/lib/krb5/os/localauth_k5login.c	1970-01-01 01:00:00.000000000 +0100
++++ b/src/lib/krb5/os/localauth_k5login.c	2015-02-26 16:23:47.039612247 +0100
+@@ -0,0 +1,183 @@
++/* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/* lib/krb5/os/localauth_k5login.c - k5login localauth module */
++/*
++ * Copyright (C) 1990,1993,2007,2013 by the Massachusetts Institute
++ * of Technology.  All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * * Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ *
++ * * Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in
++ *   the documentation and/or other materials provided with the
++ *   distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
++ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "k5-int.h"
++#include "os-proto.h"
++#include <krb5/localauth_plugin.h>
++
++#if !defined(_WIN32)            /* Not yet for Windows */
++#include <pwd.h>
++
++#if defined(__APPLE__) && defined(__MACH__)
++#include <hfs/hfs_mount.h>
++#define FILE_OWNER_OK(UID)  ((UID) == 0 || (UID) == UNKNOWNUID)
++#else
++#define FILE_OWNER_OK(UID)  ((UID) == 0)
++#endif
++
++/*
++ * Find the k5login filename for luser, either in the user's homedir or in a
++ * configured directory under the username.
++ */
++static krb5_error_code
++get_k5login_filename(krb5_context context, const char *lname,
++                     const char *homedir, char **filename_out)
++{
++    krb5_error_code ret;
++    char *dir, *filename;
++
++    *filename_out = NULL;
++    ret = profile_get_string(context->profile, KRB5_CONF_LIBDEFAULTS,
++                             KRB5_CONF_K5LOGIN_DIRECTORY, NULL, NULL, &dir);
++    if (ret != 0)
++        return ret;
++
++    if (dir == NULL) {
++        /* Look in the user's homedir. */
++        if (asprintf(&filename, "%s/.k5login", homedir) < 0)
++            return ENOMEM;
++    } else {
++        /* Look in the configured directory. */
++        if (asprintf(&filename, "%s/%s", dir, lname) < 0)
++            ret = ENOMEM;
++        profile_release_string(dir);
++        if (ret)
++            return ret;
++    }
++    *filename_out = filename;
++    return 0;
++}
++
++/* Determine whether aname is authorized to log in as lname according to the
++ * user's k5login file. */
++static krb5_error_code
++userok_k5login(krb5_context context, krb5_localauth_moddata data,
++               krb5_const_principal aname, const char *lname)
++{
++    krb5_error_code ret;
++    int authoritative = TRUE, gobble;
++    char *filename = NULL, *princname = NULL;
++    char *newline, linebuf[BUFSIZ], pwbuf[BUFSIZ];
++    struct stat sbuf;
++    struct passwd pwx, *pwd;
++    FILE *fp = NULL;
++
++    ret = profile_get_boolean(context->profile, KRB5_CONF_LIBDEFAULTS,
++                              KRB5_CONF_K5LOGIN_AUTHORITATIVE, NULL, TRUE,
++                              &authoritative);
++    if (ret)
++        goto cleanup;
++
++    /* Get the local user's .k5login filename. */
++    ret = k5_getpwnam_r(lname, &pwx, pwbuf, sizeof(pwbuf), &pwd);
++    if (ret) {
++        ret = EPERM;
++        goto cleanup;
++    }
++    ret = get_k5login_filename(context, lname, pwd->pw_dir, &filename);
++    if (ret)
++        goto cleanup;
++
++    if (access(filename, F_OK) != 0) {
++        ret = KRB5_PLUGIN_NO_HANDLE;
++        goto cleanup;
++    }
++
++    ret = krb5_unparse_name(context, aname, &princname);
++    if (ret)
++        goto cleanup;
++
++    fp = fopen(filename, "r");
++    if (fp == NULL) {
++        ret = errno;
++        goto cleanup;
++    }
++    set_cloexec_file(fp);
++
++    /* For security reasons, the .k5login file must be owned either by
++     * the user or by root. */
++    if (fstat(fileno(fp), &sbuf)) {
++        ret = errno;
++        goto cleanup;
++    }
++    if (sbuf.st_uid != pwd->pw_uid && !FILE_OWNER_OK(sbuf.st_uid)) {
++        ret = EPERM;
++        goto cleanup;
++    }
++
++    /* Check each line. */
++    while (fgets(linebuf, sizeof(linebuf), fp) != NULL) {
++        newline = strrchr(linebuf, '\n');
++        if (newline != NULL)
++            *newline = '\0';
++        if (strcmp(linebuf, princname) == 0) {
++            ret = 0;
++            goto cleanup;
++        }
++        /* Clean up the rest of the line if necessary. */
++        if (newline == NULL)
++            while ((gobble = getc(fp)) != EOF && gobble != '\n');
++    }
++
++    /* We didn't find it. */
++    ret = EPERM;
++
++cleanup:
++    free(princname);
++    free(filename);
++    if (fp != NULL)
++        fclose(fp);
++    /* If k5login files are non-authoritative, never reject. */
++    return (!authoritative && ret) ? KRB5_PLUGIN_NO_HANDLE : ret;
++}
++
++#else /* _WIN32 */
++
++static krb5_error_code
++userok_k5login(krb5_context context, krb5_localauth_moddata data,
++               krb5_const_principal aname, const char *lname)
++{
++    return KRB5_PLUGIN_NO_HANDLE;
++}
++
++#endif
++
++krb5_error_code
++localauth_k5login_initvt(krb5_context context, int maj_ver, int min_ver,
++                         krb5_plugin_vtable vtable)
++{
++    krb5_localauth_vtable vt = (krb5_localauth_vtable)vtable;
++
++    vt->name = "k5login";
++    vt->userok = userok_k5login;
++    return 0;
++}
+diff -N -r -u orig/krb5-1.10.3/src/lib/krb5/os/localauth_names.c krb5-1.10.3/src/lib/krb5/os/localauth_names.c
+--- a/src/lib/krb5/os/localauth_names.c	1970-01-01 01:00:00.000000000 +0100
++++ b/src/lib/krb5/os/localauth_names.c	2015-02-26 16:23:47.039612247 +0100
+@@ -0,0 +1,102 @@
++/* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/* lib/krb5/os/localauth_names.c - names localauth module */
++/*
++ * Copyright (C) 2013 by the Massachusetts Institute of Technology.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * * Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ *
++ * * Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in
++ *   the documentation and/or other materials provided with the
++ *   distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
++ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "k5-int.h"
++#include "os-proto.h"
++#include <krb5/localauth_plugin.h>
++
++static krb5_error_code
++an2ln_names(krb5_context context, krb5_localauth_moddata data,
++            const char *type, const char *residual, krb5_const_principal aname,
++            char **lname_out)
++{
++    krb5_error_code ret;
++    char *realm = NULL, *pname = NULL, **mapping_values = NULL;
++    const char *hierarchy[5];
++    size_t count;
++
++    *lname_out = NULL;
++
++    /*
++     * Fetch the profile values for realms-><defaultrealm>->
++     * auth_to_local_names-><princname>.  Use the principal name without realm;
++     * this is problematic in many multiple-realm environments, but is how
++     * we've historically done it.
++     */
++    ret = krb5_get_default_realm(context, &realm);
++    if (ret)
++        return KRB5_LNAME_NOTRANS;
++    ret = krb5_unparse_name_flags(context, aname,
++                                  KRB5_PRINCIPAL_UNPARSE_NO_REALM, &pname);
++    if (ret)
++        goto cleanup;
++    hierarchy[0] = KRB5_CONF_REALMS;
++    hierarchy[1] = realm;
++    hierarchy[2] = KRB5_CONF_AUTH_TO_LOCAL_NAMES;
++    hierarchy[3] = pname;
++    hierarchy[4] = NULL;
++    ret = profile_get_values(context->profile, hierarchy, &mapping_values);
++    if (ret) {
++        ret = KRB5_LNAME_NOTRANS;
++        goto cleanup;
++    }
++
++    /* We found one or more explicit mappings.  Use the last one. */
++    for (count = 0; mapping_values[count] != NULL; count++);
++    *lname_out = strdup(mapping_values[count - 1]);
++    if (*lname_out == NULL)
++        ret = ENOMEM;
++
++cleanup:
++    free(realm);
++    free(pname);
++    profile_free_list(mapping_values);
++    return ret;
++}
++
++static void
++freestr(krb5_context context, krb5_localauth_moddata data, char *str)
++{
++    free(str);
++}
++
++krb5_error_code
++localauth_names_initvt(krb5_context context, int maj_ver, int min_ver,
++                       krb5_plugin_vtable vtable)
++{
++    krb5_localauth_vtable vt = (krb5_localauth_vtable)vtable;
++
++    vt->name = "names";
++    vt->an2ln = an2ln_names;
++    vt->free_string = freestr;
++    return 0;
++}
+diff -N -r -u orig/krb5-1.10.3/src/lib/krb5/os/localauth_rule.c krb5-1.10.3/src/lib/krb5/os/localauth_rule.c
+--- a/src/lib/krb5/os/localauth_rule.c	1970-01-01 01:00:00.000000000 +0100
++++ b/src/lib/krb5/os/localauth_rule.c	2015-02-26 16:23:47.040612263 +0100
+@@ -0,0 +1,338 @@
++/* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/* lib/krb5/os/localauth_rule.c - rule localauth module */
++/*
++ * Copyright (C) 1990,1991,2007,2008,2013 by the Massachusetts
++ * Institute of Technology.  All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * * Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ *
++ * * Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in
++ *   the documentation and/or other materials provided with the
++ *   distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
++ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/*
++ * This module implements the RULE type for auth_to_local processing.
++ *
++ * There are three parts to each rule.  The first part, if present, determines
++ * the selection string.  If this is not present, the selection string defaults
++ * to the unparsed principal name without realm (which can be dangerous in
++ * multi-realm environments, but is our historical behavior).  The selection
++ * string syntax is:
++ *
++ *     "[" <ncomps> ":" <format> "]"
++ *
++ *         <ncomps> is the number of expected components for this rule.  If the
++ *         principal does not have this many components, then this rule does
++ *         not apply.
++ *
++ *         <format> determines the selection string.  Within <format>, $0 will
++ *         be substituted with the principal's realm, $1 with its first
++ *         component, $2 with its second component, and so forth.
++ *
++ * The second part is an optional regular expression surrounded by parentheses.
++ * If present, the rule will only apply if the selection string matches the
++ * regular expression.  At present, the regular expression may not contain a
++ * ')' character.
++ *
++ * The third part is a sequence of zero or more transformation rules, using
++ * the syntax:
++ *
++ *     "s/" <regexp> "/" <text> "/" ["g"]
++ *
++ * No substitutions are allowed within <text>.  A "g" indicates that the
++ * substitution should be performed globally; otherwise it will be performed at
++ * most once.
++ */
++
++#include "k5-int.h"
++#include "os-proto.h"
++#include <krb5/localauth_plugin.h>
++#include <ctype.h>
++
++#ifdef HAVE_REGEX_H
++#include <regex.h>
++
++/* Process the match portion of a rule and update *contextp.  Return
++ * KRB5_LNAME_NOTRANS if selstring doesn't match the regexp. */
++static krb5_error_code
++aname_do_match(const char *selstring, const char **contextp)
++{
++    krb5_error_code ret;
++    const char *startp, *endp;
++    char *regstr;
++    regex_t re;
++    regmatch_t m;
++
++    /* If no regexp is present, leave *contextp alone and return success. */
++    if (**contextp != '(')
++        return 0;
++
++    /* Find the end of the regexp and make a copy of it. */
++    startp = *contextp + 1;
++    endp = strchr(startp, ')');
++    if (endp == NULL)
++        return KRB5_CONFIG_BADFORMAT;
++    regstr = k5memdup0(startp, endp - startp, &ret);
++    if (regstr == NULL)
++        return ret;
++
++    /* Perform the match. */
++    ret = (regcomp(&re, regstr, REG_EXTENDED) == 0 &&
++           regexec(&re, selstring, 1, &m, 0) == 0 &&
++           m.rm_so == 0 && (size_t)m.rm_eo == strlen(selstring)) ? 0 :
++        KRB5_LNAME_NOTRANS;
++    regfree(&re);
++    free(regstr);
++    *contextp = endp + 1;
++    return ret;
++}
++
++/* Replace regular expression matches of regstr with repl in instr, producing
++ * *outstr.  If doall is true, replace all matches for regstr. */
++static krb5_error_code
++do_replacement(const char *regstr, const char *repl, krb5_boolean doall,
++               const char *instr, char **outstr)
++{
++    struct k5buf buf;
++    regex_t re;
++    regmatch_t m;
++
++    *outstr = NULL;
++    if (regcomp(&re, regstr, REG_EXTENDED))
++        return KRB5_LNAME_NOTRANS;
++    krb5int_buf_init_dynamic(&buf);
++    while (regexec(&re, instr, 1, &m, 0) == 0) {
++        krb5int_buf_add_len(&buf, instr, m.rm_so);
++        krb5int_buf_add(&buf, repl);
++        instr += m.rm_eo;
++        if (!doall)
++            break;
++    }
++    regfree(&re);
++    krb5int_buf_add(&buf, instr);
++    *outstr = krb5int_buf_data(&buf);
++    return *outstr == NULL ? ENOMEM : 0;
++}
++
++/*
++ * Perform any substitutions specified by *contextp, and advance *contextp past
++ * the substitution expressions.  Place the result of the substitutions in
++ * *result.
++ */
++static krb5_error_code
++aname_replacer(const char *string, const char **contextp, char **result)
++{
++    krb5_error_code ret = 0;
++    const char *cp, *ep, *tp;
++    char *current, *newstr, *rule = NULL, *repl = NULL;
++    krb5_boolean doglobal;
++
++    *result = NULL;
++
++    current = strdup(string);
++    if (current == NULL)
++        return ENOMEM;
++
++    /* Iterate over replacement expressions, updating current for each one. */
++    cp = *contextp;
++    while (*cp != '\0') {
++        /* Skip leading whitespace */
++        while (isspace((unsigned char)*cp))
++            cp++;
++
++        /* Find the separators for an s/rule/repl/ expression. */
++        if (!(cp[0] == 's' && cp[1] == '/' && (ep = strchr(cp + 2, '/')) &&
++              (tp = strchr(ep + 1, '/')))) {
++            ret = KRB5_CONFIG_BADFORMAT;
++            goto cleanup;
++        }
++
++        /* Copy the rule and replacement strings. */
++        free(rule);
++        rule = k5memdup0(cp + 2, ep - (cp + 2), &ret);
++        if (rule == NULL)
++            goto cleanup;
++        free(repl);
++        repl = k5memdup0(ep + 1, tp - (ep + 1), &ret);
++        if (repl == NULL)
++            goto cleanup;
++
++        /* Advance past expression and check for trailing "g". */
++        cp = tp + 1;
++        doglobal = (*cp == 'g');
++        if (doglobal)
++            cp++;
++
++        ret = do_replacement(rule, repl, doglobal, current, &newstr);
++        if (ret)
++            goto cleanup;
++        free(current);
++        current = newstr;
++    }
++    *result = current;
++
++cleanup:
++    free(repl);
++    free(rule);
++    return ret;
++}
++
++/*
++ * Compute selection string for RULE rules.  Advance *contextp to the string
++ * position after the selstring part if present, and set *result to the
++ * selection string.
++ */
++static krb5_error_code
++aname_get_selstring(krb5_context context, krb5_const_principal aname,
++                    const char **contextp, char **selstring_out)
++{
++    const char *current;
++    char *end, *str;
++    long num_comps, ind;
++    const krb5_data *datap;
++    struct k5buf selstring;
++    size_t nlit;
++
++    *selstring_out = NULL;
++    if (**contextp != '[') {
++        /*
++         * No selstring part; use the principal name without realm.  This is
++         * problematic in many multiple-realm environments, but is how we've
++         * historically done it.
++         */
++        return krb5_unparse_name_flags(context, aname,
++                                       KRB5_PRINCIPAL_UNPARSE_NO_REALM,
++                                       selstring_out);
++    }
++
++    /* Advance past the '[' and read the number of components. */
++    current = *contextp + 1;
++    errno = 0;
++    num_comps = strtol(current, &end, 10);
++    if (errno != 0 || num_comps < 0 || *end != ':')
++        return KRB5_CONFIG_BADFORMAT;
++    current = end;
++    if (num_comps != aname->length)
++        return KRB5_LNAME_NOTRANS;
++    current++;
++
++    krb5int_buf_init_dynamic(&selstring);
++    while (TRUE) {
++        /* Copy in literal characters up to the next $ or ]. */
++        nlit = strcspn(current, "$]");
++        krb5int_buf_add_len(&selstring, current, nlit);
++        current += nlit;
++        if (*current != '$')
++            break;
++
++        /* Expand $ substitution to a principal component. */
++        errno = 0;
++        ind = strtol(current + 1, &end, 10);
++        if (errno || ind > num_comps)
++            break;
++        current = end;
++        datap = ind > 0 ? krb5_princ_component(context, aname, ind - 1) :
++            krb5_princ_realm(context, aname);
++        if (!datap)
++            break;
++        krb5int_buf_add_len(&selstring, datap->data, datap->length);
++    }
++
++    /* Check that we hit a ']' and not the end of the string. */
++    if (*current != ']') {
++        krb5int_free_buf(&selstring);
++        return KRB5_CONFIG_BADFORMAT;
++    }
++
++    str = krb5int_buf_data(&selstring);
++    if (str == NULL)
++        return ENOMEM;
++
++    *contextp = current + 1;
++    *selstring_out = str;
++    return 0;
++}
++
++static krb5_error_code
++an2ln_rule(krb5_context context, krb5_localauth_moddata data, const char *type,
++           const char *rule, krb5_const_principal aname, char **lname_out)
++{
++    krb5_error_code ret;
++    const char *current;
++    char *selstring = NULL;
++
++    *lname_out = NULL;
++    if (rule == NULL)
++        return KRB5_CONFIG_BADFORMAT;
++
++    /* Compute the selection string. */
++    current = rule;
++    ret = aname_get_selstring(context, aname, &current, &selstring);
++    if (ret)
++        return ret;
++
++    /* Check the selection string against the regexp, if present. */
++    if (*current == '(') {
++        ret = aname_do_match(selstring, &current);
++        if (ret)
++            goto cleanup;
++    }
++
++    /* Perform the substitution. */
++    ret = aname_replacer(selstring, &current, lname_out);
++
++cleanup:
++    free(selstring);
++    return ret;
++}
++
++#else /* HAVE_REGEX_H */
++
++static krb5_error_code
++an2ln_rule(krb5_context context, krb5_localauth_moddata data, const char *type,
++           const char *rule, krb5_const_principal aname, char **lname_out)
++{
++    return KRB5_LNAME_NOTRANS;
++}
++
++#endif
++
++static void
++freestr(krb5_context context, krb5_localauth_moddata data, char *str)
++{
++    free(str);
++}
++
++krb5_error_code
++localauth_rule_initvt(krb5_context context, int maj_ver, int min_ver,
++                      krb5_plugin_vtable vtable)
++{
++    krb5_localauth_vtable vt = (krb5_localauth_vtable)vtable;
++    static const char *types[] = { "RULE", NULL };
++
++    vt->name = "rule";
++    vt->an2ln_types = types;
++    vt->an2ln = an2ln_rule;
++    vt->free_string = freestr;
++    return 0;
++}
+diff -N -r -u orig/krb5-1.10.3/src/lib/krb5/os/Makefile.in krb5-1.10.3/src/lib/krb5/os/Makefile.in
+--- a/src/lib/krb5/os/Makefile.in	2012-08-09 00:27:56.000000000 +0200
++++ b/src/lib/krb5/os/Makefile.in	2015-02-26 16:51:48.482526125 +0100
+@@ -13,7 +13,6 @@
+ 
+ STLIBOBJS= \
+ 	accessor.o	\
+-	an_to_ln.o	\
+ 	c_ustime.o	\
+ 	def_realm.o	\
+ 	ccdefname.o	\
+@@ -32,9 +31,13 @@
+ 	init_os_ctx.o	\
+ 	krbfileio.o	\
+ 	ktdefname.o	\
+-	kuserok.o	\
+ 	mk_faddr.o	\
+ 	localaddr.o	\
++	localauth.o	\
++	localauth_an2ln.o \
++	localauth_k5login.o \
++	localauth_names.o \
++	localauth_rule.o \
+ 	locate_kdc.o	\
+ 	lock_file.o	\
+ 	net_read.o	\
+@@ -58,7 +61,6 @@
+ 
+ OBJS= \
+ 	$(OUTPRE)accessor.$(OBJEXT)	\
+-	$(OUTPRE)an_to_ln.$(OBJEXT)	\
+ 	$(OUTPRE)c_ustime.$(OBJEXT)	\
+ 	$(OUTPRE)def_realm.$(OBJEXT)	\
+ 	$(OUTPRE)ccdefname.$(OBJEXT)	\
+@@ -77,9 +79,13 @@
+ 	$(OUTPRE)init_os_ctx.$(OBJEXT)	\
+ 	$(OUTPRE)krbfileio.$(OBJEXT)	\
+ 	$(OUTPRE)ktdefname.$(OBJEXT)	\
+-	$(OUTPRE)kuserok.$(OBJEXT)	\
+ 	$(OUTPRE)mk_faddr.$(OBJEXT)	\
+ 	$(OUTPRE)localaddr.$(OBJEXT)	\
++	$(OUTPRE)localauth.$(OBJEXT)	\
++	$(OUTPRE)localauth_an2ln.$(OBJEXT) \
++	$(OUTPRE)localauth_k5login.$(OBJEXT) \
++	$(OUTPRE)localauth_names.$(OBJEXT) \
++	$(OUTPRE)localauth_rule.$(OBJEXT) \
+ 	$(OUTPRE)locate_kdc.$(OBJEXT)	\
+ 	$(OUTPRE)lock_file.$(OBJEXT)	\
+ 	$(OUTPRE)net_read.$(OBJEXT)	\
+@@ -103,7 +109,6 @@
+ 
+ SRCS= \
+ 	$(srcdir)/accessor.c    \
+-	$(srcdir)/an_to_ln.c	\
+ 	$(srcdir)/c_ustime.c	\
+ 	$(srcdir)/def_realm.c	\
+ 	$(srcdir)/ccdefname.c	\
+@@ -122,9 +127,13 @@
+ 	$(srcdir)/init_os_ctx.c	\
+ 	$(srcdir)/krbfileio.c	\
+ 	$(srcdir)/ktdefname.c	\
+-	$(srcdir)/kuserok.c	\
+ 	$(srcdir)/mk_faddr.c	\
+ 	$(srcdir)/localaddr.c	\
++	$(srcdir)/localauth.c	\
++	$(srcdir)/localauth_an2ln.c \
++	$(srcdir)/localauth_k5login.c \
++	$(srcdir)/localauth_names.c \
++	$(srcdir)/localauth_rule.c \
+ 	$(srcdir)/locate_kdc.c	\
+ 	$(srcdir)/lock_file.c	\
+ 	$(srcdir)/net_read.c	\
+@@ -147,7 +156,7 @@
+ 	$(srcdir)/write_msg.c
+ 
+ EXTRADEPSRCS = \
+-	t_an_to_ln.c t_gifconf.c t_locate_kdc.c t_realm_iter.c \
++	t_gifconf.c t_locate_kdc.c t_realm_iter.c \
+ 	t_std_conf.c
+ 
+ ##DOS##LIBOBJS = $(OBJS)
+@@ -158,25 +167,15 @@
+ shared:
+ 	mkdir shared
+ 
+-TEST_PROGS= t_std_conf t_an_to_ln t_kuserok t_locate_kdc
++TEST_PROGS= t_std_conf t_locate_kdc
+ 
+ T_STD_CONF_OBJS= t_std_conf.o 
+ 
+-T_AN_TO_LN_OBJS = t_an_to_ln.o an_to_ln.o 
+-
+-T_KUSEROK_OBJS = t_kuserok.o
+-
+ T_REALM_ITER_OBJS = t_realm_iter.o realm_iter.o
+ 
+ t_std_conf: $(T_STD_CONF_OBJS) $(KRB5_BASE_DEPLIBS)
+ 	$(CC_LINK) -o t_std_conf $(T_STD_CONF_OBJS) $(KRB5_BASE_LIBS)
+ 
+-t_an_to_ln: $(T_AN_TO_LN_OBJS) $(KRB5_BASE_DEPLIBS)
+-	$(CC_LINK) -o t_an_to_ln $(T_AN_TO_LN_OBJS) $(KRB5_BASE_LIBS)
+-
+-t_kuserok: $(T_KUSEROK_OBJS) $(KRB5_BASE_DEPLIBS)
+-	$(CC_LINK) -o t_kuserok $(T_KUSEROK_OBJS) $(KRB5_BASE_LIBS)
+-
+ t_realm_iter: $(T_REALM_ITER_OBJS) $(KRB5_BASE_DEPLIBS)
+ 	$(CC_LINK) -o t_realm_iter $(T_REALM_ITER_OBJS) $(KRB5_BASE_LIBS)
+ 
+@@ -200,7 +199,7 @@
+ 	$(LCLINT) $(LCLINTOPTS) $(CPPFLAGS) $(LOCALINCLUDES) $(DEFS) \
+ 		-DTEST $(srcdir)/localaddr.c
+ 
+-check-unix:: check-unix-stdconf check-unix-locate check-unix-antoln t_kuserok
++check-unix:: check-unix-stdconf check-unix-locate
+ 
+ check-unix-stdconf:: t_std_conf
+ 	KRB5_CONFIG=$(srcdir)/td_krb5.conf ; export KRB5_CONFIG ;\
+@@ -233,38 +232,8 @@
+ 		echo '*** WARNING: skipped t_locate_kdc test: OFFLINE'; \
+ 	fi
+ 
+-#
+-# Do some aname-to-lname testing.
+-#
+-check-unix-antoln:: t_an_to_ln
+-	echo '[libdefaults]' > ./t_an.conf
+-	echo '	default_realm = r' >> ./t_an.conf
+-	echo '[realms]' >> ./t_an.conf
+-	echo 'r = {' >> ./t_an.conf
+-#	if test -r ../../../admin/aname/kdb5_anadd ; then \
+-#		$(KRB5_RUN_ENV) $(VALGRIND) ../../../admin/aname/kdb5_anadd -a -n ./t_an p/i/i/i@r piii; \
+-#		../../../admin/aname/kdb5_anadd -a -n ./t_an p/a/b/c@r pabc; \
+-#		echo 'auth_to_local = DB:./t_an' >> ./t_an.conf; \
+-#	fi
+-	echo 'auth_to_local = RULE:[3:$$1$$3$$2](rule.*)s/rule//g' \
+-		>> ./t_an.conf
+-	echo 'auth_to_local = RULE:[4:wi$$1ma]s/x/l/g' \
+-		>> ./t_an.conf
+-	echo 'auth_to_local = DEFAULT' >> ./t_an.conf
+-	echo '}' >> ./t_an.conf
+-#	if test -r ../../../admin/aname/kdb5_anadd ; then \
+-#		KRB5_CONFIG=./t_an.conf ; export KRB5_CONFIG ; \
+-#		$(KRB5_RUN_ENV) $(VALGRIND) ./t_an_to_ln p/i/i/i@r p/a/b/c@r; \
+-#	fi
+-	KRB5_CONFIG=./t_an.conf ; export KRB5_CONFIG ; \
+-	$(KRB5_RUN_ENV) $(VALGRIND) ./t_an_to_ln rul/helpme/e@r ru/123/le@r
+-	KRB5_CONFIG=./t_an.conf ; export KRB5_CONFIG ; \
+-	$(KRB5_RUN_ENV) $(VALGRIND) ./t_an_to_ln fred/r@r barney/r@r x/r/r/r@r
+-	$(RM) ./t_an.*
+-
+ clean:: 
+-	$(RM) $(TEST_PROGS) test.out t_std_conf.o t_an_to_ln.o t_locate_kdc.o
+-	$(RM) t_kuserok.o
++	$(RM) $(TEST_PROGS) test.out t_std_conf.o t_locate_kdc.o
+ 
+ @libobj_frag@
+ 
+diff -N -r -u orig/krb5-1.10.3/src/lib/krb5/os/os-proto.h krb5-1.10.3/src/lib/krb5/os/os-proto.h
+--- a/src/lib/krb5/os/os-proto.h	2012-08-09 00:27:56.000000000 +0200
++++ b/src/lib/krb5/os/os-proto.h	2015-02-26 16:23:47.040612263 +0100
+@@ -115,5 +115,14 @@
+ extern unsigned int krb5_skdc_timeout_1;
+ extern unsigned int krb5_max_dgram_size;
+ 
++krb5_error_code localauth_names_initvt(krb5_context context, int maj_ver,
++                                       int min_ver, krb5_plugin_vtable vtable);
++krb5_error_code localauth_rule_initvt(krb5_context context, int maj_ver,
++                                      int min_ver, krb5_plugin_vtable vtable);
++krb5_error_code localauth_k5login_initvt(krb5_context context, int maj_ver,
++                                         int min_ver,
++                                         krb5_plugin_vtable vtable);
++krb5_error_code localauth_an2ln_initvt(krb5_context context, int maj_ver,
++                                       int min_ver, krb5_plugin_vtable vtable);
+ 
+ #endif /* KRB5_LIBOS_INT_PROTO__ */
+#
+# gisburn: manually added this patch to make sure the
+# "localauth_plugin.h" header file gets installed
+#
+--- a/src/include/Makefile.in	2012-08-09 00:27:55.000000000 +0200
++++ b/src/include/Makefile.in	2015-02-26 21:31:32.873736512 +0100
+@@ -145,5 +145,6 @@
+ 	$(INSTALL_DATA) $(srcdir)/krb5/kadm5_hook_plugin.h $(DESTDIR)$(KRB5_INCDIR)$(S)krb5$(S)kadm5_hook_plugin.h
+ 	$(INSTALL_DATA) profile.h $(DESTDIR)$(KRB5_INCDIR)$(S)profile.h
+ 	$(INSTALL_DATA) $(srcdir)/gssapi.h $(DESTDIR)$(KRB5_INCDIR)$(S)gssapi.h
++	$(INSTALL_DATA) $(srcdir)/krb5/localauth_plugin.h $(DESTDIR)$(KRB5_INCDIR)$(S)krb5$(S)localauth_plugin.h
+ 
+ depend:: krb5/krb5.h $(BUILT_HEADERS)
+
+#EOF.

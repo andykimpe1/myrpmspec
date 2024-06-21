@@ -1,0 +1,104 @@
+From 7fbc092107298bded216fbce4cff6592275bff03 Mon Sep 17 00:00:00 2001
+From: Greg Hudson <ghudson@mit.edu>
+Date: Mon, 13 Apr 2015 13:09:20 -0400
+Subject: [PATCH] Fix LDAP ticket policies on big-endian LP64
+
+krb5_ldap_get_value() takes a pointer to int, and should not be passed
+a pointer to any integral type which might have a different width.
+Use an intermediate variable for each call.
+
+The erroneous calls in ldap_misc.c were passing pointers to int32_t,
+which is harmless on all common platforms.  The calls in
+ldap_tkt_policy.c were passing pointers to long; on big-endian LP64
+platforms, the result would be written to the high 32 bits of the long
+value.
+
+[rharwood@redhat.com backport not clean]
+
+ticket: 8166
+target_version: 1.13.2
+tags: pullup
+---
+ .../src/plugins/kdb/ldap/libkdb_ldap/ldap_misc.c   |   14 ++++++++++----
+ .../plugins/kdb/ldap/libkdb_ldap/ldap_tkt_policy.c |   14 ++++++++++----
+ 2 files changed, 20 insertions(+), 8 deletions(-)
+
+diff --git a/src/plugins/kdb/ldap/libkdb_ldap/ldap_misc.c b/src/plugins/kdb/ldap/libkdb_ldap/ldap_misc.c
+index 9db16d5..f1fc0f7 100644
+--- a/src/plugins/kdb/ldap/libkdb_ldap/ldap_misc.c
++++ b/src/plugins/kdb/ldap/libkdb_ldap/ldap_misc.c
+@@ -1841,6 +1841,7 @@ populate_krb5_db_entry(krb5_context context, krb5_ldap_context *ldap_context,
+     krb5_tl_data    userinfo_tl_data = {0};
+     char            **link_references = NULL;
+     char *DN = NULL;
++    int val = 0;
+ 
+     if (princ == NULL) {
+         /* XXX WAF probably should just extract princ from ldap result */
+@@ -1913,17 +1914,22 @@ populate_krb5_db_entry(krb5_context context, krb5_ldap_context *ldap_context,
+         mask |= KDB_FAIL_AUTH_COUNT_ATTR;
+ 
+     /* KRBMAXTICKETLIFE */
+-    if (krb5_ldap_get_value(ld, ent, "krbmaxticketlife", &(entry->max_life)) == 0)
++    if (krb5_ldap_get_value(ld, ent, "krbmaxticketlife", &val) == 0) {
++        entry->max_life = val;
+         mask |= KDB_MAX_LIFE_ATTR;
++    }
+ 
+     /* KRBMAXRENEWABLEAGE */
+-    if (krb5_ldap_get_value(ld, ent, "krbmaxrenewableage",
+-                            &(entry->max_renewable_life)) == 0)
++    if (krb5_ldap_get_value(ld, ent, "krbmaxrenewableage", &val) == 0) {
++        entry->max_renewable_life = val;
+         mask |= KDB_MAX_RLIFE_ATTR;
++    }
+ 
+     /* KRBTICKETFLAGS */
+-    if (krb5_ldap_get_value(ld, ent, "krbticketflags", &(entry->attributes)) == 0)
++    if (krb5_ldap_get_value(ld, ent, "krbticketflags", &val) == 0) {
++        entry->attributes = val;
+         mask |= KDB_TKT_FLAGS_ATTR;
++    }
+ 
+     /* PRINCIPAL EXPIRATION TIME */
+     if ((st=krb5_ldap_get_time(ld, ent, "krbprincipalexpiration", &(entry->expiration),
+diff --git a/src/plugins/kdb/ldap/libkdb_ldap/ldap_tkt_policy.c b/src/plugins/kdb/ldap/libkdb_ldap/ldap_tkt_policy.c
+index 99b5401..424f6fe 100644
+--- a/src/plugins/kdb/ldap/libkdb_ldap/ldap_tkt_policy.c
++++ b/src/plugins/kdb/ldap/libkdb_ldap/ldap_tkt_policy.c
+@@ -193,7 +193,7 @@ krb5_ldap_read_policy(krb5_context context, char *policyname,
+                       krb5_ldap_policy_params **policy, int *omask)
+ {
+     krb5_error_code             st=0, tempst=0;
+-    int                         objectmask=0;
++    int                         objectmask=0, val=0;
+     LDAP                        *ld=NULL;
+     LDAPMessage                 *result=NULL,*ent=NULL;
+     char                        *attributes[] = { "krbMaxTicketLife", "krbMaxRenewableAge", "krbTicketFlags", NULL};
+@@ -241,14 +241,20 @@ krb5_ldap_read_policy(krb5_context context, char *policyname,
+ 
+     ent=ldap_first_entry(ld, result);
+     if (ent != NULL) {
+-        if (krb5_ldap_get_value(ld, ent, "krbmaxticketlife", (int *) &(lpolicy->maxtktlife)) == 0)
++        if (krb5_ldap_get_value(ld, ent, "krbmaxticketlife", &val) == 0) {
++            lpolicy->maxtktlife = val;
+             *omask |= LDAP_POLICY_MAXTKTLIFE;
++        }
+ 
+-        if (krb5_ldap_get_value(ld, ent, "krbmaxrenewableage", (int *) &(lpolicy->maxrenewlife)) == 0)
++        if (krb5_ldap_get_value(ld, ent, "krbmaxrenewableage", &val) == 0) {
++            lpolicy->maxrenewlife = val;
+             *omask |= LDAP_POLICY_MAXRENEWLIFE;
++        }
+ 
+-        if (krb5_ldap_get_value(ld, ent, "krbticketflags", (int *) &(lpolicy->tktflags)) == 0)
++        if (krb5_ldap_get_value(ld, ent, "krbticketflags", &val) == 0) {
++            lpolicy->tktflags = val;
+             *omask |= LDAP_POLICY_TKTFLAGS;
++        }
+     }
+     ldap_msgfree(result);
+ 
+-- 
+1.7.1
+

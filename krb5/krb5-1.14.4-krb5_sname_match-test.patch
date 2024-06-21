@@ -1,0 +1,186 @@
+From 6c6021a33acce6eb4e2d37ad2446f0118d4b65ea Mon Sep 17 00:00:00 2001
+From: Greg Hudson <ghudson@mit.edu>
+Date: Thu, 12 May 2016 16:05:46 -0400
+Subject: [PATCH] Add tests for krb5_sname_match()
+
+ticket: 8415
+
+[rharwood@redhat.com drop gitignore]
+[rharwood@redhat.com unclean backport]
+---
+ src/lib/krb5/krb/Makefile.in     |  12 +++-
+ src/lib/krb5/krb/t_sname_match.c | 117 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 126 insertions(+), 3 deletions(-)
+ create mode 100644 src/lib/krb5/krb/t_sname_match.c
+
+diff --git a/src/lib/krb5/krb/Makefile.in b/src/lib/krb5/krb/Makefile.in
+index d62bd2b..ac0a9bf 100644
+--- a/src/lib/krb5/krb/Makefile.in
++++ b/src/lib/krb5/krb/Makefile.in
+@@ -335,7 +335,8 @@ SRCS=	$(srcdir)/addr_comp.c	\
+ 	$(srcdir)/t_pac.c	\
+ 	$(srcdir)/t_princ.c	\
+ 	$(srcdir)/t_etypes.c    \
+-	$(srcdir)/t_expire_warn.c
++	$(srcdir)/t_expire_warn.c \
++	$(srcdir)/t_sname_match.c
+ 
+ # Someday, when we have a "maintainer mode", do this right:
+ BISON=bison
+@@ -407,8 +408,11 @@ t_expire_warn: t_expire_warn.o $(KRB5_BASE_DEPLIBS)
+ t_vfy_increds: t_vfy_increds.o $(KRB5_BASE_DEPLIBS)
+ 	$(CC_LINK) -o $@ t_vfy_increds.o $(KRB5_BASE_LIBS)
+ 
++t_sname_match: t_sname_match.o sname_match.o $(KRB5_BASE_DEPLIBS)
++	$(CC_LINK) -o $@ t_sname_match.o sname_match.o $(KRB5_BASE_LIBS)
++
+ TEST_PROGS= t_walk_rtree t_kerb t_ser t_deltat t_expand t_authdata t_pac \
+-	t_princ t_etypes t_vfy_increds
++	t_princ t_etypes t_vfy_increds t_sname_match
+ 
+ check-unix:: $(TEST_PROGS)
+ 	KRB5_CONFIG=$(srcdir)/t_krb5.conf ; export KRB5_CONFIG ;\
+@@ -446,6 +450,7 @@ check-unix:: $(TEST_PROGS)
+ 	$(RUN_SETUP) $(VALGRIND) ./t_pac
+ 	$(RUN_SETUP) $(VALGRIND) ./t_princ
+ 	$(RUN_SETUP) $(VALGRIND) ./t_etypes
++	$(RUN_TEST) ./t_sname_match
+ 
+ check-pytests:: t_expire_warn t_vfy_increds
+ 	$(RUNPYTEST) $(srcdir)/t_expire_warn.py $(PYTESTFLAGS)
+@@ -462,7 +467,8 @@ clean::
+ 		$(OUTPRE)t_pac$(EXEEXT) $(OUTPRE)t_pac.$(OBJEXT)	\
+ 		$(OUTPRE)t_princ$(EXEEXT) $(OUTPRE)t_princ.$(OBJEXT)	\
+ 	$(OUTPRE)t_authdata$(EXEEXT) $(OUTPRE)t_authdata.$(OBJEXT)	\
+-	$(OUTPRE)t_vfy_increds$(EXEEXT) $(OUTPRE)t_vfy_increds.$(OBJEXT)
++	$(OUTPRE)t_vfy_increds$(EXEEXT) $(OUTPRE)t_vfy_increds.$(OBJEXT) \
++	$(OUTPRE)t_sname_match(EXEEXT)  $(OUTPRE)t_sname_match.$(OBJEXT)
+ 
+ @libobj_frag@
+ 
+diff --git a/src/lib/krb5/krb/t_sname_match.c b/src/lib/krb5/krb/t_sname_match.c
+new file mode 100644
+index 0000000..021b720
+--- /dev/null
++++ b/src/lib/krb5/krb/t_sname_match.c
+@@ -0,0 +1,117 @@
++/* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/* lib/krb5/krb/t_sname_match.c - Unit tests for krb5_sname_match() */
++/*
++ * Copyright (C) 2016 by the Massachusetts Institute of Technology.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * * Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ *
++ * * Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in
++ *   the documentation and/or other materials provided with the
++ *   distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
++ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "k5-int.h"
++
++struct test {
++    const char *matchstr;
++    const char *princstr;
++    krb5_boolean result;
++    krb5_boolean ignore_acceptor_hostname;
++    krb5_boolean non_host_nametype;
++} tests[] = {
++    /* If matching is NULL, the result is true for any princ. */
++    { NULL, "a/b@R", TRUE },
++
++    /* If matching does not have two components or does not have name type
++     * KRB5_NT_SRV_HOST, the result is a direct comparison. */
++    { "a@R", "a@R", TRUE },
++    { "a@R", "b@R", FALSE },
++    { "a/@R", "a/@R", TRUE, FALSE, TRUE },
++    { "a/@R", "a/b@R", FALSE, FALSE, TRUE },
++    { "a/b@", "a/b@", TRUE, FALSE, TRUE },
++    { "a/b@", "a/b@R", FALSE, FALSE, TRUE },
++    { "a/b/@R", "a/b/@R", TRUE },
++    { "a/b/@R", "a/b/c@R", FALSE },
++
++    /* The number of components must match. */
++    { "a/b@R", "a@R", FALSE },
++    { "a/b@R", "a/b/@R", FALSE },
++    { "a/b@R", "a/b/c@R", FALSE },
++
++    /* If matching's realm is empty, any realm in princ is permitted. */
++    { "a/b@", "a/b@", TRUE },
++    { "a/b@", "a/b@R", TRUE },
++    { "a/b@R", "a/b@R", TRUE },
++    { "a/b@R", "a/b@S", FALSE },
++
++    /* matching's first component must match princ's (even if empty). */
++    { "/b@R", "/b@R", TRUE },
++    { "/b@R", "a/b@R", FALSE },
++
++    /* If matching's second component is empty, any second component in princ
++     * is permitted. */
++    { "a/@R", "a/@R", TRUE },
++    { "a/@R", "a/b@R", TRUE },
++
++    /* If ignore_acceptor_hostname is set, any second component in princ is
++     * permitted, even if there is a different second component in matching. */
++    { "a/b@R", "a/c@R", TRUE, TRUE },
++    { "a/b@R", "c/b@R", FALSE, TRUE },
++};
++
++int
++main()
++{
++    size_t i;
++    struct test *t;
++    krb5_principal matching, princ;
++    krb5_context ctx;
++
++    if (krb5_init_context(&ctx) != 0)
++        abort();
++    for (i = 0; i < sizeof(tests) / sizeof(*tests); i++) {
++        t = &tests[i];
++
++        if (t->matchstr != NULL) {
++            if (krb5_parse_name(ctx, t->matchstr, &matching) != 0)
++                abort();
++            if (t->non_host_nametype)
++                matching->type = KRB5_NT_PRINCIPAL;
++            else
++                matching->type = KRB5_NT_SRV_HST;
++        } else {
++            matching = NULL;
++        }
++        if (krb5_parse_name(ctx, t->princstr, &princ) != 0)
++            abort();
++
++        ctx->ignore_acceptor_hostname = t->ignore_acceptor_hostname;
++        if (krb5_sname_match(ctx, matching, princ) != t->result)
++            abort();
++
++        krb5_free_principal(ctx, matching);
++        krb5_free_principal(ctx, princ);
++    }
++    krb5_free_context(ctx);
++    return 0;
++}
+-- 
+2.8.1
+

@@ -1,0 +1,69 @@
+From cb6b636a7a33f9f60701fb495ca8c0df3b021d41 Mon Sep 17 00:00:00 2001
+From: Robbie Harwood <rharwood@redhat.com>
+Date: Mon, 16 Nov 2015 14:56:39 -0500
+Subject: [PATCH] Backport Nalin's pam_krb5 memory leak fix from rhel-7
+
+---
+ src/lib/krb5/krb/get_in_tkt.c          | 1 +
+ src/lib/krb5/krb/vfy_increds.c         | 6 +++---
+ src/lib/krb5/os/sendto_kdc.c           | 2 +-
+ src/plugins/preauth/pkinit/Makefile.in | 1 +
+ 4 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/src/lib/krb5/krb/get_in_tkt.c b/src/lib/krb5/krb/get_in_tkt.c
+index 11782ad..ac027d8 100644
+--- a/src/lib/krb5/krb/get_in_tkt.c
++++ b/src/lib/krb5/krb/get_in_tkt.c
+@@ -529,6 +529,7 @@ krb5_init_creds_free(krb5_context context,
+     }
+     free(ctx->in_tkt_service);
+     zap(ctx->password.data, ctx->password.length);
++    krb5_preauth_request_context_fini(context);
+     krb5_free_data_contents(context, &ctx->password);
+     krb5_free_error(context, ctx->err_reply);
+     krb5_free_pa_data(context, ctx->err_padata);
+diff --git a/src/lib/krb5/krb/vfy_increds.c b/src/lib/krb5/krb/vfy_increds.c
+index 207b309..e6087cf 100644
+--- a/src/lib/krb5/krb/vfy_increds.c
++++ b/src/lib/krb5/krb/vfy_increds.c
+@@ -40,9 +40,9 @@ copy_creds_except(krb5_context context, krb5_ccache incc,
+ 
+     while (!(code = krb5_cc_next_cred(context, incc, &cur, &creds))) {
+         if (krb5_principal_compare(context, princ, creds.server))
+-            continue;
+-
+-        code = krb5_cc_store_cred(context, outcc, &creds);
++            code = 0;
++        else
++            code = krb5_cc_store_cred(context, outcc, &creds);
+         krb5_free_cred_contents(context, &creds);
+         if (code)
+             goto cleanup;
+diff --git a/src/lib/krb5/os/sendto_kdc.c b/src/lib/krb5/os/sendto_kdc.c
+index 63dbcd8..daa34bd 100644
+--- a/src/lib/krb5/os/sendto_kdc.c
++++ b/src/lib/krb5/os/sendto_kdc.c
+@@ -286,7 +286,7 @@ krb5_sendto_kdc(krb5_context context, const krb5_data *message,
+                 const krb5_data *realm, krb5_data *reply, int *use_master,
+                 int tcp_only)
+ {
+-    krb5_error_code retval, err;
++    krb5_error_code retval, err = 0;
+     struct serverlist servers;
+     int socktype1 = 0, socktype2 = 0, server_used;
+ 
+diff --git a/src/plugins/preauth/pkinit/Makefile.in b/src/plugins/preauth/pkinit/Makefile.in
+index 05a6794..743a099 100644
+--- a/src/plugins/preauth/pkinit/Makefile.in
++++ b/src/plugins/preauth/pkinit/Makefile.in
+@@ -6,6 +6,7 @@ PROG_LIBPATH=-L$(TOPLIBD)
+ PROG_RPATH=$(KRB5_LIBDIR)
+ MODULE_INSTALL_DIR = $(KRB5_PA_MODULE_DIR)
+ DEFS=@DEFS@
++LDFLAGS += -Wl,-z,nodelete
+ 
+ LOCALINCLUDES = -I../../../include/krb5 -I. $(PKINIT_CRYPTO_IMPL_CFLAGS)
+ RUN_SETUP = @KRB5_RUN_ENV@
+-- 
+2.6.2
+

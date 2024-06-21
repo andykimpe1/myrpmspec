@@ -1,0 +1,57 @@
+commit ea26f5230c4adaaf48b2d5d3175c2ef05f3b041d
+Author: Tom Yu <tlyu@mit.edu>
+Date:   Wed May 29 17:33:05 2013 -0400
+
+    Fix transited handling for GSSAPI acceptors
+    
+    The Acceptor Names project (#6855) extended krb5_rd_req so that it can
+    accept a "matching principal" in the server parameter.  If the
+    matching principal has an empty realm, rd_req_decoded_opt attempted to
+    do transited checking with an empty server realm.
+    
+    To fix this, always reset server to req->ticket->server for future
+    processing steps if we decrypt the ticket using a keytab.
+    decrypt_ticket replaces req->ticket->server with the principal name
+    from the keytab entry, so we know this name is correct.
+    
+    Based on a bug report and patch from nalin@redhat.com.
+    
+    (cherry picked from commit 57acee11b5c6682a7f4f036e35d8b2fc9292875e)
+    
+    [tlyu@mit.edu: removed test due to k5test.py incompatibility]
+    
+    ticket: 7649 (new)
+    version_fixed: 1.10.6
+    status: resolved
+
+diff --git a/src/lib/krb5/krb/rd_req_dec.c b/src/lib/krb5/krb/rd_req_dec.c
+index 261ac46..982f44d 100644
+--- a/src/lib/krb5/krb/rd_req_dec.c
++++ b/src/lib/krb5/krb/rd_req_dec.c
+@@ -277,11 +277,16 @@ rd_req_decoded_opt(krb5_context context, krb5_auth_context *auth_context,
+         }
+         krb5_k_free_key(context, (*auth_context)->key);
+         (*auth_context)->key = NULL;
++        if (server == NULL)
++            server = req->ticket->server;
+     } else {
+         retval = decrypt_ticket(context, req, server, keytab,
+                                 check_valid_flag ? &decrypt_key : NULL);
+         if (retval)
+             goto cleanup;
++        /* decrypt_ticket placed the principal of the keytab key in
++         * req->ticket->server; always use this for later steps. */
++        server = req->ticket->server;
+     }
+     TRACE_RD_REQ_TICKET(context, req->ticket->enc_part2->client,
+                         req->ticket->server, req->ticket->enc_part2->session);
+@@ -308,9 +313,6 @@ rd_req_decoded_opt(krb5_context context, krb5_auth_context *auth_context,
+         goto cleanup;
+     }
+ 
+-    if (!server) {
+-        server = req->ticket->server;
+-    }
+     /* Get an rcache if necessary. */
+     if (((*auth_context)->rcache == NULL)
+         && ((*auth_context)->auth_context_flags & KRB5_AUTH_CONTEXT_DO_TIME)

@@ -1,0 +1,234 @@
+Messy backport of tests from 5df4b25fe8e64ca1555662a11a4b8d8b042e048a
+
+---
+ src/tests/gssapi/Makefile.in |   20 ++--
+ src/tests/gssapi/common.c    |   23 +++++
+ src/tests/gssapi/t_err.c     |  121 ++++++++++++++++++++++++
+ src/tests/gssapi/t_gssapi.py |    2 +
+ 5 files changed, 208 insertions(+), 17 deletions(-)
+ create mode 100644 src/tests/gssapi/t_err.c
+
+diff --git a/src/tests/gssapi/Makefile.in b/src/tests/gssapi/Makefile.in
+index f62ed0f..0e309ca 100644
+--- a/src/tests/gssapi/Makefile.in
++++ b/src/tests/gssapi/Makefile.in
+@@ -6,21 +6,21 @@ RUN_SETUP = @KRB5_RUN_ENV@
+ PROG_LIBPATH=-L$(TOPLIBD)
+ PROG_RPATH=$(KRB5_LIBDIR)
+ 
+-SRCS=	$(srcdir)/t_accname.c $(srcdir)/t_ccselect.c $(srcdir)/t_imp_cred.c \
+-	$(srcdir)/t_imp_name.c $(srcdir)/t_s4u.c $(srcdir)/t_namingexts.c \
+-	$(srcdir)/t_gssexts.c $(srcdir)/t_saslname.c $(srcdir)/t_invalid.c \
+-	$(srcdir)/common.c
++SRCS=	$(srcdir)/t_accname.c $(srcdir)/t_ccselect.c $(srcdir)/t_err.c \
++	$(srcdir)/t_imp_cred.c $(srcdir)/t_imp_name.c $(srcdir)/t_s4u.c \
++	$(srcdir)/t_namingexts.c $(srcdir)/t_gssexts.c \
++	$(srcdir)/t_saslname.c $(srcdir)/t_invalid.c $(srcdir)/common.c
+ 
+-OBJS=	t_accname.o t_ccselect.o t_imp_cred.o t_imp_name.o t_s4u.o \
++OBJS=	t_accname.o t_ccselect.o t_err.o t_imp_cred.o t_imp_name.o t_s4u.o \
+ 	t_namingexts.o t_gssexts.o t_spnego.o t_saslname.o t_invalid.o common.o
+ 
+-all:: t_accname t_ccselect t_imp_cred t_imp_name t_s4u t_namingexts t_gssexts \
+-	t_spnego t_saslname t_invalid
++all:: t_accname t_ccselect t_err t_imp_cred t_imp_name t_s4u t_namingexts \
++	t_gssexts t_spnego t_saslname t_invalid
+ 
+ check-unix:: t_invalid
+ 	$(RUN_SETUP) $(VALGRIND) ./t_invalid
+ 
+-check-pytests:: t_accname t_ccselect t_imp_cred t_spnego
++check-pytests:: t_accname t_ccselect t_err t_imp_cred t_spnego
+ 	$(RUNPYTEST) $(srcdir)/t_gssapi.py $(PYTESTFLAGS)
+ 	$(RUNPYTEST) $(srcdir)/t_ccselect.py $(PYTESTFLAGS)
+ 
+@@ -28,6 +28,8 @@ t_accname: t_accname.o $(GSS_DEPLIBS) $(KRB5_BASE_DEPLIBS)
+ 	$(CC_LINK) -o t_accname t_accname.o $(GSS_LIBS) $(KRB5_BASE_LIBS)
+ t_ccselect: t_ccselect.o $(GSS_DEPLIBS) $(KRB5_BASE_DEPLIBS)
+ 	$(CC_LINK) -o t_ccselect t_ccselect.o $(GSS_LIBS) $(KRB5_BASE_LIBS)
++t_err: t_err.o common.o $(GSS_DEPLIBS) $(KRB5_BASE_DEPLIBS)
++	$(CC_LINK) -o t_err t_err.o common.o $(GSS_DEPLIBS) $(KRB5_BASE_DEPLIBS)
+ t_imp_cred: t_imp_cred.o $(GSS_DEPLIBS) $(KRB5_BASE_DEPLIBS)
+ 	$(CC_LINK) -o t_imp_cred t_imp_cred.o $(GSS_LIBS) $(KRB5_BASE_LIBS)
+ t_imp_name: t_imp_name.o $(GSS_DEPLIBS) $(KRB5_BASE_DEPLIBS)
+@@ -48,4 +50,4 @@ t_saslname: t_saslname.o $(GSS_DEPLIBS) $(KRB5_BASE_DEPLIBS)
+ clean::
+ 	$(RM) t_accname t_ccselect t_imp_cred t_imp_name t_s4u t_namingexts \
+ 		t_gssexts t_spnego t_saslname
+-	$(RM) t_invalid
++	$(RM) t_invalid t_err
+diff --git a/src/tests/gssapi/common.c b/src/tests/gssapi/common.c
+index 2f5097f..7d03240 100644
+--- a/src/tests/gssapi/common.c
++++ b/src/tests/gssapi/common.c
+@@ -85,6 +85,29 @@ errout(const char *msg)
+     exit(1);
+ }
+ 
++gss_name_t
++import_name(const char *str)
++{
++    OM_uint32 major, minor;
++    gss_name_t name;
++    gss_buffer_desc buf;
++    gss_OID nametype = NULL;
++
++    if (*str == 'u')
++        nametype = GSS_C_NT_USER_NAME;
++    else if (*str == 'p')
++        nametype = (gss_OID)GSS_KRB5_NT_PRINCIPAL_NAME;
++    else if (*str == 'h')
++        nametype = GSS_C_NT_HOSTBASED_SERVICE;
++    if (nametype == NULL || str[1] != ':')
++        errout("names must begin with u: or p: or h:");
++    buf.value = (char *)str + 2;
++    buf.length = strlen(str) - 2;
++    major = gss_import_name(&minor, &buf, nametype, &name);
++    check_gsserr("gss_import_name", major, minor);
++    return name;
++}
++
+ void
+ display_canon_name(const char *tag, gss_name_t name, gss_OID mech)
+ {
+diff --git a/src/tests/gssapi/t_err.c b/src/tests/gssapi/t_err.c
+new file mode 100644
+index 0000000..b7c32b4
+--- /dev/null
++++ b/src/tests/gssapi/t_err.c
+@@ -0,0 +1,121 @@
++/* -*- mode: c; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++/* tests/gssapi/t_err.c - Test accept_sec_context error generation */
++/*
++ * Copyright (C) 2013 by the Massachusetts Institute of Technology.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * * Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ *
++ * * Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in
++ *   the documentation and/or other materials provided with the
++ *   distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
++ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
++ * OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++/*
++ * This test program verifies that the krb5 gss_accept_sec_context can produce
++ * error tokens and that gss_init_sec_context can interpret them.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <assert.h>
++
++#include "common.h"
++
++static void
++check_replay_error(const char *msg, OM_uint32 major, OM_uint32 minor)
++{
++    OM_uint32 tmpmin, msg_ctx = 0;
++    const char *replay = "Request is a replay";
++    gss_buffer_desc m;
++
++    if (major != GSS_S_FAILURE) {
++        fprintf(stderr, "%s: expected major code GSS_S_FAILURE\n", msg);
++        check_gsserr(msg, major, minor);
++        exit(1);
++    }
++
++    (void)gss_display_status(&tmpmin, minor, GSS_C_MECH_CODE, GSS_C_NULL_OID,
++                             &msg_ctx, &m);
++    if (m.length != strlen(replay) || memcmp(m.value, replay, m.length) != 0) {
++        fprintf(stderr, "%s: expected replay error; got %.*s\n", msg,
++                (int)m.length, (char *)m.value);
++        exit(1);
++    }
++    (void)gss_release_buffer(&tmpmin, &m);
++}
++
++int
++main(int argc, char *argv[])
++{
++    OM_uint32 minor, major, flags;
++    gss_OID mech = &mech_krb5;
++    gss_name_t tname;
++    gss_buffer_desc itok, atok;
++    gss_ctx_id_t ictx = GSS_C_NO_CONTEXT, actx = GSS_C_NO_CONTEXT;
++
++    if (argc != 2) {
++        fprintf(stderr, "Usage: %s targetname\n", argv[0]);
++        return 1;
++    }
++    tname = import_name(argv[1]);
++
++    /* Get the initial context token. */
++    flags = GSS_C_REPLAY_FLAG | GSS_C_SEQUENCE_FLAG | GSS_C_MUTUAL_FLAG;
++    major = gss_init_sec_context(&minor, GSS_C_NO_CREDENTIAL, &ictx, tname,
++                                 mech, flags, GSS_C_INDEFINITE,
++                                 GSS_C_NO_CHANNEL_BINDINGS, GSS_C_NO_BUFFER,
++                                 NULL, &itok, NULL, NULL);
++    check_gsserr("gss_init_sec_context(1)", major, minor);
++    assert(major == GSS_S_CONTINUE_NEEDED);
++
++    /* Process this token into an acceptor context, then discard it. */
++    major = gss_accept_sec_context(&minor, &actx, GSS_C_NO_CREDENTIAL, &itok,
++                                   GSS_C_NO_CHANNEL_BINDINGS, NULL,
++                                   NULL, &atok, NULL, NULL, NULL);
++    check_gsserr("gss_accept_sec_context(1)", major, minor);
++    (void)gss_release_buffer(&minor, &atok);
++    (void)gss_delete_sec_context(&minor, &actx, NULL);
++
++    /* Process the same token again, producing a replay error. */
++    major = gss_accept_sec_context(&minor, &actx, GSS_C_NO_CREDENTIAL, &itok,
++                                   GSS_C_NO_CHANNEL_BINDINGS, NULL,
++                                   NULL, &atok, NULL, NULL, NULL);
++    check_replay_error("gss_accept_sec_context(2)", major, minor);
++    assert(atok.length != 0);
++
++    /* Send the error token back the initiator. */
++    (void)gss_release_buffer(&minor, &itok);
++    major = gss_init_sec_context(&minor, GSS_C_NO_CREDENTIAL, &ictx, tname,
++                                 mech, flags, GSS_C_INDEFINITE,
++                                 GSS_C_NO_CHANNEL_BINDINGS, &atok,
++                                 NULL, &itok, NULL, NULL);
++    check_replay_error("gss_init_sec_context(2)", major, minor);
++
++    (void)gss_release_name(&minor, &tname);
++    (void)gss_release_buffer(&minor, &itok);
++    (void)gss_release_buffer(&minor, &atok);
++    (void)gss_delete_sec_context(&minor, &ictx, NULL);
++    (void)gss_delete_sec_context(&minor, &actx, NULL);
++    return 0;
++}
+diff --git a/src/tests/gssapi/t_gssapi.py b/src/tests/gssapi/t_gssapi.py
+index 32485d0..f616dce 100644
+--- a/src/tests/gssapi/t_gssapi.py
++++ b/src/tests/gssapi/t_gssapi.py
+@@ -92,4 +92,6 @@ output = realm.run_as_client(['./t_accname', 'host/-nomatch-',
+ if 'host/-nomatch-' not in output:
+     fail('Expected host/-nomatch- in t_accname output')
+ 
++realm.run_as_client(['./t_err', 'p:' + realm.host_princ])
++
+ success('GSSAPI tests.')
+-- 
+1.7.1
+

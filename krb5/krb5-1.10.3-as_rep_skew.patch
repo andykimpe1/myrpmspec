@@ -1,0 +1,57 @@
+commit 2626c89efd8019853edab29c52bac951f5ba2794
+Author: ghudson <ghudson@dc483132-0cff-0310-8789-dd5450dbe970>
+Date:   Wed Jan 11 21:20:08 2012 +0000
+
+    ticket: 7063
+    
+    Fix spurious clock skew caused by gak_fct delay
+    
+    In get_in_tkt.c, a time offset is computed between the KDC's auth_time
+    and the current system time after the reply is decrypted.  Time may
+    have elapsed between these events because of a gak_fct invocation
+    which blocks on user input.  The resulting spurious time offset can
+    cause subsequent TGS-REQs to fail and can also cause the end time of
+    the next AS request to be in the past (issue #889) in cases where the
+    old ccache is opened to find the default principal.
+    
+    Use the system time, without offset, for the request time of an AS
+    request, for more predictable kinit behavior.  Use this request time,
+    rather than the current time, when computing the clock skew after the
+    reply is decrypted.
+    
+    git-svn-id: svn://anonsvn.mit.edu/krb5/trunk@25644 dc483132-0cff-0310-8789-dd5450dbe970
+
+diff --git a/src/lib/krb5/krb/get_in_tkt.c b/src/lib/krb5/krb/get_in_tkt.c
+index 2dd3947..fc8df83 100644
+--- a/src/lib/krb5/krb/get_in_tkt.c
++++ b/src/lib/krb5/krb/get_in_tkt.c
+@@ -154,6 +154,7 @@ verify_as_reply(krb5_context            context,
+     krb5_error_code             retval;
+     int                         canon_req;
+     int                         canon_ok;
++    krb5_timestamp              time_offset;
+ 
+     /* check the contents for sanity: */
+     if (!as_reply->enc_part2->times.starttime)
+@@ -216,8 +217,8 @@ verify_as_reply(krb5_context            context,
+     }
+ 
+     if (context->library_options & KRB5_LIBOPT_SYNC_KDCTIME) {
+-        retval = krb5_set_real_time(context,
+-                                    as_reply->enc_part2->times.authtime, -1);
++        time_offset = as_reply->enc_part2->times.authtime - time_now;
++        retval = krb5_set_time_offsets(context, time_offset, 0);
+         if (retval)
+             return retval;
+     } else {
+@@ -742,9 +743,7 @@ restart_init_creds_loop(krb5_context context, krb5_init_creds_context ctx,
+     if (code != 0)
+         goto cleanup;
+ 
+-    code = krb5_timeofday(context, &ctx->request_time);
+-    if (code != 0)
+-        goto cleanup;
++    ctx->request_time = time(NULL);
+ 
+     code = krb5int_fast_as_armor(context, ctx->fast_state,
+                                  ctx->opte, ctx->request);
