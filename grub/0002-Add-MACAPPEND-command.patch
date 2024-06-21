@@ -1,0 +1,242 @@
+From ad1e552c72ce86264fde5fe2144dfae98666dbef Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?V=C3=A1clav=20Pavl=C3=ADn?= <vpavlin@redhat.com>
+Date: Tue, 23 Jul 2013 14:57:47 +0200
+Subject: [PATCH 2/7] Add MACAPPEND command
+
+MACAPPEND provides BOOTIF parameter to kernel cmdline if specified in
+grub.conf file or called on grub cmdline.
+
+Resolves: rhbz#848628
+---
+ docs/grub.texi            | 10 ++++++++
+ efi/pxe.c                 | 58 +++++++++++++++++++++++++++++++++++++++++++++++
+ efi/pxe.h                 |  1 +
+ efi/x86_64/loader/linux.c | 15 ++++++++++++
+ stage2/builtins.c         | 40 +++++++++++++++++++++++++++++++-
+ stage2/shared.h           |  6 +++++
+ 6 files changed, 129 insertions(+), 1 deletion(-)
+
+diff --git a/docs/grub.texi b/docs/grub.texi
+index 5fd324d..6d3cf9f 100644
+--- a/docs/grub.texi
++++ b/docs/grub.texi
+@@ -2684,6 +2684,7 @@ you forget a command, you can run the command @command{help}
+ * ioprobe::                     Probe I/O ports used for a drive
+ * kernel::                      Load a kernel
+ * lock::                        Lock a menu entry
++* macappend::                   Append BOOTIF param to kernel cmd line
+ * makeactive::                  Make a partition active
+ * map::                         Map a drive to another
+ * md5crypt::                    Encrypt a password in MD5 format
+@@ -3023,6 +3024,15 @@ kernel /no-security-os
+ See also @ref{Security}.
+ @end deffn
+ 
++@node macappend
++@subsection macappend
++
++@deffn Command macappend
++Append BOOTIF=<hardware-address-of-boot-interface> to the cmdline.
++This allows an initrd program to determine which interface the system
++booted from.
++@end deffn
++
+ 
+ @node makeactive
+ @subsection makeactive
+diff --git a/efi/pxe.c b/efi/pxe.c
+index 3503d46..0a29c47 100644
+--- a/efi/pxe.c
++++ b/efi/pxe.c
+@@ -743,3 +743,61 @@ char *grub_efi_pxe_get_config_path(grub_efi_loaded_image_t *LoadedImage)
+ 	else
+ 		return grub_efi_pxe_get_config_pathv4(pxe, LoadedImage);
+ }
++
++char *grub_efi_pxe_get_mac()
++{
++	EFI_PXE_BASE_CODE *pxe = NULL;
++	grub_efi_handle_t *handle, *handles;
++	grub_efi_uintn_t num_handles;
++	EFI_PXE_BASE_CODE_DHCPV4_PACKET *packet;
++	char hex[] = "0123456789ABCDEF";
++
++	handles = grub_efi_locate_handle(GRUB_EFI_BY_PROTOCOL,
++					&PxeBaseCodeProtocol,
++					NULL, &num_handles);
++
++	if (!handles)
++	  return NULL;
++
++	for (handle = handles; num_handles--; handle++) {
++		pxe = grub_efi_open_protocol(*handle, &PxeBaseCodeProtocol,
++			GRUB_EFI_OPEN_PROTOCOL_GET_PROTOCOL);
++		if (!pxe || !pxe->Mode)
++			continue;
++		if (pxe->Mode->Started && pxe->Mode->DhcpAckReceived)
++			break;
++	}
++	grub_free(handles);
++
++	if (!pxe || !pxe->Mode)
++		return NULL;
++        packet = &pxe->Mode->DhcpAck.Dhcpv4;
++
++	if (!memcmp((const char *)packet->BootpHwAddr + 6, "\x00\x00\x00\x00\x00"
++					     "\x00\x00\x00\x00\x00", 10) &&
++			memcmp((const char *)packet->BootpHwAddr, "\x00\x00\x00\x00\x00\x00",
++				6)) {
++		char *mac = grub_malloc(21);
++                if (!mac)
++                        return NULL;
++
++		sprintf(mac, "01-%c%c-%c%c-%c%c-%c%c-%c%c-%c%c",
++			hex[(packet->BootpHwAddr[0] & 0xf0) >> 4],
++			hex[packet->BootpHwAddr[0] & 0xf],
++			hex[(packet->BootpHwAddr[1] & 0xf0) >> 4],
++			hex[packet->BootpHwAddr[1] & 0xf],
++			hex[(packet->BootpHwAddr[2] & 0xf0) >> 4],
++			hex[packet->BootpHwAddr[2] & 0xf],
++			hex[(packet->BootpHwAddr[3] & 0xf0) >> 4],
++			hex[packet->BootpHwAddr[3] & 0xf],
++			hex[(packet->BootpHwAddr[4] & 0xf0) >> 4],
++			hex[packet->BootpHwAddr[4] & 0xf],
++			hex[(packet->BootpHwAddr[5] & 0xf0) >> 4],
++			hex[packet->BootpHwAddr[5] & 0xf]);
++
++                return mac;
++	}
++
++        return NULL;
++
++}
+diff --git a/efi/pxe.h b/efi/pxe.h
+index 4bb7eca..ec53803 100644
+--- a/efi/pxe.h
++++ b/efi/pxe.h
+@@ -4,6 +4,7 @@
+ #include "byteswap.h"
+ 
+ extern char *grub_efi_pxe_get_config_path(grub_efi_loaded_image_t *LoadedImage);
++extern char *grub_efi_pxe_get_mac(void);
+ extern void grub_print_dhcp_info(grub_efi_loaded_image_t *loaded_image);
+ extern char *grub_efi_pxe_path_to_path_name(void);
+ 
+diff --git a/efi/x86_64/loader/linux.c b/efi/x86_64/loader/linux.c
+index ceebf5b..6d3d014 100644
+--- a/efi/x86_64/loader/linux.c
++++ b/efi/x86_64/loader/linux.c
+@@ -29,6 +29,7 @@
+ #include <shared.h>
+ 
+ #include "graphics.h"
++#include "pxe.h"
+ 
+ #define grub_file_size()    filemax
+ 
+@@ -322,6 +323,20 @@ grub_load_linux (char *kernel, char *arg)
+     }
+ 
+   setup_sects = lh->setup_sects;
++  
++  if (macappend)
++   {
++     char *mac = grub_efi_pxe_get_mac();
++     char *arg_end = NULL;
++
++     if (mac != NULL)
++       {
++         arg_end = arg+grub_strlen(arg);
++         arg_end = grub_stpcpy (arg_end, " BOOTIF=");
++         arg_end = grub_stpcpy (arg_end, mac);
++       }
++   }
++ 
+ 
+   real_size = 0x1000 + grub_strlen(arg);
+   prot_size = grub_file_size () - (setup_sects << SECTOR_BITS) - SECTOR_SIZE;
+diff --git a/stage2/builtins.c b/stage2/builtins.c
+index 17b7f34..a206a17 100644
+--- a/stage2/builtins.c
++++ b/stage2/builtins.c
+@@ -78,6 +78,10 @@ int auth = 0;
+ int grub_timeout = -1;
+ /* Whether to show the menu or not.  */
+ int show_menu = 1;
++#ifdef PLATFORM_EFI
++/* Whether to append BOOTIF param to kernel cmdline  */
++int macappend = 0;
++#endif
+ /* The BIOS drive map.  */
+ static unsigned short bios_drive_map[DRIVE_MAP_SIZE + 1];
+ 
+@@ -2746,7 +2750,38 @@ static struct builtin builtin_lock =
+   "lock",
+   "Break a command execution unless the user is authenticated."
+ };
+-  
++
++#ifdef PLATFORM_EFI
++/* macappend */
++static int
++macappend_func (char *arg, int flags)
++{
++  if (macappend)
++    {
++      macappend = 0;
++      grub_printf (" Macappend is turned off\n");
++    }
++  else
++    {
++      macappend = 1;
++      grub_printf (" Macappend is turned on\n");
++    }
++
++  return 0;
++}
++
++static struct builtin builtin_macappend =
++{
++  "macappend",
++  macappend_func,
++  BUILTIN_CMDLINE | BUILTIN_MENU,
++  "macappend",
++  "Append BOOTIF=<hardware-address-of-boot-interface> to the cmdline."
++  " This allows an initrd program to determine which interface"
++  " the system booted from."
++};
++#endif /* ! PLATFORM_EFI */
++
+ 
+ /* makeactive */
+ static int
+@@ -5259,6 +5294,9 @@ struct builtin *builtin_table[] =
+ #endif
+   &builtin_kernel,
+   &builtin_lock,
++#ifdef PLATFORM_EFI
++  &builtin_macappend,
++#endif
+   &builtin_makeactive,
+ #ifndef PLATFORM_EFI
+   &builtin_map,
+diff --git a/stage2/shared.h b/stage2/shared.h
+index b466aeb..9369b30 100644
+--- a/stage2/shared.h
++++ b/stage2/shared.h
+@@ -653,6 +653,12 @@ extern int debug_graphics;
+ 
+ /* Verbose mode flag. */
+ extern int grub_verbose;
++
++#ifdef PLATFORM_EFI
++/* Append BOOTIF to kernel args */
++extern int macappend;
++#endif
++
+ #define verbose_printf(format...) \
+   do { if (grub_verbose) printf(format); } while (0)
+ #define grub_verbose_printf(format...) \
+-- 
+1.8.3.1
+

@@ -1,0 +1,57 @@
+From 58d262b63abfd23fbe4983ae75097d61ca0f526a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?V=C3=A1clav=20Pavl=C3=ADn?= <vpavlin@redhat.com>
+Date: Mon, 29 Jul 2013 17:03:38 +0200
+Subject: [PATCH 3/7] Retry getting memory map and exit boot services on
+ failure
+
+Resolves: rhbz#918824
+---
+ efi/x86_64/loader/linux.c | 25 +++++++++++++++++--------
+ 1 file changed, 17 insertions(+), 8 deletions(-)
+
+diff --git a/efi/x86_64/loader/linux.c b/efi/x86_64/loader/linux.c
+index 6d3d014..fcdb4f8 100644
+--- a/efi/x86_64/loader/linux.c
++++ b/efi/x86_64/loader/linux.c
+@@ -192,21 +192,30 @@ big_linux_boot (void)
+   grub_efi_uintn_t desc_size;
+   grub_efi_uint32_t desc_version;
+   int e820_nr_map;
++  int retry = 5;
+ 
+   params = real_mode_mem;
+ 
+   graphics_set_kernel_params (params);
+ 
+-  if (grub_efi_get_memory_map (&map_key, &desc_size, &desc_version) <= 0)
+-    grub_fatal ("cannot get memory map");
++  /*
++   * UEFI Specification:
++   * If MapKey value is incorrect, ExitBootServices() returns EFI_INVALID_PARAMETER 
++   * and GetMemoryMap() with ExitBootServices() must be called again.
++   */
++  do {
++    if (grub_efi_get_memory_map (&map_key, &desc_size, &desc_version) <= 0)
++      grub_fatal ("cannot get memory map");
++
++    /* Pass e820 memmap. */
++    e820_map_from_efi_map ((struct e820_entry *) params->e820_map, &e820_nr_map,
++			   mmap_buf, desc_size, mmap_size);
++    params->e820_nr_map = e820_nr_map;
+ 
+-  /* Pass e820 memmap. */
+-  e820_map_from_efi_map ((struct e820_entry *) params->e820_map, &e820_nr_map,
+-			 mmap_buf, desc_size, mmap_size);
+-  params->e820_nr_map = e820_nr_map;
++  } while (!grub_efi_exit_boot_services (map_key) && --retry);
+ 
+-  if (! grub_efi_exit_boot_services (map_key))
+-    grub_fatal ("cannot exit boot services");
++  if (!retry)
++        grub_fatal ("cannot exit boot services");
+ 
+   /* Note that no boot services are available from here.  */
+ 
+-- 
+1.8.3.1
+

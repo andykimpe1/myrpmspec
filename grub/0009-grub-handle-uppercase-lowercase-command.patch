@@ -1,0 +1,213 @@
+diff --git a/efi/efimisc.c b/efi/efimisc.c
+index 6d5c174..5f46a38 100644
+--- a/efi/efimisc.c
++++ b/efi/efimisc.c
+@@ -533,6 +533,53 @@ grub_set_config_file (char *path_name)
+       /* Bigger than buffer of config_file */
+       if (path_name_len + 1 > 127)
+ 	return;
++
++      char * drive_path;
++      grub_uint32_t drive_path_len;
++
++      drive_path = grub_current_drive_path ();
++      drive_path_len = strlen (drive_path);
++
++      char * full_path = grub_malloc (2 * (drive_path_len + path_name_len + 1));
++      grub_strcpy(full_path, drive_path);
++      grub_strcpy(full_path + drive_path_len, path_name);
++
++      /* Check if file exists */
++      if (!grub_file_exists (full_path))
++        {
++          /* Try also lower/upper case variant */
++          char * full_path_file_name = grub_strrchr (full_path, '/');
++          grub_convert_string_tolower (full_path_file_name);
++
++          if (!grub_file_exists (full_path))
++            {
++              grub_convert_string_toupper (full_path_file_name);
++              /* We don't need uppercase ".efi" suffix */
++              grub_convert_string_tolower (grub_strrchr (full_path_file_name, '.') + 1);
++
++              if (grub_file_exists (full_path))
++                {
++                  /* uppercase variant found so we can use it */
++                  char * file_name = grub_strrchr (path_name, '/');
++                  grub_convert_string_toupper (file_name);
++                  /* We don't need uppercase ".efi" suffix */
++                  grub_convert_string_tolower (grub_strrchr (file_name, '.') + 1);
++                }
++            }
++          else
++            {
++                /* lowercase variant found so we can use it */
++                char * file_name = grub_strrchr (path_name, '/');
++                grub_convert_string_tolower (file_name);
++            }
++        }
++
++      /* We have to reset errnum, otherwise grub_open will fail if it failed before */
++      errnum = 0;
++      grub_free (drive_path);
++      grub_free (full_path);
++
++      /* Now we should have existing file */
+       grub_memmove (config_file, path_name, path_name_len - 4);
+       grub_strcpy (config_file + path_name_len - 4, ".conf");
+       /* Bigger than buffer of default file */
+@@ -540,6 +587,7 @@ grub_set_config_file (char *path_name)
+ 	return;
+       grub_memmove (saved_default_file, path_name, path_name_len - 4);
+       grub_strcpy (saved_default_file + path_name_len - 4, ".default");
++
+       return;
+     }
+   dir_end = grub_strrchr (path_name, '/');
+@@ -558,6 +606,7 @@ grub_set_config_file (char *path_name)
+   } else {
+     grub_memmove (config_file, path_name, path_name_len+1);
+   }
++
+   if (path_name_len + sizeof (DEFAULT_SAVED_DEFAULT_FILE_NAME) > 128)
+     return;
+   path_name_len = dir_end + 1 - path_name;
+@@ -679,3 +728,82 @@ grub_efi_disable_watchdog ()
+       grub_printf("failed to disable the system's watchdog timer");
+     }
+ }
++
++char *
++grub_current_drive_path (void)
++{
++  char *drive_path;
++  drive_path = grub_malloc (16);
++
++  if (boot_drive == NETWORK_DRIVE)
++    {
++      /* Network drive.  */
++      strcpy(drive_path, "(nd)");
++    }
++  else if (boot_drive == cdrom_drive)
++    {
++      /* CDROM drive */
++      strcpy(drive_path, "(cd)");
++    }
++  else if (boot_drive & 0x80)
++    {
++      /* Hard disk drive.  */
++      if ((install_partition & 0xFF0000) != 0xFF0000)
++        {
++          grub_sprintf (drive_path, "(hd%d,%d)", boot_drive - 0x80, install_partition >> 16);
++        }
++      else if ((install_partition & 0x00FF00) != 0x00FF00)
++        {
++          grub_sprintf (drive_path, "(hd%d,%c)", boot_drive - 0x80, ((install_partition >> 8) & 0xFF) + 'a');
++        }
++      else
++        {
++          grub_sprintf (drive_path, "(hd%d,0)", boot_drive - 0x80);
++        }
++    }
++  else
++    {
++      /* Floppy disk drive.  */
++      grub_sprintf (drive_path, "(fd%d)", boot_drive);
++    }
++
++    return drive_path;
++}
++
++int
++grub_file_exists(char *file)
++{
++  /* We have to reset errnum, otherwise grub_open will fail if it failed before */
++  errnum = 0;
++  int result = grub_open (file);
++
++  if (result)
++    {
++      grub_close();
++      return result;
++    }
++
++  return 0;
++}
++
++void
++grub_convert_string_tolower(char *string)
++{
++  int i = 0;
++  while (string[i])
++    {
++      string[i] = grub_tolower (string[i]);
++      i++;
++    }
++}
++
++void
++grub_convert_string_toupper(char *string)
++{
++  int i = 0;
++  while (string[i])
++    {
++      string[i] = grub_toupper (string[i]);
++      i++;
++    }
++}
+diff --git a/efi/grub/misc.h b/efi/grub/misc.h
+index 5ef2226..9b8b4c4 100644
+--- a/efi/grub/misc.h
++++ b/efi/grub/misc.h
+@@ -49,6 +49,11 @@ void grub_free (void *ptr);
+ char *grub_strndup (const char *s, int n);
+ #define strndup grub_strndup
+ 
++char * grub_current_drive_path (void);
++int grub_file_exists(char *file);
++void grub_convert_string_tolower(char *string);
++void grub_convert_string_toupper(char *string);
++
+ int safe_parse_maxulong (char **str_ptr, unsigned long *myulong_ptr);
+ 
+ #define E820_RAM        1
+diff --git a/stage2/char_io.c b/stage2/char_io.c
+index 073201a..17e0ac7 100644
+--- a/stage2/char_io.c
++++ b/stage2/char_io.c
+@@ -1117,6 +1117,15 @@ grub_tolower (int c)
+ }
+ 
+ int
++grub_toupper (int c)
++{
++  if (c >= 'a' && c <= 'z')
++    return (c - ('a' - 'A'));
++
++  return c;
++}
++
++int
+ grub_isspace (int c)
+ {
+   switch (c)
+diff --git a/stage2/shared.h b/stage2/shared.h
+index a19d207..83d29b0 100644
+--- a/stage2/shared.h
++++ b/stage2/shared.h
+@@ -376,6 +376,7 @@ extern void *grub_scratch_mem;
+ #define memcmp grub_memcmp
+ #define strcmp grub_strcmp
+ #define tolower grub_tolower
++#define toupper grub_toupper
+ #define strlen grub_strlen
+ #define strcpy grub_strcpy
+ #define stpncpy grub_stpncpy
+@@ -916,6 +917,7 @@ int grub_vsprintf (char *str, const char *fmt, va_list args);
+ void grub_printf (char *format,...);
+ int grub_sprintf (char *buffer, const char *format, ...);
+ int grub_tolower (int c);
++int grub_toupper (int c);
+ int grub_isspace (int c);
+ int grub_strncat (char *s1, const char *s2, int n);
+ void grub_memcpy(void *dest, const void *src, int len);

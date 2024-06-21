@@ -1,0 +1,54 @@
+From 392d5385f0c4b8e9b1654b4395b07991caffb415 Mon Sep 17 00:00:00 2001
+From: Peter Jones <pjones@redhat.com>
+Date: Tue, 14 Feb 2012 13:53:13 -0500
+Subject: [PATCH] Iterate PXE handles until we find one that's got a dhcp ack.
+
+I seriously don't know why EfiLocateProtocol() exists.  It is basically
+always wrong to use. So instead, use EfiLocateHandle() to get a list of
+handles supporting PxeBaseCodeProtocol, and then iterate them until we
+find one that claims it's actually got a dhcp ack.
+
+Resolves: rhbz#670266 .
+---
+ efi/pxe.c |   20 ++++++++++++++++----
+ 1 files changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/efi/pxe.c b/efi/pxe.c
+index 1a74315..d3084a4 100644
+--- a/efi/pxe.c
++++ b/efi/pxe.c
+@@ -346,11 +346,27 @@ char *grub_efi_pxe_get_config_path(grub_efi_loaded_image_t *LoadedImage)
+ 	char hexip[9];
+ 	int hexiplen;
+ 
+-	pxe = grub_efi_locate_protocol(&PxeBaseCodeProtocol, NULL);
+-	if (pxe == NULL)
+-		return NULL;
++	grub_efi_handle_t *handle, *handles;
++	grub_efi_uintn_t num_handles;
++
++	handles = grub_efi_locate_handle(GRUB_EFI_BY_PROTOCOL,
++					&PxeBaseCodeProtocol,
++					NULL, &num_handles);
++
++	if (!handles)
++		return NULL;
++
++	for (handle = handles; num_handles--; handle++) {
++		pxe = grub_efi_open_protocol(*handle, &PxeBaseCodeProtocol,
++			GRUB_EFI_OPEN_PROTOCOL_GET_PROTOCOL);
++		if (!pxe || !pxe->Mode)
++			continue;
++		if (pxe->Mode->Started && pxe->Mode->DhcpAckReceived)
++			break;
++	}
++	grub_free(handles);
+ 
+-	if (!pxe->Mode->Started)
++	if (!pxe)
+ 		return NULL;
+ 
+ 	set_pxe_info(LoadedImage, pxe);
+-- 
+1.7.7.6
+

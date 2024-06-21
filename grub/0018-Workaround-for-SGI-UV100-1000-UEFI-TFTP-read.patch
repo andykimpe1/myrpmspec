@@ -1,0 +1,175 @@
+From f9b2ad15d314036412397e7c94429d0ce547f0e1 Mon Sep 17 00:00:00 2001
+From: Lenny Szubowicz <lszubowi@redhat.com>
+Date: Mon, 26 Sep 2016 15:07:42 +0200
+Subject: [PATCH] Workaround for SGI UV100/1000 UEFI TFTP read file bug
+
+  https://bugzilla.redhat.com/show_bug.cgi?id=1124862
+---
+ efi/efitftp.c | 127 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 123 insertions(+), 4 deletions(-)
+
+diff --git a/efi/efitftp.c b/efi/efitftp.c
+index 07af2ff..535fb4b 100644
+--- a/efi/efitftp.c
++++ b/efi/efitftp.c
+@@ -7,6 +7,56 @@
+ #include <filesys.h>
+ #include "pxe.h"
+ 
++/* Minimum TFTP block size, for EFI_PXE_BASE_PROTOCOL.Mtftp, per UEFI spec */
++#define TFTP_BLKSIZ_MIN 512
++
++/*
++ * Some old UEFI TFTP implementations, e.g. SGI UV 100/1000, have a 16-bit
++ * block counter that must not wrap. With such implementations, the file read
++ * transfer has been observed to just stop when the internal 16-bit counter
++ * wraps, but no error is returned and the buffer size is still the full
++ * requested size.
++ */
++#define TFTP_BLKCNT_16BIT_MAX 0xFFFF
++
++/*
++ * Block size granularity to use when computing the minimum safe block size
++ * for the currently sized file read to avoid wrap of a 16-bit block counter.
++ * (Not required by spec, but avoids arbitrary byte granularity and limits
++ * test cases.)
++ */
++#define TFTP_BLKSIZ_GRAN 512
++
++/*
++ * State table used by grub_tftp_read_file to detect and avoid incomplete
++ * file reads caused by 16-bit block counter wrap.
++ * If the requested transfer size won't cause the counter to wrap with
++ * the default TFTP_BLKSIZ_MIN, then we start at state 2 in the table
++ * and do a single read with no buffer poisoning.
++ * Otherwise, we start at state 0 and may retry the transfer up to two
++ * additional times if it looks like we are victim to a partial transfer.
++ * First, we poison the tail of the buffer to detect a partial transfer.
++ * If the poison is still present after the read, we reread the same file
++ * with a different poison value. This guards against the false detection
++ * of a wrap problem when the data in file exactly matches the first
++ * poison value. If the new poison is present after the second read, then
++ * we attempt the read a final time using the computed safe block size.
++ * We are reluctant to use the larger block size unless it looks like we
++ * have no choice because of concerns that some UEFI TFTP implementations
++ * may not handle a larger block size well.
++ */
++static struct {
++	grub_efi_uintn_t block_size;	/* Block size for this read */
++	char poison;			/* Poison pattern for buffer */
++} tftp_read_state_tbl[3] = {
++	[0].block_size = TFTP_BLKSIZ_MIN,
++	[0].poison = 'p',
++	[1].block_size = TFTP_BLKSIZ_MIN,
++	[1].poison = 'q',
++	[2].block_size = TFTP_BLKSIZ_MIN, /* Replaced by SafeBlockSize */
++	[2].poison = 0			  /* Zero means no poison */
++};
++
+ struct tftp_info tftp_info = {
+ 	.LoadedImage = NULL,
+ 	.Pxe = NULL,
+@@ -112,6 +162,17 @@ grub_efi_status_t tftp_get_file_size(
+ 	return rc;
+ }
+ 
++static int mem_is_poison(
++	char *PoisonStart,
++	char Poison,
++	grub_efi_uint64_t PoisonSize)
++{
++	for ( ; PoisonSize > 0; PoisonSize--)
++		if (*PoisonStart++ != Poison)
++			return 0;
++	return 1;
++}
++
+ static grub_efi_status_t tftp_read_file(
+ 	char *Filename,
+ 	char *Buffer,
+@@ -120,9 +181,15 @@ static grub_efi_status_t tftp_read_file(
+ 	EFI_PXE_BASE_CODE_TFTP_OPCODE OpCode = EFI_PXE_BASE_CODE_TFTP_READ_FILE;
+ 	grub_efi_boolean_t Overwrite = 0;
+ 	grub_efi_boolean_t DontUseBuffer = 0;
+-	grub_efi_uintn_t BlockSize = 512;
++	grub_efi_uintn_t BlockSize;
++	grub_efi_uintn_t SafeBlockSize;
+ 	grub_efi_status_t rc;
+ 	char *FullPath = NULL;
++	int  ReadState;
++	grub_efi_uintn_t SafeSize;
++	char *PoisonStart;
++	grub_efi_uint64_t PoisonSize;
++	char Poison;
+ 
+ 	if (tftp_info.BasePath) {
+ 		int PathSize = 0;
+@@ -133,10 +200,62 @@ static grub_efi_status_t tftp_read_file(
+ 		FullPath = grub_malloc(strlen(Filename));
+ 		strcpy(FullPath, Filename);
+ 	}
++	/*
++	 * We may need to retry the UEFI TFTP read file request as many as two
++	 * additional times if it appears that the UEFI TFTP implemenation on
++	 * this system is vulnerable to the 16-bit block counter wrap problem.
++	 * The tftp_read_state_tbl guides us through the read attempts.
++	 * The calculated "safe" block size that's sufficiently large to avoid
++	 * the wrap problem for this read size determines the index, ReadState,
++	 * where we start in the tftp_read_state_tbl.
++	 */
++	SafeBlockSize = (BufferSize + TFTP_BLKCNT_16BIT_MAX - 1)
++			/ TFTP_BLKCNT_16BIT_MAX;
++	if (SafeBlockSize <= TFTP_BLKSIZ_MIN) {
++		SafeBlockSize = TFTP_BLKSIZ_MIN;
++		ReadState = 2;
++	} else {
++		SafeBlockSize = ((SafeBlockSize + TFTP_BLKSIZ_GRAN - 1)
++				 / TFTP_BLKSIZ_GRAN) * TFTP_BLKSIZ_GRAN;
++		ReadState = 0;
++	}
++	tftp_read_state_tbl[2].block_size = SafeBlockSize;
+ 
+-	rc = Call_Service_10(tftp_info.Pxe->Mtftp, tftp_info.Pxe, OpCode,
+-		Buffer, Overwrite, &BufferSize, &BlockSize, tftp_info.ServerIp,
+-		FullPath, NULL, DontUseBuffer);
++	for ( ; ReadState <= 2; ReadState++) {
++		BlockSize = tftp_read_state_tbl[ReadState].block_size;
++		Poison = tftp_read_state_tbl[ReadState].poison;
++		/*
++		 * If we are using the buffer poisoning heuristic on this read
++		 * attempt, pre-fill the tail end of the buffer with the
++		 * poison character, from the point where a 16-bit block
++		 * counter would wrap. The poison value should be null
++		 * for a safe block size. But we check here just to be sure.
++		 */
++		if (Poison) {
++			SafeSize = BlockSize * TFTP_BLKCNT_16BIT_MAX;
++			if (SafeSize < BufferSize) {
++				PoisonStart = Buffer + SafeSize;
++				PoisonSize = BufferSize - SafeSize;
++				grub_memset(PoisonStart, Poison, PoisonSize);
++			} else {
++				Poison = 0;
++			}
++		}
++		rc = Call_Service_10(tftp_info.Pxe->Mtftp, tftp_info.Pxe,
++				     OpCode, Buffer, Overwrite, &BufferSize,
++				     &BlockSize, tftp_info.ServerIp, FullPath,
++				     NULL, DontUseBuffer);
++		if (rc != GRUB_EFI_SUCCESS)
++			break;
++		/*
++		 * If we are using the buffer poisoning heuristic on this read
++		 * attempt and the buffer tail is no longer poisoned after the
++		 * read, then it looks like we are not vulnerable to the 16-bit
++		 * wrap problem. Therefore, no additional attempts are needed.
++		 */
++		if (Poison == 0 || !mem_is_poison(PoisonStart, Poison, PoisonSize))
++			break;
++	}
+ 	grub_free(FullPath);
+ 	return rc;
+ }
+-- 
+2.7.4
+
