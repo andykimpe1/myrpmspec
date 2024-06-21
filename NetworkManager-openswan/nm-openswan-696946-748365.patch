@@ -1,0 +1,706 @@
+diff -urNp NetworkManager-openswan-0.8-patched/properties/import-file.c NetworkManager-openswan-0.8-current/properties/import-file.c
+--- NetworkManager-openswan-0.8-patched/properties/import-file.c	1969-12-31 19:00:00.000000000 -0500
++++ NetworkManager-openswan-0.8-current/properties/import-file.c	2012-03-01 16:31:33.867516029 -0500
+@@ -0,0 +1,279 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager -- Network link manager
++ *
++ * Copyright (C) 2012 Avesh Agarwal <avagarwa@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2005 - 2008 Red Hat, Inc.
++ * (C) Copyright 2007 - 2008 Novell, Inc.
++ */
++
++#include <stdio.h>
++#include <string.h>
++#include <errno.h>
++#include <ctype.h>
++#include <stdlib.h>
++
++#include "import-file.h"
++
++static void
++import_entry_free (importEntry *entry)
++{
++	if (entry) {
++		g_free (entry->key);
++		g_free (entry->value);
++		g_free (entry);
++	}
++}
++
++gboolean
++import_file_lookup_int (GHashTable *import_file,
++                     const char *group,
++                     const char *key,
++                     gint *value)
++{
++	const char *buf = NULL;
++	long int tmp;
++
++	g_return_val_if_fail (import_file != NULL, FALSE);
++	g_return_val_if_fail (group != NULL, FALSE);
++	g_return_val_if_fail (key != NULL, FALSE);
++	g_return_val_if_fail (value != NULL, FALSE);
++
++	*value = 0;
++	if (!import_file_lookup_string (import_file, group, key, &buf))
++		return FALSE;
++
++	errno = 0;
++	tmp = strtol (buf, NULL, 10);
++	if ((errno == 0) && (tmp > G_MININT) && (tmp < G_MAXINT)) {
++		*value = (gint) tmp;
++		return TRUE;
++	}
++
++	return FALSE;
++}
++
++
++gboolean
++import_file_lookup_string (GHashTable *import_file,
++                        const char *group,
++                        const char *key,
++                        const char **value)
++{
++	importEntry *entry;
++
++	g_return_val_if_fail (import_file != NULL, FALSE);
++	g_return_val_if_fail (group != NULL, FALSE);
++	g_return_val_if_fail (key != NULL, FALSE);
++	g_return_val_if_fail (value != NULL, FALSE);
++
++	*value = NULL;
++	entry = import_file_lookup (import_file, group, key);
++	if (!entry || !entry->value || !strlen (entry->value))
++		return FALSE;
++
++	*value = entry->value;
++	return TRUE;
++}
++
++importEntry *
++import_file_lookup (GHashTable *import_file,
++                 const char *group,
++                 const char *key)
++{
++	gpointer section;
++	importEntry *entry = NULL;
++	char *group_lower = NULL;
++	char *key_lower = NULL;
++
++	g_return_val_if_fail (import_file != NULL, NULL);
++	g_return_val_if_fail (group != NULL, NULL);
++	g_return_val_if_fail (key != NULL, NULL);
++
++	group_lower = g_utf8_strdown (group, -1);
++	section = g_hash_table_lookup (import_file, group_lower);
++	if (section) {
++		key_lower = g_utf8_strdown (key, -1);
++		entry = (importEntry *) g_hash_table_lookup ((GHashTable *) section, key_lower);
++	}
++
++	g_free (group_lower);
++	g_free (key_lower);
++
++	return entry;
++}
++
++gboolean
++import_file_lookup_bool (GHashTable *import_file,
++                      const char *group,
++                      const char *key,
++                      gboolean *value)
++{
++	const char *buf = NULL;
++	gboolean success = FALSE;
++
++	g_return_val_if_fail (import_file != NULL, FALSE);
++	g_return_val_if_fail (group != NULL, FALSE);
++	g_return_val_if_fail (key != NULL, FALSE);
++	g_return_val_if_fail (value != NULL, FALSE);
++
++	*value = FALSE;
++	if (!import_file_lookup_string (import_file, group, key, &buf))
++		return FALSE;
++
++	if (strlen (buf) == 1) {
++		if (strcmp (buf, "1") == 0) {
++			*value = TRUE;
++			success = TRUE;
++		} else if (strcmp (buf, "0") == 0) {
++			*value = FALSE;
++			success = TRUE;
++		}
++	} else {
++		if (   !strncasecmp (buf, "yes", 3)
++		    || !strncasecmp (buf, "true", 4)) {
++			*value = TRUE;
++			success = TRUE;
++		} else if (   !strncasecmp (buf, "no", 2)
++		           || !strncasecmp (buf, "false", 5)) {
++			*value = FALSE;
++			success = TRUE;
++		}
++	}
++
++	return success;
++}
++
++
++GHashTable *
++import_file_load (const char *fname)
++{
++    FILE *fo;
++    unsigned line;
++    GHashTable *import;
++    GHashTable *group = NULL;
++    importEntry *entry;
++    char *key;
++    
++    g_return_val_if_fail (fname != NULL, NULL);
++
++    if (!(fo = fopen (fname, "r"))) {
++        g_warning ("Failed to open file '%s': %s", fname, strerror (errno));
++        return NULL;
++    }
++
++	import = g_hash_table_new_full (g_str_hash, g_str_equal,
++								 g_free,
++								 (GDestroyNotify) g_hash_table_destroy);
++
++    line = 0;
++    while (!feof (fo)) {
++        char ln[1024]; /* 4x what we think to allow for possible UTF-8 conversion */
++        char *s, *e;
++        
++        if (!(fgets (ln, sizeof (ln) / 4, fo)))
++            break;
++
++        line++;
++
++		if (!g_utf8_validate (ln, -1, NULL)) {
++			char *tmp;
++			GError *error = NULL;
++
++			tmp = g_locale_to_utf8 (ln, -1, NULL, NULL, &error);
++			if (error) {
++				/* ignore the error; leave 'ln' alone.  We tried. */
++				g_error_free (error);
++			} else {
++				g_assert (tmp);
++				strcpy (ln, tmp);  /* update ln with the UTF-8 safe text */
++			}
++			g_free (tmp);
++		}
++
++        s = ln + strspn (ln, " \t");
++        s[strcspn (s, "\r\n")] = 0;
++
++        /* Skip comments*/
++        if (*s == '#')
++            continue;
++
++	/* empty line means the connection definition finished*/
++	if (*s == 0)
++	    break;
++
++        if ( (e = strstr(s, "conn"))) {
++            /* new group */
++     
++		/* conn <name>*/
++		/* here we go at the start of space character before <name>*/
++		/* statement *(e++)=0  makes space a 0 and advances to the name or key value*/
++		e += strlen("conn");
++		group = g_hash_table_new_full (g_str_hash, g_str_equal, NULL,
++						(GDestroyNotify) import_entry_free);
++
++		g_hash_table_insert (import, g_utf8_strdown ("conn", -1), group);
++
++        } else {
++            /* Normal assignment */
++            if (!(e = strchr (s, '='))) {
++                g_warning ("Missing assignment in %s:%u: <%s>", fname, line, s);
++                goto fail;
++            }
++            
++            if (!group) {
++                g_warning ("Assignment outside group in %s:%u <%s>", fname, line, s);
++                goto fail;
++            }
++	}
++
++	/* Split the key and the value */
++	*(e++) = 0;
++
++	entry = g_new (importEntry, 1);
++	entry->value = g_strdup (g_strstrip (e));
++
++	if (*s == ' ') {
++		key = g_utf8_strdown (s+1, -1);
++	} else {
++		key = g_utf8_strdown (s, -1);
++	}
++
++	entry->read_only = FALSE;
++	entry->key = g_strdup (g_strstrip (key));
++	g_free (key);
++	g_hash_table_insert (group, entry->key, entry);
++    }
++
++    /* Contains a main section? */
++    if (!g_hash_table_lookup (import, "conn"))
++        goto fail;
++    
++    fclose (fo);
++        
++    return import;
++
++fail:
++
++    if (fo)
++        fclose (fo);
++
++    if (import)
++        g_hash_table_destroy (import);
++
++    return NULL;
++}
+diff -urNp NetworkManager-openswan-0.8-patched/properties/import-file.h NetworkManager-openswan-0.8-current/properties/import-file.h
+--- NetworkManager-openswan-0.8-patched/properties/import-file.h	1969-12-31 19:00:00.000000000 -0500
++++ NetworkManager-openswan-0.8-current/properties/import-file.h	2012-03-01 16:31:52.935517136 -0500
+@@ -0,0 +1,58 @@
++/* -*- Mode: C; tab-width: 4; indent-tabs-mode: t; c-basic-offset: 4 -*- */
++/* NetworkManager -- Network link manager
++ *
++ * Copyright (C) 2012 Avesh Agarwal <avagarwa@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * (C) Copyright 2005 - 2008 Red Hat, Inc.
++ * (C) Copyright 2007 - 2008 Novell, Inc.
++ */
++
++#ifndef IMPORT_FILE_H
++#define IMPORT_FILE_H
++
++#include <glib.h>
++
++typedef struct importEntry importEntry;
++
++struct importEntry {
++	char *key;
++	char *value;
++	gboolean read_only;
++};
++
++GHashTable  *import_file_load        (const char *fname);
++importEntry    *import_file_lookup      (GHashTable *import_file,
++                                   const char *group,
++                                   const char *key);
++
++gboolean import_file_lookup_string (GHashTable *import_file,
++                                 const char *group,
++                                 const char *key,
++                                 const char **value);
++
++gboolean import_file_lookup_bool (GHashTable *import_file,
++                               const char *group,
++                               const char *key,
++                               gboolean *value);
++
++gboolean import_file_lookup_int (GHashTable *import_file,
++                              const char *group,
++                              const char *key,
++                              gint *value);
++
++#endif /* IMPORT_FILE_H */
++
+diff -urNp NetworkManager-openswan-0.8-patched/properties/Makefile.am NetworkManager-openswan-0.8-current/properties/Makefile.am
+--- NetworkManager-openswan-0.8-patched/properties/Makefile.am	2012-02-28 12:06:53.798143230 -0500
++++ NetworkManager-openswan-0.8-current/properties/Makefile.am	2012-02-29 12:59:39.847175063 -0500
+@@ -4,6 +4,8 @@ plugindir = $(libdir)/NetworkManager
+ plugin_LTLIBRARIES = libnm-openswan-properties.la
+ 
+ libnm_openswan_properties_la_SOURCES = \
++	import-file.c \
++	import-file.h \
+ 	nm-openswan.c \
+ 	nm-openswan.h
+ 
+diff -urNp NetworkManager-openswan-0.8-patched/properties/Makefile.in NetworkManager-openswan-0.8-current/properties/Makefile.in
+--- NetworkManager-openswan-0.8-patched/properties/Makefile.in	2012-02-28 12:06:53.798143230 -0500
++++ NetworkManager-openswan-0.8-current/properties/Makefile.in	2012-02-29 12:59:51.075185682 -0500
+@@ -78,6 +78,7 @@ libnm_openswan_properties_la_DEPENDENCIE
+ 	$(am__DEPENDENCIES_1) $(am__DEPENDENCIES_1) \
+ 	$(top_builddir)/common-gnome/libnm-openswan-common-gnome.la
+ am_libnm_openswan_properties_la_OBJECTS =  \
++	libnm_openswan_properties_la-import-file.lo \
+ 	libnm_openswan_properties_la-nm-openswan.lo
+ libnm_openswan_properties_la_OBJECTS =  \
+ 	$(am_libnm_openswan_properties_la_OBJECTS)
+@@ -261,6 +262,8 @@ INCLUDES = -I${top_srcdir}
+ plugindir = $(libdir)/NetworkManager
+ plugin_LTLIBRARIES = libnm-openswan-properties.la
+ libnm_openswan_properties_la_SOURCES = \
++	import-file.c \
++	import-file.h \
+ 	nm-openswan.c \
+ 	nm-openswan.h
+ 
+@@ -367,6 +370,7 @@ mostlyclean-compile:
+ distclean-compile:
+ 	-rm -f *.tab.c
+ 
++@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libnm_openswan_properties_la-import-file.Plo@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libnm_openswan_properties_la-nm-openswan.Plo@am__quote@
+ 
+ .c.o:
+@@ -393,6 +397,13 @@ distclean-compile:
+ @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+ @am__fastdepCC_FALSE@	$(LTCOMPILE) -c -o $@ $<
+ 
++libnm_openswan_properties_la-import-file.lo: import-file.c
++@am__fastdepCC_TRUE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(libnm_openswan_properties_la_CPPFLAGS) $(CPPFLAGS) $(AM_CFLAGS) $(CFLAGS) -MT libnm_openswan_properties_la-import-file.lo -MD -MP -MF $(DEPDIR)/libnm_openswan_properties_la-import-file.Tpo -c -o libnm_openswan_properties_la-import-file.lo `test -f 'import-file.c' || echo '$(srcdir)/'`import-file.c
++@am__fastdepCC_TRUE@	$(am__mv) $(DEPDIR)/libnm_openswan_properties_la-import-file.Tpo $(DEPDIR)/libnm_openswan_properties_la-import-file.Plo
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='import-file.c' object='libnm_openswan_properties_la-import-file.lo' libtool=yes @AMDEPBACKSLASH@
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
++@am__fastdepCC_FALSE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(libnm_openswan_properties_la_CPPFLAGS) $(CPPFLAGS) $(AM_CFLAGS) $(CFLAGS) -c -o libnm_openswan_properties_la-import-file.lo `test -f 'import-file.c' || echo '$(srcdir)/'`import-file.c
++
+ libnm_openswan_properties_la-nm-openswan.lo: nm-openswan.c
+ @am__fastdepCC_TRUE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(libnm_openswan_properties_la_CPPFLAGS) $(CPPFLAGS) $(AM_CFLAGS) $(CFLAGS) -MT libnm_openswan_properties_la-nm-openswan.lo -MD -MP -MF $(DEPDIR)/libnm_openswan_properties_la-nm-openswan.Tpo -c -o libnm_openswan_properties_la-nm-openswan.lo `test -f 'nm-openswan.c' || echo '$(srcdir)/'`nm-openswan.c
+ @am__fastdepCC_TRUE@	$(am__mv) $(DEPDIR)/libnm_openswan_properties_la-nm-openswan.Tpo $(DEPDIR)/libnm_openswan_properties_la-nm-openswan.Plo
+diff -urNp NetworkManager-openswan-0.8-patched/properties/nm-openswan.c NetworkManager-openswan-0.8-current/properties/nm-openswan.c
+--- NetworkManager-openswan-0.8-patched/properties/nm-openswan.c	2012-02-28 12:07:46.557151470 -0500
++++ NetworkManager-openswan-0.8-current/properties/nm-openswan.c	2012-03-01 16:46:26.189550831 -0500
+@@ -30,6 +30,7 @@
+ #include <arpa/inet.h>
+ #include <errno.h>
+ #include <stdlib.h>
++#include <ctype.h>
+ #include <glib/gi18n-lib.h>
+ #include <string.h>
+ #include <gtk/gtk.h>
+@@ -47,6 +48,7 @@
+ #include "src/nm-openswan-service.h"
+ #include "common-gnome/keyring-helpers.h"
+ #include "nm-openswan.h"
++#include "import-file.h"
+ 
+ #define OPENSWAN_PLUGIN_NAME    _("IPsec based VPN")
+ #define OPENSWAN_PLUGIN_DESC    _("IPsec, IKEv1, IKEv2 based VPN")
+@@ -124,6 +126,81 @@ openswan_plugin_ui_error_get_type (void)
+ 	return etype;
+ }
+ 
++/* This function verifies if the input string represents a valid 
++ * ipv4 or not, only if the string is a ipv4 address otherwise consider 
++ * the string a hostname or ipv6 address and returns true
++ */
++static gboolean
++valid_ip_if_ip(const char *str) 
++{
++
++	char *tmp;
++	/* nlabels counts number of parts seprated by dots*/
++	int nlabels=0, i=0;
++	char tmp_str[1024];
++	long int tmp_li;
++	gboolean all_valid_numbers = TRUE;
++
++	tmp = (char *)str;
++	
++	/* assumption is that an ip address must have either a dot or a digit */
++	while(*tmp) {
++	tmp_str[i++] = *tmp;
++
++		/* This means this may be hostname or IPV6 return TRUE*/
++		if(*tmp != '.' && !isdigit(*tmp)) {
++		return TRUE;
++		}
++
++		if (*tmp == '.'  || *(tmp+1) == '\0' ) {
++
++		if(*tmp == '.') {
++			tmp_str[i-1]='\0';
++		}
++		else {
++			tmp_str[i] = '\0';
++		}
++		nlabels++;
++			/* check length of this part for valid ip, maximum is 3 (255) */
++			/* !strlen(tmp_str) tests if tmp_str does not contain anything for example 10.. 
++			 * or similar to this */
++			if (strlen(tmp_str) > 3 || !strlen(tmp_str)) {
++				/* this means a part of string has all digits 
++				 * but is not valid for ipv4 address */
++				all_valid_numbers = FALSE;
++			}
++			else {
++				tmp_li = strtol(tmp_str, (char **) NULL, 10);
++				if( tmp_li < 0 || tmp_li > 255) {
++				all_valid_numbers = FALSE;
++				}
++			}
++
++		/*proceed to process another part if not reached to end of string*/
++		i=0;
++		}
++	tmp++;
++	}
++
++	/* if flow comes here that means all are either digits or dots, now check for validity*/
++	/* check if there are not 4 part separetd by dots then it is an invalid an ip address,
++	 * otherwise consider it as a hostname and return true.
++	 *  last character should not be dot that is invalid ip 
++	 */
++	if(nlabels != 4 || *(tmp-1) == '.') {
++		return FALSE;
++	}
++	/* Now check if all the parts are valid integers as per ip address */
++	else if (all_valid_numbers){
++		/* this means it is a valid IP address*/
++		return TRUE; 
++
++	}
++	else {
++		/* This is invalid ip address*/
++		return FALSE;
++	}
++}
+ 
+ static gboolean
+ check_validity (OpenswanPluginUiWidget *self, GError **error)
+@@ -134,7 +211,7 @@ check_validity (OpenswanPluginUiWidget *
+ 
+ 	widget = glade_xml_get_widget (priv->xml, "gateway_entry");
+ 	str = (char *) gtk_entry_get_text (GTK_ENTRY (widget));
+-	if (!str || !strlen (str) || strstr (str, " ") || strstr (str, "\t")) {
++	if (!str || !strlen (str) || strstr (str, " ") || strstr (str, "\t") || !valid_ip_if_ip(str)) {
+ 		g_set_error (error,
+ 		             OPENSWAN_PLUGIN_UI_ERROR,
+ 		             OPENSWAN_PLUGIN_UI_ERROR_INVALID_PROPERTY,
+@@ -763,9 +840,184 @@ get_capabilities (NMVpnPluginUiInterface
+ 	return (NM_VPN_PLUGIN_UI_CAPABILITY_IMPORT | NM_VPN_PLUGIN_UI_CAPABILITY_EXPORT);
+ }
+ 
++static NMConnection *
++import_from_file (NMVpnPluginUiInterface *iface, const char *path, GError **error)
++{
++	NMConnection *connection;
++	NMSettingConnection *s_con;
++	NMSettingVPN *s_vpn;
++	GHashTable *import;
++	const char *buf;
++	gboolean bool_value;
++	NMSettingIP4Config *s_ip4;
++	
++	import = import_file_load (path);
++	if (!import) {
++		g_set_error (error, 0, 0, "does not look like a %s openswan connection (parse failed)",
++		             OPENSWAN_PLUGIN_NAME);
++		return NULL;
++	}
++
++	connection = nm_connection_new ();
++	s_con = NM_SETTING_CONNECTION (nm_setting_connection_new ());
++	nm_connection_add_setting (connection, NM_SETTING (s_con));
++
++	s_vpn = NM_SETTING_VPN (nm_setting_vpn_new ());
++	g_object_set (s_vpn, NM_SETTING_VPN_SERVICE_TYPE, NM_DBUS_SERVICE_OPENSWAN, NULL);
++	nm_connection_add_setting (connection, NM_SETTING (s_vpn));
++
++	s_ip4 = NM_SETTING_IP4_CONFIG (nm_setting_ip4_config_new ());
++	nm_connection_add_setting (connection, NM_SETTING (s_ip4));
++
++	/* Connection name */
++	if (import_file_lookup_string (import, "conn", "conn", &buf))
++		g_object_set (s_con, NM_SETTING_CONNECTION_ID, buf, NULL);
++	else {
++		g_set_error (error, 0, 0, "connection name error for %s VPN connection (parse failed)",
++			OPENSWAN_PLUGIN_NAME);
++		g_object_unref (connection);
++		return NULL;
++        }
++
++	/* Gateway */
++	if (import_file_lookup_string (import, "conn", "right", &buf))
++		nm_setting_vpn_add_data_item (s_vpn, NM_OPENSWAN_RIGHT, buf);
++	else {
++		g_set_error (error, 0, 0, "does not look like a %s openswan connection (no gateway specified)",
++		             OPENSWAN_PLUGIN_NAME);
++		g_object_unref (connection);
++		return NULL;
++	}
++
++	/* Group name */
++	if (import_file_lookup_string (import, "conn", "leftid", &buf)) {
++		if(*buf == '@') {
++		nm_setting_vpn_add_data_item (s_vpn, NM_OPENSWAN_LEFTID, buf+1);
++		}
++		else {
++		nm_setting_vpn_add_data_item (s_vpn, NM_OPENSWAN_LEFTID, buf);
++		}
++	}
++	else {
++		g_set_error (error, 0, 0, "does not look like a %s openswan connection (no GroupName)",
++		             OPENSWAN_PLUGIN_NAME);
++		g_object_unref (connection);
++		return NULL;
++	}
++
++
++	/* Optional settings */
++
++	/* aggressive mode*/
++	if (import_file_lookup_bool (import, "conn", "aggrmode", &bool_value)) {
++		if (!bool_value) {
++			g_set_error (error, 0, 0, "(aggrmode=yes) must be specified for %s openswan connection",
++		             OPENSWAN_PLUGIN_NAME);
++			g_object_unref (connection);
++			return NULL;
++		}
++	}
++
++	/* authentication method */
++	if (import_file_lookup_string (import, "conn", "authby", &buf)) {
++		if(strcmp(buf, "secret")) {
++			g_set_error (error, 0, 0, "only authby=secret is supported for %s openswan connection",
++				         OPENSWAN_PLUGIN_NAME);
++			g_object_unref (connection);
++			return NULL;
++		}
++
++	}
++
++	/* xauth client mode */
++	if (import_file_lookup_bool (import, "conn", "leftxauthclient", &bool_value)) {
++		if (!bool_value) {
++			g_set_error (error, 0, 0, "(leftxauthclient=yes) must be specified for %s openswan connection",
++		             OPENSWAN_PLUGIN_NAME);
++			g_object_unref (connection);
++			return NULL;
++		}
++	}
++
++	/* mode cfg client mode */
++	if (import_file_lookup_bool (import, "conn", "leftmodecfgclient", &bool_value)) {
++		if (!bool_value) {
++			g_set_error (error, 0, 0, "(leftmodecfgclient=yes) must be specified for %s openswan connection",
++		             OPENSWAN_PLUGIN_NAME);
++			g_object_unref (connection);
++			return NULL;
++		}
++	}
++
++
++	/* remote peer type */
++	if (import_file_lookup_string (import, "conn", "remote_peer_type", &buf)) {
++		if(strcmp(buf, "cisco")) {
++			g_set_error (error, 0, 0, "remote_peer_type must only be of type cisco is supported for %s openswan connection",
++				         OPENSWAN_PLUGIN_NAME);
++			g_object_unref (connection);
++			return NULL;
++		}
++
++	}
++
++	/* xauth user name*/
++	if (import_file_lookup_string (import, "conn", "leftxauthusername", &buf)) {
++		nm_setting_vpn_add_data_item (s_vpn, NM_OPENSWAN_LEFTXAUTHUSER, buf);
++	}
++
++	/* xauth server mode */
++	if (import_file_lookup_bool (import, "conn", "rightxauthserver", &bool_value)) {
++		if (!bool_value) {
++			g_set_error (error, 0, 0, "(rightxauthserver=yes) should be specified for %s openswan connection",
++		             OPENSWAN_PLUGIN_NAME);
++			g_object_unref (connection);
++			return NULL;
++		}
++	}
++
++	/* mode cfg server mode */
++	if (import_file_lookup_bool (import, "conn", "rightmodecfgserver", &bool_value)) {
++		if (!bool_value) {
++			g_set_error (error, 0, 0, "(rightmodecfgserver=yes) should be specified for %s openswan connection",
++		             OPENSWAN_PLUGIN_NAME);
++			g_object_unref (connection);
++			return NULL;
++		}
++	}
++
++	/* network manager type connection*/
++	if (import_file_lookup_bool (import, "conn", "nm_configured", &bool_value)) {
++		if (!bool_value) {
++			g_set_error (error, 0, 0, "(nm_configured=yes) should be specified for %s openswan connection",
++		             OPENSWAN_PLUGIN_NAME);
++			g_object_unref (connection);
++			return NULL;
++		}
++	}
++
++	/* IKE algorithms*/
++	if (import_file_lookup_string (import, "conn", "ike", &buf)) {
++		nm_setting_vpn_add_data_item (s_vpn, NM_OPENSWAN_IKE, buf);
++	}
++
++	/* ESP algorithms*/
++	if (import_file_lookup_string (import, "conn", "esp", &buf)) {
++		nm_setting_vpn_add_data_item (s_vpn, NM_OPENSWAN_ESP, buf);
++	}
++
++
++	/* Connection name */
++	/*if (import_file_lookup_string (import, "main", "Description", &buf))
++		g_object_set (s_con, NM_SETTING_CONNECTION_ID, buf, NULL);*/
++
++	g_hash_table_destroy (import);
++
++	return connection;
++}
+ 
+ static gboolean
+-export (NMVpnPluginUiInterface *iface,
++export_to_file (NMVpnPluginUiInterface *iface,
+         const char *path,
+         NMConnection *connection,
+         GError **error)
+@@ -944,8 +1196,8 @@ openswan_plugin_ui_interface_init (NMVpn
+ 	/* interface implementation */
+ 	iface_class->ui_factory = ui_factory;
+ 	iface_class->get_capabilities = get_capabilities;
+-	iface_class->import_from_file = NULL;
+-	iface_class->export_to_file = export;
++	iface_class->import_from_file = import_from_file;
++	iface_class->export_to_file = export_to_file;
+ 	iface_class->get_suggested_name = NULL;
+ 	iface_class->delete_connection = delete_connection;
+ }

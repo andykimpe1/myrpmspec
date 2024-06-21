@@ -1,0 +1,152 @@
+diff -urNp NetworkManager-openswan-0.8-cvs-patched/properties/nm-openswan.c NetworkManager-openswan-0.8-current/properties/nm-openswan.c
+--- NetworkManager-openswan-0.8-cvs-patched/properties/nm-openswan.c	2011-04-04 16:02:31.000000000 -0400
++++ NetworkManager-openswan-0.8-current/properties/nm-openswan.c	2011-10-21 14:50:10.120380553 -0400
+@@ -763,6 +763,100 @@ get_capabilities (NMVpnPluginUiInterface
+ 	return (NM_VPN_PLUGIN_UI_CAPABILITY_IMPORT | NM_VPN_PLUGIN_UI_CAPABILITY_EXPORT);
+ }
+ 
++
++static gboolean
++export (NMVpnPluginUiInterface *iface,
++        const char *path,
++        NMConnection *connection,
++        GError **error)
++{
++
++	NMSettingConnection *s_con;
++	NMSettingVPN *s_vpn;
++	FILE *f;
++	const char *value=NULL;
++	const char *default_username=NULL;
++	const char *groupname=NULL;
++	const char *gateway=NULL;
++	const char *phase1_alg_str=NULL;
++	const char *phase2_alg_str=NULL;
++	gboolean success = FALSE;
++
++	s_con = NM_SETTING_CONNECTION (nm_connection_get_setting (connection, NM_TYPE_SETTING_CONNECTION));	
++	s_vpn = (NMSettingVPN *) nm_connection_get_setting (connection, NM_TYPE_SETTING_VPN);
++
++	f = fopen (path, "w");
++	if (!f) {
++		g_set_error (error, 0, 0, "could not open file for writing");
++		return FALSE;
++	}
++
++	value = nm_setting_vpn_get_data_item (s_vpn, NM_OPENSWAN_RIGHT);
++	if (value && strlen (value))
++		gateway = value;
++	else {
++		g_set_error (error, 0, 0, "Openswan connection is missing gateway");
++		goto done;
++	}
++
++	value = nm_setting_vpn_get_data_item (s_vpn, NM_OPENSWAN_LEFTID);
++	if (value && strlen (value))
++		groupname = value;
++	else {
++		g_set_error (error, 0, 0, "Openswan connection is missing group name");
++		goto done;
++	}
++
++	default_username = nm_setting_vpn_get_data_item (s_vpn, NM_OPENSWAN_LEFTXAUTHUSER);    
++	if ( !default_username || !strlen(default_username)) {
++		default_username = nm_setting_vpn_get_user_name (s_vpn);
++	}
++
++	value = nm_setting_vpn_get_data_item (s_vpn, NM_OPENSWAN_IKE);
++	if(value && strlen (value)) {       
++		phase1_alg_str=value;
++	}
++
++	value = nm_setting_vpn_get_data_item (s_vpn, NM_OPENSWAN_ESP);
++	if(value && strlen (value)) {
++		phase2_alg_str=value;
++	}
++
++	fprintf(f,
++			"conn %s\n"
++			" aggrmode=yes\n"
++			" authby=secret\n"
++			" left=%%defaultroute\n"
++			" leftid=@%s\n"
++			" leftxauthclient=yes\n"
++			" leftmodecfgclient=yes\n"
++			" leftxauthusername=%s\n"
++			" right=%s\n"
++			" remote_peer_type=cisco\n"
++			" rightxauthserver=yes\n"
++			" rightmodecfgserver=yes\n"
++			" nm_configured=yes\n"
++			" rekey=no\n"
++			" salifetime=24h\n"
++			" ikelifetime=24h\n"
++			" keyingtries=1\n"
++			" ike=%s\n"
++			" esp=%s\n"
++			" auto=add\n",
++			nm_setting_connection_get_id (s_con),
++			groupname ? groupname: "",
++			default_username ? default_username : "",
++			gateway ? gateway : "",
++			phase1_alg_str ? phase1_alg_str : "aes-sha1",
++			phase2_alg_str ? phase2_alg_str : "aes-sha1;modp1024");
++     
++	success = TRUE;
++done:
++        fclose (f);
++        return success;
++
++}
++
+ static gboolean
+ delete_connection (NMVpnPluginUiInterface *iface,
+                    NMConnection *connection,
+@@ -851,7 +945,7 @@ openswan_plugin_ui_interface_init (NMVpn
+ 	iface_class->ui_factory = ui_factory;
+ 	iface_class->get_capabilities = get_capabilities;
+ 	iface_class->import_from_file = NULL;
+-	iface_class->export_to_file = NULL;
++	iface_class->export_to_file = export;
+ 	iface_class->get_suggested_name = NULL;
+ 	iface_class->delete_connection = delete_connection;
+ }
+diff -urNp NetworkManager-openswan-0.8-cvs-patched/src/nm-openswan-service.c NetworkManager-openswan-0.8-current/src/nm-openswan-service.c
+--- NetworkManager-openswan-0.8-cvs-patched/src/nm-openswan-service.c	2011-04-04 16:02:34.000000000 -0400
++++ NetworkManager-openswan-0.8-current/src/nm-openswan-service.c	2011-10-21 14:32:12.405222695 -0400
+@@ -557,10 +557,13 @@ nm_openswan_config_write (gint openswan_
+         }
+ 
+         write_config_option (fdtmp1, " nm_configured=yes\n");
+-	write_config_option (fdtmp1, " rekey=yes\n");
++	write_config_option (fdtmp1, " rekey=no\n");
+ 	write_config_option (fdtmp1, " salifetime=24h\n");
+ 	write_config_option (fdtmp1, " ikelifetime=24h\n");
+ 	write_config_option (fdtmp1, " keyingtries=1\n");
++	//write_config_option (fdtmp1, " dpddelay=30\n");
++	//write_config_option (fdtmp1, " dpdtimeout=120\n");
++	//write_config_option (fdtmp1, " dpdaction=clear\n");
+         //write_config_option (fdtmp1, " leftupdown=%s\n", NM_OSW_UPDOWN_PATH);
+         write_config_option (fdtmp1, " auto=add\n");
+         //write_config_option (fdtmp1, " #connectionname=%s\n", nm_setting_vpn_get_data_item (s_vpn, NM_SETTING_VPN_SETTING_NAME));
+diff -urNp NetworkManager-openswan-0.8-cvs-patched/src/nm-openswan-service-helper.c NetworkManager-openswan-0.8-current/src/nm-openswan-service-helper.c
+--- NetworkManager-openswan-0.8-cvs-patched/src/nm-openswan-service-helper.c	2011-04-04 16:02:34.000000000 -0400
++++ NetworkManager-openswan-0.8-current/src/nm-openswan-service-helper.c	2011-04-04 16:17:58.000000000 -0400
+@@ -226,7 +226,7 @@ addr_list_to_gvalue (const char *str)
+  * PLUTO_MY_SOURCEIP		-- address
+  * PLUTO_CISCO_DNS_INFO         -- list of dns serverss
+  * PLUTO_CISCO_DOMAIN_INFO      -- default domain name
+- * PLUTO_SERVERBANNER           -- banner from server
++ * PLUTO_PEER_BANNER           -- banner from server
+  *
+  */
+ int 
+@@ -321,7 +321,7 @@ main (int argc, char *argv[])
+ 		g_hash_table_insert (config, NM_VPN_PLUGIN_IP4_CONFIG_DOMAIN, val);
+ 
+ 	/* Banner */
+-	val = str_to_gvalue (getenv ("PLUTO_SERVERBANNER"), TRUE);
++	val = str_to_gvalue (getenv ("PLUTO_PEER_BANNER"), TRUE);
+ 	if (val)
+ 		g_hash_table_insert (config, NM_VPN_PLUGIN_IP4_CONFIG_BANNER, val);
+ 

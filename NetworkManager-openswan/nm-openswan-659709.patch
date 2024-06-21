@@ -1,0 +1,80 @@
+diff -urNp NetworkManager-openswan-0.8-cvs-patched/src/nm-openswan-service.c NetworkManager-openswan-0.8-current/src/nm-openswan-service.c
+--- NetworkManager-openswan-0.8-cvs-patched/src/nm-openswan-service.c	2010-09-07 14:21:00.722406998 -0400
++++ NetworkManager-openswan-0.8-current/src/nm-openswan-service.c	2010-12-14 16:42:29.030144393 -0500
+@@ -557,6 +557,10 @@ nm_openswan_config_write (gint openswan_
+         }
+ 
+         write_config_option (fdtmp1, " nm_configured=yes\n");
++	write_config_option (fdtmp1, " rekey=yes\n");
++	write_config_option (fdtmp1, " salifetime=24h\n");
++	write_config_option (fdtmp1, " ikelifetime=24h\n");
++	write_config_option (fdtmp1, " keyingtries=1\n");
+         //write_config_option (fdtmp1, " leftupdown=%s\n", NM_OSW_UPDOWN_PATH);
+         write_config_option (fdtmp1, " auto=add\n");
+         //write_config_option (fdtmp1, " #connectionname=%s\n", nm_setting_vpn_get_data_item (s_vpn, NM_SETTING_VPN_SETTING_NAME));
+diff -urNp NetworkManager-openswan-0.8-cvs-patched/src/nm-openswan-service-helper.c NetworkManager-openswan-0.8-current/src/nm-openswan-service-helper.c
+--- NetworkManager-openswan-0.8-cvs-patched/src/nm-openswan-service-helper.c	2010-09-07 14:20:55.816157179 -0400
++++ NetworkManager-openswan-0.8-current/src/nm-openswan-service-helper.c	2010-12-22 16:01:44.638688638 -0500
+@@ -70,6 +70,37 @@ helper_failed (DBusGConnection *connecti
+ 	exit (1);
+ }
+ 
++
++
++static void
++helper_disconnect (DBusGConnection *connection, const char *reason)
++{
++        DBusGProxy *proxy;
++        GError *err = NULL;
++
++        nm_warning ("nm-openswan-service-helper received %s from openswan", reason);
++
++        proxy = dbus_g_proxy_new_for_name (connection,
++                                                                NM_DBUS_SERVICE_OPENSWAN,
++                                                                NM_VPN_DBUS_PLUGIN_PATH,
++                                                                NM_VPN_DBUS_PLUGIN_INTERFACE);
++
++        dbus_g_proxy_call (proxy, "Disconnect", &err,
++                                    G_TYPE_INVALID, G_TYPE_INVALID,
++                                    G_TYPE_INVALID,
++                                    G_TYPE_INVALID);
++
++        if (err) {
++                nm_warning ("Could not send failure information: %s", err->message);
++                g_error_free (err);
++        }
++
++        g_object_unref (proxy);
++
++        exit (1);
++}
++
++
+ static void
+ send_ip4_config (DBusGConnection *connection, GHashTable *config)
+ {
+@@ -215,18 +246,20 @@ main (int argc, char *argv[])
+ 	 * don't proceed unless its "connect".
+ 	 */
+ 	tmp = getenv ("openswan_reason");
+-	if (tmp && strcmp (tmp, "connect") != 0)
+-		exit (0);
++	if (tmp == NULL || ( strcmp (tmp, "connect") != 0 && strcmp (tmp, "disconnect") != 0))
++		exit (0); 
+ 
+-	
+ 	connection = dbus_g_bus_get (DBUS_BUS_SYSTEM, &err);
+ 	if (!connection) {
+ 		nm_warning ("Could not get the system bus: %s", err->message);
+ 		exit (1);
+ 	}
+ 
+-	config = g_hash_table_new (g_str_hash, g_str_equal);
++	if( strcmp (tmp, "disconnect") == 0 ) {
++	helper_disconnect (connection, "disconnect");
++	}
+ 
++	config = g_hash_table_new (g_str_hash, g_str_equal);
+ 
+ 	/* Right peer (or Gateway) */
+ 	val = addr_to_gvalue (getenv ("PLUTO_PEER"));

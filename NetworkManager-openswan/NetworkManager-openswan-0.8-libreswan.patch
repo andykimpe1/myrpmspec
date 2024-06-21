@@ -1,0 +1,143 @@
+From f3d27d5383317c0107acaa4c4f84e912113ddb72 Mon Sep 17 00:00:00 2001
+From: Paul Wouters <pwouters@redhat.com>
+Date: Wed, 30 Sep 2015 14:13:54 +0200
+Subject: [PATCH] service: add libreswan compatibility
+
+[lkundrak@v3.sk: install the helper for libreswan too]
+---
+ src/Makefile.am                  |  7 +++++++
+ src/nm-openswan-service-helper.c | 12 ++++++++++--
+ 2 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 33cfd82..07c3b4c 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -36,4 +36,11 @@ nm_openswan_service_helper_LDADD = \
+ 				$(GTHREAD_LIBS) \
+ 				$(NM_UTILS_LIBS)
+ 
++install-exec-hook:
++	$(LN_S) -f nm-openswan-service-helper \
++		$(DESTDIR)$(libexecdir)/nm-libreswan-service-helper
++
++uninstall-hook:
++	rm -f $(DESTDIR)$(libexecdir)/nm-libreswan-service-helper
++
+ CLEANFILES = *~
+diff --git a/src/nm-openswan-service-helper.c b/src/nm-openswan-service-helper.c
+index b29e401..ebafaee 100644
+--- a/src/nm-openswan-service-helper.c
++++ b/src/nm-openswan-service-helper.c
+@@ -246,8 +246,12 @@ main (int argc, char *argv[])
+ 	 * don't proceed unless its "connect".
+ 	 */
+ 	tmp = getenv ("openswan_reason");
+-	if (tmp == NULL || ( strcmp (tmp, "connect") != 0 && strcmp (tmp, "disconnect") != 0))
+-		exit (0); 
++	if (tmp == NULL || ( strcmp (tmp, "connect") != 0 && strcmp (tmp, "disconnect") != 0)) {
++		tmp = getenv ("libreswan_reason");
++		if (tmp == NULL || ( strcmp (tmp, "connect") != 0 && strcmp (tmp, "disconnect") != 0)) {
++			exit (0);
++		}
++	}
+ 
+ 	connection = dbus_g_bus_get (DBUS_BUS_SYSTEM, &err);
+ 	if (!connection) {
+@@ -305,6 +309,8 @@ main (int argc, char *argv[])
+ 
+ 	/* DNS */
+ 	val = addr_list_to_gvalue (getenv ("PLUTO_CISCO_DNS_INFO"));
++	if (!val)
++		val = addr_list_to_gvalue (getenv ("PLUTO_PEER_DNS_INFO"));
+ 	if (val)
+ 		g_hash_table_insert (config, NM_VPN_PLUGIN_IP4_CONFIG_DNS, val);
+ 
+@@ -317,6 +323,8 @@ main (int argc, char *argv[])
+ 
+ 	/* Default domain */
+ 	val = str_to_gvalue (getenv ("PLUTO_CISCO_DOMAIN_INFO"), TRUE);
++	if (!val)
++		val = str_to_gvalue (getenv ("PLUTO_PEER_DOMAIN_INFO"), TRUE);
+ 	if (val)
+ 		g_hash_table_insert (config, NM_VPN_PLUGIN_IP4_CONFIG_DOMAIN, val);
+ 
+-- 
+2.4.3
+
+From cc4b217a191f4a2430ff841d67982ef56170481d Mon Sep 17 00:00:00 2001
+From: Lubomir Rintel <lkundrak@v3.sk>
+Date: Wed, 30 Sep 2015 14:37:02 +0200
+Subject: [PATCH] Update automake
+
+---
+ src/Makefile.in | 44 ++++++++++++++++++++++++++++----------------
+ 1 file changed, 28 insertions(+), 16 deletions(-)
+
+diff --git a/src/Makefile.in b/src/Makefile.in
+index 4ef62e8..15ffe1e 100644
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -537,7 +537,8 @@ install-dvi: install-dvi-am
+ install-dvi-am:
+ 
+ install-exec-am: install-libexecPROGRAMS
+-
++	@$(NORMAL_INSTALL)
++	$(MAKE) $(AM_MAKEFLAGS) install-exec-hook
+ install-html: install-html-am
+ 
+ install-html-am:
+@@ -577,23 +578,34 @@ ps: ps-am
+ ps-am:
+ 
+ uninstall-am: uninstall-libexecPROGRAMS
++	@$(NORMAL_INSTALL)
++	$(MAKE) $(AM_MAKEFLAGS) uninstall-hook
++.MAKE: install-am install-exec-am install-strip uninstall-am
++
++.PHONY: CTAGS GTAGS TAGS all all-am check check-am clean clean-generic \
++	clean-libexecPROGRAMS clean-libtool cscopelist-am ctags \
++	ctags-am distclean distclean-compile distclean-generic \
++	distclean-libtool distclean-tags distdir dvi dvi-am html \
++	html-am info info-am install install-am install-data \
++	install-data-am install-dvi install-dvi-am install-exec \
++	install-exec-am install-exec-hook install-html install-html-am \
++	install-info install-info-am install-libexecPROGRAMS \
++	install-man install-pdf install-pdf-am install-ps \
++	install-ps-am install-strip installcheck installcheck-am \
++	installdirs maintainer-clean maintainer-clean-generic \
++	mostlyclean mostlyclean-compile mostlyclean-generic \
++	mostlyclean-libtool pdf pdf-am ps ps-am tags tags-am uninstall \
++	uninstall-am uninstall-hook uninstall-libexecPROGRAMS
++
++.PRECIOUS: Makefile
++
+ 
+-.MAKE: install-am install-strip
+-
+-.PHONY: CTAGS GTAGS all all-am check check-am clean clean-generic \
+-	clean-libexecPROGRAMS clean-libtool ctags distclean \
+-	distclean-compile distclean-generic distclean-libtool \
+-	distclean-tags distdir dvi dvi-am html html-am info info-am \
+-	install install-am install-data install-data-am install-dvi \
+-	install-dvi-am install-exec install-exec-am install-html \
+-	install-html-am install-info install-info-am \
+-	install-libexecPROGRAMS install-man install-pdf install-pdf-am \
+-	install-ps install-ps-am install-strip installcheck \
+-	installcheck-am installdirs maintainer-clean \
+-	maintainer-clean-generic mostlyclean mostlyclean-compile \
+-	mostlyclean-generic mostlyclean-libtool pdf pdf-am ps ps-am \
+-	tags uninstall uninstall-am uninstall-libexecPROGRAMS
++install-exec-hook:
++	$(LN_S) -f nm-openswan-service-helper \
++		$(DESTDIR)$(libexecdir)/nm-libreswan-service-helper
+ 
++uninstall-hook:
++	rm -f $(DESTDIR)$(libexecdir)/nm-libreswan-service-helper
+ 
+ # Tell versions [3.59,3.63) of GNU make to not export all variables.
+ # Otherwise a system limit (for SysV at least) may be exceeded.
+-- 
+2.4.3
+
