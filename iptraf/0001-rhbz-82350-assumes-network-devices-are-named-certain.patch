@@ -1,0 +1,829 @@
+From 99367572c3333638b829eba7ee546fcd7e73703f Mon Sep 17 00:00:00 2001
+Message-Id: <99367572c3333638b829eba7ee546fcd7e73703f.1326883612.git.npajkovs@redhat.com>
+From: Nikola Pajkovsky <npajkovs@redhat.com>
+Date: Wed, 18 Jan 2012 11:46:44 +0100
+Subject: [PATCH] rhbz#82350 - assumes network devices are named certain
+ things
+
+Signed-off-by: Nikola Pajkovsky <npajkovs@redhat.com>
+---
+ src/hostmon.c  |   57 ++++++++---------
+ src/ifaces.c   |   35 -----------
+ src/ifstats.c  |    8 ---
+ src/iptraf.c   |    3 -
+ src/itrafmon.c |    5 --
+ src/landesc.c  |   11 ++--
+ src/links.h    |   15 -----
+ src/log.c      |    9 +--
+ src/options.c  |    6 +-
+ src/othptab.c  |   40 ++++++------
+ src/packet.c   |  183 ++++++++++++--------------------------------------------
+ src/packet.h   |    4 -
+ src/pktsize.c  |    5 --
+ src/promisc.c  |    4 +-
+ src/serv.c     |    5 --
+ src/tcptable.c |   12 ++--
+ src/tcptable.h |    1 -
+ 17 files changed, 105 insertions(+), 298 deletions(-)
+ delete mode 100644 src/links.h
+
+diff --git a/src/hostmon.c b/src/hostmon.c
+index 2fbed60..592211c 100644
+--- a/src/hostmon.c
++++ b/src/hostmon.c
+@@ -41,7 +41,6 @@ details.
+ #include <labels.h>
+ #include "dirs.h"
+ #include "deskman.h"
+-#include "links.h"
+ #include "fltdefs.h"
+ #include "fltselect.h"
+ #include "isdntab.h"            /* needed by packet.h */
+@@ -290,11 +289,11 @@ void printethent(struct ethtab *table, struct ethtabent *entry,
+         wmove(table->tabwin, target_row, 1);
+         wattrset(table->tabwin, STDATTR);
+ 
+-        if (entry->un.desc.linktype == LINK_ETHERNET)
++        if (entry->un.desc.linktype == ARPHRD_ETHER)
+             wprintw(table->tabwin, "Ethernet");
+-        else if (entry->un.desc.linktype == LINK_PLIP)
+-            wprintw(table->tabwin, "PLIP");
+-        else if (entry->un.desc.linktype == LINK_FDDI)
++//      else if (entry->un.desc.linktype == LINK_PLIP)
++//          wprintw(table->tabwin, "PLIP");
++        else if (entry->un.desc.linktype == ARPHRD_FDDI)
+             wprintw(table->tabwin, "FDDI");
+ 
+         wprintw(table->tabwin, " HW addr: %s", entry->un.desc.ascaddr);
+@@ -753,11 +752,6 @@ void hostmon(const struct OPTIONS *options, int facilitytime, char *ifptr,
+     }
+ 
+     if (ifptr != NULL) {
+-        if (!iface_supported(ifptr)) {
+-            err_iface_unsupported();
+-            unmark_facility(LANMONIDFILE, ifptr);
+-            return;
+-        }
+         if (!iface_up(ifptr)) {
+             err_iface_down();
+             unmark_facility(LANMONIDFILE, ifptr);
+@@ -786,8 +780,8 @@ void hostmon(const struct OPTIONS *options, int facilitytime, char *ifptr,
+     hostmonhelp();
+ 
+     initethtab(&table, options->actmode);
+-    loaddesclist(&elist, LINK_ETHERNET, WITHETCETHERS);
+-    loaddesclist(&flist, LINK_FDDI, WITHETCETHERS);
++    loaddesclist(&elist, ARPHRD_ETHER, WITHETCETHERS);
++    loaddesclist(&flist, ARPHRD_FDDI, WITHETCETHERS);
+ 
+     if (logging) {
+         if (strcmp(current_logfile, "") == 0) {
+@@ -901,10 +895,11 @@ void hostmon(const struct OPTIONS *options, int facilitytime, char *ifptr,
+             if (pkt_result != PACKET_OK)
+                 continue;
+ 
+-            if ((linktype == LINK_ETHERNET) || (linktype == LINK_FDDI)
+-                || (linktype == LINK_PLIP) || (linktype == LINK_TR) ||
+-                (linktype == LINK_VLAN)) {
+-
++            if ((fromaddr.sll_hatype == ARPHRD_ETHER)
++                || (fromaddr.sll_hatype == ARPHRD_FDDI)
++//              || (linktype == LINK_PLIP)
++                || (fromaddr.sll_hatype == ARPHRD_IEEE802_TR)
++                || (fromaddr.sll_hatype == ARPHRD_IEEE802)) {
+                 if (fromaddr.sll_protocol == htons(ETH_P_IP))
+                     is_ip = 1;
+                 else
+@@ -914,24 +909,26 @@ void hostmon(const struct OPTIONS *options, int facilitytime, char *ifptr,
+                  * Check source address entry
+                  */
+ 
+-                if ((linktype == LINK_ETHERNET) || (linktype == LINK_PLIP)
+-                    || (linktype == LINK_VLAN)) {
+-                    struct ethhdr *eth_hdr = (struct ethhdr*) buf;
+-                    memcpy(scratch_saddr, eth_hdr->h_source, ETH_ALEN);
+-                    memcpy(scratch_daddr, eth_hdr->h_dest, ETH_ALEN);
++                if ((fromaddr.sll_hatype == ARPHRD_ETHER)
++//                  || (linktype == LINK_PLIP)
++                    || (fromaddr.sll_hatype == ARPHRD_IEEE802_TR)
++                    || (fromaddr.sll_hatype == ARPHRD_IEEE802)) {
++                    struct ethhdr* hdr_eth = (struct ethhdr *) buf;
++                    memcpy(scratch_saddr, (hdr_eth)->h_source, ETH_ALEN);
++                    memcpy(scratch_daddr, (hdr_eth)->h_dest, ETH_ALEN);
+                     list = &elist;
+-                } else if (linktype == LINK_FDDI) {
+-                    struct fddihdr *fddi_hdr = (struct fddihdr*) buf;
+-                    memcpy(scratch_saddr, fddi_hdr->saddr, FDDI_K_ALEN);
+-                    memcpy(scratch_daddr, fddi_hdr->daddr, FDDI_K_ALEN);
++                } else if (fromaddr.sll_hatype == ARPHRD_FDDI) {
++                    struct fddihdr* hdr_fddi = (struct fddihdr *) buf;
++                    memcpy(scratch_saddr, (hdr_fddi)->saddr, FDDI_K_ALEN);
++                    memcpy(scratch_daddr, (hdr_fddi)->daddr, FDDI_K_ALEN);
+                     list = &flist;
+-                } else if (linktype == LINK_TR) {
+-                    struct trh_hdr *hdr_trh = (struct trh_hdr*) buf;
+-                    memcpy(scratch_saddr, hdr_trh->saddr, TR_ALEN);
+-                    memcpy(scratch_daddr, hdr_trh->daddr, TR_ALEN);
++                } else if ((fromaddr.sll_hatype == ARPHRD_IEEE802_TR)
++                           || (fromaddr.sll_hatype == ARPHRD_IEEE802)) {
++                    struct trh_hdr* hdr_trh = (struct trh_hdr *) buf;
++                    memcpy(scratch_saddr, (hdr_trh)->saddr, TR_ALEN);
++                    memcpy(scratch_daddr, (hdr_trh)->daddr, TR_ALEN);
+                     list = &flist;
+                 }
+-
+                 entry = in_ethtable(&table, linktype, scratch_saddr);
+ 
+                 if ((entry == NULL) && (!nomem))
+diff --git a/src/ifaces.c b/src/ifaces.c
+index 2da8025..54029de 100644
+--- a/src/ifaces.c
++++ b/src/ifaces.c
+@@ -29,21 +29,10 @@ details.
+ #include <string.h>
+ #include <linux/types.h>
+ #include <linux/if_packet.h>
+-#include "links.h"
+ #include "error.h"
+ 
+-extern int accept_unsupported_interfaces;
+-#define NUM_SUPPORTED_IFACES 30
+-
+ extern int daemonized;
+ 
+-char ifaces[][6] =
+-    { "lo", "eth", "sl", "ppp", "ippp", "plip", "fddi", "isdn", "dvb",
+-    "pvc", "hdlc", "ipsec", "sbni", "tr", "wvlan", "wlan", "sm2", "sm3",
+-    "pent", "lec", "brg", "tun", "tap", "cipcb", "tunl", "vlan", "hsi",
+-    "ctc", "ath", "bond"
+-};
+-
+ char *ltrim(char *buf)
+ {
+     char *tmp = buf;
+@@ -101,25 +90,6 @@ int get_next_iface(FILE * fd, char *ifname, int n)
+     return 0;
+ }
+ 
+-/*
+- * Determine if supplied interface is supported.
+- */
+-
+-int iface_supported(char *iface)
+-{
+-    int i;
+-
+-    if (accept_unsupported_interfaces)
+-        return 1;
+-
+-    for (i = 0; i <= NUM_SUPPORTED_IFACES - 1; i++) {
+-        if (strncmp(ifaces[i], iface, strlen(ifaces[i])) == 0)
+-            return 1;
+-    }
+-
+-    return 0;
+-}
+-
+ int iface_up(char *iface)
+ {
+     int fd;
+@@ -139,11 +109,6 @@ int iface_up(char *iface)
+     return 1;
+ }
+ 
+-void err_iface_unsupported(void)
+-{
+-    write_error("Specified interface not supported", daemonized);
+-}
+-
+ void err_iface_down(void)
+ {
+     write_error("Specified interface not active", daemonized);
+diff --git a/src/ifstats.c b/src/ifstats.c
+index 3ec6e73..d2806f7 100644
+--- a/src/ifstats.c
++++ b/src/ifstats.c
+@@ -145,9 +145,6 @@ void initiflist(struct iflist **list)
+ 
+     while (get_next_iface(fd, ifname, 12)) {
+         if (strcmp(ifname, "") != 0) {
+-            if (!(iface_supported(ifname)))
+-                continue;
+-
+             if (ifinlist(*list, ifname))        /* ignore entry if already in */
+                 continue;       /* interface list */
+ 
+@@ -866,11 +863,6 @@ void detstats(char *iface, const struct OPTIONS *options, int facilitytime,
+         unmark_facility(DSTATIDFILE, iface);
+         return;
+     }
+-    if (!iface_supported(iface)) {
+-        err_iface_unsupported();
+-        unmark_facility(DSTATIDFILE, iface);
+-        return;
+-    }
+     if (!iface_up(iface)) {
+         err_iface_down();
+         unmark_facility(DSTATIDFILE, iface);
+diff --git a/src/iptraf.c b/src/iptraf.c
+index be3991a..61f1527 100644
+--- a/src/iptraf.c
++++ b/src/iptraf.c
+@@ -74,7 +74,6 @@ int facility_running = 0;
+ int is_first_instance;
+ char active_facility_lockfile[64];
+ char active_facility_countfile[64];
+-int accept_unsupported_interfaces = 0;
+ char graphing_filter[80];
+ 
+ extern void about();
+@@ -538,8 +537,6 @@ int main(int argc, char **argv)
+                             80);
+             } else if (opt == 'q') {
+                 /* -q parameter now ignored, maintained for compatibility */
+-            } else if (opt == 'u') {
+-                accept_unsupported_interfaces = 1;
+             } else if (opt == 'I') {
+                 current_log_interval = atoi(optarg);
+                 if (current_log_interval == 0)
+diff --git a/src/itrafmon.c b/src/itrafmon.c
+index c08f35b..d417b58 100644
+--- a/src/itrafmon.c
++++ b/src/itrafmon.c
+@@ -663,11 +663,6 @@ void ipmon(struct OPTIONS *options,
+     }
+ 
+     if (ifptr != NULL) {
+-        if (!iface_supported(ifptr)) {
+-            err_iface_unsupported();
+-            unmark_facility(IPMONIDFILE, ifptr);
+-            return;
+-        }
+         if (!iface_up(ifptr)) {
+             err_iface_down();
+             unmark_facility(IPMONIDFILE, ifptr);
+diff --git a/src/landesc.c b/src/landesc.c
+index 4e0179d..30db138 100644
+--- a/src/landesc.c
++++ b/src/landesc.c
+@@ -38,7 +38,6 @@ details.
+ #include "attrs.h"
+ #include "dirs.h"
+ #include "landesc.h"
+-#include "links.h"
+ 
+ void etherr(void)
+ {
+@@ -81,9 +80,9 @@ void loaddesclist(struct desclist *list, unsigned int linktype,
+ 
+     bzero(list, sizeof(struct desclist));
+ 
+-    if (linktype == LINK_ETHERNET)
++    if (linktype == ARPHRD_ETHER)
+         fd = fopen(ETHFILE, "r");
+-    else if (linktype == LINK_FDDI)
++    else if (linktype == ARPHRD_FDDI)
+         fd = fopen(FDDIFILE, "r");
+ 
+     if (fd == NULL) {
+@@ -131,7 +130,7 @@ void loaddesclist(struct desclist *list, unsigned int linktype,
+     if (!withethers)
+         return;
+ 
+-    if (linktype != LINK_ETHERNET)
++    if (linktype != ARPHRD_ETHER)
+         return;
+ 
+     fd = fopen("/etc/ethers", "r");
+@@ -203,9 +202,9 @@ void savedesclist(struct desclist *list, unsigned int linktype)
+ 
+     struct desclistent *ptmp = list->head;
+ 
+-    if (linktype == LINK_ETHERNET)
++    if (linktype == ARPHRD_ETHER)
+         fd = fopen(ETHFILE, "w");
+-    else if (linktype == LINK_FDDI)
++    else if (linktype == ARPHRD_FDDI)
+         fd = fopen(FDDIFILE, "w");
+ 
+     if (fd <= 0) {
+diff --git a/src/links.h b/src/links.h
+deleted file mode 100644
+index 48f83af..0000000
+--- a/src/links.h
++++ /dev/null
+@@ -1,15 +0,0 @@
+-#define LINK_ETHERNET		1
+-#define LINK_PPP		2
+-#define LINK_SLIP		3
+-#define LINK_PLIP		4
+-#define LINK_LOOPBACK		5
+-#define LINK_ISDN_RAWIP		6
+-#define LINK_ISDN_CISCOHDLC	7
+-#define LINK_CISCOHDLC  7
+-#define LINK_FDDI		8
+-#define LINK_FRAD		9
+-#define LINK_DLCI		10
+-#define LINK_TR			11
+-#define LINK_IPIP       12
+-#define LINK_VLAN       13
+-#define LINK_INVALID		0
+diff --git a/src/log.c b/src/log.c
+index 86266e0..9e43cdb 100644
+--- a/src/log.c
++++ b/src/log.c
+@@ -36,7 +36,6 @@ details.
+ #include "serv.h"
+ #include "pktsize.h"
+ #include "hostmon.h"
+-#include "links.h"
+ #include "mode.h"
+ 
+ #define MSGSTRING_MAX		240
+@@ -486,12 +485,12 @@ void writeethlog(struct ethtabent *list, int unit, unsigned long nsecs,
+ 
+     while (ptmp != NULL) {
+         if (ptmp->type == 0) {
+-            if (ptmp->un.desc.linktype == LINK_ETHERNET)
++            if (ptmp->un.desc.linktype == ARPHRD_ETHER)
+                 fprintf(fd, "\nEthernet address: %s",
+                         ptmp->un.desc.ascaddr);
+-            else if (ptmp->un.desc.linktype == LINK_PLIP)
+-                fprintf(fd, "\nPLIP address: %s", ptmp->un.desc.ascaddr);
+-            else if (ptmp->un.desc.linktype == LINK_FDDI)
++//            else if (ptmp->un.desc.linktype == LINK_PLIP)
++//                fprintf(fd, "\nPLIP address: %s", ptmp->un.desc.ascaddr);
++            else if (ptmp->un.desc.linktype == ARPHRD_FDDI)
+                 fprintf(fd, "\nFDDI address: %s", ptmp->un.desc.ascaddr);
+ 
+             if (ptmp->un.desc.withdesc)
+diff --git a/src/options.c b/src/options.c
+index 27dc245..0742760 100644
+--- a/src/options.c
++++ b/src/options.c
+@@ -26,7 +26,7 @@ details.
+ #include <menurt.h>
+ #include <input.h>
+ #include <msgboxes.h>
+-#include "links.h"
++#include <net/if_arp.h>
+ #include "serv.h"
+ #include "options.h"
+ #include "deskman.h"
+@@ -378,10 +378,10 @@ void setoptions(struct OPTIONS *options, struct porttab **ports)
+             removeaport(ports);
+             break;
+         case 15:
+-            ethdescmgr(LINK_ETHERNET);
++            ethdescmgr(ARPHRD_ETHER);
+             break;
+         case 16:
+-            ethdescmgr(LINK_FDDI);
++            ethdescmgr(ARPHRD_FDDI);
+             break;
+         }
+ 
+diff --git a/src/othptab.c b/src/othptab.c
+index 748f1e9..aab4c71 100644
+--- a/src/othptab.c
++++ b/src/othptab.c
+@@ -35,7 +35,6 @@ details.
+ #include "log.h"
+ #include "revname.h"
+ #include "rvnamed.h"
+-#include "links.h"
+ 
+ #define MSGSTRING_MAX	240
+ #define SHORTSTRING_MAX	40
+@@ -150,22 +149,22 @@ struct othptabent *add_othp_entry(struct othptable *table,
+     new_entry->fragment = fragment;
+ 
+     if ((table->mac) || (!is_ip)) {
+-        if ((linkproto == LINK_ETHERNET) || (linkproto == LINK_PLIP)) {
+-            convmacaddr(((struct ethhdr *) packet)->h_source,
+-                        new_entry->smacaddr);
+-            convmacaddr(((struct ethhdr *) packet)->h_dest,
+-                        new_entry->dmacaddr);
+-        } else if (linkproto == LINK_FDDI) {
+-            convmacaddr(((struct fddihdr *) packet)->saddr,
+-                        new_entry->smacaddr);
+-            convmacaddr(((struct fddihdr *) packet)->daddr,
+-                        new_entry->dmacaddr);
+-        } else if (linkproto == LINK_TR) {
+-            convmacaddr(((struct trh_hdr *) packet)->saddr,
+-                        new_entry->smacaddr);
+-            convmacaddr(((struct trh_hdr *) packet)->daddr,
+-                        new_entry->dmacaddr);
+-        }
++	    if ((linkproto == ARPHRD_ETHER) /* || (linkproto == LINK_PLIP) */ ) {
++		    convmacaddr((char*)(((struct ethhdr *) packet)->h_source),
++				new_entry->smacaddr);
++		    convmacaddr((char*)(((struct ethhdr *) packet)->h_dest),
++				new_entry->dmacaddr);
++	    } else if (linkproto == ARPHRD_FDDI) {
++		    convmacaddr((char*)(((struct fddihdr *) packet)->saddr),
++				new_entry->smacaddr);
++		    convmacaddr((char*)(((struct fddihdr *) packet)->daddr),
++				new_entry->dmacaddr);
++	    } else if ((linkproto == ARPHRD_IEEE802) || (linkproto == ARPHRD_IEEE802_TR)) {
++		    convmacaddr((char*)(((struct trh_hdr *) packet)->saddr),
++				new_entry->smacaddr);
++		    convmacaddr((char*)(((struct trh_hdr *) packet)->daddr),
++				new_entry->dmacaddr);
++	    }
+     }
+ 
+     if (is_ip) {
+@@ -401,9 +400,10 @@ void printothpentry(struct othptable *table, struct othptabent *entry,
+         sprintf(scratchpad, " (%u bytes)", entry->pkt_length);
+         strcat(msgstring, scratchpad);
+ 
+-        if ((entry->linkproto == LINK_ETHERNET) ||
+-            (entry->linkproto == LINK_PLIP) ||
+-            (entry->linkproto == LINK_FDDI)) {
++        if ((entry->linkproto == ARPHRD_ETHER) ||
++//            (entry->linkproto == LINK_PLIP) ||
++            (entry->linkproto == ARPHRD_FDDI)) {
++
+             sprintf(scratchpad, " from %s to %s on %s",
+                     entry->smacaddr, entry->dmacaddr, entry->iface);
+ 
+diff --git a/src/packet.c b/src/packet.c
+index 24962ab..fc35a7d 100644
+--- a/src/packet.c
++++ b/src/packet.c
+@@ -44,7 +44,6 @@ details.
+ #include "deskman.h"
+ #include "error.h"
+ #include "options.h"
+-#include "links.h"
+ #include "fltdefs.h"
+ #include "fltselect.h"
+ #include "isdntab.h"
+@@ -55,7 +54,6 @@ details.
+ #include "tr.h"
+ 
+ extern int daemonized;
+-extern int accept_unsupported_interfaces;
+ 
+ int isdnfd;
+ struct isdntab isdntable;
+@@ -70,116 +68,26 @@ void open_socket(int *fd)
+     }
+ }
+ 
+-unsigned short getlinktype(unsigned short family, char *ifname,
+-                           int isdn_fd, struct isdntab *isdnlist)
++static void adjustpacket(char *tpacket, struct sockaddr_ll *fromaddr,
++                         char **packet, char *aligned_buf, unsigned int *readlen)
+ {
+-    unsigned short result = 0;
+-    struct isdntabent *isdnent;
++    unsigned int dataoffset;
+ 
+-    switch (family) {
++    switch (fromaddr->sll_hatype) {
+     case ARPHRD_ETHER:
+-        if (strncmp(ifname, "eth", 3) == 0)
+-            result = LINK_ETHERNET;
+-        else if (strncmp(ifname, "plip", 4) == 0)
+-            result = LINK_PLIP;
+-        else if (strncmp(ifname, "fddi", 4) == 0)       /* For some Ethernet- */
+-            result = LINK_ETHERNET;     /* emulated FDDI ifaces */
+-        else if (strncmp(ifname, "dvb", 3) == 0)
+-            result = LINK_ETHERNET;
+-        else if (strncmp(ifname, "sbni", 4) == 0)
+-            result = LINK_ETHERNET;
+-        else if (strncmp(ifname, "ipsec", 5) == 0)
+-            result = LINK_ETHERNET;
+-        else if ((strncmp(ifname, "wvlan", 5) == 0)
+-                 || (strncmp(ifname, "wlan", 4) == 0))
+-            result = LINK_ETHERNET;
+-        else if ((strncmp(ifname, "sm2", 3) == 0)
+-                 || (strncmp(ifname, "sm3", 3) == 0))
+-            result = LINK_ETHERNET;
+-        else if (strncmp(ifname, "pent", 4) == 0)
+-            result = LINK_ETHERNET;
+-        else if (strncmp(ifname, "lec", 3) == 0)
+-            result = LINK_ETHERNET;
+-        else if (strncmp(ifname, "tun", 3) == 0)
+-            result = LINK_ETHERNET;
+-        else if (strncmp(ifname, "vlan", 3) == 0)
+-            result = LINK_ETHERNET;
+-        else if (strncmp(ifname, "bond", 4) == 0)
+-            result = LINK_ETHERNET;
+-        else if (strncmp(ifname, "brg", 3) == 0)
+-            result = LINK_ETHERNET;
+-        else if (strncmp(ifname, "tap", 3) == 0)
+-            result = LINK_ETHERNET;
+-        else if (strncmp(ifname, "ctc", 3) == 0)
+-            result = LINK_ETHERNET;
+-        else if (strncmp(ifname, "hsi", 3) == 0)
+-            result = LINK_ETHERNET;
+-        else if (strncmp(ifname, "ath", 3) == 0)
+-            result = LINK_ETHERNET;
+-        else if ((strncmp(ifname, "isdn", 4) == 0) && (isdn_fd != -1)) {
+-            isdnent = isdn_table_lookup(isdnlist, ifname, isdn_fd);
+-
+-            switch (isdnent->encap) {
+-            case ISDN_NET_ENCAP_RAWIP:
+-                result = LINK_ISDN_RAWIP;
+-                break;
+-            case ISDN_NET_ENCAP_CISCOHDLC:
+-                result = LINK_ISDN_CISCOHDLC;
+-                break;
+-            default:
+-                result = LINK_INVALID;
+-                break;
+-            }
+-        } else if (accept_unsupported_interfaces)
+-            result = LINK_ETHERNET;
+-        break;
+     case ARPHRD_LOOPBACK:
+-        result = LINK_LOOPBACK;
+-        break;
+-    case ARPHRD_SLIP:
+-    case ARPHRD_CSLIP:
+-    case ARPHRD_SLIP6:
+-    case ARPHRD_CSLIP6:
+-        result = LINK_SLIP;
+-        break;
+-    case ARPHRD_PPP:
+-        result = LINK_PPP;
+-        break;
+-    case ARPHRD_FDDI:
+-        result = LINK_FDDI;
+-        break;
+-    case ARPHRD_IEEE802:
+-    case ARPHRD_IEEE802_TR:
+-        result = LINK_TR;
+-        break;
+-    case ARPHRD_FRAD:
+-        result = LINK_FRAD;
+-        break;
+-    case ARPHRD_DLCI:
+-        result = LINK_DLCI;
+-        break;
+-    case ARPHRD_HDLC:
+-        result = LINK_CISCOHDLC;
+-        break;
+-    case ARPHRD_TUNNEL:
+-        result = LINK_IPIP;
+-        break;
+-    default:
+-        result = LINK_INVALID;
+-        break;
+-    }
+-    return result;
+-}
+-
+-void adjustpacket(char *tpacket, unsigned short family,
+-                  char **packet, char *aligned_buf, unsigned int *readlen)
+-{
+-    unsigned int dataoffset;
++        if (fromaddr->sll_protocol == ETH_P_8021Q) {
++            /* 0x8100 802.1Q VLAN Extended Header  */
++            *packet = tpacket + VLAN_ETH_HLEN;
++            readlen -= VLAN_ETH_HLEN;
++            /*
++             * Move IP datagram into an aligned buffer.
++             */
++            memmove(aligned_buf, *packet, min(SNAPSHOT_LEN, *readlen));
++            *packet = aligned_buf;
++            break;
++        }
+ 
+-    switch (family) {
+-    case LINK_ETHERNET:
+-    case LINK_LOOPBACK:
+-    case LINK_PLIP:
+         *packet = tpacket + ETH_HLEN;
+         *readlen -= ETH_HLEN;
+ 
+@@ -192,18 +100,18 @@ void adjustpacket(char *tpacket, unsigned short family,
+         memmove(aligned_buf, *packet, min(SNAPSHOT_LEN, *readlen));
+         *packet = aligned_buf;
+         break;
+-    case LINK_PPP:
+-    case LINK_SLIP:
+-    case LINK_ISDN_RAWIP:
++    case ARPHRD_SLIP:
++    case ARPHRD_CSLIP:
++    case ARPHRD_SLIP6:
++    case ARPHRD_CSLIP6:
+         *packet = tpacket;
+         break;
+-    case LINK_ISDN_CISCOHDLC:
+-    case LINK_FRAD:
+-    case LINK_DLCI:
++    case ARPHRD_FRAD:
++    case ARPHRD_DLCI:
+         *packet = tpacket + 4;
+         *readlen -= 4;
+         break;
+-    case LINK_FDDI:
++    case ARPHRD_FDDI:
+         *packet = tpacket + sizeof(struct fddihdr);
+         *readlen -= sizeof(struct fddihdr);
+ 
+@@ -216,15 +124,16 @@ void adjustpacket(char *tpacket, unsigned short family,
+         memmove(aligned_buf, *packet, min(SNAPSHOT_LEN, *readlen));
+         *packet = aligned_buf;
+         break;
+-    case LINK_TR:
++    case ARPHRD_IEEE802_TR:
++    case ARPHRD_IEEE802:
+         /*
+-         * Token Ring patch supplied by Tomas Dvorak 
++         * Token Ring patch supplied by Tomas Dvorak
+          */
+ 
+         /*
+          * Get the start of the IP packet from the Token Ring frame.
+          */
+-        dataoffset = get_tr_ip_offset(tpacket);
++        dataoffset = get_tr_ip_offset((unsigned char*)tpacket);
+         *packet = tpacket + dataoffset;
+         *readlen -= dataoffset;
+         /*
+@@ -233,18 +142,9 @@ void adjustpacket(char *tpacket, unsigned short family,
+         memmove(aligned_buf, *packet, min(SNAPSHOT_LEN, *readlen));
+         *packet = aligned_buf;
+         break;
+-    case LINK_IPIP:
++    case ARPHRD_TUNNEL:
+         *packet = tpacket;
+         break;
+-    case LINK_VLAN:
+-        *packet = tpacket + VLAN_ETH_HLEN;
+-        readlen -= VLAN_ETH_HLEN;
+-        /*
+-         * Move IP datagram into an aligned buffer.
+-         */
+-        memmove(aligned_buf, *packet, min(SNAPSHOT_LEN, *readlen));
+-        *packet = aligned_buf;
+-	break;
+     default:
+         *packet = (char *) NULL;        /* return a NULL packet to signal */
+         break;                  /* an unrecognized link protocol */
+@@ -329,41 +229,36 @@ int processpacket(char *tpacket, char **packet, unsigned int *br,
+     } in_ip;
+ 
+     /*
+-     * Is interface supported?
+-     */
+-    if (!iface_supported(ifname))
+-        return INVALID_PACKET;
+-
+-    /*
+      * Does returned interface (ifname) match the specified interface name
+      * (ifptr)?
+      */
+-    if (ifptr != NULL) {
+-        if (strcmp(ifptr, ifname) != 0) {
++    if (ifptr && strcmp(ifptr, ifname) != 0)
+             return INVALID_PACKET;
+-        }
+-    }
+ 
++#if 0
+     /*
+      * Prepare ISDN reference descriptor and table.
+      */
+ 
+     bzero(&isdntable, sizeof(struct isdntab));
+     isdn_iface_check(&isdnfd, ifname);
++#endif
+ 
+     /*
+      * Get IPTraf link type based on returned information and move past
+      * data link header.
+      */
++    /*
++     * Get IPTraf link type based on returned information and move past
++     * data link header.
++     */
+     fromaddr->sll_protocol = ntohs(fromaddr->sll_protocol);
+-    if (fromaddr->sll_protocol != ETH_P_8021Q)
+-        *linktype =
+-            getlinktype(fromaddr->sll_hatype, ifname, isdnfd, &isdntable);
+-    else {
+-        *linktype = LINK_VLAN;
++    if (fromaddr->sll_protocol == ETH_P_8021Q)
+         fromaddr->sll_protocol = ntohs(*((unsigned short*)(tpacket+ETH_HLEN+2)));
+-    }
+-    adjustpacket(tpacket, *linktype, packet, aligned_buf, br);
++
++
++    adjustpacket(tpacket, fromaddr,
++                 packet, aligned_buf, br);
+ 
+     if (*packet == NULL)
+         return INVALID_PACKET;
+diff --git a/src/packet.h b/src/packet.h
+index b28f626..33b8c33 100644
+--- a/src/packet.h
++++ b/src/packet.h
+@@ -36,10 +36,6 @@ Written by Gerard Paul Java
+ extern int isdnfd;
+ 
+ void open_socket(int *fd);
+-unsigned short getlinktype(unsigned short family, char *ifname,
+-                           int isdn_fd, struct isdntab *isdntable);
+-void adjustpacket(char *tpacket, unsigned short family,
+-                  char **packet, char *aligned_buf, unsigned int *readlen);
+ void getpacket(int fd, char *buf, struct sockaddr_ll *fromaddr,
+                int *ch, int *br, char *ifname, WINDOW * win);
+ int processpacket(char *tpacket, char **packet, unsigned int *br,
+diff --git a/src/pktsize.c b/src/pktsize.c
+index 832531d..61ef63d 100644
+--- a/src/pktsize.c
++++ b/src/pktsize.c
+@@ -205,11 +205,6 @@ void packet_size_breakdown(struct OPTIONS *options, char *ifname,
+         return;
+     }
+ 
+-    if (!iface_supported(ifname)) {
+-        err_iface_unsupported();
+-        unmark_facility(PKTSIZEIDFILE, ifname);
+-        return;
+-    }
+     if (!iface_up(ifname)) {
+         err_iface_down();
+         unmark_facility(PKTSIZEIDFILE, ifname);
+diff --git a/src/promisc.c b/src/promisc.c
+index d02f745..2bab86a 100644
+--- a/src/promisc.c
++++ b/src/promisc.c
+@@ -43,7 +43,6 @@ details.
+ #define PROMISC_MSG_MAX 80
+ 
+ extern int daemonized;
+-extern int accept_unsupported_interfaces;
+ 
+ void init_promisc_list(struct promisc_states **list)
+ {
+@@ -82,8 +81,7 @@ void init_promisc_list(struct promisc_states **list)
+                 (strncmp(buf, "fddi", 4) == 0) ||
+                 (strncmp(buf, "tr", 2) == 0) ||
+                 (strncmp(ptmp->params.ifname, "wvlan", 4) == 0) ||
+-                (strncmp(ptmp->params.ifname, "lec", 3) == 0) ||
+-                (accept_unsupported_interfaces)) {
++                (strncmp(ptmp->params.ifname, "lec", 3) == 0)) {
+                 strcpy(ifr.ifr_name, buf);
+ 
+                 istat = ioctl(ifd, SIOCGIFFLAGS, &ifr);
+diff --git a/src/serv.c b/src/serv.c
+index 93eeffb..0698395 100644
+--- a/src/serv.c
++++ b/src/serv.c
+@@ -796,11 +796,6 @@ void servmon(char *ifname, struct porttab *ports,
+         unmark_facility(TCPUDPIDFILE, ifname);
+         return;
+     }
+-    if (!iface_supported(ifname)) {
+-        err_iface_unsupported();
+-        unmark_facility(TCPUDPIDFILE, ifname);
+-        return;
+-    }
+     if (!iface_up(ifname)) {
+         err_iface_down();
+         unmark_facility(TCPUDPIDFILE, ifname);
+diff --git a/src/tcptable.c b/src/tcptable.c
+index 9b36a58..e2f56ce 100644
+--- a/src/tcptable.c
++++ b/src/tcptable.c
+@@ -641,12 +641,12 @@ void updateentry(struct tcptable *table, struct tcptableent *tableentry,
+     if (opts->mac) {
+         bzero(newmacaddr, 15);
+ 
+-        if ((linkproto == LINK_ETHERNET) || (linkproto == LINK_PLIP)) {
+-            convmacaddr(((struct ethhdr *) packet)->h_source, newmacaddr);
+-        } else if (linkproto == LINK_FDDI) {
+-            convmacaddr(((struct fddihdr *) packet)->saddr, newmacaddr);
+-        } else if (linkproto == LINK_TR) {
+-            convmacaddr(((struct trh_hdr *) packet)->saddr, newmacaddr);
++        if ((linkproto == ARPHRD_ETHER) /* || (linkproto == LINK_PLIP) */ ) {
++            convmacaddr((char*)(((struct ethhdr *) packet)->h_source), newmacaddr);
++        } else if (linkproto == ARPHRD_FDDI) {
++            convmacaddr((char*)(((struct fddihdr *) packet)->saddr), newmacaddr);
++        } else if ((linkproto == ARPHRD_IEEE802) || (linkproto == ARPHRD_IEEE802_TR)) {
++            convmacaddr((char*)(((struct trh_hdr *) packet)->saddr), newmacaddr);
+         }
+ 
+         if (tableentry->smacaddr[0] != '\0') {
+diff --git a/src/tcptable.h b/src/tcptable.h
+index dcecc20..afae96b 100644
+--- a/src/tcptable.h
++++ b/src/tcptable.h
+@@ -30,7 +30,6 @@
+ #include <netinet/udp.h>
+ #include "servname.h"
+ #include "tcphdr.h"
+-#include "links.h"
+ 
+ #define max(a, b) (( a > b) ? a : b)
+ 
+-- 
+1.7.8
+
