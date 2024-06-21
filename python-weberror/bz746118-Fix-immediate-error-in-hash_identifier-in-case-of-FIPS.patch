@@ -1,0 +1,104 @@
+From 220a6b211f4e0f69e080d2bb4269c6ac9a2c31de Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jan=20Pokorn=C3=BD?= <jpokorny@redhat.com>
+Date: Mon, 5 Aug 2013 21:53:27 +0200
+Subject: [PATCH] Fix immediate error in hash_identifier in case of FIPS mode
+ (#6)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+After rethinking what to do with the issue at hand (Bitbucket issue 8
+resurrected as GitHub #6, in parallel to rhbz#746118) and querying
+various code databases (incl. GitHub and Ohloh and general search
+engines) to validate that my intention is not going to be disruptive
+to open source projects with weberror in their stacks, I've decided
+(primarily because of lack of permission from @jaredjennings) to go
+another way.
+
+It's based on the fact that the product of hash_identifier sits in
+CollectedException instance as its identification_code attribute,
+but hardly ever gets used (except for non-public code, maybe),
+which is a waste.  On the other hand, this "feature" was there
+from ~beginning so should probably be retained.
+
+Good way to fight with waste is to be lazy and as the arranged
+scenario supports such behavior reasonably well (there will be
+limitations but the doctest passes OK without any change) and as
+the import of md5 functionality (unlike the actul use) is non-issue
+in FIPS mode, we can simply push possible point of failure out of
+the main unconditional flow, making the respective hash-based
+value computed on-demand as in lazy evaluation.  This doesn't
+cover eveything, but weberror becomes well-behaved even in FIPS
+mode for vast majority of dependent projects with this change.
+
+The code should be compatible with Python 2.4+, definitely works
+with newer ones (Python 3 line is not supported due to syntax used
+on other places in the modified file).
+
+Signed-off-by: Jan Pokorný <jpokorny@redhat.com>
+Backport-of: <https://github.com/Pylons/weberror/pull/7>
+---
+ weberror/util/serial_number_generator.py | 36 +++++++++++++++++++++++++++++++-
+ 1 file changed, 35 insertions(+), 1 deletion(-)
+
+diff --git a/weberror/util/serial_number_generator.py b/weberror/util/serial_number_generator.py
+index 0289663..c4b9f7e 100644
+--- a/weberror/util/serial_number_generator.py
++++ b/weberror/util/serial_number_generator.py
+@@ -17,6 +17,39 @@ good_characters = "23456789abcdefghjkmnpqrtuvwxyz"
+ 
+ base = len(good_characters)
+ 
++def lazy_result(return_type, dummy_initial=None):
++    """Decorator to allow for on-demand evaluation (limited scope of use!)"""
++    if not issubclass(return_type, basestring):
++        raise NotImplementedError
++
++    class _lazy_class(return_type):
++        """lazified access to value of %s type""" % return_type.__name__
++        def __new__(self, *args, **kwargs):
++            return super(_lazy_class, self).__new__(self, dummy_initial)
++        def __init__(self, *args, **kwargs):
++            self._args = args
++            self._kwargs = kwargs
++            self._active = Ellipsis
++        def __call__(self, **kwargs):
++            if self._active is Ellipsis:
++                # explicit caller can possibly override keyword arguments
++                kwargs.update(self._kwargs)
++                self._active = self._generator(*self._args, **kwargs)
++            return self._active
++    _lazy_class.__name__ = "lazy_%s" % return_type.__name__
++
++    # not everything implemented (and will never be 100%)
++    _lazy_class.__str__ = lambda self: str(self())
++    _lazy_class.__repr__ = lambda self: repr(self())
++    _lazy_class.__cmp__ = lambda self, other: cmp(self(), other)
++    _lazy_class.__getslice__ = lambda self, **kws: slice(self(), **kws)
++
++    def _generating_lazy_class(generator):
++        _lazy_class._generator = staticmethod(generator)
++        return _lazy_class
++
++    return _generating_lazy_class
++
+ def make_identifier(number):
+     """
+     Encodes a number as an identifier.
+@@ -37,6 +70,7 @@ def make_identifier(number):
+         number = number / base
+     return ''.join(result)
+ 
++@lazy_result(str)
+ def hash_identifier(s, length, pad=True, hasher=md5, prefix='',
+                     group=None, upper=False):
+     """
+@@ -120,4 +154,4 @@ __test__ = {
+ if __name__ == '__main__':
+     import doctest
+     doctest.testmod()
+-    
++
+-- 
+1.8.1.4
+
