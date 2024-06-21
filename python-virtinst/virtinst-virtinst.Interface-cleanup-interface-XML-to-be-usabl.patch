@@ -1,0 +1,77 @@
+From 5f94b2a04c12c8439e8d1180f8e4b4a2f88f392a Mon Sep 17 00:00:00 2001
+From: Pavel Hrdina <phrdina@redhat.com>
+Date: Mon, 9 Jan 2017 09:49:57 +0100
+Subject: [PATCH] virtinst.Interface: cleanup interface XML to be usable in
+ bridge interface
+
+The interface XML is obtained from libvirt and it contains elements
+that are not allowed while defining bridge interface.  We need to
+cleanup that XML before it can be used to define bridge interface.
+
+RHEL-only
+
+Resolves: https://bugzilla.redhat.com/show_bug.cgi?id=1408650
+
+Signed-off-by: Pavel Hrdina <phrdina@redhat.com>
+---
+ virtinst/Interface.py | 37 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+diff --git a/virtinst/Interface.py b/virtinst/Interface.py
+index 1df8659..53ae5a2 100644
+--- a/virtinst/Interface.py
++++ b/virtinst/Interface.py
+@@ -21,6 +21,7 @@ Classes for building and installing libvirt interface xml
+ """
+ 
+ import libvirt
++import libxml2
+ 
+ import logging
+ 
+@@ -305,6 +306,42 @@ class _InterfaceCompound(Interface):
+             else:
+                 iface_xml = i.XMLDesc(libvirt.VIR_INTERFACE_XML_INACTIVE)
+ 
++                # Remove elements from interface XML that cannot be used if the
++                # interface is defined in bridge.
++                iface_node = libxml2.parseDoc(iface_xml).getRootElement()
++                iface_type = iface_node.hasProp("type")
++
++                child_node = iface_node.children
++                while child_node and iface_type:
++                    remove = False
++                    if child_node.name != "text":
++                        if (iface_type.content == "ethernet" and
++                            child_node.name != "mac"):
++                            remove = True
++                        elif (iface_type.content == "vlan" and
++                              child_node.name != "vlan" and
++                              child_node.name != "interface"):
++                            remove = True
++                        elif (iface_type.content == "bond" and
++                              child_node.name != "bond"):
++                            remove = True
++
++                    next_node = child_node.next
++                    if remove:
++                        # Remove child node with its text node to remove empty
++                        # lines from the interface XML
++                        prev_text = child_node.prev
++                        if (prev_text and prev_text.type == "text" and
++                            not prev_text.content.count("<")):
++                            prev_text.unlinkNode()
++                            prev_text.freeNode()
++
++                        child_node.unlinkNode()
++                        child_node.freeNode()
++                    child_node = next_node
++
++                iface_xml = self._indent_xml(str(iface_node), 4)
++
+             xml += iface_xml
+         return xml
+ 
+-- 
+2.11.0
+

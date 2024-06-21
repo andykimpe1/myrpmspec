@@ -1,0 +1,162 @@
+From c2715746d15e0fb99a39c24069a82f4895374def Mon Sep 17 00:00:00 2001
+From: Giuseppe Scrivano <gscrivan@redhat.com>
+Date: Fri, 23 May 2014 15:40:13 +0200
+Subject: [PATCH] virtinst: by default add USB2 controllers
+
+RHEL-only
+
+Closes: https://bugzilla.redhat.com/show_bug.cgi?id=1001999
+
+Signed-off-by: Giuseppe Scrivano <gscrivan@redhat.com>
+---
+ virtinst/Guest.py             |  9 ++++++
+ virtinst/VirtualController.py | 64 +++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 70 insertions(+), 3 deletions(-)
+
+diff --git a/virtinst/Guest.py b/virtinst/Guest.py
+index bb79f45..bce58bc 100644
+--- a/virtinst/Guest.py
++++ b/virtinst/Guest.py
+@@ -40,6 +40,7 @@ from VirtualDevice import VirtualDevice
+ from VirtualDisk import VirtualDisk
+ from VirtualInputDevice import VirtualInputDevice
+ from VirtualCharDevice import VirtualCharDevice
++from VirtualController import VirtualControllerUSB, VirtualController
+ from Clock import Clock
+ from Seclabel import Seclabel
+ from CPU import CPU
+@@ -1495,6 +1496,14 @@ class Guest(XMLBuilderDomain.XMLBuilderDomain):
+                 if chn.char_type == chn.CHAR_SPICEVMC:
+                     return True
+ 
++        # Add USB2 controllers
++        ctrls = self.get_devices(VirtualDevice.VIRTUAL_DEV_CONTROLLER)
++        usb_ctrls = [x for x in ctrls if
++                     x.get_type() == VirtualController.CONTROLLER_TYPE_USB]
++        if len(usb_ctrls) == 0:
++            for i in VirtualControllerUSB.get_usb2_controllers(self.conn):
++                self._add_device(i)
++
+         if (has_spice() and
+             not has_spice_agent() and
+             support.check_conn_support(self.conn,
+diff --git a/virtinst/VirtualController.py b/virtinst/VirtualController.py
+index 032d91b..94f63cf 100644
+--- a/virtinst/VirtualController.py
++++ b/virtinst/VirtualController.py
+@@ -30,9 +30,10 @@ class VirtualController(VirtualDevice.VirtualDevice):
+     CONTROLLER_TYPE_SCSI            = "scsi"
+     CONTROLLER_TYPE_SATA            = "sata"
+     CONTROLLER_TYPE_VIRTIOSERIAL    = "virtio-serial"
++    CONTROLLER_TYPE_USB             = "usb"
+     CONTROLLER_TYPES = [CONTROLLER_TYPE_IDE, CONTROLLER_TYPE_FDC,
+                         CONTROLLER_TYPE_SCSI, CONTROLLER_TYPE_SATA,
+-                        CONTROLLER_TYPE_VIRTIOSERIAL]
++                        CONTROLLER_TYPE_VIRTIOSERIAL, CONTROLLER_TYPE_USB]
+ 
+     @staticmethod
+     def pretty_type(ctype):
+@@ -41,7 +42,8 @@ class VirtualController(VirtualDevice.VirtualDevice):
+             VirtualController.CONTROLLER_TYPE_FDC           : "Floppy",
+             VirtualController.CONTROLLER_TYPE_SCSI          : "SCSI",
+             VirtualController.CONTROLLER_TYPE_SATA          : "SATA",
+-            VirtualController.CONTROLLER_TYPE_VIRTIOSERIAL  : "Virtio Serial"
++            VirtualController.CONTROLLER_TYPE_VIRTIOSERIAL  : "Virtio Serial",
++            VirtualController.CONTROLLER_TYPE_USB           : "USB"
+         }
+ 
+         if ctype not in pretty_mappings:
+@@ -63,6 +65,8 @@ class VirtualController(VirtualDevice.VirtualDevice):
+             return VirtualControllerSATA
+         elif ctype == VirtualController.CONTROLLER_TYPE_VIRTIOSERIAL:
+             return VirtualControllerVirtioSerial
++        elif ctype == VirtualController.CONTROLLER_TYPE_USB:
++            return VirtualControllerUSB
+ 
+     _controller_type = None
+ 
+@@ -74,6 +78,7 @@ class VirtualController(VirtualDevice.VirtualDevice):
+         self._ports = None
+         self._vectors = None
+         self._model = None
++        self._master_startport = None
+ 
+     def get_type(self):
+         return self._controller_type
+@@ -108,15 +113,29 @@ class VirtualController(VirtualDevice.VirtualDevice):
+     model = _xml_property(get_model, set_model,
+                           xpath="./@model")
+ 
++    def get_master_startport(self):
++        return self._master_startport
++    def set_master_startport(self, val):
++        self._master_startport = val
++    master_startport = _xml_property(get_master_startport,
++                                     set_master_startport,
++                                     xpath="./master/@startport")
++
+     def _extra_config(self):
+         return ""
+ 
++    def _extra_tags(self):
++        return ""
++
+     def _get_xml_config(self):
+         extra = self._extra_config()
++        extra_tags = self._extra_tags()
+ 
+         xml = "    <controller type='%s' index='%s'" % (self.type, self.index)
+         xml += extra
+-        xml += "/>"
++        xml += ">\n"
++        xml += extra_tags
++        xml += "    </controller>"
+ 
+         return xml
+ 
+@@ -150,3 +169,42 @@ class VirtualControllerVirtioSerial(VirtualController):
+             xml += " vectors='%s'" % self.vectors
+ 
+         return xml
++
++class VirtualControllerUSB(VirtualController):
++    _controller_type = VirtualController.CONTROLLER_TYPE_USB
++    def _extra_config(self):
++        xml = ""
++        if self.model != None:
++            xml += " model='%s'" % self.model
++
++        return xml
++
++    def _extra_tags(self):
++        xml = ""
++        if self.master_startport is not None:
++            xml += "        <master startport='%s'/>\n" % self.master_startport
++
++        return xml
++
++    @staticmethod
++    def get_usb2_controllers(conn):
++        ret = []
++        ctrl = VirtualControllerUSB(conn)
++        ctrl.model = "ich9-ehci1"
++        ret.append(ctrl)
++
++        ctrl = VirtualControllerUSB(conn)
++        ctrl.model = "ich9-uhci1"
++        ctrl.master_startport = 0
++        ret.append(ctrl)
++
++        ctrl = VirtualControllerUSB(conn)
++        ctrl.model = "ich9-uhci2"
++        ctrl.master_startport = 2
++        ret.append(ctrl)
++
++        ctrl = VirtualControllerUSB(conn)
++        ctrl.model = "ich9-uhci3"
++        ctrl.master_startport = 4
++        ret.append(ctrl)
++        return ret
+-- 
+1.9.0
+

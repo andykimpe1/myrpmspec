@@ -1,0 +1,122 @@
+From 18064ba0d5d78db60806522a9c3c929271d96968 Mon Sep 17 00:00:00 2001
+From: Guannan Ren <gren@redhat.com>
+Date: Fri, 19 Jul 2013 20:58:13 +0800
+Subject: [RHEL-6.5 python-virtinst PATCH 4/5] virtinst: set is_dup to true
+ when --host-device come with bus.addr
+
+Resolves: https://bugzilla.redhat.com/show_bug.cgi?id=861972
+(cherry picked from commit 4c1039252a28d97301b668c17be4c4d6c57df6cd)
+When there are multile USB devices, --host-device with bus.addr
+can identify unique device, so we need to add bus/addr info to
+XML rather than only vendor/product
+
+If there is only one USB device with --host-device bus.addr,
+adding bus/addr is no harm under the request of user.
+
+Conflicts:
+	virtinst/NodeDeviceParser.py
+---
+ virtinst/NodeDeviceParser.py  | 18 ++++++++++++++----
+ virtinst/VirtualHostDevice.py |  4 +++-
+ 2 files changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/virtinst/NodeDeviceParser.py b/virtinst/NodeDeviceParser.py
+index 627af06..c6c8c26 100644
+--- a/virtinst/NodeDeviceParser.py
++++ b/virtinst/NodeDeviceParser.py
+@@ -34,6 +34,11 @@ CAPABILITY_TYPE_STORAGE = "storage"
+ CAPABILITY_TYPE_SCSIBUS = "scsi_host"
+ CAPABILITY_TYPE_SCSIDEV = "scsi"
+
++HOSTDEV_ADDR_TYPE_LIBVIRT = 0
++HOSTDEV_ADDR_TYPE_PCI = 1
++HOSTDEV_ADDR_TYPE_USB_BUSADDR = 2
++HOSTDEV_ADDR_TYPE_USB_VENPRO = 3
++
+ class NodeDevice(object):
+     def __init__(self, node):
+         self.name = None
+@@ -430,7 +435,8 @@ def lookupNodeName(conn, name):
+                            "enumeration."))
+
+     try:
+-        return _lookupNodeName(conn, name)
++        return (_lookupNodeName(conn, name),
++                 HOSTDEV_ADDR_TYPE_LIBVIRT)
+     except libvirt.libvirtError, e:
+         ret = _isAddressStr(name)
+         if not ret:
+@@ -440,6 +446,7 @@ def lookupNodeName(conn, name):
+
+ def _isAddressStr(addrstr):
+     cmp_func = None
++    addr_type = None
+
+     try:
+         # Determine addrstr type
+@@ -464,6 +471,7 @@ def _isAddressStr(addrstr):
+                         (int(nodedev.bus) == bus) and
+                         (int(nodedev.slot) == slot))
+             cmp_func = pci_cmp
++            addr_type = HOSTDEV_ADDR_TYPE_PCI
+
+         elif addrstr.count(":"):
+             devtype = CAPABILITY_TYPE_USBDEV
+@@ -475,6 +483,7 @@ def _isAddressStr(addrstr):
+                 return ((int(nodedev.vendor_id, 16) == vendor) and
+                         (int(nodedev.product_id, 16) == product))
+             cmp_func = usbprod_cmp
++            addr_type = HOSTDEV_ADDR_TYPE_USB_VENPRO
+
+         elif addrstr.count("."):
+             devtype = CAPABILITY_TYPE_USBDEV
+@@ -486,11 +495,12 @@ def _isAddressStr(addrstr):
+                 return ((int(nodedev.bus) == bus) and
+                         (int(nodedev.device) == addr))
+             cmp_func = usbaddr_cmp
++            addr_type = HOSTDEV_ADDR_TYPE_USB_BUSADDR
+     except:
+         logging.exception("Error parsing node device string.")
+         return None
+
+-    return cmp_func, devtype
++    return cmp_func, devtype, addr_type
+
+ def devAddressToNodedev(conn, addrstr):
+     """
+@@ -513,7 +523,7 @@ def devAddressToNodedev(conn, addrstr):
+     if not ret:
+         raise ValueError(_("Could not determine format of '%s'") % addrstr)
+
+-    cmp_func, devtype = ret
++    cmp_func, devtype, addr_type = ret
+
+     # Iterate over node devices and compare
+     count = 0
+@@ -527,7 +537,7 @@ def devAddressToNodedev(conn, addrstr):
+             count += 1
+
+     if count == 1:
+-        return nodedev
++        return nodedev, addr_type
+     elif count > 1:
+         raise ValueError(_("%s corresponds to multiple node devices") %
+                          addrstr)
+diff --git a/virtinst/VirtualHostDevice.py b/virtinst/VirtualHostDevice.py
+index 6d4f996..f514500 100644
+--- a/virtinst/VirtualHostDevice.py
++++ b/virtinst/VirtualHostDevice.py
+@@ -51,7 +51,9 @@ class VirtualHostDevice(VirtualDevice.VirtualDevice):
+         if nodedev:
+             nodeinst = nodedev
+         else:
+-            nodeinst = NodeDeviceParser.lookupNodeName(conn, name)
++            nodeinst, addr_type = NodeDeviceParser.lookupNodeName(conn, name)
++            if addr_type == NodeDeviceParser.HOSTDEV_ADDR_TYPE_USB_BUSADDR:
++                is_dup = True
+
+         if isinstance(nodeinst, NodeDeviceParser.PCIDevice):
+             return VirtualHostDevicePCI(conn, nodedev=nodeinst)
+-- 
+1.8.3.2
+

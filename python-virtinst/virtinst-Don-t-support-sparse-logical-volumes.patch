@@ -1,0 +1,100 @@
+From cf795d4d06b6b8a9f2d00dac98cff91f7cdf8649 Mon Sep 17 00:00:00 2001
+Message-Id: <cf795d4d06b6b8a9f2d00dac98cff91f7cdf8649.1374136911.git.mkletzan@redhat.com>
+In-Reply-To: <1511d0e8f43bbff718747c8e4c0cb79892bd2dc1.1374136911.git.mkletzan@redhat.com>
+References: <1511d0e8f43bbff718747c8e4c0cb79892bd2dc1.1374136911.git.mkletzan@redhat.com>
+From: Martin Kletzander <mkletzan@redhat.com>
+Date: Tue, 2 Apr 2013 13:51:28 +0200
+Subject: [RHEL-6.5 python-virtinst PATCH 4/5] Don't support sparse logical
+ volumes
+
+https://bugzilla.redhat.com/show_bug.cgi?id=921480
+
+Sparse logical volumes are supported by libvirt, but only in case the
+user takes care of the reallocation, which is not what virt-install
+and virt-manager users want.  This patch defaults the logical volumes
+to non-sparse ones and makes sure allocation is always equal to
+capacity for such volumes.
+
+Signed-off-by: Martin Kletzander <mkletzan@redhat.com>
+(cherry picked from commit 590c8dbebfddb71874de7a98e579264ebae6859f)
+---
+ man/en/virt-install.pod.in |  8 ++++----
+ virtinst/Storage.py        | 20 ++++++++++++++++++--
+ 2 files changed, 22 insertions(+), 6 deletions(-)
+
+diff --git a/man/en/virt-install.pod.in b/man/en/virt-install.pod.in
+index 4a65ef0..e6098b7 100644
+--- a/man/en/virt-install.pod.in
++++ b/man/en/virt-install.pod.in
+@@ -449,10 +449,11 @@ size (in GB) to use if creating new storage
+ =item B<sparse>
+
+ whether to skip fully allocating newly created storage. Value is 'true' or
+-'false'. Default is 'true' (do not fully allocate).
++'false'. Default is 'true' (do not fully allocate) unless it isn't
++supported by the underlying storage type.
+
+ The initial time taken to fully-allocate the guest virtual disk (sparse=false)
+-will be usually by balanced by faster install times inside the guest. Thus
++will be usually balanced by faster install times inside the guest. Thus
+ use of this option is recommended to ensure consistently high performance
+ and to avoid I/O errors in the guest should the host filesystem fill up.
+
+@@ -589,7 +590,7 @@ Connect to a virtual network in the host called C<NAME>. Virtual networks
+ can be listed, created, deleted using the C<virsh> command line tool. In
+ an unmodified install of C<libvirt> there is usually a virtual network
+ with a name of C<default>. Use a virtual network if the host has dynamic
+-networking (eg NetworkManager), or using wireless. The guest will be 
++networking (eg NetworkManager), or using wireless. The guest will be
+ NATed to the LAN by whichever connection is active.
+
+ =item user
+@@ -1368,4 +1369,3 @@ is NO WARRANTY, to the extent permitted by law.
+ C<virsh(1)>, C<virt-clone(1)>, C<virt-manager(1)>, the project website C<http://virt-manager.org>
+
+ =cut
+-
+diff --git a/virtinst/Storage.py b/virtinst/Storage.py
+index 441d499..f9e2526 100644
+--- a/virtinst/Storage.py
++++ b/virtinst/Storage.py
+@@ -1,5 +1,5 @@
+ #
+-# Copyright 2008 Red Hat, Inc.
++# Copyright 2008, 2013 Red Hat, Inc.
+ # Cole Robinson <crobinso@redhat.com>
+ #
+ # This program is free software; you can redistribute it and/or modify
+@@ -1350,12 +1350,28 @@ class LogicalVolume(StorageVolume):
+
+     def __init__(self, name, capacity, pool=None, pool_name=None, conn=None,
+                  allocation=None, perms=None):
++        if allocation and allocation != capacity:
++            raise ValueError(_("Sparse logical volumes are not supported, "
++                               "allocation must be equal to capacity"))
+         StorageVolume.__init__(self, name=name, pool=pool, pool_name=pool_name,
+-                               allocation=allocation, capacity=capacity,
++                               allocation=capacity, capacity=capacity,
+                                conn=conn)
+         if perms:
+             self.perms = perms
+
++    def set_capacity(self, capacity):
++        super(LogicalVolume, self).set_capacity(capacity)
++        self.allocation = capacity
++    capacity = property(StorageVolume.get_capacity, set_capacity)
++
++    def set_allocation(self, allocation):
++        if allocation != self.capacity:
++            raise ValueError(_("Sparse logical volumes are not supported, "
++                               "allocation must be equal to capacity"))
++        super(LogicalVolume, self).set_allocation(allocation)
++    capacity = property(StorageVolume.get_allocation, set_allocation)
++
++
+     def _get_target_xml(self):
+         return "%s" % self._get_perms_xml()
+
+-- 
+1.8.3.2
+

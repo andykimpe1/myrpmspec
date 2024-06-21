@@ -1,0 +1,118 @@
+From 8cf1f2cfa0bc98ce0a91a241bb820b0862d1748b Mon Sep 17 00:00:00 2001
+From: Guannan Ren <gren@redhat.com>
+Date: Fri, 19 Jul 2013 20:58:14 +0800
+Subject: [RHEL-6.5 python-virtinst PATCH 5/5] addhardware: differentiate
+ duplicate usb devices by bus/addr
+
+Resolves: https://bugzilla.redhat.com/show_bug.cgi?id=861972
+(cherry picked from commit 32f07815316c6aee3f74680fd7e26abfb9c0f1e0)
+When there are multiple usb devices with same vendor/product
+in the host device list, the bus/addr is going to be used when
+attaching one of usb devices.
+
+Currently is_dup flag is only useful to VirtualHostDeviceUSB.
+
+I put get_nodedevs_number() in connection.py, so the startup
+hooks can use it.
+
+Conflicts:
+	virtManager/addhardware.py #remove virt-manager code hunk
+	virtManager/connection.py  #likewise
+---
+ tests/nodedev-xml/devxml/usbdev2.xml |  2 ++
+ tests/nodedev.py                     | 10 +++-------
+ virtinst/VirtualHostDevice.py        |  9 +++++----
+ 3 files changed, 10 insertions(+), 11 deletions(-)
+
+diff --git a/tests/nodedev-xml/devxml/usbdev2.xml b/tests/nodedev-xml/devxml/usbdev2.xml
+index 1c8ed82..cf0b50a 100644
+--- a/tests/nodedev-xml/devxml/usbdev2.xml
++++ b/tests/nodedev-xml/devxml/usbdev2.xml
+@@ -1,5 +1,7 @@
+     <hostdev mode='subsystem' type='usb' managed='yes'>
+       <source>
++        <vendor id='0x0781'/>
++        <product id='0x5151'/>
+         <address bus='1' device='4'/>
+       </source>
+     </hostdev>
+diff --git a/tests/nodedev.py b/tests/nodedev.py
+index fab3e2c..6516b2e 100644
+--- a/tests/nodedev.py
++++ b/tests/nodedev.py
+@@ -52,12 +52,12 @@ class TestNodeDev(unittest.TestCase):
+         for attr in vals.keys():
+             self.assertEqual(vals[attr], getattr(dev, attr))
+
+-    def _testNode2DeviceCompare(self, nodename, devfile, nodedev=None):
++    def _testNode2DeviceCompare(self, nodename, devfile, nodedev=None, is_dup=False):
+         devfile = os.path.join("tests/nodedev-xml/devxml", devfile)
+         if not nodedev:
+             nodedev = self._nodeDevFromName(nodename)
+
+-        dev = VirtualHostDevice.device_from_node(conn, nodedev=nodedev)
++        dev = VirtualHostDevice.device_from_node(conn, nodedev=nodedev, is_dup=is_dup)
+         utils.diff_compare(dev.get_xml_config() + "\n", devfile)
+
+     def testSystemDevice(self):
+@@ -201,11 +201,7 @@ class TestNodeDev(unittest.TestCase):
+         devfile = "usbdev2.xml"
+         nodedev = self._nodeDevFromName(nodename)
+
+-        # Force xml building to use bus, addr
+-        nodedev.product_id = None
+-        nodedev.vendor_id = None
+-
+-        self._testNode2DeviceCompare(nodename, devfile, nodedev=nodedev)
++        self._testNode2DeviceCompare(nodename, devfile, nodedev=nodedev, is_dup=True)
+
+     def testNodeDev2PCI(self):
+         nodename = "pci_1180_592"
+diff --git a/virtinst/VirtualHostDevice.py b/virtinst/VirtualHostDevice.py
+index f514500..1f94998 100644
+--- a/virtinst/VirtualHostDevice.py
++++ b/virtinst/VirtualHostDevice.py
+@@ -30,7 +30,7 @@ class VirtualHostDevice(VirtualDevice.VirtualDevice):
+
+     _virtual_device_type = VirtualDevice.VirtualDevice.VIRTUAL_DEV_HOSTDEV
+
+-    def device_from_node(conn, name=None, nodedev=None):
++    def device_from_node(conn, name=None, nodedev=None, is_dup=False):
+         """
+         Convert the passed device name to a VirtualHostDevice
+         instance, with proper error reporting. Name can be any of the
+@@ -58,7 +58,7 @@ class VirtualHostDevice(VirtualDevice.VirtualDevice):
+         if isinstance(nodeinst, NodeDeviceParser.PCIDevice):
+             return VirtualHostDevicePCI(conn, nodedev=nodeinst)
+         elif isinstance(nodeinst, NodeDeviceParser.USBDevice):
+-            return VirtualHostDeviceUSB(conn, nodedev=nodeinst)
++            return VirtualHostDeviceUSB(conn, nodedev=nodeinst, is_dup=is_dup)
+         elif isinstance(nodeinst, NodeDeviceParser.NetDevice):
+             parentname = nodeinst.parent
+             try:
+@@ -200,11 +200,12 @@ class VirtualHostDevice(VirtualDevice.VirtualDevice):
+
+ class VirtualHostDeviceUSB(VirtualHostDevice):
+
+-    def __init__(self, conn, nodedev=None):
++    def __init__(self, conn, nodedev=None, is_dup=False):
+         VirtualHostDevice.__init__(self, conn, nodedev)
+
+         self.mode = "subsystem"
+         self.type = "usb"
++        self.is_dup = is_dup
+
+         self._set_from_nodedev(self._nodedev)
+
+@@ -219,7 +220,7 @@ class VirtualHostDeviceUSB(VirtualHostDevice):
+         self.vendor = nodedev.vendor_id
+         self.product = nodedev.product_id
+
+-        if not (self.vendor or self.product):
++        if self.is_dup:
+             self.bus = nodedev.bus
+             self.device = nodedev.device
+
+-- 
+1.8.3.2
+
