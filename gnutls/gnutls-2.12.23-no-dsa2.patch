@@ -1,0 +1,186 @@
+diff --git a/lib/gnutls_algorithms.c b/lib/gnutls_algorithms.c
+index 1285ebf..739e5bb 100644
+--- a/lib/gnutls_algorithms.c
++++ b/lib/gnutls_algorithms.c
+@@ -1941,10 +1941,16 @@ static const gnutls_sign_entry sign_algorithms[] = {
+    GNUTLS_MAC_RMD160, TLS_SIGN_AID_UNKNOWN},
+   {"DSA-SHA1", SIG_DSA_SHA1_OID, GNUTLS_SIGN_DSA_SHA1, GNUTLS_PK_DSA,
+    GNUTLS_MAC_SHA1, {2, 2}},
++/* DSA2 doesn't work with libgcrypt */
++#ifdef HAVE_LIBNETTLE
+   {"DSA-SHA224", SIG_DSA_SHA224_OID, GNUTLS_SIGN_DSA_SHA224, GNUTLS_PK_DSA,
+    GNUTLS_MAC_SHA224, {3, 2}},
+   {"DSA-SHA256", SIG_DSA_SHA256_OID, GNUTLS_SIGN_DSA_SHA256, GNUTLS_PK_DSA,
+    GNUTLS_MAC_SHA256, {4, 2}},
++#else
++  {"DSA-SHA224", SIG_DSA_SHA224_OID, 0, 0, 0, TLS_SIGN_AID_UNKNOWN},
++  {"DSA-SHA256", SIG_DSA_SHA256_OID, 0, 0, 0, TLS_SIGN_AID_UNKNOWN},
++#endif
+   {"RSA-MD5", SIG_RSA_MD5_OID, GNUTLS_SIGN_RSA_MD5, GNUTLS_PK_RSA,
+    GNUTLS_MAC_MD5, {1, 1}},
+   {"RSA-MD2", SIG_RSA_MD2_OID, GNUTLS_SIGN_RSA_MD2, GNUTLS_PK_RSA,
+@@ -1964,8 +1970,10 @@ static const gnutls_sign_algorithm_t supported_sign[] = {
+   GNUTLS_SIGN_RSA_SHA512,
+   GNUTLS_SIGN_RSA_RMD160,
+   GNUTLS_SIGN_DSA_SHA1,
++#ifdef HAVE_LIBNETTLE
+   GNUTLS_SIGN_DSA_SHA224,
+   GNUTLS_SIGN_DSA_SHA256,
++#endif
+   GNUTLS_SIGN_RSA_MD5,
+   GNUTLS_SIGN_RSA_MD2,
+   0
+diff --git a/tests/dsa/Makefile.am b/tests/dsa/Makefile.am
+index 19f43ab..33d9e0a 100644
+--- a/tests/dsa/Makefile.am
++++ b/tests/dsa/Makefile.am
+@@ -21,8 +21,12 @@
+ 
+ EXTRA_DIST = cert.dsa.1024.pem  cert.dsa.2048.pem  cert.dsa.3072.pem  dsa.1024.pem  dsa.2048.pem  dsa.3072.pem
+ 
+-dist_check_SCRIPTS = testdsa
++dist_check_SCRIPTS = testdsa testdsa1024
+ 
++if !ENABLE_NETTLE
++TESTS = testdsa1024
++else
+ TESTS = testdsa
++endif
+ 
+ TESTS_ENVIRONMENT = EXEEXT=$(EXEEXT)
+diff --git a/tests/dsa/testdsa1024 b/tests/dsa/testdsa1024
+new file mode 100755
+index 0000000..1ca74a8
+--- /dev/null
++++ b/tests/dsa/testdsa1024
+@@ -0,0 +1,86 @@
++#!/bin/sh
++
++# Copyright (C) 2010 Free Software Foundation, Inc.
++#
++# Author: Nikos Mavrogiannopoulos
++#
++# This file is part of GnuTLS.
++#
++# GnuTLS is free software; you can redistribute it and/or modify it
++# under the terms of the GNU General Public License as published by the
++# Free Software Foundation; either version 3 of the License, or (at
++# your option) any later version.
++#
++# GnuTLS is distributed in the hope that it will be useful, but
++# WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++# General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with GnuTLS; if not, write to the Free Software Foundation,
++# Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
++
++srcdir="${srcdir:-.}"
++SERV="${SERV:-../../src/gnutls-serv} -q"
++CLI="${CLI:-../../src/gnutls-cli}"
++PORT="${PORT:-5559}"
++DEBUG=""
++unset RETCODE
++
++if test "${WINDIR}" != "";then
++  exit 77
++fi 
++
++fail() {
++   echo "Failure: $1" >&2
++   exit 1
++}
++
++echo "Checking various DSA key sizes"
++
++# DSA 1024 + TLS 1.0
++
++echo "Checking DSA-1024 with TLS 1.0"
++
++$SERV $DEBUG -p $PORT --priority "NORMAL:-VERS-TLS-ALL:+VERS-TLS1.0" --x509certfile $srcdir/cert.dsa.1024.pem --x509keyfile $srcdir/dsa.1024.pem >/dev/null 2>&1 & PID=$!
++trap "kill $PID" 1 15 2
++
++# give the server a chance to initialize
++sleep 2
++
++$CLI $DEBUG -p $PORT 127.0.0.1 --insecure </dev/null >/dev/null || \
++  fail "Failed connection to a server with DSA 1024 key and TLS 1.0!"
++
++echo "Checking server DSA-1024 with client DSA-1024 and TLS 1.0"
++
++#try with client key of 1024 bits (should succeed) 
++$CLI $DEBUG -p $PORT 127.0.0.1 --insecure --x509certfile $srcdir/cert.dsa.1024.pem --x509keyfile $srcdir/dsa.1024.pem </dev/null >/dev/null || \
++  fail "Failed connection to a server with DSA 1024 key and TLS 1.0!"
++
++kill $PID
++wait
++
++# DSA 1024 + TLS 1.2
++
++echo "Checking DSA-1024 with TLS 1.2"
++
++$SERV $DEBUG -p $PORT --priority "NORMAL:-VERS-TLS-ALL:+VERS-TLS1.2" --x509certfile $srcdir/cert.dsa.1024.pem --x509keyfile $srcdir/dsa.1024.pem >/dev/null 2>&1 & PID=$!
++trap "kill $PID" 1 15 2
++
++# give the server a chance to initialize
++sleep 2
++
++$CLI $DEBUG -p $PORT 127.0.0.1 --insecure </dev/null >/dev/null || \
++  fail "Failed connection to a server with DSA 1024 key and TLS 1.2!"
++
++echo "Checking server DSA-1024 with client DSA-1024 and TLS 1.2"
++
++#try with client key of 1024 bits (should succeed) 
++$CLI $DEBUG -p $PORT 127.0.0.1 --insecure --x509certfile $srcdir/cert.dsa.1024.pem --x509keyfile $srcdir/dsa.1024.pem </dev/null >/dev/null || \
++  fail "Failed connection to a server with DSA 1024 key and TLS 1.2!"
++
++kill $PID
++wait
++
++exit 0
++
+diff --git a/tests/openpgpself.c b/tests/openpgpself.c
+index 8fc9c6e..63c1e47 100644
+--- a/tests/openpgpself.c
++++ b/tests/openpgpself.c
+@@ -529,6 +529,14 @@ server_start (void)
+     success ("server: ready. Listening to port '%d'.\n", PORT);
+ }
+ 
++/* gcrypt's DSA2 support is broken.
++ */
++#ifdef HAVE_LIBNETTLE
++static unsigned use_only_1024 = 0;
++#else
++static unsigned use_only_1024 = 1;
++#endif
++
+ static void
+ server (void)
+ {
+@@ -550,7 +558,7 @@ server (void)
+ 
+   for (j = 0; j < 2; j++)
+     {
+-     if (j==0)
++     if (j==0 || use_only_1024)
+        {
+          gnutls_certificate_allocate_credentials (&pgp_cred);
+          ret = gnutls_certificate_set_openpgp_key_mem2 (pgp_cred, &server_crt,
+diff --git a/tests/sha2/Makefile.am b/tests/sha2/Makefile.am
+index 6e649e3..7994974 100644
+--- a/tests/sha2/Makefile.am
++++ b/tests/sha2/Makefile.am
+@@ -24,6 +24,10 @@ EXTRA_DIST = key-ca.pem key-subca.pem key-subsubca.pem key-user.pem key-dsa.pem
+ 
+ dist_check_SCRIPTS = sha2 sha2-dsa
+ 
+-TESTS = sha2 sha2-dsa
++TESTS = sha2
++
++if ENABLE_NETTLE
++TESTS += sha2-dsa
++endif
+ 
+ TESTS_ENVIRONMENT = EXEEXT=$(EXEEXT)

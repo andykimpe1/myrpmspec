@@ -1,0 +1,195 @@
+From 38c20a672f180bfceeffaa0685145ea044c37971 Mon Sep 17 00:00:00 2001
+From: Nikos Mavrogiannopoulos <nmav@redhat.com>
+Date: Mon, 10 Oct 2016 13:07:42 +0200
+Subject: [PATCH] legacy settings
+
+---
+ lib/gnutls_state.c | 40 ++++++++++++++++++++++++++-
+ src/cli.c          |  2 --
+ tests/Makefile.am  |  3 +-
+ tests/check-env    | 81 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 122 insertions(+), 4 deletions(-)
+ create mode 100755 tests/check-env
+
+diff --git a/lib/gnutls_state.c b/lib/gnutls_state.c
+index 80769f2..ddfa205 100644
+--- a/lib/gnutls_state.c
++++ b/lib/gnutls_state.c
+@@ -47,6 +47,8 @@
+ #include <gnutls_algorithms.h>
+ #include <gnutls_extensions.h>
+ #include <system.h>
++#include <stdlib.h>
++#include <ctype.h>
+ 
+ /* These should really be static, but src/tests.c calls them.  Make
+    them public functions?  */
+@@ -252,7 +254,43 @@ _gnutls_handshake_internal_state_clear (gnutls_session_t session)
+ 
+ }
+ 
+-#define MIN_DH_BITS 1023
++static unsigned _min_dh_bits = 1023;
++#define MIN_BITS_CMD "MinimumDHBits"
++
++static void __attribute__ ((constructor)) state_init(void)
++{
++  const char *filename = "/etc/pki/tls/legacy-settings";
++  FILE *fp;
++  char line[512], *p;
++
++  if ((p=__secure_getenv("GNUTLS_OVERRIDE_LEGACY_FILENAME")) != NULL)
++    filename = p;
++
++  fp = fopen(filename, "r");
++  if (fp == NULL)
++    return;
++
++  while((p=fgets(line, sizeof(line)-1, fp)) != NULL)
++    {
++      while(isspace(*p)) p++;
++      if (strncasecmp(p, MIN_BITS_CMD, sizeof(MIN_BITS_CMD)-1) == 0)
++        {
++          long bits;
++          p+=sizeof(MIN_BITS_CMD)-1;
++          bits = strtol(p, NULL, 10);
++          if (bits < 0 || bits == LONG_MAX || bits == 0)
++            goto fail;
++          _min_dh_bits = bits;
++          break;
++        }
++    }
++
++fail:
++  fclose(fp);
++}
++
++#define MIN_DH_BITS _min_dh_bits
++
+ /**
+  * gnutls_init:
+  * @con_end: indicate if this session is to be used for server or client.
+diff --git a/src/cli.c b/src/cli.c
+index d8db27c..9a65705 100644
+--- a/src/cli.c
++++ b/src/cli.c
+@@ -557,8 +557,6 @@ init_tls_session (const char *hostname)
+   if (mac_priority[0])
+     gnutls_mac_set_priority (session, mac_priority);
+ 
+-  gnutls_dh_set_prime_bits (session, 512);
+-
+   gnutls_credentials_set (session, GNUTLS_CRD_ANON, anon_cred);
+   if (srp_cred)
+     gnutls_credentials_set (session, GNUTLS_CRD_SRP, srp_cred);
+diff --git a/tests/Makefile.am b/tests/Makefile.am
+index 8c804d5..5114ff4 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -87,7 +87,7 @@ endif
+ endif
+ 
+ check_PROGRAMS = $(ctests)
+-dist_check_SCRIPTS = rfc2253-escape-test
++dist_check_SCRIPTS = rfc2253-escape-test check-env
+ 
+ TESTS = $(ctests) $(dist_check_SCRIPTS)
+ 
+@@ -96,6 +96,7 @@ TESTS_ENVIRONMENT =						\
+ 	PKCS12PASSWORD=foobar					\
+ 	PKCS12FILE_2=$(srcdir)/pkcs12-decode/pkcs12_2certs.p12	\
+ 	PKCS12PASSWORD_2=""					\
++	GNUTLS_OVERRIDE_LEGACY_FILENAME="$(srcdir)/file-not-exists.txt"	\
+ 	EXEEXT=$(EXEEXT)					\
+ 	srcdir="$(srcdir)"
+ 
+diff --git a/tests/check-env b/tests/check-env
+new file mode 100755
+index 0000000..80e80a6
+--- /dev/null
++++ b/tests/check-env
+@@ -0,0 +1,81 @@
++#!/bin/sh
++
++# Copyright (C) 2010 Free Software Foundation, Inc.
++#
++# Author: Nikos Mavrogiannopoulos
++#
++# This file is part of GnuTLS.
++#
++# GnuTLS is free software; you can redistribute it and/or modify it
++# under the terms of the GNU General Public License as published by the
++# Free Software Foundation; either version 3 of the License, or (at
++# your option) any later version.
++#
++# GnuTLS is distributed in the hope that it will be useful, but
++# WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++# General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with GnuTLS; if not, write to the Free Software Foundation,
++# Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
++
++srcdir="${srcdir:-.}"
++SERV="${SERV:-../src/gnutls-serv} -q"
++CLI="${CLI:-../src/gnutls-cli}"
++PORT="${PORT:-5679}"
++DEBUG=""
++unset RETCODE
++
++if test "${WINDIR}" != "";then
++  exit 77
++fi 
++
++fail() {
++   echo "Failure: $1" >&2
++   exit 1
++}
++
++rm -f $GNUTLS_OVERRIDE_LEGACY_FILENAME
++
++$SERV $DEBUG -p $PORT --priority "NORMAL:-VERS-TLS-ALL:+VERS-TLS1.0:-RSA" --x509certfile $srcdir/../doc/credentials/x509/cert.pem --x509keyfile $srcdir/../doc/credentials/x509/key.pem >/dev/null 2>&1 & PID=$!
++trap "kill $PID" 1 15 2
++
++# give the server a chance to initialize
++sleep 2
++
++echo "Checking with default limit"
++$CLI $DEBUG -p $PORT 127.0.0.1 --insecure </dev/null >/dev/null || \
++  fail "Failed connection to a server with DSA 1024 key and TLS 1.0!"
++
++echo "Checking with limit 1023"
++GNUTLS_OVERRIDE_LEGACY_FILENAME=./test.txt
++export GNUTLS_OVERRIDE_LEGACY_FILENAME
++echo "LegacySigningMDs md5">$GNUTLS_OVERRIDE_LEGACY_FILENAME
++echo "MinimumDHBits 1024  ">>$GNUTLS_OVERRIDE_LEGACY_FILENAME
++echo " ">>$GNUTLS_OVERRIDE_LEGACY_FILENAME
++
++$CLI $DEBUG -p $PORT 127.0.0.1 --insecure </dev/null >/dev/null || \
++  fail "Failed connection with 1024 bits"
++
++echo "Checking with limit 2048"
++echo "LegacySigningMDs md5">$GNUTLS_OVERRIDE_LEGACY_FILENAME
++echo "MinimumDHBits  2048 ">>$GNUTLS_OVERRIDE_LEGACY_FILENAME
++
++$CLI $DEBUG -p $PORT 127.0.0.1 --insecure </dev/null >/dev/null && \
++  fail "Succeeded connection with 2048 bits"
++
++echo "Checking with invalid limit (should use default)"
++echo "LegacySigningMDs md5">$GNUTLS_OVERRIDE_LEGACY_FILENAME
++echo "MinimumDHBits aaaa">>$GNUTLS_OVERRIDE_LEGACY_FILENAME
++
++$CLI $DEBUG -p $PORT 127.0.0.1 --insecure </dev/null >/dev/null || \
++  fail "Failed connection with invalid bits"
++
++kill $PID
++wait
++
++rm -f $GNUTLS_OVERRIDE_LEGACY_FILENAME
++
++exit 0
++
+-- 
+2.7.4
+

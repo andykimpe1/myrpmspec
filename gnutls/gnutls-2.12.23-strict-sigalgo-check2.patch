@@ -1,0 +1,75 @@
+diff --git a/lib/ext_signature.c b/lib/ext_signature.c
+index 46cf287..3aafed9 100644
+--- a/lib/ext_signature.c
++++ b/lib/ext_signature.c
+@@ -292,7 +292,7 @@ unsigned int hash_len;
+  * to return the second choice etc.
+  */
+ gnutls_sign_algorithm_t
+-_gnutls_session_get_sign_algo (gnutls_session_t session, gnutls_cert* cert)
++_gnutls_session_get_sign_algo (gnutls_session_t session, gnutls_cert* cert, unsigned client_cert)
+ {
+   unsigned i;
+   int ret;
+@@ -309,7 +309,10 @@ _gnutls_session_get_sign_algo (gnutls_session_t session, gnutls_cert* cert)
+   if (ret < 0 || !_gnutls_version_has_selectable_sighash (ver))
+     /* none set, allow SHA-1 only */
+     {
+-      return _gnutls_x509_pk_to_sign (cert->subject_pk_algorithm, GNUTLS_DIG_SHA1);
++      ret = _gnutls_x509_pk_to_sign (cert->subject_pk_algorithm, GNUTLS_DIG_SHA1);
++      if (!client_cert && _gnutls_session_sign_algo_enabled(session, ret) < 0)
++        goto fail;
++      return ret;
+     }
+ 
+   for (i = 0; i < priv->sign_algorithms_size; i++)
+@@ -319,10 +322,14 @@ _gnutls_session_get_sign_algo (gnutls_session_t session, gnutls_cert* cert)
+           if (cert_compatible_with_sig(cert, ver, priv->sign_algorithms[i]) < 0)
+             continue;
+ 
++          if (!client_cert && _gnutls_session_sign_algo_enabled(session, priv->sign_algorithms[i]) < 0)
++            continue;
++
+           return priv->sign_algorithms[i];
+         }
+     }
+ 
++ fail:
+   return GNUTLS_SIGN_UNKNOWN;
+ }
+ 
+diff --git a/lib/ext_signature.h b/lib/ext_signature.h
+index b566842..3e570e4 100644
+--- a/lib/ext_signature.h
++++ b/lib/ext_signature.h
+@@ -33,7 +33,7 @@
+ extern extension_entry_st ext_mod_sig;
+ 
+ gnutls_sign_algorithm_t
+-_gnutls_session_get_sign_algo (gnutls_session_t session, gnutls_cert* cert);
++_gnutls_session_get_sign_algo (gnutls_session_t session, gnutls_cert* cert, unsigned client_cert);
+ int _gnutls_sign_algorithm_parse_data (gnutls_session_t session,
+                                        const opaque * data, size_t data_size, unsigned cert_verify);
+ int _gnutls_sign_algorithm_write_params (gnutls_session_t session,
+diff --git a/lib/gnutls_sig.c b/lib/gnutls_sig.c
+index 9542925..c32d9c3 100644
+--- a/lib/gnutls_sig.c
++++ b/lib/gnutls_sig.c
+@@ -72,7 +72,7 @@ _gnutls_handshake_sign_data (gnutls_session_t session, gnutls_cert * cert,
+   gnutls_digest_algorithm_t hash_algo;
+ 
+   *sign_algo =
+-    _gnutls_session_get_sign_algo (session, cert);
++    _gnutls_session_get_sign_algo (session, cert, 0);
+   if (*sign_algo == GNUTLS_SIGN_UNKNOWN)
+     {
+       gnutls_assert ();
+@@ -611,7 +611,7 @@ _gnutls_handshake_sign_cert_vrfy12 (gnutls_session_t session,
+   digest_hd_st *handshake_td;
+ 
+   sign_algo =
+-    _gnutls_session_get_sign_algo (session, cert);
++    _gnutls_session_get_sign_algo (session, cert, 1);
+   if (sign_algo == GNUTLS_SIGN_UNKNOWN)
+     {
+       gnutls_assert ();

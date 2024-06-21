@@ -1,0 +1,1453 @@
+diff --git a/lib/Makefile.am b/lib/Makefile.am
+index 1529dc1..4c8d587 100644
+--- a/lib/Makefile.am
++++ b/lib/Makefile.am
+@@ -77,7 +77,7 @@ COBJECTS = gnutls_record.c gnutls_compress.c debug.c gnutls_cipher.c	\
+ 	gnutls_mem.c auth_cert.c gnutls_ui.c gnutls_sig.c auth_dhe.c	\
+ 	gnutls_dh_primes.c ext_max_record.c gnutls_alert.c		\
+ 	gnutls_str.c gnutls_state.c gnutls_x509.c ext_cert_type.c	\
+-	gnutls_rsa_export.c auth_rsa_export.c ext_server_name.c		\
++	gnutls_rsa_export.c ext_server_name.c		\
+ 	auth_dh_common.c gnutls_helper.c gnutls_supplemental.c		\
+ 	crypto.c random.c  ext_signature.c cryptodev.c system.c \
+ 	crypto-api.c ext_safe_renegotiation.c gnutls_privkey.c \
+@@ -103,7 +103,7 @@ HFILES = abstract_int.h debug.h gnutls_compress.h gnutls_cipher.h	\
+ 	gnutls_constate.h gnutls_global.h gnutls_sig.h gnutls_mem.h	\
+ 	ext_max_record.h gnutls_session_pack.h gnutls_str.h		\
+ 	gnutls_state.h gnutls_x509.h ext_cert_type.h			\
+-	gnutls_rsa_export.h ext_server_name.h auth_dh_common.h		\
++	ext_server_name.h auth_dh_common.h		\
+ 	ext_srp.h gnutls_srp.h auth_srp.h auth_srp_passwd.h		\
+ 	gnutls_helper.h auth_psk.h auth_psk_passwd.h			\
+ 	gnutls_supplemental.h crypto.h random.h system.h		\
+diff --git a/lib/auth_cert.h b/lib/auth_cert.h
+index 0eb0093..03d3844 100644
+--- a/lib/auth_cert.h
++++ b/lib/auth_cert.h
+@@ -115,7 +115,6 @@ typedef struct cert_auth_info_st
+    * They must be freed.
+    */
+   dh_info_st dh;
+-  rsa_info_st rsa_export;
+ 
+   gnutls_datum_t *raw_certificate_list; /* holds the raw certificate of the
+                                          * peer.
+diff --git a/lib/auth_rsa.c b/lib/auth_rsa.c
+index 068c8e2..f2a6019 100644
+--- a/lib/auth_rsa.c
++++ b/lib/auth_rsa.c
+@@ -97,37 +97,6 @@ _gnutls_get_public_rsa_params (gnutls_session_t session,
+     }
+ 
+ 
+-  /* EXPORT case: */
+-  if (_gnutls_cipher_suite_get_kx_algo
+-      (&session->security_parameters.current_cipher_suite) ==
+-      GNUTLS_KX_RSA_EXPORT
+-      && _gnutls_mpi_get_nbits (peer_cert.params[0]) > 512)
+-    {
+-
+-      _gnutls_gcert_deinit (&peer_cert);
+-
+-      if (session->key->rsa[0] == NULL || session->key->rsa[1] == NULL)
+-        {
+-          gnutls_assert ();
+-          return GNUTLS_E_INTERNAL_ERROR;
+-        }
+-
+-      if (*params_len < 2)
+-        {
+-          gnutls_assert ();
+-          return GNUTLS_E_INTERNAL_ERROR;
+-        }
+-      *params_len = 2;
+-      for (i = 0; i < *params_len; i++)
+-        {
+-          params[i] = _gnutls_mpi_copy (session->key->rsa[i]);
+-        }
+-
+-      return 0;
+-    }
+-
+-  /* end of export case */
+-
+   if (*params_len < peer_cert.params_size)
+     {
+       gnutls_assert ();
+diff --git a/lib/auth_rsa_export.c b/lib/auth_rsa_export.c
+deleted file mode 100644
+index ed35fcc..0000000
+--- a/lib/auth_rsa_export.c
++++ /dev/null
+@@ -1,495 +0,0 @@
+-/*
+- * Copyright (C) 2000, 2001, 2002, 2003, 2004, 2005, 2007, 2010 Free
+- * Software Foundation, Inc.
+- *
+- * Author: Nikos Mavrogiannopoulos
+- *
+- * This file is part of GnuTLS.
+- *
+- * The GnuTLS is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU Lesser General Public License
+- * as published by the Free Software Foundation; either version 2.1 of
+- * the License, or (at your option) any later version.
+- *
+- * This library is distributed in the hope that it will be useful, but
+- * WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+- * Lesser General Public License for more details.
+- *
+- * You should have received a copy of the GNU Lesser General Public
+- * License along with this library; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,
+- * USA
+- *
+- */
+-
+-/* This file contains the RSA key exchange part of the certificate
+- * authentication.
+- */
+-
+-#include "gnutls_int.h"
+-#include "gnutls_auth.h"
+-#include "gnutls_errors.h"
+-#include "gnutls_dh.h"
+-#include "gnutls_num.h"
+-#include "gnutls_datum.h"
+-#include "auth_cert.h"
+-#include <gnutls_pk.h>
+-#include <gnutls_algorithms.h>
+-#include <gnutls_global.h>
+-#include "debug.h"
+-#include <gnutls_sig.h>
+-#include <gnutls_x509.h>
+-#include <gnutls_rsa_export.h>
+-#include <gnutls_state.h>
+-#include <random.h>
+-
+-int _gnutls_gen_rsa_client_kx (gnutls_session_t, opaque **);
+-static int gen_rsa_export_server_kx (gnutls_session_t, opaque **);
+-static int proc_rsa_export_server_kx (gnutls_session_t, opaque *, size_t);
+-static int proc_rsa_export_client_kx (gnutls_session_t session, opaque * data,
+-                                      size_t _data_size);
+-
+-const mod_auth_st rsa_export_auth_struct = {
+-  "RSA EXPORT",
+-  _gnutls_gen_cert_server_certificate,
+-  _gnutls_gen_cert_client_certificate,
+-  gen_rsa_export_server_kx,
+-  _gnutls_gen_rsa_client_kx,
+-  _gnutls_gen_cert_client_cert_vrfy,    /* gen client cert vrfy */
+-  _gnutls_gen_cert_server_cert_req,     /* server cert request */
+-
+-  _gnutls_proc_cert_server_certificate,
+-  _gnutls_proc_cert_client_certificate,
+-  proc_rsa_export_server_kx,
+-  proc_rsa_export_client_kx,    /* proc client kx */
+-  _gnutls_proc_cert_client_cert_vrfy,   /* proc client cert vrfy */
+-  _gnutls_proc_cert_cert_req    /* proc server cert request */
+-};
+-
+-/* This function reads the RSA parameters from the private key
+- */
+-static int
+-_gnutls_get_private_rsa_params (gnutls_session_t session,
+-                                bigint_t ** params, int *params_size)
+-{
+-  int bits;
+-  gnutls_certificate_credentials_t cred;
+-  gnutls_rsa_params_t rsa_params;
+-
+-  cred = (gnutls_certificate_credentials_t)
+-    _gnutls_get_cred (session->key, GNUTLS_CRD_CERTIFICATE, NULL);
+-  if (cred == NULL)
+-    {
+-      gnutls_assert ();
+-      return GNUTLS_E_INSUFFICIENT_CREDENTIALS;
+-    }
+-
+-  if (session->internals.selected_cert_list == NULL)
+-    {
+-      gnutls_assert ();
+-      return GNUTLS_E_INSUFFICIENT_CREDENTIALS;
+-    }
+-
+-  bits =
+-    _gnutls_mpi_get_nbits (session->internals.
+-                           selected_cert_list[0].params[0]);
+-
+-  if (_gnutls_cipher_suite_get_kx_algo
+-      (&session->security_parameters.current_cipher_suite)
+-      != GNUTLS_KX_RSA_EXPORT || bits < 512)
+-    {
+-      gnutls_assert ();
+-      return GNUTLS_E_INVALID_REQUEST;
+-    }
+-
+-  rsa_params =
+-    _gnutls_certificate_get_rsa_params (cred->rsa_params,
+-                                        cred->params_func, session);
+-  /* EXPORT case: */
+-  if (rsa_params == NULL)
+-    {
+-      gnutls_assert ();
+-      return GNUTLS_E_NO_TEMPORARY_RSA_PARAMS;
+-    }
+-
+-  /* In the export case, we do use temporary RSA params
+-   * of 512 bits size. The params in the certificate are
+-   * used to sign this temporary stuff.
+-   */
+-  *params_size = RSA_PRIVATE_PARAMS;
+-  *params = rsa_params->params;
+-
+-  return 0;
+-}
+-
+-int
+-proc_rsa_export_client_kx (gnutls_session_t session, opaque * data,
+-                           size_t _data_size)
+-{
+-  gnutls_datum_t plaintext;
+-  gnutls_datum_t ciphertext;
+-  int ret, dsize;
+-  bigint_t *params;
+-  int params_len;
+-  int randomize_key = 0;
+-  ssize_t data_size = _data_size;
+-
+-  if (gnutls_protocol_get_version (session) == GNUTLS_SSL3)
+-    {
+-      /* SSL 3.0 
+-       */
+-      ciphertext.data = data;
+-      ciphertext.size = data_size;
+-    }
+-  else
+-    {
+-      /* TLS 1.0
+-       */
+-      DECR_LEN (data_size, 2);
+-      ciphertext.data = &data[2];
+-      dsize = _gnutls_read_uint16 (data);
+-
+-      if (dsize != data_size)
+-        {
+-          gnutls_assert ();
+-          return GNUTLS_E_UNEXPECTED_PACKET_LENGTH;
+-        }
+-      ciphertext.size = dsize;
+-    }
+-
+-  ret = _gnutls_get_private_rsa_params (session, &params, &params_len);
+-  if (ret < 0)
+-    {
+-      gnutls_assert ();
+-      return ret;
+-    }
+-
+-  ret = _gnutls_pkcs1_rsa_decrypt (&plaintext, &ciphertext, params, params_len, 2);     /* btype==2 */
+-
+-  if (ret < 0 || plaintext.size != GNUTLS_MASTER_SIZE)
+-    {
+-      /* In case decryption fails then don't inform
+-       * the peer. Just use a random key. (in order to avoid
+-       * attack against pkcs-1 formating).
+-       */
+-      gnutls_assert ();
+-      _gnutls_x509_log ("auth_rsa: Possible PKCS #1 format attack\n");
+-      randomize_key = 1;
+-    }
+-  else
+-    {
+-      /* If the secret was properly formatted, then
+-       * check the version number.
+-       */
+-      if (_gnutls_get_adv_version_major (session) != plaintext.data[0]
+-          || _gnutls_get_adv_version_minor (session) != plaintext.data[1])
+-        {
+-          /* No error is returned here, if the version number check
+-           * fails. We proceed normally.
+-           * That is to defend against the attack described in the paper
+-           * "Attacking RSA-based sessions in SSL/TLS" by Vlastimil Klima,
+-           * Ondej Pokorny and Tomas Rosa.
+-           */
+-          gnutls_assert ();
+-          _gnutls_x509_log
+-            ("auth_rsa: Possible PKCS #1 version check format attack\n");
+-        }
+-    }
+-
+-  if (randomize_key != 0)
+-    {
+-      session->key->key.size = GNUTLS_MASTER_SIZE;
+-      session->key->key.data = gnutls_malloc (session->key->key.size);
+-      if (session->key->key.data == NULL)
+-        {
+-          gnutls_assert ();
+-          return GNUTLS_E_MEMORY_ERROR;
+-        }
+-
+-      /* we do not need strong random numbers here.
+-       */
+-      ret = _gnutls_rnd (GNUTLS_RND_NONCE, session->key->key.data,
+-                         session->key->key.size);
+-      if (ret < 0)
+-        {
+-          gnutls_assert ();
+-          return ret;
+-        }
+-
+-    }
+-  else
+-    {
+-      session->key->key.data = plaintext.data;
+-      session->key->key.size = plaintext.size;
+-    }
+-
+-  /* This is here to avoid the version check attack
+-   * discussed above.
+-   */
+-  session->key->key.data[0] = _gnutls_get_adv_version_major (session);
+-  session->key->key.data[1] = _gnutls_get_adv_version_minor (session);
+-
+-  return 0;
+-}
+-
+-static int
+-gen_rsa_export_server_kx (gnutls_session_t session, opaque ** data)
+-{
+-  gnutls_rsa_params_t rsa_params;
+-  const bigint_t *rsa_mpis;
+-  size_t n_e, n_m;
+-  uint8_t *data_e, *data_m;
+-  int ret = 0, data_size;
+-  gnutls_cert *apr_cert_list;
+-  gnutls_privkey_t apr_pkey;
+-  int apr_cert_list_length;
+-  gnutls_datum_t signature, ddata;
+-  gnutls_certificate_credentials_t cred;
+-  gnutls_sign_algorithm_t sign_algo;
+-  unsigned int bits = 0;
+-
+-  cred = (gnutls_certificate_credentials_t)
+-    _gnutls_get_cred (session->key, GNUTLS_CRD_CERTIFICATE, NULL);
+-  if (cred == NULL)
+-    {
+-      gnutls_assert ();
+-      return GNUTLS_E_INSUFFICIENT_CREDENTIALS;
+-    }
+-
+-  /* find the appropriate certificate */
+-  if ((ret =
+-       _gnutls_get_selected_cert (session, &apr_cert_list,
+-                                  &apr_cert_list_length, &apr_pkey)) < 0)
+-    {
+-      gnutls_assert ();
+-      return ret;
+-    }
+-
+-  /* abort sending this message if we have a certificate
+-   * of 512 bits or less.
+-   */
+-  gnutls_privkey_get_pk_algorithm (apr_pkey, &bits);
+-  if (apr_pkey && bits <= 512)
+-    {
+-      gnutls_assert ();
+-      return GNUTLS_E_INT_RET_0;
+-    }
+-
+-  rsa_params =
+-    _gnutls_certificate_get_rsa_params (cred->rsa_params, cred->params_func,
+-                                        session);
+-  rsa_mpis = _gnutls_rsa_params_to_mpi (rsa_params);
+-  if (rsa_mpis == NULL)
+-    {
+-      gnutls_assert ();
+-      return GNUTLS_E_NO_TEMPORARY_RSA_PARAMS;
+-    }
+-
+-  if ((ret = _gnutls_auth_info_set (session, GNUTLS_CRD_CERTIFICATE,
+-                                    sizeof (cert_auth_info_st), 0)) < 0)
+-    {
+-      gnutls_assert ();
+-      return ret;
+-    }
+-
+-  _gnutls_rsa_export_set_pubkey (session, rsa_mpis[1], rsa_mpis[0]);
+-
+-  _gnutls_mpi_print (rsa_mpis[0], NULL, &n_m);
+-  _gnutls_mpi_print (rsa_mpis[1], NULL, &n_e);
+-
+-  (*data) = gnutls_malloc (n_e + n_m + 4);
+-  if (*data == NULL)
+-    {
+-      return GNUTLS_E_MEMORY_ERROR;
+-    }
+-
+-  data_m = &(*data)[0];
+-  _gnutls_mpi_print (rsa_mpis[0], &data_m[2], &n_m);
+-
+-  _gnutls_write_uint16 (n_m, data_m);
+-
+-  data_e = &data_m[2 + n_m];
+-  _gnutls_mpi_print (rsa_mpis[1], &data_e[2], &n_e);
+-
+-  _gnutls_write_uint16 (n_e, data_e);
+-
+-  data_size = n_m + n_e + 4;
+-
+-
+-  /* Generate the signature. */
+-
+-  ddata.data = *data;
+-  ddata.size = data_size;
+-
+-  if (apr_cert_list_length > 0)
+-    {
+-      if ((ret =
+-           _gnutls_handshake_sign_data (session, &apr_cert_list[0],
+-                                        apr_pkey, &ddata, &signature,
+-                                        &sign_algo)) < 0)
+-        {
+-          gnutls_assert ();
+-          gnutls_free (*data);
+-          *data = NULL;
+-          return ret;
+-        }
+-    }
+-  else
+-    {
+-      gnutls_assert ();
+-      return data_size;         /* do not put a signature - ILLEGAL! */
+-    }
+-
+-  *data = gnutls_realloc_fast (*data, data_size + signature.size + 2);
+-  if (*data == NULL)
+-    {
+-      _gnutls_free_datum (&signature);
+-      gnutls_assert ();
+-      return GNUTLS_E_MEMORY_ERROR;
+-    }
+-
+-  _gnutls_write_datum16 (&((*data)[data_size]), signature);
+-  data_size += signature.size + 2;
+-
+-  _gnutls_free_datum (&signature);
+-
+-  return data_size;
+-}
+-
+-/* if the peer's certificate is of 512 bits or less, returns non zero.
+- */
+-int
+-_gnutls_peers_cert_less_512 (gnutls_session_t session)
+-{
+-  gnutls_cert peer_cert;
+-  int ret;
+-  cert_auth_info_t info = _gnutls_get_auth_info (session);
+-
+-  if (info == NULL || info->ncerts == 0)
+-    {
+-      gnutls_assert ();
+-      /* we need this in order to get peer's certificate */
+-      return 0;
+-    }
+-
+-  if ((ret =
+-       _gnutls_get_auth_info_gcert (&peer_cert,
+-                                    session->security_parameters.cert_type,
+-                                    info, CERT_NO_COPY)) < 0)
+-    {
+-      gnutls_assert ();
+-      return 0;
+-    }
+-
+-  if (peer_cert.subject_pk_algorithm != GNUTLS_PK_RSA)
+-    {
+-      gnutls_assert ();
+-      _gnutls_gcert_deinit (&peer_cert);
+-      return 0;
+-    }
+-
+-  if (_gnutls_mpi_get_nbits (peer_cert.params[0]) <= 512)
+-    {
+-      _gnutls_gcert_deinit (&peer_cert);
+-      return 1;
+-    }
+-
+-  _gnutls_gcert_deinit (&peer_cert);
+-
+-  return 0;
+-}
+-
+-static int
+-proc_rsa_export_server_kx (gnutls_session_t session,
+-                           opaque * data, size_t _data_size)
+-{
+-  uint16_t n_m, n_e;
+-  size_t _n_m, _n_e;
+-  uint8_t *data_m;
+-  uint8_t *data_e;
+-  int i, sigsize;
+-  gnutls_datum_t vparams, signature;
+-  int ret;
+-  ssize_t data_size = _data_size;
+-  cert_auth_info_t info;
+-  gnutls_cert peer_cert;
+-
+-  info = _gnutls_get_auth_info (session);
+-  if (info == NULL || info->ncerts == 0)
+-    {
+-      gnutls_assert ();
+-      /* we need this in order to get peer's certificate */
+-      return GNUTLS_E_INTERNAL_ERROR;
+-    }
+-
+-
+-  i = 0;
+-
+-  DECR_LEN (data_size, 2);
+-  n_m = _gnutls_read_uint16 (&data[i]);
+-  i += 2;
+-
+-  DECR_LEN (data_size, n_m);
+-  data_m = &data[i];
+-  i += n_m;
+-
+-  DECR_LEN (data_size, 2);
+-  n_e = _gnutls_read_uint16 (&data[i]);
+-  i += 2;
+-
+-  DECR_LEN (data_size, n_e);
+-  data_e = &data[i];
+-  i += n_e;
+-
+-  _n_e = n_e;
+-  _n_m = n_m;
+-
+-  if (_gnutls_mpi_scan_nz (&session->key->rsa[0], data_m, _n_m) != 0)
+-    {
+-      gnutls_assert ();
+-      return GNUTLS_E_MPI_SCAN_FAILED;
+-    }
+-
+-  if (_gnutls_mpi_scan_nz (&session->key->rsa[1], data_e, _n_e) != 0)
+-    {
+-      gnutls_assert ();
+-      return GNUTLS_E_MPI_SCAN_FAILED;
+-    }
+-
+-  _gnutls_rsa_export_set_pubkey (session, session->key->rsa[1],
+-                                 session->key->rsa[0]);
+-
+-  /* VERIFY SIGNATURE */
+-
+-  vparams.size = n_m + n_e + 4;
+-  vparams.data = data;
+-
+-  DECR_LEN (data_size, 2);
+-  sigsize = _gnutls_read_uint16 (&data[vparams.size]);
+-
+-  DECR_LEN (data_size, sigsize);
+-  signature.data = &data[vparams.size + 2];
+-  signature.size = sigsize;
+-
+-  if ((ret =
+-       _gnutls_get_auth_info_gcert (&peer_cert,
+-                                    session->security_parameters.cert_type,
+-                                    info, CERT_NO_COPY)) < 0)
+-    {
+-      gnutls_assert ();
+-      return ret;
+-    }
+-
+-  ret =
+-    _gnutls_handshake_verify_data (session, &peer_cert, &vparams, &signature,
+-                                   GNUTLS_SIGN_UNKNOWN);
+-
+-  _gnutls_gcert_deinit (&peer_cert);
+-  if (ret < 0)
+-    {
+-      gnutls_assert ();
+-    }
+-
+-  return ret;
+-}
+diff --git a/lib/gnutls_algorithms.c b/lib/gnutls_algorithms.c
+index 739e5bb..f29f99e 100644
+--- a/lib/gnutls_algorithms.c
++++ b/lib/gnutls_algorithms.c
+@@ -72,7 +72,6 @@ typedef struct
+ static const gnutls_cred_map cred_mappings[] = {
+   {GNUTLS_KX_ANON_DH, GNUTLS_CRD_ANON, GNUTLS_CRD_ANON},
+   {GNUTLS_KX_RSA, GNUTLS_CRD_CERTIFICATE, GNUTLS_CRD_CERTIFICATE},
+-  {GNUTLS_KX_RSA_EXPORT, GNUTLS_CRD_CERTIFICATE, GNUTLS_CRD_CERTIFICATE},
+   {GNUTLS_KX_DHE_DSS, GNUTLS_CRD_CERTIFICATE, GNUTLS_CRD_CERTIFICATE},
+   {GNUTLS_KX_DHE_RSA, GNUTLS_CRD_CERTIFICATE, GNUTLS_CRD_CERTIFICATE},
+   {GNUTLS_KX_PSK, GNUTLS_CRD_PSK, GNUTLS_CRD_PSK},
+@@ -111,7 +110,6 @@ typedef struct
+  */
+ static const gnutls_pk_map pk_mappings[] = {
+   {GNUTLS_KX_RSA, GNUTLS_PK_RSA, CIPHER_ENCRYPT},
+-  {GNUTLS_KX_RSA_EXPORT, GNUTLS_PK_RSA, CIPHER_SIGN},
+   {GNUTLS_KX_DHE_RSA, GNUTLS_PK_RSA, CIPHER_SIGN},
+   {GNUTLS_KX_SRP_RSA, GNUTLS_PK_RSA, CIPHER_SIGN},
+   {GNUTLS_KX_DHE_DSS, GNUTLS_PK_DSA, CIPHER_SIGN},
+@@ -289,7 +287,6 @@ static const gnutls_mac_algorithm_t supported_macs[] = {
+ 
+ 
+ extern mod_auth_st rsa_auth_struct;
+-extern mod_auth_st rsa_export_auth_struct;
+ extern mod_auth_st dhe_rsa_auth_struct;
+ extern mod_auth_st dhe_dss_auth_struct;
+ extern mod_auth_st anon_auth_struct;
+@@ -314,8 +311,6 @@ static const gnutls_kx_algo_entry _gnutls_kx_algorithms[] = {
+   {"ANON-DH", GNUTLS_KX_ANON_DH, &anon_auth_struct, 1, 0},
+ #endif
+   {"RSA", GNUTLS_KX_RSA, &rsa_auth_struct, 0, 0},
+-  {"RSA-EXPORT", GNUTLS_KX_RSA_EXPORT, &rsa_export_auth_struct, 0,
+-   1 /* needs RSA params */ },
+   {"DHE-RSA", GNUTLS_KX_DHE_RSA, &dhe_rsa_auth_struct, 1, 0},
+   {"DHE-DSS", GNUTLS_KX_DHE_DSS, &dhe_dss_auth_struct, 1, 0},
+ 
+@@ -338,7 +333,6 @@ static const gnutls_kx_algorithm_t supported_kxs[] = {
+   GNUTLS_KX_ANON_DH,
+ #endif
+   GNUTLS_KX_RSA,
+-  GNUTLS_KX_RSA_EXPORT,
+   GNUTLS_KX_DHE_RSA,
+   GNUTLS_KX_DHE_DSS,
+ #ifdef ENABLE_SRP
+@@ -439,8 +433,6 @@ typedef struct
+ #define GNUTLS_RSA_ARCFOUR_MD5 { 0x00, 0x04 }
+ #define GNUTLS_RSA_3DES_EDE_CBC_SHA1 { 0x00, 0x0A }
+ 
+-#define GNUTLS_RSA_EXPORT_ARCFOUR_40_MD5 { 0x00, 0x03 }
+-
+ /* rfc3268:
+  */
+ #define GNUTLS_RSA_AES_128_CBC_SHA1 { 0x00, 0x2F }
+@@ -705,12 +697,6 @@ static const gnutls_cipher_suite_entry cs_algorithms[] = {
+                              GNUTLS_KX_RSA, GNUTLS_MAC_SHA256, GNUTLS_TLS1_2,
+                              GNUTLS_VERSION_MAX),
+ 
+-  /* RSA-EXPORT */
+-  GNUTLS_CIPHER_SUITE_ENTRY (GNUTLS_RSA_EXPORT_ARCFOUR_40_MD5,
+-                             GNUTLS_CIPHER_ARCFOUR_40,
+-                             GNUTLS_KX_RSA_EXPORT, GNUTLS_MAC_MD5,
+-                             GNUTLS_SSL3, GNUTLS_TLS1_0),
+-
+   /* RSA */
+   GNUTLS_CIPHER_SUITE_ENTRY (GNUTLS_RSA_ARCFOUR_SHA1,
+                              GNUTLS_CIPHER_ARCFOUR_128,
+@@ -1135,14 +1121,6 @@ _gnutls_kx_is_ok (gnutls_kx_algorithm_t algorithm)
+ }
+ 
+ int
+-_gnutls_kx_needs_rsa_params (gnutls_kx_algorithm_t algorithm)
+-{
+-  ssize_t ret = 0;
+-  GNUTLS_KX_ALG_LOOP (ret = p->needs_rsa_params);
+-  return ret;
+-}
+-
+-int
+ _gnutls_kx_needs_dh_params (gnutls_kx_algorithm_t algorithm)
+ {
+   ssize_t ret = 0;
+diff --git a/lib/gnutls_algorithms.h b/lib/gnutls_algorithms.h
+index 8fa0fcb..2f93680 100644
+--- a/lib/gnutls_algorithms.h
++++ b/lib/gnutls_algorithms.h
+@@ -83,7 +83,6 @@ int _gnutls_cipher_get_export_flag (gnutls_cipher_algorithm_t algorithm);
+ 
+ /* Functions for key exchange. */
+ int _gnutls_kx_needs_dh_params (gnutls_kx_algorithm_t algorithm);
+-int _gnutls_kx_needs_rsa_params (gnutls_kx_algorithm_t algorithm);
+ mod_auth_st *_gnutls_kx_auth_struct (gnutls_kx_algorithm_t algorithm);
+ int _gnutls_kx_is_ok (gnutls_kx_algorithm_t algorithm);
+ 
+diff --git a/lib/gnutls_auth.c b/lib/gnutls_auth.c
+index a6003af..b6cff88 100644
+--- a/lib/gnutls_auth.c
++++ b/lib/gnutls_auth.c
+@@ -301,7 +301,6 @@ void
+ _gnutls_free_auth_info (gnutls_session_t session)
+ {
+   dh_info_st *dh_info;
+-  rsa_info_st *rsa_info;
+ 
+   if (session == NULL || session->key == NULL)
+     {
+@@ -344,7 +343,6 @@ _gnutls_free_auth_info (gnutls_session_t session)
+           break;
+ 
+         dh_info = &info->dh;
+-        rsa_info = &info->rsa_export;
+         for (i = 0; i < info->ncerts; i++)
+           {
+             _gnutls_free_datum (&info->raw_certificate_list[i]);
+@@ -355,7 +353,6 @@ _gnutls_free_auth_info (gnutls_session_t session)
+         info->ncerts = 0;
+ 
+         _gnutls_free_dh_info (dh_info);
+-        _gnutls_free_rsa_info (rsa_info);
+       }
+ 
+ 
+diff --git a/lib/gnutls_cert.c b/lib/gnutls_cert.c
+index 90fea89..f736525 100644
+--- a/lib/gnutls_cert.c
++++ b/lib/gnutls_cert.c
+@@ -224,45 +224,6 @@ gnutls_certificate_free_ca_names (gnutls_certificate_credentials_t sc)
+   _gnutls_free_datum (&sc->x509_rdn_sequence);
+ }
+ 
+-/*-
+- * _gnutls_certificate_get_rsa_params - Returns the RSA parameters pointer
+- * @rsa_params: holds the RSA parameters or NULL.
+- * @func: function to retrieve the parameters or NULL.
+- * @session: The session.
+- *
+- * This function will return the rsa parameters pointer.
+- -*/
+-gnutls_rsa_params_t
+-_gnutls_certificate_get_rsa_params (gnutls_rsa_params_t rsa_params,
+-                                    gnutls_params_function * func,
+-                                    gnutls_session_t session)
+-{
+-  gnutls_params_st params;
+-  int ret;
+-
+-  if (session->internals.params.rsa_params)
+-    {
+-      return session->internals.params.rsa_params;
+-    }
+-
+-  if (rsa_params)
+-    {
+-      session->internals.params.rsa_params = rsa_params;
+-    }
+-  else if (func)
+-    {
+-      ret = func (session, GNUTLS_PARAMS_RSA_EXPORT, &params);
+-      if (ret == 0 && params.type == GNUTLS_PARAMS_RSA_EXPORT)
+-        {
+-          session->internals.params.rsa_params = params.params.rsa_export;
+-          session->internals.params.free_rsa_params = params.deinit;
+-        }
+-    }
+-
+-  return session->internals.params.rsa_params;
+-}
+-
+-
+ /**
+  * gnutls_certificate_free_credentials:
+  * @sc: is a #gnutls_certificate_credentials_t structure.
+diff --git a/lib/gnutls_constate.c b/lib/gnutls_constate.c
+index a3f2b02..d96ae04 100644
+--- a/lib/gnutls_constate.c
++++ b/lib/gnutls_constate.c
+@@ -59,7 +59,7 @@ static const int servwrite_length = sizeof (servwrite) - 1;
+  */
+ static int
+ _gnutls_set_keys (gnutls_session_t session, record_parameters_st * params,
+-                  int hash_size, int IV_size, int key_size, int export_flag)
++                  int hash_size, int IV_size, int key_size)
+ {
+   /* FIXME: This function is too long
+    */
+@@ -81,8 +81,7 @@ _gnutls_set_keys (gnutls_session_t session, record_parameters_st * params,
+     GNUTLS_SERVER ? &params->write : &params->read;
+ 
+   block_size = 2 * hash_size + 2 * key_size;
+-  if (export_flag == 0)
+-    block_size += 2 * IV_size;
++  block_size += 2 * IV_size;
+ 
+   memcpy (rnd, session->security_parameters.server_random,
+           GNUTLS_RANDOM_SIZE);
+@@ -140,75 +139,15 @@ _gnutls_set_keys (gnutls_session_t session, record_parameters_st * params,
+       opaque *client_write_key, *server_write_key;
+       int client_write_key_size, server_write_key_size;
+ 
+-      if (export_flag == 0)
+-        {
+-          client_write_key = &key_block[pos];
+-          client_write_key_size = key_size;
+-
+-          pos += key_size;
+-
+-          server_write_key = &key_block[pos];
+-          server_write_key_size = key_size;
+-
+-          pos += key_size;
+-
+-        }
+-      else
+-        {                       /* export */
+-          client_write_key = key1;
+-          server_write_key = key2;
+-
+-          /* generate the final keys */
+-
+-          if (session->security_parameters.version == GNUTLS_SSL3)
+-            {                   /* SSL 3 */
+-              ret =
+-                _gnutls_ssl3_hash_md5 (&key_block[pos],
+-                                       key_size, rrnd,
+-                                       2 * GNUTLS_RANDOM_SIZE,
+-                                       EXPORT_FINAL_KEY_SIZE,
+-                                       client_write_key);
+-
+-            }
+-          else
+-            {                   /* TLS 1.0 */
+-              ret =
+-                _gnutls_PRF (session, &key_block[pos], key_size,
+-                             cliwrite, cliwrite_length,
+-                             rrnd,
+-                             2 * GNUTLS_RANDOM_SIZE,
+-                             EXPORT_FINAL_KEY_SIZE, client_write_key);
+-            }
+-
+-          if (ret < 0)
+-            return gnutls_assert_val (ret);
+-
+-          client_write_key_size = EXPORT_FINAL_KEY_SIZE;
+-          pos += key_size;
+-
+-          if (session->security_parameters.version == GNUTLS_SSL3)
+-            {                   /* SSL 3 */
+-              ret =
+-                _gnutls_ssl3_hash_md5 (&key_block[pos], key_size,
+-                                       rnd, 2 * GNUTLS_RANDOM_SIZE,
+-                                       EXPORT_FINAL_KEY_SIZE,
+-                                       server_write_key);
+-            }
+-          else
+-            {                   /* TLS 1.0 */
+-              ret =
+-                _gnutls_PRF (session, &key_block[pos], key_size,
+-                             servwrite, servwrite_length,
+-                             rrnd, 2 * GNUTLS_RANDOM_SIZE,
+-                             EXPORT_FINAL_KEY_SIZE, server_write_key);
+-            }
+-
+-          if (ret < 0)
+-            return gnutls_assert_val (ret);
+-
+-          server_write_key_size = EXPORT_FINAL_KEY_SIZE;
+-          pos += key_size;
+-        }
++      client_write_key = &key_block[pos];
++      client_write_key_size = key_size;
++
++      pos += key_size;
++
++      server_write_key = &key_block[pos];
++      server_write_key_size = key_size;
++
++      pos += key_size;
+ 
+       if (_gnutls_sset_datum
+           (&client_write->key, client_write_key, client_write_key_size) < 0)
+@@ -235,7 +174,7 @@ _gnutls_set_keys (gnutls_session_t session, record_parameters_st * params,
+ 
+   /* IV generation in export and non export ciphers.
+    */
+-  if (IV_size > 0 && export_flag == 0)
++  if (IV_size > 0)
+     {
+       if (_gnutls_sset_datum
+           (&client_write->IV, &key_block[pos], IV_size) < 0)
+@@ -250,42 +189,6 @@ _gnutls_set_keys (gnutls_session_t session, record_parameters_st * params,
+       pos += IV_size;
+ 
+     }
+-  else if (IV_size > 0 && export_flag != 0)
+-    {
+-      opaque iv_block[MAX_CIPHER_BLOCK_SIZE * 2];
+-
+-      if (session->security_parameters.version == GNUTLS_SSL3)
+-        {                       /* SSL 3 */
+-          ret = _gnutls_ssl3_hash_md5 ("", 0,
+-                                       rrnd, GNUTLS_RANDOM_SIZE * 2,
+-                                       IV_size, iv_block);
+-
+-          if (ret < 0)
+-            return gnutls_assert_val (ret);
+-
+-
+-          ret = _gnutls_ssl3_hash_md5 ("", 0, rnd,
+-                                       GNUTLS_RANDOM_SIZE * 2,
+-                                       IV_size, &iv_block[IV_size]);
+-
+-        }
+-      else
+-        {                       /* TLS 1.0 */
+-          ret = _gnutls_PRF (session, "", 0,
+-                             ivblock, ivblock_length, rrnd,
+-                             2 * GNUTLS_RANDOM_SIZE, IV_size * 2, iv_block);
+-        }
+-
+-      if (ret < 0)
+-        return gnutls_assert_val (ret);
+-
+-      if (_gnutls_sset_datum (&client_write->IV, iv_block, IV_size) < 0)
+-        return gnutls_assert_val (GNUTLS_E_MEMORY_ERROR);
+-
+-      if (_gnutls_sset_datum
+-          (&server_write->IV, &iv_block[IV_size], IV_size) < 0)
+-        return gnutls_assert_val (GNUTLS_E_MEMORY_ERROR);
+-    }
+ 
+   return 0;
+ }
+@@ -390,7 +293,7 @@ _gnutls_epoch_set_keys (gnutls_session_t session, uint16_t epoch)
+ {
+   int hash_size;
+   int IV_size;
+-  int key_size, export_flag;
++  int key_size;
+   gnutls_cipher_algorithm_t cipher_algo;
+   gnutls_mac_algorithm_t mac_algo;
+   gnutls_compression_method_t comp_algo;
+@@ -420,11 +323,10 @@ _gnutls_epoch_set_keys (gnutls_session_t session, uint16_t epoch)
+ 
+   IV_size = _gnutls_cipher_get_iv_size (cipher_algo);
+   key_size = gnutls_cipher_get_key_size (cipher_algo);
+-  export_flag = _gnutls_cipher_get_export_flag (cipher_algo);
+   hash_size = _gnutls_hash_get_algo_len (mac_algo);
+ 
+   ret = _gnutls_set_keys
+-    (session, params, hash_size, IV_size, key_size, export_flag);
++    (session, params, hash_size, IV_size, key_size);
+   if (ret < 0)
+     return gnutls_assert_val (ret);
+ 
+diff --git a/lib/gnutls_handshake.c b/lib/gnutls_handshake.c
+index 489418d..98bdb1c 100644
+--- a/lib/gnutls_handshake.c
++++ b/lib/gnutls_handshake.c
+@@ -52,7 +52,6 @@
+ #include <ext_srp.h>
+ #include <ext_session_ticket.h>
+ #include <ext_safe_renegotiation.h>
+-#include <gnutls_rsa_export.h>  /* for gnutls_get_rsa_params() */
+ #include <auth_anon.h>          /* for gnutls_anon_server_credentials_t */
+ #include <auth_psk.h>           /* for gnutls_psk_server_credentials_t */
+ #include <random.h>
+@@ -3202,7 +3201,6 @@ check_server_params (gnutls_session_t session,
+ {
+   int cred_type;
+   gnutls_dh_params_t dh_params = NULL;
+-  gnutls_rsa_params_t rsa_params = NULL;
+   int j;
+ 
+   cred_type = _gnutls_map_kx_get_cred (kx, 1);
+@@ -3221,10 +3219,6 @@ check_server_params (gnutls_session_t session,
+           dh_params =
+             _gnutls_get_dh_params (x509_cred->dh_params,
+                                    x509_cred->params_func, session);
+-          rsa_params =
+-            _gnutls_certificate_get_rsa_params (x509_cred->rsa_params,
+-                                                x509_cred->params_func,
+-                                                session);
+         }
+ 
+       /* Check also if the certificate supports the
+@@ -3278,19 +3272,6 @@ check_server_params (gnutls_session_t session,
+     return 0;                   /* no need for params */
+ 
+ 
+-  /* If the key exchange method needs RSA or DH params,
+-   * but they are not set then remove it.
+-   */
+-  if (_gnutls_kx_needs_rsa_params (kx) != 0)
+-    {
+-      /* needs rsa params. */
+-      if (_gnutls_rsa_params_to_mpi (rsa_params) == NULL)
+-        {
+-          gnutls_assert ();
+-          return 1;
+-        }
+-    }
+-
+   if (_gnutls_kx_needs_dh_params (kx) != 0)
+     {
+       /* needs DH params. */
+diff --git a/lib/gnutls_int.h b/lib/gnutls_int.h
+index b0ecf8b..46595f4 100644
+--- a/lib/gnutls_int.h
++++ b/lib/gnutls_int.h
+@@ -256,9 +256,6 @@ struct gnutls_key_st
+   bigint_t b;
+   bigint_t a;
+   bigint_t x;
+-  /* RSA: e, m
+-   */
+-  bigint_t rsa[2];
+ 
+   /* this is used to hold the peers authentication data 
+    */
+@@ -461,8 +458,6 @@ typedef struct
+ {
+   gnutls_dh_params_t dh_params;
+   int free_dh_params;
+-  gnutls_rsa_params_t rsa_params;
+-  int free_rsa_params;
+ } internal_params_st;
+ 
+ 
+diff --git a/lib/gnutls_kx.c b/lib/gnutls_kx.c
+index e24292c..ff157e6 100644
+--- a/lib/gnutls_kx.c
++++ b/lib/gnutls_kx.c
+@@ -37,7 +37,6 @@
+ #include "gnutls_mpi.h"
+ #include <gnutls_state.h>
+ #include <gnutls_datum.h>
+-#include <gnutls_rsa_export.h>
+ #include <gnutls_mbuffers.h>
+ #include "../libextra/ext_inner_application.h"  /* isn't this too much? */
+ 
+@@ -358,16 +357,6 @@ _gnutls_recv_server_kx_message (gnutls_session_t session)
+ 
+   if (session->internals.auth_struct->gnutls_process_server_kx != NULL)
+     {
+-
+-      /* EXCEPTION FOR RSA_EXPORT cipher suite 
+-       */
+-      if (_gnutls_session_is_export (session) != 0 &&
+-          _gnutls_peers_cert_less_512 (session) != 0)
+-        {
+-          gnutls_assert ();
+-          return 0;
+-        }
+-
+       /* Server key exchange packet is optional for PSK. */
+       if (_gnutls_session_is_psk (session))
+         optflag = OPTIONAL_PACKET;
+diff --git a/lib/gnutls_priority.c b/lib/gnutls_priority.c
+index ba0012f..7888954 100644
+--- a/lib/gnutls_priority.c
++++ b/lib/gnutls_priority.c
+@@ -235,14 +235,6 @@ static const int kx_priority_performance[] = {
+   0
+ };
+ 
+-static const int kx_priority_export[] = {
+-  GNUTLS_KX_RSA,
+-  GNUTLS_KX_DHE_RSA,
+-  GNUTLS_KX_DHE_DSS,
+-  GNUTLS_KX_RSA_EXPORT,
+-  0
+-};
+-
+ static const int kx_priority_secure[] = {
+   /* The ciphersuites that offer forward secrecy take
+    * precendance
+@@ -257,7 +249,6 @@ static const int kx_priority_secure[] = {
+ };
+ 
+ static const int cipher_priority_performance[] = {
+-  GNUTLS_CIPHER_ARCFOUR_128,
+ #ifdef	ENABLE_CAMELLIA
+   GNUTLS_CIPHER_CAMELLIA_128_CBC,
+ #endif
+@@ -267,19 +258,20 @@ static const int cipher_priority_performance[] = {
+ #ifdef	ENABLE_CAMELLIA
+   GNUTLS_CIPHER_CAMELLIA_256_CBC,
+ #endif
+-  /* GNUTLS_CIPHER_ARCFOUR_40: Insecure, don't add! */
++  GNUTLS_CIPHER_3DES_CBC,
++  GNUTLS_CIPHER_ARCFOUR_128,
+   0
+ };
+ 
+ static const int cipher_priority_normal[] = {
+-  GNUTLS_CIPHER_AES_128_CBC,
+-#ifdef	ENABLE_CAMELLIA
+-  GNUTLS_CIPHER_CAMELLIA_128_CBC,
+-#endif
+   GNUTLS_CIPHER_AES_256_CBC,
+ #ifdef	ENABLE_CAMELLIA
+   GNUTLS_CIPHER_CAMELLIA_256_CBC,
+ #endif
++  GNUTLS_CIPHER_AES_128_CBC,
++#ifdef	ENABLE_CAMELLIA
++  GNUTLS_CIPHER_CAMELLIA_128_CBC,
++#endif
+   GNUTLS_CIPHER_3DES_CBC,
+   GNUTLS_CIPHER_ARCFOUR_128,
+   /* GNUTLS_CIPHER_ARCFOUR_40: Insecure, don't add! */
+@@ -288,11 +280,12 @@ static const int cipher_priority_normal[] = {
+ 
+ static const int cipher_priority_secure128[] = {
+   GNUTLS_CIPHER_AES_128_CBC,
++  GNUTLS_CIPHER_AES_256_CBC,
+ #ifdef	ENABLE_CAMELLIA
+   GNUTLS_CIPHER_CAMELLIA_128_CBC,
++  GNUTLS_CIPHER_CAMELLIA_256_CBC,
+ #endif
+   GNUTLS_CIPHER_3DES_CBC,
+-  GNUTLS_CIPHER_ARCFOUR_128,
+   /* GNUTLS_CIPHER_ARCFOUR_40: Insecure, don't add! */
+   0
+ };
+@@ -308,25 +301,10 @@ static const int cipher_priority_secure256[] = {
+   GNUTLS_CIPHER_CAMELLIA_128_CBC,
+ #endif
+   GNUTLS_CIPHER_3DES_CBC,
+-  GNUTLS_CIPHER_ARCFOUR_128,
+   /* GNUTLS_CIPHER_ARCFOUR_40: Insecure, don't add! */
+   0
+ };
+ 
+-/* The same as cipher_priority_security_normal + arcfour-40. */
+-static const int cipher_priority_export[] = {
+-  GNUTLS_CIPHER_AES_128_CBC,
+-  GNUTLS_CIPHER_AES_256_CBC,
+-#ifdef	ENABLE_CAMELLIA
+-  GNUTLS_CIPHER_CAMELLIA_128_CBC,
+-  GNUTLS_CIPHER_CAMELLIA_256_CBC,
+-#endif
+-  GNUTLS_CIPHER_3DES_CBC,
+-  GNUTLS_CIPHER_ARCFOUR_128,
+-  GNUTLS_CIPHER_ARCFOUR_40,
+-  0
+-};
+-
+ static const int comp_priority[] = {
+   /* compression should be explicitely requested to be enabled */
+   GNUTLS_COMP_NULL,
+@@ -334,8 +312,6 @@ static const int comp_priority[] = {
+ };
+ 
+ static const int sign_priority_default[] = {
+-  GNUTLS_SIGN_DSA_SHA224,
+-  GNUTLS_SIGN_DSA_SHA256,
+   GNUTLS_SIGN_RSA_SHA256,
+   GNUTLS_SIGN_RSA_SHA384,
+   GNUTLS_SIGN_RSA_SHA512,
+@@ -585,7 +561,7 @@ gnutls_priority_init (gnutls_priority_t * priority_cache,
+           _set_priority (&(*priority_cache)->sign_algo,
+                          sign_priority_default);
+         }
+-      else if (strcasecmp (broken_list[i], "NORMAL") == 0)
++      else if (strcasecmp (broken_list[i], "NORMAL") == 0 || strcasecmp (broken_list[i], "EXPORT") == 0)
+         {
+           _set_priority (&(*priority_cache)->cipher, cipher_priority_normal);
+           /* We give priority to RSA ciphersuites since the DHE-*
+@@ -617,14 +593,6 @@ gnutls_priority_init (gnutls_priority_t * priority_cache,
+           _set_priority (&(*priority_cache)->sign_algo,
+                          sign_priority_secure128);
+         }
+-      else if (strcasecmp (broken_list[i], "EXPORT") == 0)
+-        {
+-          _set_priority (&(*priority_cache)->cipher, cipher_priority_export);
+-          _set_priority (&(*priority_cache)->kx, kx_priority_export);
+-          _set_priority (&(*priority_cache)->mac, mac_priority_secure);
+-          _set_priority (&(*priority_cache)->sign_algo,
+-                         sign_priority_default);
+-        }                       /* now check if the element is something like -ALGO */
+       else if (broken_list[i][0] == '!' || broken_list[i][0] == '+'
+                || broken_list[i][0] == '-')
+         {
+diff --git a/lib/gnutls_rsa_export.c b/lib/gnutls_rsa_export.c
+index a0bf568..11703e9 100644
+--- a/lib/gnutls_rsa_export.c
++++ b/lib/gnutls_rsa_export.c
+@@ -30,7 +30,6 @@
+ #include <gnutls_int.h>
+ #include <gnutls_errors.h>
+ #include <gnutls_datum.h>
+-#include <gnutls_rsa_export.h>
+ #include "x509/x509_int.h"
+ #include "debug.h"
+ 
+diff --git a/lib/gnutls_rsa_export.h b/lib/gnutls_rsa_export.h
+deleted file mode 100644
+index d148a91..0000000
+--- a/lib/gnutls_rsa_export.h
++++ /dev/null
+@@ -1,27 +0,0 @@
+-/*
+- * Copyright (C) 2000, 2001, 2002, 2003, 2004, 2005, 2010 Free Software
+- * Foundation, Inc.
+- *
+- * Author: Nikos Mavrogiannopoulos
+- *
+- * This file is part of GnuTLS.
+- *
+- * The GnuTLS is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU Lesser General Public License
+- * as published by the Free Software Foundation; either version 2.1 of
+- * the License, or (at your option) any later version.
+- *
+- * This library is distributed in the hope that it will be useful, but
+- * WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+- * Lesser General Public License for more details.
+- *
+- * You should have received a copy of the GNU Lesser General Public
+- * License along with this library; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,
+- * USA
+- *
+- */
+-
+-const bigint_t *_gnutls_rsa_params_to_mpi (gnutls_rsa_params_t);
+-int _gnutls_peers_cert_less_512 (gnutls_session_t session);
+diff --git a/lib/gnutls_session_pack.c b/lib/gnutls_session_pack.c
+index effaabe..956af58 100644
+--- a/lib/gnutls_session_pack.c
++++ b/lib/gnutls_session_pack.c
+@@ -318,10 +318,6 @@ pack_certificate_auth_info (gnutls_session_t session, gnutls_buffer_st * ps)
+                          info->dh.generator.size);
+       BUFFER_APPEND_PFX (ps, info->dh.public_key.data,
+                          info->dh.public_key.size);
+-      BUFFER_APPEND_PFX (ps, info->rsa_export.modulus.data,
+-                         info->rsa_export.modulus.size);
+-      BUFFER_APPEND_PFX (ps, info->rsa_export.exponent.data,
+-                         info->rsa_export.exponent.size);
+ 
+       BUFFER_APPEND_NUM (ps, info->ncerts);
+ 
+@@ -375,8 +371,6 @@ unpack_certificate_auth_info (gnutls_session_t session, gnutls_buffer_st * ps)
+   BUFFER_POP_DATUM (ps, &info->dh.prime);
+   BUFFER_POP_DATUM (ps, &info->dh.generator);
+   BUFFER_POP_DATUM (ps, &info->dh.public_key);
+-  BUFFER_POP_DATUM (ps, &info->rsa_export.modulus);
+-  BUFFER_POP_DATUM (ps, &info->rsa_export.exponent);
+ 
+   BUFFER_POP_NUM (ps, info->ncerts);
+ 
+@@ -406,9 +400,6 @@ error:
+       _gnutls_free_datum (&info->dh.generator);
+       _gnutls_free_datum (&info->dh.public_key);
+ 
+-      _gnutls_free_datum (&info->rsa_export.modulus);
+-      _gnutls_free_datum (&info->rsa_export.exponent);
+-
+       for (j = 0; j < i; j++)
+         _gnutls_free_datum (&info->raw_certificate_list[j]);
+ 
+diff --git a/lib/gnutls_state.c b/lib/gnutls_state.c
+index 441fbdc..80769f2 100644
+--- a/lib/gnutls_state.c
++++ b/lib/gnutls_state.c
+@@ -45,7 +45,6 @@
+ #include <auth_anon.h>
+ #include <auth_psk.h>
+ #include <gnutls_algorithms.h>
+-#include <gnutls_rsa_export.h>
+ #include <gnutls_extensions.h>
+ #include <system.h>
+ 
+@@ -211,9 +210,6 @@ deinit_internal_params (gnutls_session_t session)
+   if (session->internals.params.free_dh_params)
+     gnutls_dh_params_deinit (session->internals.params.dh_params);
+ 
+-  if (session->internals.params.free_rsa_params)
+-    gnutls_rsa_params_deinit (session->internals.params.rsa_params);
+-
+   _gnutls_handshake_hash_buffers_clear (session);
+ 
+   memset (&session->internals.params, 0, sizeof (session->internals.params));
+@@ -424,10 +420,6 @@ gnutls_deinit (gnutls_session_t session)
+       _gnutls_mpi_release (&session->key->B);
+       _gnutls_mpi_release (&session->key->b);
+ 
+-      /* RSA */
+-      _gnutls_mpi_release (&session->key->rsa[0]);
+-      _gnutls_mpi_release (&session->key->rsa[1]);
+-
+       _gnutls_mpi_release (&session->key->dh_secret);
+       gnutls_free (session->key);
+ 
+@@ -545,45 +537,6 @@ _gnutls_dh_set_secret_bits (gnutls_session_t session, unsigned bits)
+   return 0;
+ }
+ 
+-/* This function will set in the auth info structure the
+- * RSA exponent and the modulus.
+- */
+-int
+-_gnutls_rsa_export_set_pubkey (gnutls_session_t session,
+-                               bigint_t exponent, bigint_t modulus)
+-{
+-  cert_auth_info_t info;
+-  int ret;
+-
+-  info = _gnutls_get_auth_info (session);
+-  if (info == NULL)
+-    return GNUTLS_E_INTERNAL_ERROR;
+-
+-  if (info->rsa_export.modulus.data)
+-    _gnutls_free_datum (&info->rsa_export.modulus);
+-
+-  if (info->rsa_export.exponent.data)
+-    _gnutls_free_datum (&info->rsa_export.exponent);
+-
+-  ret = _gnutls_mpi_dprint_lz (modulus, &info->rsa_export.modulus);
+-  if (ret < 0)
+-    {
+-      gnutls_assert ();
+-      return ret;
+-    }
+-
+-  ret = _gnutls_mpi_dprint_lz (exponent, &info->rsa_export.exponent);
+-  if (ret < 0)
+-    {
+-      gnutls_assert ();
+-      _gnutls_free_datum (&info->rsa_export.modulus);
+-      return ret;
+-    }
+-
+-  return 0;
+-}
+-
+-
+ /* Sets the prime and the generator in the auth info structure.
+  */
+ int
+@@ -1192,27 +1145,6 @@ gnutls_session_is_resumed (gnutls_session_t session)
+ }
+ 
+ /*-
+- * _gnutls_session_is_export - Used to check whether this session is of export grade
+- * @session: is a #gnutls_session_t structure.
+- *
+- * This function will return non zero if this session is of export grade.
+- -*/
+-int
+-_gnutls_session_is_export (gnutls_session_t session)
+-{
+-  gnutls_cipher_algorithm_t cipher;
+-
+-  cipher =
+-    _gnutls_cipher_suite_get_cipher_algo (&session->
+-                                          security_parameters.current_cipher_suite);
+-
+-  if (_gnutls_cipher_get_export_flag (cipher) != 0)
+-    return 1;
+-
+-  return 0;
+-}
+-
+-/*-
+  * _gnutls_session_is_psk - Used to check whether this session uses PSK kx
+  * @session: is a #gnutls_session_t structure.
+  *
+diff --git a/lib/gnutls_state.h b/lib/gnutls_state.h
+index 2112cd5..0198579 100644
+--- a/lib/gnutls_state.h
++++ b/lib/gnutls_state.h
+@@ -54,11 +54,7 @@ int _gnutls_dh_set_group (gnutls_session_t session, bigint_t gen,
+ int _gnutls_dh_get_allowed_prime_bits (gnutls_session_t session);
+ void _gnutls_handshake_internal_state_clear (gnutls_session_t);
+ 
+-int _gnutls_rsa_export_set_pubkey (gnutls_session_t session,
+-                                   bigint_t exponent, bigint_t modulus);
+-
+ int _gnutls_session_is_resumable (gnutls_session_t session);
+-int _gnutls_session_is_export (gnutls_session_t session);
+ 
+ int _gnutls_session_is_psk (gnutls_session_t session);
+ 
+diff --git a/lib/gnutls_ui.c b/lib/gnutls_ui.c
+index c2d5b88..468bc79 100644
+--- a/lib/gnutls_ui.c
++++ b/lib/gnutls_ui.c
+@@ -206,36 +206,8 @@ gnutls_rsa_export_get_pubkey (gnutls_session_t session,
+                               gnutls_datum_t * exponent,
+                               gnutls_datum_t * modulus)
+ {
+-  cert_auth_info_t info;
+-  int ret;
+-
+-  if (gnutls_auth_get_type (session) == GNUTLS_CRD_CERTIFICATE)
+-    {
+-      info = _gnutls_get_auth_info (session);
+-      if (info == NULL)
+-        return GNUTLS_E_INTERNAL_ERROR;
+-
+-      ret = _gnutls_set_datum (modulus, info->rsa_export.modulus.data,
+-                               info->rsa_export.modulus.size);
+-      if (ret < 0)
+-        {
+-          gnutls_assert ();
+-          return ret;
+-        }
+-
+-      ret = _gnutls_set_datum (exponent, info->rsa_export.exponent.data,
+-                               info->rsa_export.exponent.size);
+-      if (ret < 0)
+-        {
+-          gnutls_assert ();
+-          _gnutls_free_datum (modulus);
+-          return ret;
+-        }
+-
+-      return 0;
+-    }
+-
+-  return GNUTLS_E_INVALID_REQUEST;
++  gnutls_assert();
++  return GNUTLS_E_UNIMPLEMENTED_FEATURE;
+ }
+ 
+ 
+@@ -380,13 +352,7 @@ gnutls_dh_get_prime_bits (gnutls_session_t session)
+ int
+ gnutls_rsa_export_get_modulus_bits (gnutls_session_t session)
+ {
+-  cert_auth_info_t info;
+-
+-  info = _gnutls_get_auth_info (session);
+-  if (info == NULL)
+-    return GNUTLS_E_INTERNAL_ERROR;
+-
+-  return mpi_buf2bits (&info->rsa_export.modulus);
++  return GNUTLS_E_UNIMPLEMENTED_FEATURE;
+ }
+ 
+ /**
+@@ -673,7 +639,7 @@ void
+ gnutls_certificate_set_rsa_export_params (gnutls_certificate_credentials_t
+                                           res, gnutls_rsa_params_t rsa_params)
+ {
+-  res->rsa_params = rsa_params;
++  return;
+ }
+ 
+ /**
+diff --git a/lib/x509/privkey.c b/lib/x509/privkey.c
+index 7f477a1..47abcc5 100644
+--- a/lib/x509/privkey.c
++++ b/lib/x509/privkey.c
+@@ -27,7 +27,6 @@
+ #include <gnutls_datum.h>
+ #include <gnutls_global.h>
+ #include <gnutls_errors.h>
+-#include <gnutls_rsa_export.h>
+ #include <gnutls_sig.h>
+ #include <common.h>
+ #include <gnutls_x509.h>
+diff --git a/lib/x509/privkey_pkcs8.c b/lib/x509/privkey_pkcs8.c
+index 7e232eb..3a8f2b3 100644
+--- a/lib/x509/privkey_pkcs8.c
++++ b/lib/x509/privkey_pkcs8.c
+@@ -30,7 +30,6 @@
+ #include <gnutls_datum.h>
+ #include <gnutls_global.h>
+ #include <gnutls_errors.h>
+-#include <gnutls_rsa_export.h>
+ #include <common.h>
+ #include <gnutls_x509.h>
+ #include <x509_b64.h>
