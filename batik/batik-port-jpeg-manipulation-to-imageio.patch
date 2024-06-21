@@ -1,0 +1,257 @@
+From 498af7e8acfdb0aa1da48be486268ef591647c0d Mon Sep 17 00:00:00 2001
+From: Michael Simacek <msimacek@redhat.com>
+Date: Thu, 19 Nov 2015 13:13:48 +0100
+Subject: [PATCH 2/4] Port JPEG manipulation to imageio
+
+---
+ .../ext/awt/image/codec/jpeg/JPEGImageWriter.java  | 38 +++++----------
+ .../awt/image/codec/jpeg/JPEGRegistryEntry.java    | 31 +++++-------
+ .../batik/ext/awt/image/codec/tiff/TIFFImage.java  | 57 +++++++++-------------
+ 3 files changed, 48 insertions(+), 78 deletions(-)
+
+diff --git a/sources/org/apache/batik/ext/awt/image/codec/jpeg/JPEGImageWriter.java b/sources/org/apache/batik/ext/awt/image/codec/jpeg/JPEGImageWriter.java
+index dab2e3f..a787932 100644
+--- a/sources/org/apache/batik/ext/awt/image/codec/jpeg/JPEGImageWriter.java
++++ b/sources/org/apache/batik/ext/awt/image/codec/jpeg/JPEGImageWriter.java
+@@ -18,19 +18,18 @@
+  */
+ package org.apache.batik.ext.awt.image.codec.jpeg;
+ 
+-import java.awt.image.BufferedImage;
+ import java.awt.image.RenderedImage;
+ import java.io.IOException;
+ import java.io.OutputStream;
+ 
+-import org.apache.batik.ext.awt.image.GraphicsUtil;
++import javax.imageio.IIOImage;
++import javax.imageio.ImageIO;
++import javax.imageio.ImageWriteParam;
++import javax.imageio.stream.ImageOutputStream;
++
+ import org.apache.batik.ext.awt.image.spi.ImageWriter;
+ import org.apache.batik.ext.awt.image.spi.ImageWriterParams;
+ 
+-import com.sun.image.codec.jpeg.JPEGCodec;
+-import com.sun.image.codec.jpeg.JPEGEncodeParam;
+-import com.sun.image.codec.jpeg.JPEGImageEncoder;
+-
+ /**
+  * ImageWriter implementation that uses the sun.com.image.codec.jpeg
+  * intefaces to write JPEG files.
+@@ -52,26 +51,15 @@ public class JPEGImageWriter implements ImageWriter {
+      */
+     public void writeImage(RenderedImage image, OutputStream out,
+             ImageWriterParams params) throws IOException {
+-        BufferedImage bi;
+-        if (image instanceof BufferedImage) {
+-            bi = (BufferedImage)image;
+-        } else {
+-            //TODO Is this the right way?
+-            bi = GraphicsUtil.makeLinearBufferedImage(
+-                    image.getWidth(), image.getHeight(), false);
+-        }
+-        JPEGImageEncoder encoder = JPEGCodec.createJPEGEncoder(out);
+-        if (params != null) {
+-            JPEGEncodeParam param = encoder.getDefaultJPEGEncodeParam(bi);
+-            if (params.getJPEGQuality() != null) {
+-                param.setQuality(
+-                        params.getJPEGQuality().floatValue(),
+-                        params.getJPEGForceBaseline().booleanValue());
+-            }
+-            encoder.encode(bi, param);
+-        } else {
+-            encoder.encode(bi);
++        javax.imageio.ImageWriter writer = ImageIO.getImageWritersByMIMEType("image/jpeg").next();
++        ImageWriteParam writeParam = writer.getDefaultWriteParam();
++        writeParam.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
++        if (params != null && params.getJPEGQuality() != null) {
++            writeParam.setCompressionQuality(params.getJPEGQuality().floatValue());
+         }
++        ImageOutputStream ios = ImageIO.createImageOutputStream(out);
++        writer.setOutput(ios);
++        writer.write(null, new IIOImage(image, null, null), writeParam);
+     }
+ 
+     /**
+diff --git a/sources/org/apache/batik/ext/awt/image/codec/jpeg/JPEGRegistryEntry.java b/sources/org/apache/batik/ext/awt/image/codec/jpeg/JPEGRegistryEntry.java
+index ee2c808..334c263 100644
+--- a/sources/org/apache/batik/ext/awt/image/codec/jpeg/JPEGRegistryEntry.java
++++ b/sources/org/apache/batik/ext/awt/image/codec/jpeg/JPEGRegistryEntry.java
+@@ -25,6 +25,10 @@ import java.awt.image.WritableRaster;
+ import java.io.IOException;
+ import java.io.InputStream;
+ 
++import javax.imageio.ImageIO;
++import javax.imageio.ImageReader;
++import javax.imageio.stream.ImageInputStream;
++
+ import org.apache.batik.ext.awt.image.GraphicsUtil;
+ import org.apache.batik.ext.awt.image.renderable.DeferRable;
+ import org.apache.batik.ext.awt.image.renderable.Filter;
+@@ -36,10 +40,6 @@ import org.apache.batik.ext.awt.image.spi.ImageTagRegistry;
+ import org.apache.batik.ext.awt.image.spi.MagicNumberRegistryEntry;
+ import org.apache.batik.util.ParsedURL;
+ 
+-import com.sun.image.codec.jpeg.JPEGCodec;
+-import com.sun.image.codec.jpeg.JPEGImageDecoder;
+-import com.sun.image.codec.jpeg.TruncatedFileException;
+-
+ /**
+  *
+  * @version $Id: JPEGRegistryEntry.java 501094 2007-01-29 16:35:37Z deweese $
+@@ -85,22 +85,13 @@ public class JPEGRegistryEntry
+         }
+ 
+         Thread t = new Thread() {
+-                public void run() {
+-                    Filter filt;
+-                    try{
+-                        JPEGImageDecoder decoder;
+-                        decoder = JPEGCodec.createJPEGDecoder(is);
+-                        BufferedImage image;
+-                        try {
+-                            image   = decoder.decodeAsBufferedImage();
+-                        } catch (TruncatedFileException tfe) {
+-                            image = tfe.getBufferedImage();
+-                            // Should probably draw some indication
+-                            // that this is a partial image....
+-                            if (image == null)
+-                                throw new IOException
+-                                    ("JPEG File was truncated");
+-                        }
++            public void run() {
++                Filter filt;
++                try {
++                    ImageReader reader = ImageIO.getImageReadersByMIMEType("image/jpeg").next();
++                    ImageInputStream iis = ImageIO.createImageInputStream(is);
++                    reader.setInput(iis);
++                    BufferedImage image = reader.read(0);
+                         dr.setBounds(new Rectangle2D.Double
+                                      (0, 0, image.getWidth(),
+                                       image.getHeight()));
+diff --git a/sources/org/apache/batik/ext/awt/image/codec/tiff/TIFFImage.java b/sources/org/apache/batik/ext/awt/image/codec/tiff/TIFFImage.java
+index 946eead..73f6170 100644
+--- a/sources/org/apache/batik/ext/awt/image/codec/tiff/TIFFImage.java
++++ b/sources/org/apache/batik/ext/awt/image/codec/tiff/TIFFImage.java
+@@ -41,14 +41,14 @@ import java.util.Map;
+ import java.util.zip.DataFormatException;
+ import java.util.zip.Inflater;
+ 
++import javax.imageio.ImageIO;
++import javax.imageio.ImageReader;
++import javax.imageio.stream.ImageInputStream;
++
+ import org.apache.batik.ext.awt.image.codec.util.SeekableStream;
+ import org.apache.batik.ext.awt.image.rendered.AbstractRed;
+ import org.apache.batik.ext.awt.image.rendered.CachableRed;
+ 
+-import com.sun.image.codec.jpeg.JPEGCodec;
+-import com.sun.image.codec.jpeg.JPEGDecodeParam;
+-import com.sun.image.codec.jpeg.JPEGImageDecoder;
+-
+ /**
+  *
+  * @version $Id: TIFFImage.java 498740 2007-01-22 18:35:57Z dvholten $
+@@ -105,7 +105,7 @@ public class TIFFImage extends AbstractRed {
+     int predictor;
+ 
+     // TTN2 JPEG related variables
+-    JPEGDecodeParam decodeParam = null;
++    ImageReader jpegReader = null;
+     boolean colorConvertJPEG = false;
+ 
+     // DEFLATE variables
+@@ -137,26 +137,19 @@ public class TIFFImage extends AbstractRed {
+      * @param minX the X position of the returned Raster.
+      * @param minY the Y position of the returned Raster.
+      */
+-    private static final Raster decodeJPEG(byte[] data,
+-                                           JPEGDecodeParam decodeParam,
++    private static final Raster decodeJPEG(byte[] data, ImageReader reader,
+                                            boolean colorConvert,
+                                            int minX,
+                                            int minY) {
+         // Create an InputStream from the compressed data array.
+         ByteArrayInputStream jpegStream = new ByteArrayInputStream(data);
+ 
+-        // Create a decoder.
+-        JPEGImageDecoder decoder = decodeParam == null ?
+-            JPEGCodec.createJPEGDecoder(jpegStream) :
+-            JPEGCodec.createJPEGDecoder(jpegStream,
+-                                        decodeParam);
+-
+         // Decode the compressed data into a Raster.
+         Raster jpegRaster;
+         try {
+-            jpegRaster = colorConvert ?
+-                decoder.decodeAsBufferedImage().getWritableTile(0, 0) :
+-                decoder.decodeAsRaster();
++            ImageInputStream iis = ImageIO.createImageInputStream(jpegStream);
++            reader.setInput(iis);
++            jpegRaster = colorConvert ? reader.read(0).getWritableTile(0, 0) : reader.readRaster(0, null);
+         } catch (IOException ioe) {
+             throw new RuntimeException("TIFFImage13");
+         }
+@@ -582,17 +575,17 @@ public class TIFFImage extends AbstractRed {
+                     throw new RuntimeException("TIFFImage16");
+                 }
+ 
+-                // Create decodeParam from JPEGTables field if present.
+-                if(dir.isTagPresent(TIFF_JPEG_TABLES)) {
+-                    TIFFField jpegTableField = dir.getField(TIFF_JPEG_TABLES);
+-                    byte[] jpegTable = jpegTableField.getAsBytes();
+-                    ByteArrayInputStream tableStream =
+-                        new ByteArrayInputStream(jpegTable);
+-                    JPEGImageDecoder decoder =
+-                        JPEGCodec.createJPEGDecoder(tableStream);
+-                    decoder.decodeAsRaster();
+-                    decodeParam = decoder.getJPEGDecodeParam();
+-                }
++            jpegReader = ImageIO.getImageReadersByMIMEType("image/jpeg").next();
++
++            // Read abbreviated table stream if present
++            if (dir.isTagPresent(TIFF_JPEG_TABLES)) {
++                TIFFField jpegTableField = dir.getField(TIFF_JPEG_TABLES);
++                byte[] jpegTable = jpegTableField.getAsBytes();
++                ImageInputStream tableStream = ImageIO.createImageInputStream(new ByteArrayInputStream(jpegTable));
++                jpegReader.setInput(tableStream);
++                // tables are retained within reader's state
++                jpegReader.getStreamMetadata();
++            }
+ 
+                 break;
+             default:
+@@ -1121,8 +1114,7 @@ public class TIFFImage extends AbstractRed {
+                         } else if (compression == COMP_JPEG_TTN2) {
+ 
+                             stream.readFully(data, 0, byteCount);
+-                            Raster tempTile = decodeJPEG(data,
+-                                                         decodeParam,
++                            Raster tempTile = decodeJPEG(data, jpegReader,
+                                                          colorConvertJPEG,
+                                                          tile.getMinX(),
+                                                          tile.getMinY());
+@@ -1193,8 +1185,8 @@ public class TIFFImage extends AbstractRed {
+                         } else if (compression == COMP_JPEG_TTN2) {
+ 
+                             stream.readFully(data, 0, byteCount);
+-                            tile.setRect(decodeJPEG(data,
+-                                                    decodeParam,
++                            tile.setRect(
++                                    decodeJPEG(data, jpegReader,
+                                                     colorConvertJPEG,
+                                                     tile.getMinX(),
+                                                     tile.getMinY()));
+@@ -1379,8 +1371,7 @@ public class TIFFImage extends AbstractRed {
+                     } else if (compression == COMP_JPEG_TTN2) {
+ 
+                         stream.readFully(data, 0, byteCount);
+-                        tile.setRect(decodeJPEG(data,
+-                                                decodeParam,
++                        tile.setRect(decodeJPEG(data, jpegReader,
+                                                 colorConvertJPEG,
+                                                 tile.getMinX(),
+                                                 tile.getMinY()));
+-- 
+2.5.0
+
