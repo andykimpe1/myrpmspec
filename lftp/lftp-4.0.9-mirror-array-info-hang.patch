@@ -1,0 +1,145 @@
+diff --git a/src/Http.cc.old b/src/Http.cc
+index 1de7363..d3a27a5 100644
+--- a/src/Http.cc.old
++++ b/src/Http.cc
+@@ -678,9 +680,13 @@ void Http::SendArrayInfoRequest()
+    while(array_send-fileset_for_info->curr_index()<m
+    && array_send<fileset_for_info->count())
+    {
+-      SendRequest(array_send==fileset_for_info->count()-1 ? 0 : "keep-alive",
+-	 (*fileset_for_info)[array_send]->name);
+-      array_send++;
++      FileInfo *fi=(*fileset_for_info)[array_send++];
++      xstring *name=&fi->name;
++      if(fi->filetype==fi->DIRECTORY && name->last_char()!='/') {
++	 name=&xstring::get_tmp(*name);
++	 name->append('/');
++      }
++      SendRequest(array_send==fileset_for_info->count()-1 ? 0 : "keep-alive", *name);
+    }
+ }
+ 
+--- a/src/Http.cc.old
++++ b/src/Http.cc
+@@ -668,8 +670,18 @@ void Http::SendRequest(const char *connection,const char *f)
+    send_buf->SetPos(0);
+ }
+ 
+-void Http::SendArrayInfoRequest()
++int Http::SendArrayInfoRequest()
+ {
++   // skip to next needed file
++   for(FileInfo *fi=fileset_for_info->curr(); fi; fi=fileset_for_info->next())
++      if(fi->need)
++	 break;
++   if(array_send<fileset_for_info->curr_index())
++      array_send=fileset_for_info->curr_index();
++
++   if(state!=CONNECTED)
++      return 0;
++
+    int m=1;
+    if(keep_alive && use_head)
+    {
+@@ -677,17 +689,22 @@ void Http::SendArrayInfoRequest()
+       if(m==-1)
+ 	 m=100;
+    }
++   int req_count=0;
+    while(array_send-fileset_for_info->curr_index()<m
+    && array_send<fileset_for_info->count())
+    {
+       FileInfo *fi=(*fileset_for_info)[array_send++];
++      if(fi->need==0)
++	 continue;
+       xstring *name=&fi->name;
+       if(fi->filetype==fi->DIRECTORY && name->last_char()!='/') {
+ 	 name=&xstring::get_tmp(*name);
+ 	 name->append('/');
+       }
+       SendRequest(array_send==fileset_for_info->count()-1 ? 0 : "keep-alive", *name);
++      req_count++;
+    }
++   return req_count;
+ }
+ 
+ static const char *extract_quoted_header_value(const char *value)
+@@ -930,6 +947,16 @@ int Http::Do()
+ 	 state=DONE;
+ 	 return MOVED;
+       }
++      if(mode==ARRAY_INFO)
++      {
++	 // check if we have anything to request
++	 SendArrayInfoRequest();
++	 if(!fileset_for_info->curr())
++	 {
++	    state=DONE;
++	    return MOVED;
++	 }
++      }
+       if(!hftp && mode==QUOTE_CMD && !special)
+       {
+       handle_quote_cmd:
+@@ -1136,13 +1163,17 @@ int Http::Do()
+ 	 state=DONE;
+ 	 return MOVED;
+       }
+-      LogNote(9,_("Sending request..."));
+       if(mode==ARRAY_INFO)
+       {
+-	 SendArrayInfoRequest();
++         if(SendArrayInfoRequest()==0) {
++	    // nothing to do
++	    state=DONE;
++	    return MOVED;
++	 }
+       }
+       else
+       {
++         LogNote(9,_("Sending request..."));
+ 	 SendRequest();
+       }
+ 
+@@ -1230,15 +1261,25 @@ int Http::Do()
+ 		  // we'll have to receive next header
+ 		  status.set(0);
+ 		  status_code=0;
+-		  if(!fileset_for_info->next())
+-      {
++    		  for(;;)
++		  {
++		     // skip to next needed file
++		     FileInfo *fi=fileset_for_info->next();
++		     if(!fi || fi->need)
++			break;
++		  }
++		  if(!fileset_for_info->curr())
++		  {
++		     // received all requested info.
+ 		     state=DONE;
+ 		     return MOVED;
+ 		  }
+ 		  // we can avoid reconnection if server supports it.
+ 		  if(keep_alive && (keep_alive_max>1 || keep_alive_max==-1) && use_head)
+ 		  {
+-		     SendArrayInfoRequest();
++		     state=CONNECTED;
++		     if(SendArrayInfoRequest()==0)
++			state=DONE;
+ 		  }
+ 		  else
+ 		  {
+diff --git a/src/Http.h.old b/src/Http.h
+index 6d83e0b..287448e 100644
+--- a/src/Http.h.old
++++ b/src/Http.h
+@@ -68,7 +68,7 @@ class Http : public NetAccess
+       {
+ 	 SendRequest(connection,file);
+       }
+-   void SendArrayInfoRequest();
++   int SendArrayInfoRequest(); // returns count of sent requests
+    int status_code;
+    void HandleHeaderLine(const char *name,const char *value);
+    void GetBetterConnection(int level);
