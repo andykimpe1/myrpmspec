@@ -1,0 +1,211 @@
+diff --git a/common-src/conffile.c b/common-src/conffile.c
+index 718d2a0..256d7bd 100644
+--- a/common-src/conffile.c
++++ b/common-src/conffile.c
+@@ -4151,7 +4151,7 @@ config_uninit(void)
+     amfree(config_name);
+     amfree(config_dir);
+ 
+-    g_slist_free_full(seen_filenames);
++    slist_free_full(seen_filenames, g_free);
+     seen_filenames = NULL;
+ 
+     config_client = FALSE;
+@@ -5655,7 +5655,7 @@ free_val_t(
+             break;
+ 
+ 	case CONFTYPE_PP_SCRIPTLIST:
+-	    g_slist_free_full(val->v.pp_scriptlist);
++	    slist_free_full(val->v.pp_scriptlist, g_free);
+ 	    break;
+ 
+ 	case CONFTYPE_APPLICATION:
+@@ -6771,7 +6771,7 @@ config_errors(GSList **errstr)
+ void
+ config_clear_errors(void)
+ {
+-    g_slist_free_full(cfgerr_errors);
++    slist_free_full(cfgerr_errors, g_free);
+ 
+     cfgerr_errors = NULL;
+     cfgerr_level = CFGERR_OK;
+diff --git a/common-src/glib-util.c b/common-src/glib-util.c
+index d3b17f9..4c1bf62 100644
+--- a/common-src/glib-util.c
++++ b/common-src/glib-util.c
+@@ -107,8 +107,9 @@ GValue* g_value_unset_copy(const GValue * from, GValue * to) {
+     return to;
+ }
+ 
+-void g_list_free_full(GList * list) {
+-    GList * cur = list;
++#if (GLIB_MAJOR_VERSION < 2 || (GLIB_MAJOR_VERSION == 2 && GLIB_MINOR_VERSION < 28))
++void list_free_full(GSList * list, GDestroyNotify free_fn) {
++    GSList * cur = list;
+ 
+     while (cur != NULL) {
+         gpointer data = cur->data;
+@@ -119,7 +120,7 @@ void g_list_free_full(GList * list) {
+     g_list_free(list);
+ }
+ 
+-void g_slist_free_full(GSList * list) {
++void slist_free_full(GSList * list, GDestroyNotify free_fn) {
+     GSList * cur = list;
+ 
+     while (cur != NULL) {
+@@ -130,6 +131,7 @@ void g_slist_free_full(GSList * list) {
+ 
+     g_slist_free(list);
+ }
++#endif
+ 
+ void g_queue_free_full(GQueue * queue) {
+     while (!g_queue_is_empty(queue)) {
+diff --git a/common-src/glib-util.h b/common-src/glib-util.h
+index bc54c53..d185296 100644
+--- a/common-src/glib-util.h
++++ b/common-src/glib-util.h
+@@ -64,8 +64,14 @@ GValue* g_value_unset_copy(const GValue* from, GValue * to);
+ 
+ /* These functions all take a GLib container, and call free() on all the
+  * pointers in the container before free()ing the container itself. */
+-void g_list_free_full(GList * list);
+-void g_slist_free_full(GSList * list);
++#if (GLIB_MAJOR_VERSION < 2 || (GLIB_MAJOR_VERSION == 2 && GLIB_MINOR_VERSION < 28))
++void list_free_full(GSList * list, GDestroyNotify free_fn);
++void slist_free_full(GSList * list, GDestroyNotify free_fn);
++#else
++#define list_free_full(list, free_fn) g_list_free_full((list), (free_fn))
++#define slist_free_full(list, free_fn) g_slist_free_full((list), (free_fn))
++#endif
++
+ void g_queue_free_full(GQueue * queue);
+ void g_ptr_array_free_full(GPtrArray * array);
+ 
+diff --git a/server-src/amadmin.c b/server-src/amadmin.c
+index b7069b4..20d0aa8 100644
+--- a/server-src/amadmin.c
++++ b/server-src/amadmin.c
+@@ -1414,7 +1414,7 @@ holding(
+                 amfree(dumpstr);
+ 		dumpfile_free_data(&file);
+             }
+-            g_slist_free_full(file_list);
++            slist_free_full(file_list, g_free);
+             break;
+ 
+         case HOLDING_DELETE:
+@@ -1432,7 +1432,7 @@ holding(
+                     error(_("Could not delete '%s'"), (char *)li->data);
+                 }
+             }
+-            g_slist_free_full(file_list);
++            slist_free_full(file_list, g_free);
+             break;
+     }
+ }
+diff --git a/server-src/amflush.c b/server-src/amflush.c
+index e2a9d10..d84128f 100644
+--- a/server-src/amflush.c
++++ b/server-src/amflush.c
+@@ -241,7 +241,7 @@ main(
+ 		    stralloc((char *)datestamp->data),
+ 		    g_compare_strings);
+ 	}
+-	g_slist_free_full(all_datestamps);
++	slist_free_full(all_datestamps, g_free);
+     }
+     else {
+ 	/* otherwise, in batch mode, use all datestamps */
+@@ -390,9 +390,9 @@ main(
+ 	}
+     }
+ 
+-    g_slist_free_full(datestamp_list);
++    slist_free_full(datestamp_list, g_free);
+     datestamp_list = NULL;
+-    g_slist_free_full(holding_list);
++    slist_free_full(holding_list, g_free);
+     holding_list = NULL;
+ 
+     if(redirect) { /* rename errfile */
+@@ -583,7 +583,7 @@ pick_datestamp(void)
+ 		}
+ 		chupper = (char)toupper(ch);
+ 		if (chupper < 'A' || chupper > max_char) {
+-		    g_slist_free_full(r_datestamp_list);
++		    slist_free_full(r_datestamp_list, g_free);
+ 		    r_datestamp_list = NULL;
+ 		    break;
+ 		}
+@@ -591,7 +591,7 @@ pick_datestamp(void)
+ 					   stralloc(datestamps[chupper - 'A']));
+ 	    } while ((ch = *a++) != '\0');
+ 	    if (r_datestamp_list && ch == '\0') {
+-		g_slist_free_full(datestamp_list);
++		slist_free_full(datestamp_list, g_free);
+ 		datestamp_list = r_datestamp_list;
+ 		break;
+ 	    }
+diff --git a/server-src/cmdline.c b/server-src/cmdline.c
+index 892b6a3..09bcf67 100644
+--- a/server-src/cmdline.c
++++ b/server-src/cmdline.c
+@@ -255,7 +255,7 @@ cmdline_match_holding(
+ 	dumpfile_free_data(&file);
+     }
+ 
+-    g_slist_free_full(holding_files);
++    slist_free_full(holding_files, g_free);
+ 
+     return matching_files;
+ }
+diff --git a/server-src/find.c b/server-src/find.c
+index 631c4b8..1cd56a3 100644
+--- a/server-src/find.c
++++ b/server-src/find.c
+@@ -257,7 +257,7 @@ search_holding_disk(
+ 	dumpfile_free_data(&file);
+     }
+ 
+-    g_slist_free_full(holding_file_list);
++    slist_free_full(holding_file_list, g_free);
+ }
+ 
+ static char *
+diff --git a/server-src/holding.c b/server-src/holding.c
+index c0e1ff8..8093e92 100644
+--- a/server-src/holding.c
++++ b/server-src/holding.c
+@@ -565,7 +565,7 @@ holding_get_files_for_flush(
+ 	dumpfile_free_data(&file);
+     }
+ 
+-    if (file_list) g_slist_free_full(file_list);
++    if (file_list) slist_free_full(file_list, g_free);
+ 
+     return result_list;
+ }
+@@ -591,7 +591,7 @@ holding_get_all_datestamps(void)
+ 	dumpfile_free_data(&dfile);
+     }
+ 
+-    g_slist_free_full(all_files);
++    slist_free_full(all_files, g_free);
+ 
+     return datestamps;
+ }
+diff --git a/server-src/planner.c b/server-src/planner.c
+index 02a4cb8..d923e36 100644
+--- a/server-src/planner.c
++++ b/server-src/planner.c
+@@ -431,7 +431,7 @@ main(
+ 	    amfree(qhname);
+ 	    dumpfile_free_data(&file);
+ 	}
+-	g_slist_free_full(holding_list);
++	slist_free_full(holding_list, g_free);
+ 	holding_list = NULL;
+     }
+     g_fprintf(stderr, _("ENDFLUSH\n"));
