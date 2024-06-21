@@ -1,0 +1,63 @@
+--- less-436/filename.c.empty-lessopen	2009-07-06 22:52:23.000000000 +0200
++++ less-436/filename.c	2013-02-06 19:16:06.648490728 +0100
+@@ -843,6 +843,16 @@ open_altfile(filename, pf, pfd)
+ #else
+ 		lessopen++;
+ 		returnfd = 1;
++
++		if (*lessopen == '|') {
++			/*
++			 * If there is another vertical bar |, after
++			 * the first one, it indicates a "pipe preprocessor"
++			 * with correct exit status.
++			 */
++			lessopen++;
++			returnfd = 2;
++		}
+ #endif
+ 	}
+ 	if (*lessopen == '-') {
+@@ -879,17 +889,39 @@ open_altfile(filename, pf, pfd)
+ 		 */
+ 		f = fileno(fd);
+ 		SET_BINARY(f);
++		*pfd = (void *) fd;
++		*pf = f;
+ 		if (read(f, &c, 1) != 1)
+ 		{
+ 			/*
+-			 * Pipe is empty.  This means there is no alt file.
++			 * Error or pipe is empty. Close it and eventually
++			 * check exit status of the pipe process.
+ 			 */
+-			pclose(fd);
++			*pf = 0;
++			*pfd = NULL;
++			if (pclose(fd) != 0 && returnfd == 2) {
++				/*
++				 * Exit status was zero, so the EOF was correct empty output.
++				 * Let the program open the archive again and seek to its end to
++				 * be sure to get EOF.
++				 * Quite ugly hack, to provide platform independency
++				 */
++				fd = fopen(filename, "rb");
++				if (fd == NULL)
++					return (NULL);
++				int check_seek = fseek(fd, 0, SEEK_END);
++				if (check_seek != 0)
++				{
++					fclose(fd);
++					return (NULL);
++				}
++				*pf = fileno(fd);
++				*pfd = (void *) fd;
++				return (save(filename));
++			}
+ 			return (NULL);
+ 		}
+ 		ch_ungetchar(c);
+-		*pfd = (void *) fd;
+-		*pf = f;
+ 		return (save("-"));
+ 	}
+ #endif
