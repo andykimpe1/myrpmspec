@@ -1,0 +1,102 @@
+diff -up qt-everywhere-opensource-src-4.6.2/examples/qtestlib/tutorial3/tutorial3.pro.gcc qt-everywhere-opensource-src-4.6.2/examples/qtestlib/tutorial3/tutorial3.pro
+--- qt-everywhere-opensource-src-4.6.2/examples/qtestlib/tutorial3/tutorial3.pro.gcc	2014-02-12 00:54:19.527184643 +0100
++++ qt-everywhere-opensource-src-4.6.2/examples/qtestlib/tutorial3/tutorial3.pro	2014-02-12 00:54:55.184184733 +0100
+@@ -1,6 +1,8 @@
+ SOURCES = testgui.cpp
+ CONFIG  += qtestlib
+ 
++*-g++*: QMAKE_CXXFLAGS += -fno-strict-aliasing
++
+ # install
+ target.path = $$[QT_INSTALL_EXAMPLES]/qtestlib/tutorial3
+ sources.files = $$SOURCES *.pro
+diff -up qt-everywhere-opensource-src-4.6.2/examples/qtestlib/tutorial4/tutorial4.pro.gcc qt-everywhere-opensource-src-4.6.2/examples/qtestlib/tutorial4/tutorial4.pro
+--- qt-everywhere-opensource-src-4.6.2/examples/qtestlib/tutorial4/tutorial4.pro.gcc	2014-02-12 00:56:03.420184905 +0100
++++ qt-everywhere-opensource-src-4.6.2/examples/qtestlib/tutorial4/tutorial4.pro	2014-02-12 00:56:12.968184929 +0100
+@@ -1,6 +1,8 @@
+ SOURCES = testgui.cpp
+ CONFIG  += qtestlib
+ 
++*-g++*: QMAKE_CXXFLAGS += -fno-strict-aliasing
++
+ # install
+ target.path = $$[QT_INSTALL_EXAMPLES]/qtestlib/tutorial4
+ sources.files = $$SOURCES *.pro
+diff -up qt-everywhere-opensource-src-4.6.2/src/corelib/tools/qstring.h.gcc qt-everywhere-opensource-src-4.6.2/src/corelib/tools/qstring.h
+--- qt-everywhere-opensource-src-4.6.2/src/corelib/tools/qstring.h.gcc	2010-02-11 16:55:23.000000000 +0100
++++ qt-everywhere-opensource-src-4.6.2/src/corelib/tools/qstring.h	2014-02-11 23:30:16.245171962 +0100
+@@ -685,9 +685,9 @@ inline QString::QString(const QLatin1Str
+ inline int QString::length() const
+ { return d->size; }
+ inline const QChar QString::at(int i) const
+-{ Q_ASSERT(i >= 0 && i < size()); return d->data[i]; }
++{ Q_ASSERT(uint(i) < uint(size())); return d->data[i]; }
+ inline const QChar QString::operator[](int i) const
+-{ Q_ASSERT(i >= 0 && i < size()); return d->data[i]; }
++{ Q_ASSERT(uint(i) < uint(size())); return d->data[i]; }
+ inline const QChar QString::operator[](uint i) const
+ { Q_ASSERT(i < uint(size())); return d->data[i]; }
+ inline bool QString::isEmpty() const
+@@ -785,7 +785,7 @@ public:
+     inline operator QChar() const
+         { return i < s.d->size ? s.d->data[i] : 0; }
+     inline QCharRef &operator=(const QChar &c)
+-        { if (i >= s.d->size) s.expand(i); else s.detach();
++        { if (uint(i) >= uint(s.d->size)) s.expand(i); else s.detach();
+           s.d->data[i] = c.unicode();  return *this; }
+ 
+     // An operator= for each QChar cast constructors
+diff -up qt-everywhere-opensource-src-4.6.2/src/gui/text/qtextformat.cpp.gcc qt-everywhere-opensource-src-4.6.2/src/gui/text/qtextformat.cpp
+--- qt-everywhere-opensource-src-4.6.2/src/gui/text/qtextformat.cpp.gcc	2010-02-11 16:55:22.000000000 +0100
++++ qt-everywhere-opensource-src-4.6.2/src/gui/text/qtextformat.cpp	2014-02-11 23:30:16.246171962 +0100
+@@ -265,10 +265,18 @@ private:
+     friend QDataStream &operator>>(QDataStream &, QTextFormat &);
+ };
+ 
+-// this is only safe if sizeof(int) == sizeof(float)
++// this is only safe bacause sizeof(int) == sizeof(float)
+ static inline uint hash(float d)
+ {
++#ifdef Q_CC_GNU
++    // this is a GCC extension and isn't guaranteed to work in other compilers
++    // the reinterpret_cast below generates a strict-aliasing warning with GCC
++    union { float f; uint u; } cvt;
++    cvt.f = d;
++    return cvt.u;
++#else
+     return reinterpret_cast<uint&>(d);
++#endif
+ }
+ 
+ static inline uint hash(const QColor &color)
+diff -up qt-everywhere-opensource-src-4.6.2/src/tools/rcc/rcc.pri.gcc qt-everywhere-opensource-src-4.6.2/src/tools/rcc/rcc.pri
+--- qt-everywhere-opensource-src-4.6.2/src/tools/rcc/rcc.pri.gcc	2010-02-11 16:55:23.000000000 +0100
++++ qt-everywhere-opensource-src-4.6.2/src/tools/rcc/rcc.pri	2014-02-11 23:30:16.246171962 +0100
+@@ -1,3 +1,5 @@
+ INCLUDEPATH += $$PWD
+ HEADERS += $$PWD/rcc.h
+ SOURCES += $$PWD/rcc.cpp
++
++*-g++*: QMAKE_CXXFLAGS += -fno-strict-aliasing
+diff -up qt-everywhere-opensource-src-4.6.2/src/gui/painting/qpaintengineex.cpp.than qt-everywhere-opensource-src-4.6.2/src/gui/painting/qpaintengineex.cpp
+--- qt-everywhere-opensource-src-4.6.2/src/gui/painting/qpaintengineex.cpp.than	2014-02-12 00:09:36.940177898 +0100
++++ qt-everywhere-opensource-src-4.6.2/src/gui/painting/qpaintengineex.cpp	2014-02-12 10:53:18.129275008 +0100
+@@ -824,14 +824,11 @@ void QPaintEngineEx::drawLines(const QLi
+ void QPaintEngineEx::drawEllipse(const QRectF &r)
+ {
+     qreal pts[26]; // QPointF[13] without constructors...
+-    union {
+-        qreal *ptr;
+-        QPointF *points;
+-    } x;
+-    x.ptr = pts;
+-
++    QPointF *points;
++    __asm ("" : "=r" (points) : "0" (&pts[0]) : "memory");
+     int point_count = 0;
+-    x.points[0] = qt_curves_for_arc(r, 0, -360, x.points + 1, &point_count);
++    points[0] = qt_curves_for_arc(r, 0, -360, points + 1, &point_count);
++    __asm ("" : : "g" (points), "g" (&pts[0]) : "memory");
+     QVectorPath vp((qreal *) pts, 13, qpaintengineex_ellipse_types, QVectorPath::EllipseHint);
+     draw(vp);
+ }

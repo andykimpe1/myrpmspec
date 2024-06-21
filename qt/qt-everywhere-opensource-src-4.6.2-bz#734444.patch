@@ -1,0 +1,91 @@
+diff -up qt-everywhere-opensource-src-4.6.2/src/network/ssl/qsslsocket_openssl.cpp.bz#734444 qt-everywhere-opensource-src-4.6.2/src/network/ssl/qsslsocket_openssl.cpp
+--- qt-everywhere-opensource-src-4.6.2/src/network/ssl/qsslsocket_openssl.cpp.bz#734444	2012-03-21 15:56:11.659831142 +0100
++++ qt-everywhere-opensource-src-4.6.2/src/network/ssl/qsslsocket_openssl.cpp	2012-03-21 18:14:38.330853525 +0100
+@@ -58,12 +58,6 @@
+ #include <QtCore/qurl.h>
+ #include <QtCore/qvarlengtharray.h>
+ 
+-static void initNetworkResources()
+-{
+-    // Initialize resources
+-    Q_INIT_RESOURCE(network);
+-}
+-
+ QT_BEGIN_NAMESPACE
+ 
+ // Useful defines
+@@ -402,9 +396,6 @@ bool QSslSocketPrivate::ensureInitialize
+     if (!q_initialized) {
+         q_initialized = true;
+ 
+-        // Initialize resources
+-        initNetworkResources();
+-
+         // Initialize OpenSSL.
+         q_CRYPTO_set_id_callback(id_function);
+         q_CRYPTO_set_locking_callback(locking_function);
+@@ -482,25 +473,33 @@ void QSslSocketPrivate::resetDefaultCiph
+ 
+ QList<QSslCertificate> QSslSocketPrivate::systemCaCertificates()
+ {
++    QList<QSslCertificate> systemCerts;
+ 
+-    QFile caBundle;
+-
+-#ifdef Q_OS_UNIX
+-    // Check known locations for the system's default bundle.  ### On Windows,
+-    // we should use CAPI to find the bundle, and not rely on default unix
+-    // locations.
+-    caBundle.setFileName(QLatin1String("/etc/pki/tls/certs/ca-bundle.crt"));
+-    if (caBundle.open(QIODevice::ReadOnly | QIODevice::Text))
+-       return QSslCertificate::fromDevice(&caBundle);
+-#endif
+-
+-    // Qt provides a default bundle of certificates
+-    caBundle.setFileName(QLatin1String(":/trolltech/network/ssl/qt-ca-bundle.crt"));
+-    if (caBundle.open(QIODevice::ReadOnly | QIODevice::Text))
+-        return QSslCertificate::fromDevice(&caBundle);
+-
+-    // Unreachable; return no bundle.
+-    return QList<QSslCertificate>();
++    QSet<QString> certFiles;
++    QList<QByteArray> directories;
++    directories << "/etc/ssl/certs/"; // (K)ubuntu, OpenSUSE, Mandriva, MeeGo ...
++    directories << "/usr/lib/ssl/certs/"; // Gentoo, Mandrake
++    directories << "/usr/share/ssl/"; // Centos, Redhat, SuSE
++
++    QDir currentDir;
++    QStringList nameFilters;
++    nameFilters << QLatin1String("*.pem") << QLatin1String("*.crt");
++    currentDir.setNameFilters(nameFilters);
++    for (int a = 0; a < directories.count(); a++) {
++        currentDir.setPath(QLatin1String(directories.at(a)));
++        QDirIterator it(currentDir);
++        while(it.hasNext()) {
++            it.next();
++            // use canonical path here to not load the same certificate twice if symlinked
++            certFiles.insert(it.fileInfo().canonicalFilePath());
++        }
++    }
++    QSetIterator<QString> it(certFiles);
++    while(it.hasNext()) {
++        systemCerts.append(QSslCertificate::fromPath(it.next()));
++    }
++    systemCerts.append(QSslCertificate::fromPath(QLatin1String("/etc/pki/tls/certs/ca-bundle.crt"), QSsl::Pem)); // Fedora, Mandriva
++    return systemCerts;
+ }
+ 
+ void QSslSocketBackendPrivate::startClientEncryption()
+diff -up qt-everywhere-opensource-src-4.6.2/src/network/ssl/ssl.pri.me qt-everywhere-opensource-src-4.6.2/src/network/ssl/ssl.pri
+--- qt-everywhere-opensource-src-4.6.2/src/network/ssl/ssl.pri.me	2012-03-21 19:02:57.647772992 +0100
++++ qt-everywhere-opensource-src-4.6.2/src/network/ssl/ssl.pri	2012-03-21 19:03:11.637770390 +0100
+@@ -31,9 +31,6 @@ symbian {
+                ssl/qsslsocket_openssl.cpp \
+                ssl/qsslsocket_openssl_symbols.cpp
+ 
+-    # Include Qt's default CA bundle
+-    RESOURCES += network.qrc
+-
+     # Add optional SSL libs
+     LIBS_PRIVATE += $$OPENSSL_LIBS
+ }

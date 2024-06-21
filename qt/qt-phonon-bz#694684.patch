@@ -1,0 +1,78 @@
+--- qt-everywhere-opensource-src-4.6.2-vanilla/src/3rdparty/phonon/gstreamer/backend.cpp	2011-03-29 15:26:17.531740397 +0200
++++ qt-everywhere-opensource-src-4.6.2-vanilla/src/3rdparty/phonon/gstreamer/backend.cpp	2011-03-29 15:35:21.973973996 +0200
+@@ -393,9 +393,10 @@ 
+ void Backend::addBusWatcher(MediaObject* node)
+ {
+     Q_ASSERT(node);
+-    GstBus *bus = gst_pipeline_get_bus (GST_PIPELINE(node->pipeline()));
+-    gst_bus_add_watch (bus, busCall, node);
++    GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(node->pipeline()));
++    gst_bus_add_watch(bus, busCall, node);
+     gst_object_unref(bus);
++    m_watchList.append(node);
+ }
+ 
+ /***
+@@ -405,6 +406,7 @@ 
+ {
+     Q_ASSERT(node);
+     g_source_remove_by_user_data(node);
++    m_watchList.removeAll(node);
+ }
+ 
+ /***
+@@ -414,7 +416,10 @@ 
+ void Backend::handleBusMessage(Message message)
+ {
+     MediaObject *mediaObject = message.source();
+-    mediaObject->handleBusMessage(message);
++    Q_ASSERT(mediaObject);
++    if (m_watchList.contains(mediaObject)) {
++        mediaObject->handleBusMessage(message);
++    }
+ }
+ 
+ DeviceManager* Backend::deviceManager() const
+--- qt-everywhere-opensource-src-4.6.2-vanilla/src/3rdparty/phonon/gstreamer/backend.h	2011-03-29 15:26:17.529760968 +0200
++++ qt-everywhere-opensource-src-4.6.2-vanilla/src/3rdparty/phonon/gstreamer/backend.h	2011-03-29 15:35:21.974979803 +0200
+@@ -92,6 +92,9 @@ 
+     EffectManager *m_effectManager;
+     DebugLevel m_debugLevel;
+     bool m_isValid;
++
++    // To ensure that only such messages get forwarded that target an still existing MediaObject.
++    QList<MediaObject *> m_watchList;
+ };
+ }
+ } // namespace Phonon::Gstreamer
+--- qt-everywhere-opensource-src-4.6.2-vanilla/src/3rdparty/phonon/phonon/mediaobject.cpp	2011-03-29 15:26:17.748738107 +0200
++++ qt-everywhere-opensource-src-4.6.2-vanilla/src/3rdparty/phonon/phonon/mediaobject.cpp	2011-03-29 15:41:39.195989723 +0200
+@@ -452,10 +452,17 @@ 
+     Q_ASSERT(m_backendObject);
+     //pDebug() << Q_FUNC_INFO;
+ 
++    // Queue the stateChanged connection to prevent issues with Amarok's engine controller.
++    // On error Amarok's engine controller will delete the MediaObject, meaning if
++    // the error state was emitted from the same thread it will destroy the backend's
++    // MediaObject *while* it is doing something.
++    // before Amarok starts doing nasty things to us.
++
++
+ #ifndef QT_NO_PHONON_ABSTRACTMEDIASTREAM
+-    QObject::connect(m_backendObject, SIGNAL(stateChanged(Phonon::State,Phonon::State)), q, SLOT(_k_stateChanged(Phonon::State,Phonon::State)));
++    QObject::connect(m_backendObject, SIGNAL(stateChanged(Phonon::State,Phonon::State)), q, SLOT(_k_stateChanged(Phonon::State,Phonon::State)), Qt::QueuedConnection);
+ #else
+-    QObject::connect(m_backendObject, SIGNAL(stateChanged(Phonon::State,Phonon::State)), q, SIGNAL(stateChanged(Phonon::State,Phonon::State)));
++    QObject::connect(m_backendObject, SIGNAL(stateChanged(Phonon::State,Phonon::State)), q, SIGNAL(stateChanged(Phonon::State,Phonon::State)), Qt::QueuedConnection);
+ #endif // QT_NO_PHONON_ABSTRACTMEDIASTREAM
+     QObject::connect(m_backendObject, SIGNAL(tick(qint64)),             q, SIGNAL(tick(qint64)));
+     QObject::connect(m_backendObject, SIGNAL(seekableChanged(bool)),    q, SIGNAL(seekableChanged(bool)));
+@@ -463,7 +470,7 @@ 
+     QObject::connect(m_backendObject, SIGNAL(hasVideoChanged(bool)),    q, SIGNAL(hasVideoChanged(bool)));
+ #endif //QT_NO_PHONON_VIDEO
+     QObject::connect(m_backendObject, SIGNAL(bufferStatus(int)),        q, SIGNAL(bufferStatus(int)));
+-    QObject::connect(m_backendObject, SIGNAL(finished()),               q, SIGNAL(finished()));
++    QObject::connect(m_backendObject, SIGNAL(finished()),               q, SIGNAL(finished()), Qt::QueuedConnection);
+     QObject::connect(m_backendObject, SIGNAL(aboutToFinish()),          q, SLOT(_k_aboutToFinish()));
+     QObject::connect(m_backendObject, SIGNAL(prefinishMarkReached(qint32)), q, SIGNAL(prefinishMarkReached(qint32)));
+     QObject::connect(m_backendObject, SIGNAL(totalTimeChanged(qint64)), q, SIGNAL(totalTimeChanged(qint64)));
