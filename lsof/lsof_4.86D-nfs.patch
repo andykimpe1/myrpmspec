@@ -1,0 +1,683 @@
+diff -upr lsof_4.82-rh.old/00PORTING lsof_4.82-rh/00PORTING
+--- lsof_4.82-rh.old/00PORTING	2012-01-10 13:06:14.000000000 +0100
++++ lsof_4.82-rh/00PORTING	2012-01-10 13:06:26.565602730 +0100
+@@ -1415,6 +1415,12 @@ possibilities
+ 			this symbol to be defined for proper handling of
+ 			stream export data.
+ 
++    SAVE_MP_IN_SFILE	indicates the dialect needs to have the mounts
++			structure pointer for a file system search argument
++			recorded in the dialect's sfile structure.  This
++			definition is made in the dialect's dlsof.h header
++			file within the sfile structure.
++
+     TIMEVAL_LSOF        defines the name of the timeval structure.
+ 			The default is timeval.  /dev/kmem-based
+ 			Linux lsof redefines timeval with this
+diff -upr lsof_4.82-rh.old/arg.c lsof_4.82-rh/arg.c
+--- lsof_4.82-rh.old/arg.c	2012-01-10 13:06:14.000000000 +0100
++++ lsof_4.82-rh/arg.c	2012-01-10 13:06:26.566602292 +0100
+@@ -312,7 +312,13 @@ ck_file_arg(i, ac, av, fv, rs, sbp)
+ #endif	/* defined(CKFA_MPXCHAN) */
+ 
+ 		} else {
++
++#if	defined(SAVE_MP_IN_SFILE)
++		    sfp->mp = mp = mmp[mx++];
++#else	/* !defined(SAVE_MP_IN_SFILE) */
+ 		    mp = mmp[mx++];
++#endif	/* defined(SAVE_MP_IN_SFILE) */
++
+ 		    ss++;
+ 
+ #if	defined(HASPROCFS)
+diff -upr lsof_4.82-rh.old/Configure lsof_4.82-rh/Configure
+--- lsof_4.82-rh.old/Configure	2012-01-10 13:06:14.000000000 +0100
++++ lsof_4.82-rh/Configure	2012-01-10 13:06:26.573599096 +0100
+@@ -4697,7 +4697,15 @@ return(0); }
+     esac	# }
+     LSOF_CFGF="-Dsolaris=$LSOF_VERS $LSOF_CFGF"
+ 
++    # Test for <sys/fs/cachefs_fs.h>.
++
++    if test -r ${LSOF_INCLUDE}/sys/fs/cachefs_fs.h	# {
++    then
++      LSOF_CFGF="$LSOF_CFGF -DHASCACHEFS"
++    fi	# }
++
+     # Test for <utmpx.h>
++
+     if test -r ${LSOF_INCLUDE}/utmpx.h	# {
+     then
+       LSOF_CFGF="$LSOF_CFGF -DHASUTMPX"
+diff -upr lsof_4.82-rh.old/dialects/linux/dfile.c lsof_4.82-rh/dialects/linux/dfile.c
+--- lsof_4.82-rh.old/dialects/linux/dfile.c	2002-02-26 16:20:18.000000000 +0100
++++ lsof_4.82-rh/dialects/linux/dfile.c	2012-01-10 13:06:26.605584512 +0100
+@@ -40,6 +40,329 @@ static char *rcsid = "$Id: dfile.c,v 1.7
+ 
+ 
+ /*
++ * Local structures
++ */
++
++struct hsfile {
++	struct sfile *s;		/* the Sfile table address */
++	struct hsfile *next;		/* the next hash bucket entry */
++};
++
++/*
++ * Local static variables
++ */
++
++static struct hsfile *HbyFdi =		/* hash by file (dev,ino) buckets */
++	(struct hsfile *)NULL;
++static int HbyFdiCt = 0;		/* HbyFdi entry count */
++static struct hsfile *HbyFrd =		/* hash by file raw device buckets */
++	(struct hsfile *)NULL;
++static int HbyFrdCt = 0;		/* HbyFrd entry count */
++static struct hsfile *HbyFsd =		/* hash by file system buckets */
++	(struct hsfile *)NULL;
++static int HbyFsdCt = 0;		/* HbyFsd entry count */
++static struct hsfile *HbyNm =		/* hash by name buckets */
++	(struct hsfile *)NULL;
++static int HbyNmCt = 0;			/* HbyNm entry count */
++
++
++/*
++ * Local definitions
++ */
++
++#define	SFDIHASH	4094		/* Sfile hash by (device,inode) number
++					 * pair bucket count (power of 2!) */
++#define	SFFSHASH	1024		/* Sfile hash by file system device
++					 * number bucket count (power of 2!) */
++#define SFHASHDEVINO(maj, min, ino, mod) ((int)(((int)((((int)(maj+1))*((int)((min+1))))+ino)*31415)&(mod-1)))
++					/* hash for Sfile by major device,
++					 * minor device, and inode, modulo mod
++					 * (mod must be a power of 2) */
++#define	SFRDHASH	1024		/* Sfile hash by raw device number
++					 * bucket count (power of 2!) */
++#define SFHASHRDEVI(maj, min, rmaj, rmin, ino, mod) ((int)(((int)((((int)(maj+1))*((int)((min+1))))+((int)(rmaj+1)*(int)(rmin+1))+ino)*31415)&(mod-1)))
++					/* hash for Sfile by major device,
++					 * minor device, major raw device,
++					 * minor raw device, and inode, modulo
++					 * mod (mod must be a power of 2) */
++#define	SFNMHASH	4096		/* Sfile hash by name bucket count
++					 * (must be a power of 2!) */
++
++
++/*
++ * hashSfile() - hash Sfile entries for use in is_file_named() searches
++ */
++
++void
++hashSfile()
++{
++	static int hs = 0;
++	int i;
++	struct sfile *s;
++	struct hsfile *sh, *sn;
++/*
++ * Do nothing if there are no file search arguments cached or if the
++ * hashes have already been constructed.
++ */
++	if (!Sfile || hs)
++	    return;
++/*
++ * Allocate hash buckets by (device,inode), file system device, and file name.
++ */
++	if (!(HbyFdi = (struct hsfile *)calloc((MALLOC_S)SFDIHASH,
++					       sizeof(struct hsfile))))
++	{
++	    (void) fprintf(stderr,
++		"%s: can't allocate space for %d (dev,ino) hash buckets\n",
++		Pn, SFDIHASH);
++	    Exit(1);
++	}
++	if (!(HbyFrd = (struct hsfile *)calloc((MALLOC_S)SFRDHASH,
++					       sizeof(struct hsfile))))
++	{
++	    (void) fprintf(stderr,
++		"%s: can't allocate space for %d rdev hash buckets\n",
++		Pn, SFRDHASH);
++	    Exit(1);
++	}
++	if (!(HbyFsd = (struct hsfile *)calloc((MALLOC_S)SFFSHASH,
++					       sizeof(struct hsfile))))
++	{
++	    (void) fprintf(stderr,
++		"%s: can't allocate space for %d file sys hash buckets\n",
++		Pn, SFFSHASH);
++	    Exit(1);
++	}
++	if (!(HbyNm = (struct hsfile *)calloc((MALLOC_S)SFNMHASH,
++					      sizeof(struct hsfile))))
++	{
++	    (void) fprintf(stderr,
++		"%s: can't allocate space for %d name hash buckets\n",
++		Pn, SFNMHASH);
++	    Exit(1);
++	}
++	hs++;
++/*
++ * Scan the Sfile chain, building file, file system, raw device, and file
++ * name hash bucket chains.
++ */
++	for (s = Sfile; s; s = s->next) {
++	    for (i = 0; i < 3; i++) {
++		switch (i) {
++		case 0:			/* hash by name */
++		    if (!s->aname)
++			continue;
++		    sh = &HbyNm[hashbyname(s->aname, SFNMHASH)];
++		    HbyNmCt++;
++		    break;
++		case 1:			/* hash by device and inode, or file
++					 * system device */
++		    if (s->type) {
++			sh = &HbyFdi[SFHASHDEVINO(GET_MAJ_DEV(s->dev),
++						  GET_MIN_DEV(s->dev), s->i,
++						  SFDIHASH)];
++			HbyFdiCt++;
++		    } else {
++			sh = &HbyFsd[SFHASHDEVINO(GET_MAJ_DEV(s->dev),
++						  GET_MIN_DEV(s->dev),
++						  0,
++						  SFFSHASH)];
++			HbyFsdCt++;
++		    }
++		    break;
++		case 2:			/* hash by file's raw device */
++		    if ((s->mode == S_IFCHR) || (s->mode == S_IFBLK)) {
++			sh = &HbyFrd[SFHASHRDEVI(GET_MAJ_DEV(s->dev),
++						 GET_MIN_DEV(s->dev),
++						 GET_MAJ_DEV(s->rdev),
++						 GET_MIN_DEV(s->rdev),
++						 s->i,
++						 SFRDHASH)];
++			HbyFrdCt++;
++		    } else
++			continue;
++		}
++	    /*
++	     * Add hash to the bucket's chain, allocating new entries for
++	     * all after the first.
++	     */
++		if (!sh->s) {
++		    sh->s = s;
++		    sh->next = (struct hsfile *)NULL;
++		    continue;
++		} else {
++		    if (!(sn = (struct hsfile *)malloc(
++				(MALLOC_S)sizeof(struct hsfile))))
++		    {
++			(void) fprintf(stderr,
++			    "%s: can't allocate hsfile bucket for: %s\n",
++			    Pn, s->aname);
++			Exit(1);
++		    }
++		    sn->s = s;
++		    sn->next = sh->next;
++		    sh->next = sn;
++		}
++	    }
++	}
++}
++
++
++/*
++ * is_file_named() - is this file named?
++ */
++
++int
++is_file_named(ty, p, mp, cd)
++	int ty;				/* search type: 0 = only by device
++					 *		    and inode
++					 *		1 = by device and
++					 *		    inode, or by file
++					 *		    system device and
++					 *		    path for NFS file
++					 *		    systems
++					 *		2 = only by path
++					 */
++	char *p;			/* path name (device and inode are
++					 * identified via *Lf) */
++	struct mounts *mp;		/* NFS file system (NULL if not) */
++	int cd;				/* character or block type file --
++					 * VCHR or VBLK vnode, or S_IFCHR
++					 * or S_IFBLK inode */
++{
++	char *ep;
++	int f = 0;
++	struct mounts *smp;
++	struct sfile *s = (struct sfile *)NULL;
++	struct hsfile *sh;
++	size_t sz;
++/*
++ * Check for a path name match, as requested.
++ */
++	if ((ty == 2) && p && HbyNmCt) {
++	    for (sh = &HbyNm[hashbyname(p, SFNMHASH)]; sh; sh = sh->next) {
++		if ((s = sh->s) && strcmp(p, s->aname) == 0) {
++		    f = 2;
++		    break;
++		}
++	    }
++	}
++/*
++ * Check for a regular file by device and inode number.
++ */
++	if (!f && (ty < 2) && HbyFdiCt && Lf->dev_def
++	&& (Lf->inp_ty == 1 || Lf->inp_ty == 3))
++	{
++	    for (sh = &HbyFdi[SFHASHDEVINO(GET_MAJ_DEV(Lf->dev),
++					   GET_MIN_DEV(Lf->dev),
++					   Lf->inode,
++					   SFDIHASH)];
++		 sh;
++		 sh = sh->next)
++	    {
++		if ((s = sh->s) && (Lf->dev == s->dev)
++		&&  (Lf->inode == s->i)) {
++		    f = 1;
++		    break;
++		}
++	    }
++	}
++/*
++ * Check for a file system match.
++ */
++	if (!f && (ty == 1) && HbyFsdCt && Lf->dev_def) {
++	    for (sh = &HbyFsd[SFHASHDEVINO(GET_MAJ_DEV(Lf->dev),
++	    				   GET_MIN_DEV(Lf->dev), 0,
++					   SFFSHASH)];
++		 sh;
++		 sh = sh->next)
++	    {
++		if ((s = sh->s) && (s->dev == Lf->dev)) {
++		    if (Lf->ntype != N_NFS) {
++
++		    /*
++		     * A non-NFS file matches to a non-NFS file system by
++		     * device.
++		     */
++			if (!(smp = s->mp) || (smp->ty != N_NFS)) {
++			    f = 1;
++			    break;
++			}
++		    } else {
++
++		    /*
++		     * An NFS file must also match to a file system by the
++		     * the path name of the file system -- i.e., the first
++		     * part of the file's path.  This terrible, non-UNIX
++		     * hack is forced on lsof by an egregious error in
++		     * Linux NFS that can assign the same device number
++		     * to two different NFS mounts.
++		     */
++			if (p && mp && mp->dirl && mp->dir && s->name
++			&&  !strncmp(mp->dir, s->name, mp->dirl))
++			{
++			    f = 1;
++			    break;
++		 	}
++		    }
++		}
++	    }
++	}
++/*
++ * Check for a character or block device match.
++ */
++	if (!f && !ty && HbyFrdCt && cd
++	&&  Lf->dev_def && (Lf->dev == DevDev)
++	&&  Lf->rdev_def
++	&& (Lf->inp_ty == 1 || Lf->inp_ty == 3))
++	{
++	    for (sh = &HbyFrd[SFHASHRDEVI(GET_MAJ_DEV(Lf->dev),
++					  GET_MIN_DEV(Lf->dev),
++					  GET_MAJ_DEV(Lf->rdev),
++					  GET_MIN_DEV(Lf->rdev),
++					  Lf->inode, SFRDHASH)];
++		 sh;
++		 sh = sh->next)
++	    {
++		if ((s = sh->s) && (s->dev == Lf->dev)
++		&&  (s->rdev == Lf->rdev) && (s->i == Lf->inode))
++		{
++		    f = 1;
++		    break;
++		}
++	    }
++	}
++/*
++ * Convert the name if a match occurred.
++ */
++	switch (f) {
++	case 0:
++	    return(0);
++	case 1:
++	    if (s->type) {
++
++	    /*
++	     * If the search argument isn't a file system, propagate it
++	     * to Namech[]; otherwise, let printname() compose the name.
++	     */
++		(void) snpf(Namech, Namechl, "%s", s->name);
++		if (s->devnm) {
++		    ep = endnm(&sz);
++		    (void) snpf(ep, sz, " (%s)", s->devnm);
++		}
++	    }
++	    break;
++	case 2:
++	    (void) strcpy(Namech, p);
++	    break;
++	}
++	if (s)
++	    s->f = 1;
++	return(1);
++}
++
++
++/*
+  * printdevname() - print character device name
+  *
+  * Note: this function should not be needed in /proc-based lsof, but
+diff -upr lsof_4.82-rh.old/dialects/linux/dlsof.h lsof_4.82-rh/dialects/linux/dlsof.h
+--- lsof_4.82-rh.old/dialects/linux/dlsof.h	2008-10-21 18:17:24.000000000 +0200
++++ lsof_4.82-rh/dialects/linux/dlsof.h	2012-01-10 13:06:26.607583597 +0100
+@@ -136,11 +136,12 @@ typedef	unsigned long	KA_T;
+  */
+ 
+ struct mounts {
+-        char *dir;              	/* directory (mounted on) */
++        char *dir;              	/* directory name (mounted on) */
+ 	char *fsname;           	/* file system
+ 					 * (symbolic links unresolved) */
+ 	char *fsnmres;           	/* file system
+ 					 * (symbolic links resolved) */
++	size_t dirl;			/* length of directory name */
+         dev_t dev;              	/* directory st_dev */
+ 	dev_t rdev;			/* directory st_rdev */
+ 	INODETYPE inode;		/* directory st_ino */
+@@ -163,6 +164,9 @@ struct sfile {
+ 				 	 *	      1 = regular file */
+ 	INODETYPE i;			/* inode number */
+ 	int f;				/* file found flag */
++	struct mounts *mp;		/* mount structure pointer for file
++					 * system type entries */
++#define	SAVE_MP_IN_SFILE	1	/* for ck_file_arg() im arg.c */
+ 	struct sfile *next;		/* forward link */
+ };
+ 
+diff -upr lsof_4.82-rh.old/dialects/linux/dmnt.c lsof_4.82-rh/dialects/linux/dmnt.c
+--- lsof_4.82-rh.old/dialects/linux/dmnt.c	2012-01-10 13:06:14.000000000 +0100
++++ lsof_4.82-rh/dialects/linux/dmnt.c	2012-01-10 13:06:26.608583139 +0100
+@@ -56,7 +56,7 @@ static char *rcsid = "$Id: dmnt.c,v 1.17
+ _PROTOTYPE(static char *cvtoe,(char *os));
+ 
+ #if	defined(HASMNTSUP)
+-_PROTOTYPE(static int getmntdev,(char *dn, struct stat *s, int *ss));
++_PROTOTYPE(static int getmntdev,(char *dn, size_t dnl, struct stat *s, int *ss));
+ _PROTOTYPE(static int hash_mnt,(char *dn));
+ #endif	/* defined(HASMNTSUP) */
+ 
+@@ -67,7 +67,8 @@ _PROTOTYPE(static int hash_mnt,(char *dn
+ 
+ #if	defined(HASMNTSUP)
+ typedef struct mntsup {
+-	char *dn;			/* directory name */
++	char *dn;			/* mounted directory name */
++	size_t dnl;			/* strlen(dn) */
+ 	dev_t dev;			/* device number */
+ 	int ln;				/* line on which defined */
+ 	struct mntsup *next;		/* next entry */
+@@ -180,8 +181,9 @@ cvtoe(os)
+  */
+ 
+ static int
+-getmntdev(dn, s, ss)
+-	char *dn;			/* mount point directory name */
++getmntdev(dn, dnl, s, ss)
++	char *dn;			/* mounted directory name */
++	size_t dnl;			/* strlen(dn) */
+ 	struct stat *s;			/* stat(2) buffer receptor */
+ 	int *ss;			/* stat(2) status result -- i.e., SB_*
+ 					 * values */
+@@ -304,7 +306,7 @@ getmntdev(dn, s, ss)
+ 		}
+ 		h = hash_mnt(path);
+ 		for (mp = MSHash[h]; mp; mp = mp->next) {
+-		    if (!strcmp(mp->dn, path))
++		    if ((mp->dnl == dnl) && !strcmp(mp->dn, path))
+ 			break;
+ 		}
+ 		if (mp) {
+@@ -338,6 +340,7 @@ getmntdev(dn, s, ss)
+ 		    Exit(1);
+ 		}
+ 		(void) strcpy(mpn->dn, path);
++		mpn->dnl = sz;
+ 		mpn->dev = dev;
+ 		mpn->ln = ln;
+ 		mpn->next = MSHash[h];
+@@ -368,13 +371,13 @@ getmntdev(dn, s, ss)
+ 	}
+ /*
+  * If no errors have been detected reading the mount supplement file, search
+- * its hash biuckets for the supplied directory path.
++ * its hash buckets for the supplied directory path.
+  */
+ 	if (err)
+ 	    return(0);
+ 	h = hash_mnt(dn);
+ 	for (mp = MSHash[h]; mp; mp = mp->next) {
+-	    if (!strcmp(dn, mp->dn)) {
++	    if ((dnl == mp->dnl) && !strcmp(dn, mp->dn)) {
+ 		memset((void *)s, 0, sizeof(struct stat));
+ 		s->st_dev = mp->dev;
+ 		*ss |= SB_DEV;
+@@ -415,8 +418,9 @@ hash_mnt(dn)
+ struct mounts *
+ readmnt()
+ {
+-	char buf[MAXPATHLEN], *cp, **fp;
++	char buf[MAXPATHLEN], *cp, **fp, *fsnm;
+ 	char *dn = (char *)NULL;
++	size_t dnl;
+ 	int ds;
+ 	char *fp0 = (char *)NULL;
+ 	char *fp1 = (char *)NULL;
+@@ -458,18 +462,21 @@ readmnt()
+ 	    if (!(fp0 = cvtoe(fp[0])) || !(fp1 = cvtoe(fp[1])))
+ 		continue;
+ 	/*
+-	 * Ignore an entry with a colon in the device name, followed by
+-	 * "(pid*" -- it's probably an automounter entry.
++	 * Locate any colon (':') in the device name.
++	 *
++	 * If the colon is followed by * "(pid*" -- it's probably an
++	 * automounter entry.
+ 	 *
+ 	 * Ignore autofs, pipefs, and sockfs entries.
+ 	 */
+-	    if ((cp = strchr(fp0, ':')) && !strncasecmp(++cp, "(pid", 4))
++	    cp = strchr(fp0, ':');
++	    if (cp && !strncasecmp(++cp, "(pid", 4))
+ 		continue;
+ 	    if (!strcasecmp(fp[2], "autofs") || !strcasecmp(fp[2], "pipefs")
+ 	    ||  !strcasecmp(fp[2], "sockfs"))
+ 		continue;
+ 	/*
+-	 * Interpolate a possible symbolic directory link.
++	 * Interpolate a possible symbolic mounted directory link.
+ 	 */
+ 	    if (dn)
+ 		(void) free((FREE_P *)dn);
+@@ -516,16 +523,12 @@ readmnt()
+ 	    }
+ 	    if (*dn != '/')
+ 		continue;
+-	/*
+-	 * Detect an NFS mount point.
+-	 */
+-	    if (!(nfs = strcasecmp(fp[2], "nfs")) && !HasNFS)
+-		HasNFS = 1;
++	    dnl = strlen(dn);
+ 	/*
+ 	 * Skip duplicate directories.
+ 	 */
+ 	    for (mp = Lmi; mp; mp = mp->next) {
+-		if (!strcmp(dn, mp->dir))
++		if ((dnl == mp->dirl) && !strcmp(dn, mp->dir))
+ 		    break;
+ 	    }
+ 	    if (mp)
+@@ -559,7 +562,7 @@ readmnt()
+ 	     */
+ 		if ((MntSup == 2) && MntSupP) {
+ 		    ds = 0;
+-		    if (getmntdev(dn, &sb, &ds) || !(ds & SB_DEV)) {
++		    if (getmntdev(dn, dnl, &sb, &ds) || !(ds & SB_DEV)) {
+ 			(void) fprintf(stderr,
+ 			    "%s: assuming dev=%#lx for %s from %s\n",
+ 			    Pn, (long)sb.st_dev, dn, MntSupP);
+@@ -579,6 +582,14 @@ readmnt()
+ #endif	/* defined(HASMNTSUP) */
+ 
+ 	/*
++	 * Test for NFS file system type.
++	 */
++	    if ((nfs = strcasecmp(fp[2], "nfs"))) {
++		if ((nfs = strcasecmp(fp[2], "nfs3")))
++		    nfs = strcasecmp(fp[2], "nfs4");
++	    }
++
++	/*
+ 	 * Allocate and fill a local mount structure.
+ 	 */
+ 	    if (!(mp = (struct mounts *)malloc(sizeof(struct mounts)))) {
+@@ -589,6 +600,7 @@ readmnt()
+ 	    }
+ 	    mp->dir = dn;
+ 	    dn = (char *)NULL;
++	    mp->dirl = dnl;
+ 	    mp->next = Lmi;
+ 	    mp->dev = ((mp->ds = ds) & SB_DEV) ? sb.st_dev : 0;
+ 	    mp->rdev = (ds & SB_RDEV) ? sb.st_rdev : 0;
+@@ -615,13 +627,14 @@ readmnt()
+ #endif	/* defined(HASMNTSUP) */
+ 
+ 	/*
+-	 * Save mounted-on directory name.
++	 * Save mounted-on device or directory name.
+ 	 */
+ 	    dn = fp0;
+ 	    fp0 = (char *)NULL;
+ 	    mp->fsname = dn;
+ 	/*
+-	 * Interpolate a possible file system (mounted-on) device name link.
++	 * Interpolate a possible file system (mounted-on) device name or
++	 * directory name link.
+ 	 *
+ 	 * Avoid Readlink() when requested.
+ 	 */
+diff -upr lsof_4.82-rh.old/dialects/linux/dnode.c lsof_4.82-rh/dialects/linux/dnode.c
+--- lsof_4.82-rh.old/dialects/linux/dnode.c	2012-01-10 13:06:14.000000000 +0100
++++ lsof_4.82-rh/dialects/linux/dnode.c	2012-01-10 13:06:26.609582684 +0100
+@@ -389,15 +389,16 @@ process_proc_node(p, s, ss, l, ls)
+ 	    type = s->st_mode & S_IFMT;
+ 	    switch (type) {
+ 	    case S_IFBLK:
+-		Ntype = N_BLK;
++		Lf->ntype = Ntype = N_BLK;
+ 		break;
+ 	    case S_IFCHR:
+-		Ntype = N_CHR;
++		Lf->ntype = Ntype = N_CHR;
+ 		break;
+ 	    case S_IFIFO:
+-		Ntype = N_FIFO;
++		Lf->ntype = Ntype = N_FIFO;
+ 		break;
+ 	    case S_IFSOCK:
++		/* Lf->ntype = Ntype = N_REGLR;		by alloc_lfile() */
+ 		process_proc_sock(p, s, ss, l, ls);
+ 		return;
+ 	    }
+@@ -420,9 +421,11 @@ process_proc_node(p, s, ss, l, ls)
+ 	if (Ntype == N_REGLR && (HasNFS == 2)) {
+ 	    for (mp = readmnt(); mp; mp = mp->next) {
+ 		if ((mp->ty == N_NFS)
+-		&&  (mp->ds & SB_DEV) && (Lf->dev == mp->dev)
++		&&  (mp->ds & SB_DEV) && Lf->dev_def && (Lf->dev == mp->dev)
++		&&  (mp->dir && mp->dirl
++		&&   !strncmp(mp->dir, p, mp->dirl))
+ 		) {
+-		    Ntype = N_NFS;
++		    Lf->ntype = Ntype = N_NFS;
+ 		    break;
+ 		}
+ 	    }
+@@ -508,7 +511,6 @@ process_proc_node(p, s, ss, l, ls)
+ 	    tn = "unknown";
+ 	if (tn)
+ 	    (void) snpf(Lf->type, sizeof(Lf->type), "%s", tn);
+-	Lf->ntype = Ntype;
+ /*
+  * Record an NFS file selection.
+  */
+@@ -518,7 +520,7 @@ process_proc_node(p, s, ss, l, ls)
+  * Test for specified file.
+  */
+ 	if (Sfile
+-	&& is_file_named((char *)NULL,
++	&& is_file_named(1, p, mp,
+ 			 ((type == S_IFCHR) || (type == S_IFBLK)) ? 1 : 0))
+ 	    Lf->sf |= SELNM;
+ /*
+diff -upr lsof_4.82-rh.old/dialects/linux/dproto.h lsof_4.82-rh/dialects/linux/dproto.h
+--- lsof_4.82-rh.old/dialects/linux/dproto.h	2008-04-15 15:32:35.000000000 +0200
++++ lsof_4.82-rh/dialects/linux/dproto.h	2012-01-10 13:06:26.610582230 +0100
+@@ -43,7 +43,7 @@ _PROTOTYPE(extern int enter_cntx_arg,(ch
+ 
+ _PROTOTYPE(extern int get_fields,(char *ln, char *sep, char ***fr, int *eb, int en));
+ _PROTOTYPE(extern void get_locks,(char *p));
+-_PROTOTYPE(extern int is_file_named,(char *p, int cd));
++_PROTOTYPE(extern int is_file_named,(int ty, char *p, struct mounts *mp, int cd));
+ _PROTOTYPE(extern int make_proc_path,(char *pp, int lp, char **np, int *npl, char *sf));
+ _PROTOTYPE(extern FILE *open_proc_stream,(char *p, char *mode, char **buf, size_t *sz, int act));
+ _PROTOTYPE(extern void process_proc_node,(char *p, struct stat *s, int ss, struct stat *l, int ls));
+diff -upr lsof_4.82-rh.old/dialects/linux/dsock.c lsof_4.82-rh/dialects/linux/dsock.c
+--- lsof_4.82-rh.old/dialects/linux/dsock.c	2012-01-10 13:06:14.000000000 +0100
++++ lsof_4.82-rh/dialects/linux/dsock.c	2012-01-10 13:06:26.611581775 +0100
+@@ -2443,7 +2443,7 @@ process_proc_sock(p, s, ss, l, lss)
+ 		    Lf->dev = up->sb_dev;
+ 		    Lf->inode = up->sb_ino;
+ 		    Lf->rdev = up->sb_rdev;
+-		    if (is_file_named((char *)NULL, 0)) {
++		    if (is_file_named(0, path, (struct mounts *)NULL, 0)) {
+ 			f = 1;
+ 			Lf->sf |= SELNM;
+ 		    }
+@@ -2460,7 +2460,7 @@ process_proc_sock(p, s, ss, l, lss)
+ 		 * If the file has not yet been found and the stat buffer has
+ 		 * st_mode, search for the file by full path.
+ 		 */
+-		    if (is_file_named(path,
++		    if (is_file_named(2, path, (struct mounts *)NULL,
+ 			((s->st_mode & S_IFMT) == S_IFCHR)) ? 1 : 0)
+ 		    {
+ 			Lf->sf |= SELNM;
+diff -upr lsof_4.82-rh.old/dialects/linux/machine.h lsof_4.82-rh/dialects/linux/machine.h
+--- lsof_4.82-rh.old/dialects/linux/machine.h	2012-01-10 13:06:14.000000000 +0100
++++ lsof_4.82-rh/dialects/linux/machine.h	2012-01-10 13:06:26.612581320 +0100
+@@ -581,7 +581,7 @@
+ /* #define	USE_LIB_CKKV			1	   ckkv.c */
+ /* #define	USE_LIB_COMPLETEVFS		1	   cvfs.c */
+ /* #define	USE_LIB_FIND_CH_INO		1	   fino.c */
+-#define	USE_LIB_IS_FILE_NAMED			1	/* isfn.c */
++/* #define	USE_LIB_IS_FILE_NAMED		1	   isfn.c */
+ /* #define	USE_LIB_LKUPDEV			1	   lkud.c */
+ /* #define	USE_LIB_PRINTDEVNAME		1	   pdvn.c */
+ /* #define	USE_LIB_PROCESS_FILE		1	   prfp.c */

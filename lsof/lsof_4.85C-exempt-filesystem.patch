@@ -1,0 +1,1652 @@
+diff -Naur lsof_4.82-rh/00PORTING lsof_4.83_src/00PORTING
+--- lsof_4.82-rh/00PORTING	2009-03-25 20:19:35.000000000 +0100
++++ lsof_4.83_src/00PORTING	2011-08-23 15:49:41.972639996 +0200
+@@ -770,6 +770,9 @@
+ 			the lsof distribution for information on
+ 			when HASENVDC is used or ignored.)
+ 
++    HASEOPT		indicates the dialect supports the -e option to
++			eliminate kernel blocks on a named file system.
++
+     HASEXT2FS           is defined for BSD dialects for which ext2fs
+ 			file system support can be provided.  A value
+ 			of 1 indicates that the i_e2din member does not
+diff -Naur lsof_4.82-rh/arg.c lsof_4.83_src/arg.c
+--- lsof_4.82-rh/arg.c	2009-03-25 20:20:33.000000000 +0100
++++ lsof_4.83_src/arg.c	2011-08-23 15:49:41.974639772 +0200
+@@ -722,6 +722,69 @@
+ }
+ 
+ 
++#if	defined(HASEOPT)
++/*
++ * enter_efsys() -- enter path of file system whose kernel blocks are to be
++ *		    eliminated
++ */
++
++int
++enter_efsys(e, rdlnk)
++	char *e;			/* file system path */
++	int rdlnk;			/* avoid readlink(2) if non-zero */
++{
++	char *ec;			/* pointer to copy of path */
++	efsys_list_t *ep;		/* file system path list pointer */
++	int i;				/* temporary index */
++	char *path;			/* Readlink() of file system path */
++
++	if (!e || (*e != '/')) {
++	    if (!Fwarn)
++		(void) fprintf(stderr,
++		    "%s: -e not followed by a file system path: \"%s\"\n",
++		    Pn, e);
++	    return(1);
++	}
++	if (!(ec = mkstrcpy(e, (MALLOC_S *)NULL))) {
++	    (void) fprintf(stderr, "%s: no space for -e string: ", Pn);
++	    safestrprt(e, stderr, 1);
++	    Exit(1);
++	}
++	if (rdlnk)
++	    path = ec;
++	else {
++	    if (!(path = Readlink(ec)))
++		return(1);
++	}
++/*
++ * Remove terminating `/' characters from paths longer than one.
++ */
++	for (i = (int)strlen(path); (i > 1) && (path[i - 1] == '/'); i--) {
++	    path[i - 1] = '\0';
++	}
++/*
++ * Enter file system path on list, avoiding duplicates.
++ */
++	for (ep = Efsysl; ep; ep = ep->next) {
++	   if (!strcmp(ep->path, path))
++		return(0);
++	}
++	if (!(ep = (efsys_list_t *)malloc((MALLOC_S)(sizeof(efsys_list_t))))) {
++	   (void) fprintf(stderr, "%s: no space for \"-e %s\" entry\n",
++		Pn, e);
++	   Exit(1);
++	}
++	ep->path = path;
++	ep->pathl = i;
++	ep->rdlnk = rdlnk;
++	ep->mp = (struct mounts *)NULL;
++	if (!(ep->next = Efsysl))
++	    Efsysl = ep;
++	return(0);
++}
++#endif	/* defined(HASEOPT) */
++
++
+ /*
+  * enter_fd() - enter file descriptor list for searching
+  */
+diff -Naur lsof_4.82-rh/dialects/linux/dmnt.c lsof_4.83_src/dialects/linux/dmnt.c
+--- lsof_4.82-rh/dialects/linux/dmnt.c	2008-04-15 15:32:33.000000000 +0200
++++ lsof_4.83_src/dialects/linux/dmnt.c	2011-08-23 15:49:41.975639663 +0200
+@@ -420,6 +420,7 @@
+ 	int ds;
+ 	char *fp0 = (char *)NULL;
+ 	char *fp1 = (char *)NULL;
++	int fr, ignrdl, ignstat;
+ 	char *ln;
+ 	struct mounts *mp;
+ 	FILE *ms;
+@@ -474,16 +475,44 @@
+ 		(void) free((FREE_P *)dn);
+ 	    dn = fp1;
+ 	    fp1 = (char *)NULL;
+-	    if (!(ln = Readlink(dn))) {
+-		if (!Fwarn){
+-		    (void) fprintf(stderr,
+-			"      Output information may be incomplete.\n");
++
++#if	defined(HASEOPT)
++	if (Efsysl) {
++
++	/*
++	 * If there is an -e file system list, check it to decide if a stat()
++	 * and Readlink() on this one should be performed.
++	 */
++	    efsys_list_t *ep;
++
++	    for (ignrdl = ignstat = 0, ep = Efsysl; ep; ep = ep->next) {
++		if (!strcmp(dn, ep->path)) {
++		    ignrdl = ep->rdlnk;
++		    ignstat = 1;
++		    break;
+ 		}
+-		continue;
+ 	    }
+-	    if (ln != dn) {
+-		(void) free((FREE_P *)dn);
+-		dn = ln;
++	} else
++
++#endif	/* defined(HASEOPT */
++
++	    ignrdl = ignstat = 0;
++
++	/*
++	 * Avoid Readlink() when requested.
++	 */
++	    if (!ignrdl) {
++		if (!(ln = Readlink(dn))) {
++		    if (!Fwarn) {
++			(void) fprintf(stderr,
++			"      Output information may be incomplete.\n");
++		    }
++			continue;
++		}
++		if (ln != dn) {
++		    (void) free((FREE_P *)dn);
++		    dn = ln;
++		}
+ 	    }
+ 	    if (*dn != '/')
+ 		continue;
+@@ -493,34 +522,62 @@
+ 	    if (!(nfs = strcasecmp(fp[2], "nfs")) && !HasNFS)
+ 		HasNFS = 1;
+ 	/*
++	 * Skip duplicate directories.
++	 */
++	    for (mp = Lmi; mp; mp = mp->next) {
++		if (!strcmp(dn, mp->dir))
++		    break;
++	    }
++	    if (mp)
++		continue;
++	/*
+ 	 * Stat() the directory.
+ 	 */
+-	    if (statsafely(dn, &sb)) {
+-		if (!Fwarn) {
+-		    (void) fprintf(stderr, "%s: WARNING: can't stat() ", Pn);
+-		    safestrprt(fp[2], stderr, 0);
+-		    (void) fprintf(stderr, " file system ");
+-		    safestrprt(dn, stderr, 1);
+-		    (void) fprintf(stderr,
+-			"      Output information may be incomplete.\n");
+-		}
++	    if (ignstat)
++		fr = 1;
++	    else {
++		if ((fr = statsafely(dn, &sb))) {
++		    if (!Fwarn) {
++			(void) fprintf(stderr, "%s: WARNING: can't stat() ",
++			    Pn);
++			safestrprt(fp[2], stderr, 0);
++			(void) fprintf(stderr, " file system ");
++			safestrprt(dn, stderr, 1);
++			(void) fprintf(stderr,
++			    "      Output information may be incomplete.\n");
++		    }
++		} else
++		    ds = SB_ALL;
++	    }
+ 
+ #if	defined(HASMNTSUP)
++	    if (fr) {
++
++	    /*
++	     * If the stat() failed or wasn't called, check the mount
++	     * supplement table, if possible.
++	     */
+ 		if ((MntSup == 2) && MntSupP) {
+ 		    ds = 0;
+-		    if (!getmntdev(dn, &sb, &ds) || !(ds & SB_DEV))
++		    if (getmntdev(dn, &sb, &ds) || !(ds & SB_DEV)) {
++			(void) fprintf(stderr,
++			    "%s: assuming dev=%#lx for %s from %s\n",
++			    Pn, (long)sb.st_dev, dn, MntSupP);
++			}
++		} else {
++		    if (!ignstat)
+ 			continue;
+-		    (void) fprintf(stderr,
+-			"      assuming dev=%#lx from %s\n",
+-			(long)sb.st_dev, MntSupP);
+-		} else
+-		    continue;
++		   ds = 0;		/* No stat() was allowed. */
++		}
++	    }
+ #else	/* !defined(HASMNTSUP) */
+-		continue;
++	    if (fr) {
++		if (!ignstat)
++		    continue;
++		ds = 0;			/* No stat() was allowed. */
++	    }
+ #endif	/* defined(HASMNTSUP) */
+ 
+-	    } else
+-		ds = SB_ALL;
+ 	/*
+ 	 * Allocate and fill a local mount structure.
+ 	 */
+@@ -549,23 +606,41 @@
+ 	 * If support for the mount supplement file is defined and if the
+ 	 * +m option was supplied, print mount supplement information.
+ 	 */
+-	    if (MntSup == 1)
+-		(void) printf("%s %#lx\n", mp->dir, (long)mp->dev);
++	    if (MntSup == 1) {
++		if (mp->dev)
++		    (void) printf("%s %#lx\n", mp->dir, (long)mp->dev);
++		else
++		    (void) printf("%s 0x0\n", mp->dir);
++	    }
+ #endif	/* defined(HASMNTSUP) */
+ 
+ 	/*
+-	 * Interpolate a possible file system (mounted-on) device name link.
++	 * Save mounted-on directory name.
+ 	 */
+ 	    dn = fp0;
+ 	    fp0 = (char *)NULL;
+ 	    mp->fsname = dn;
+-	    ln = Readlink(dn);
++	/*
++	 * Interpolate a possible file system (mounted-on) device name link.
++	 *
++	 * Avoid Readlink() when requested.
++	 */
++	    if (ignrdl || (*dn != '/')) {
++		if (!(ln = mkstrcpy(dn, (MALLOC_S *)NULL))) {
++		    (void) fprintf(stderr,
++			"%s: can't allocate space for: ", Pn);
++		    safestrprt(dn, stderr, 1);
++		    Exit(1);
++		}
++		ignstat = 1;
++	    } else
++		ln = Readlink(dn);
+ 	    dn = (char *)NULL;
+ 	/*
+ 	 * Stat() the file system (mounted-on) name and add file system
+ 	 * information to the local mount table entry.
+ 	 */
+-	    if (!ln || statsafely(ln, &sb))
++	    if (ignstat || !ln || statsafely(ln, &sb))
+ 		sb.st_mode = 0;
+ 	    mp->fsnmres = ln;
+ 	    mp->fs_mode = sb.st_mode;
+diff -Naur lsof_4.82-rh/dialects/linux/dnode.c lsof_4.83_src/dialects/linux/dnode.c
+--- lsof_4.82-rh/dialects/linux/dnode.c	2009-03-25 20:22:41.000000000 +0100
++++ lsof_4.83_src/dialects/linux/dnode.c	2011-08-23 15:49:42.016634578 +0200
+@@ -193,7 +193,7 @@
+ 		if (!fp) {
+ 		    (void) fprintf(stderr,
+ 			"%s: can't allocate %d bytes for field pointers.\n",
+-			Pn, len);
++			Pn, (int)len);
+ 		    Exit(1);
+ 		}
+ 	    }
+@@ -244,7 +244,7 @@
+ 	    if (!LckH) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d lock hash bytes\n",
+-		    Pn, sizeof(struct llock *) * PIDBUCKS);
++		    Pn, (int)(sizeof(struct llock *) * PIDBUCKS));
+ 		Exit(1);
+ 	    }
+ 	}
+diff -Naur lsof_4.82-rh/dialects/linux/dproc.c lsof_4.83_src/dialects/linux/dproc.c
+--- lsof_4.82-rh/dialects/linux/dproc.c	2011-08-23 15:22:12.000000000 +0200
++++ lsof_4.83_src/dialects/linux/dproc.c	2011-08-23 15:49:42.018634326 +0200
+@@ -82,6 +82,8 @@
+ 
+ _PROTOTYPE(static int get_fdinfo,(char *p, struct l_fdinfo *fi));
+ _PROTOTYPE(static int getlinksrc,(char *ln, char *src, int srcl));
++_PROTOTYPE(static int isefsys,(char *path, char *type, int l,
++			       efsys_list_t **rep, struct lfile **lfr));
+ _PROTOTYPE(static int nm2id,(char *nm, int *id, int *idl));
+ _PROTOTYPE(static int read_id_stat,(int ty, char *p, int id, char **cmd,
+ 				    int *ppid, int *pgid));
+@@ -183,7 +185,7 @@
+ 	    if (!(pidpath = (char *)malloc(pidpathl))) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d bytes for \"%s/\"<pid>\n",
+-		    Pn, pidpathl, PROCFS);
++		    Pn, (int)pidpathl, PROCFS);
+ 		Exit(1);
+ 	    }
+ 	    (void) snpf(pidpath, pidpathl, "%s/", PROCFS);
+@@ -270,7 +272,7 @@
+ 		{
+ 		    (void) fprintf(stderr,
+ 			"%s: can't allocate %d bytes for \"%s/%s/\"\n",
+-			Pn, pidpathl, PROCFS, dp->d_name);
++			Pn, (int)pidpathl, PROCFS, dp->d_name);
+ 		    Exit(1);
+ 		}
+ 	    }
+@@ -561,7 +563,7 @@
+ 	    if (!cp) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d bytes for %s%s\n",
+-		    Pn, rl, pp, sf);
++		    Pn, (int)rl, pp, sf);
+ 		Exit(1);
+ 	    }
+ 	    *nl = rl;
+@@ -574,6 +576,81 @@
+ 
+ 
+ /*
++ * isefsys() -- is path on a file system declared with -e
++ *
++ * Note: alloc_lfile() must have been called in advance.
++ */
++
++static int
++isefsys(path, type, l, rep, lfr)
++	char *path;			/* path to file */
++	char *type;			/* unknown file type */
++	int l;				/* link request: 0 = report
++					 *               1 = link */
++	efsys_list_t **rep;		/* returned Efsysl pointer, if not
++					 * NULL */
++	struct lfile **lfr;		/* allocated struct lfile pointer */
++{
++	efsys_list_t *ep;
++	int ds, len;
++	struct mounts *mp;
++	char nmabuf[MAXPATHLEN + 1];
++
++	len = (int) strlen(path);
++	for (ep = Efsysl; ep; ep = ep->next) {
++
++	/*
++	 * Look for a matching -e path at the beginning of the file path.
++	 */
++	    if (ep->pathl > len)
++		continue;
++	    if (strncmp(ep->path, path, ep->pathl))
++		continue;
++	/*
++	 * If only reporting, return information as requested.
++	 */
++	    if (!l) {
++		if (rep)
++		    *rep = ep;
++		return(0);
++	    }
++	/*
++	 * Process a non-blocked file.
++	 */
++	    ds = 0;
++	    if ((mp = ep->mp)) {
++		if (mp->ds & SB_DEV) {
++		    Lf->dev = mp->dev;
++		    ds = Lf->dev_def = 1;
++		}
++		if (mp->ds & SB_RDEV) {
++		    Lf->rdev = mp->rdev;
++		    ds = Lf->rdev_def = 1;
++		}
++	    }
++	    if (!ds)
++		(void) enter_dev_ch("UNKNOWN");
++	    Lf->ntype = N_UNKN;
++	    (void) snpf(Lf->type, sizeof(Lf->type), "%s",
++			(type ? type : "UNKN"));
++	    (void) enter_nm(path);
++	    (void) snpf(nmabuf, sizeof(nmabuf), "(%ce %s)",
++		ep->rdlnk ? '+' : '-', ep->path);
++	    nmabuf[sizeof(nmabuf) - 1] = '\0';
++	    (void) add_nma(nmabuf, strlen(nmabuf));
++	    if (Lf->sf) {
++		if (lfr)
++		    *lfr = Lf;
++		link_lfile();
++	    } else if (lfr)
++		*lfr = (struct lfile *)NULL;
++	    return(0);
++	}
++	return(1);
++}
++
++
++/*
+  * nm2id() - convert a name to an integer ID
+  */
+ 
+@@ -693,7 +770,7 @@
+ 	int av;
+ 	static char *dpath = (char *)NULL;
+ 	static int dpathl = 0;
+-	short enls, enss, lnk, oty, pn, pss, sf;
++	short efs, enls, enss, lnk, oty, pn, pss, sf;
+ 	int fd, i, ls, n, ss, sv;
+ 	struct l_fdinfo fi;
+ 	DIR *fdp;
+@@ -701,6 +778,7 @@
+ 	static char *ipath = (char *)NULL;
+ 	static int ipathl = 0;
+ 	int j = 0;
++	struct lfile *lfr;
+ 	struct stat lsb, sb;
+ 	char nmabuf[MAXPATHLEN + 1], pbuf[MAXPATHLEN + 1];
+ 	static char *path = (char *)NULL;
+@@ -736,6 +814,7 @@
+ 	if (!Ckscko) {
+ 	    (void) make_proc_path(idp, idpl, &path, &pathl, "cwd");
+ 	    alloc_lfile(CWD, -1);
++	    efs = 0;
+ 	    if (getlinksrc(path, pbuf, sizeof(pbuf)) < 1) {
+ 		if (!Fwarn) {
+ 		    (void) memset((void *)&sb, 0, sizeof(sb));
+@@ -749,19 +828,24 @@
+ 		    pn = 0;
+ 	    } else {
+ 		lnk = pn = 1;
+-		ss = SB_ALL;
+-		if (HasNFS) {
+-		    if ((sv = statsafely(path, &sb)))
++		if (Efsysl && !isefsys(pbuf, "UNKNcwd", 1, NULL, &lfr)) {
++		    efs = 1;
++		    pn = 0;
++		} else {
++		    ss = SB_ALL;
++		    if (HasNFS) {
++			if ((sv = statsafely(path, &sb)))
+ 			sv = statEx(pbuf, &sb, &ss);
+-		} else
+-		    sv = stat(path, &sb);
+-		if (sv) {
+-		    ss = 0;
+-		    if (!Fwarn) {
+-			(void) snpf(nmabuf, sizeof(nmabuf), "(stat: %s)",
+-			    strerror(errno));
+-			nmabuf[sizeof(nmabuf) - 1] = '\0';
+-			(void) add_nma(nmabuf, strlen(nmabuf));
++		    } else
++			sv = stat(path, &sb);
++		    if (sv) {
++			ss = 0;
++			if (!Fwarn) {
++			    (void) snpf(nmabuf, sizeof(nmabuf), "(stat: %s)",
++				strerror(errno));
++			    nmabuf[sizeof(nmabuf) - 1] = '\0';
++			    (void) add_nma(nmabuf, strlen(nmabuf));
++			}
+ 		    }
+ 		}
+ 	    }
+@@ -792,19 +876,23 @@
+ 		    pn = 0;
+ 	    } else {
+ 		lnk = pn = 1;
+-		ss = SB_ALL;
+-		if (HasNFS) {
+-		    if ((sv = statsafely(path, &sb)))
+-			sv = statEx(pbuf, &sb, &ss);
+-		} else
+-		    sv = stat(path, &sb);
+-		if (sv) {
+-		    ss = 0;
+-		    if (!Fwarn) {
+-			(void) snpf(nmabuf, sizeof(nmabuf), "(stat: %s)",
+-			    strerror(errno));
+-			nmabuf[sizeof(nmabuf) - 1] = '\0';
+-			(void) add_nma(nmabuf, strlen(nmabuf));
++		if (Efsysl && !isefsys(pbuf, "UNKNrtd", 1, NULL, NULL))
++		    pn = 0;
++		else {
++		    ss = SB_ALL;
++		    if (HasNFS) {
++			if ((sv = statsafely(path, &sb)))
++			    sv = statEx(pbuf, &sb, &ss);
++		    } else
++			sv = stat(path, &sb);
++		    if (sv) {
++			ss = 0;
++			if (!Fwarn) {
++			    (void) snpf(nmabuf, sizeof(nmabuf), "(stat: %s)",
++				strerror(errno));
++			    nmabuf[sizeof(nmabuf) - 1] = '\0';
++			    (void) add_nma(nmabuf, strlen(nmabuf));
++			}
+ 		    }
+ 		}
+ 	    }
+@@ -820,6 +908,7 @@
+  * Process the ID's execution info.
+  */
+ 	if (!Ckscko) {
++	    txts = 0;
+ 	    (void) make_proc_path(idp, idpl, &path, &pathl, "exe");
+ 	    alloc_lfile("txt", -1);
+ 	    if (getlinksrc(path, pbuf, sizeof(pbuf)) < 1) {
+@@ -837,25 +926,29 @@
+ 		    pn = 0;
+ 	    } else {
+ 		lnk = pn = 1;
+-		ss = SB_ALL;
+-		if (HasNFS) {
+-		    if ((sv = statsafely(path, &sb))) {
+-			sv = statEx(pbuf, &sb,  &ss);
+-			if (!sv && (ss & SB_DEV) && (ss & SB_INO))
+-			    txts = 1;
+-		    }
+-		} else
+-		    sv = stat(path, &sb);
+-		if (sv) {
+-		    ss = 0;
+-		    if (!Fwarn) {
+-			(void) snpf(nmabuf, sizeof(nmabuf), "(stat: %s)",
+-			    strerror(errno));
+-			nmabuf[sizeof(nmabuf) - 1] = '\0';
+-			(void) add_nma(nmabuf, strlen(nmabuf));
+-		    }
+-		} else
+-		    txts = 1;
++		if (Efsysl && !isefsys(pbuf, "UNKNtxt", 1, NULL, NULL))
++		    pn = 0;
++		else {
++		    ss = SB_ALL;
++		    if (HasNFS) {
++			if ((sv = statsafely(path, &sb))) {
++			    sv = statEx(pbuf, &sb,  &ss);
++			    if (!sv && (ss & SB_DEV) && (ss & SB_INO))
++				txts = 1;
++			}
++		    } else
++			sv = stat(path, &sb);
++		    if (sv) {
++			ss = 0;
++			if (!Fwarn) {
++			    (void) snpf(nmabuf, sizeof(nmabuf), "(stat: %s)",
++				strerror(errno));
++			    nmabuf[sizeof(nmabuf) - 1] = '\0';
++			    (void) add_nma(nmabuf, strlen(nmabuf));
++			}
++		    } else
++			txts = 1;
++		}
+ 	    }
+ 	    if (pn) {
+ 		(void) process_proc_node(lnk ? pbuf : path,
+@@ -954,69 +1047,89 @@
+ 		    pn = 0;
+ 	    } else {
+ 		lnk = 1;
+-		if (HasNFS) {
+-		    if (lstatsafely(path, &lsb)) {
+-			(void) statEx(pbuf, &lsb, &ls);
+-		        enls = errno;
++		if (Efsysl && !isefsys(pbuf, "UNKNfd", 1, NULL, &lfr)) {
++		    efs = 1;
++		    pn = 0;
++		} else {
++		    if (HasNFS) {
++			if (lstatsafely(path, &lsb)) {
++			    (void) statEx(pbuf, &lsb, &ls);
++			    enls = errno;
++			} else {
++			    enls = 0;
++			    ls = SB_ALL;
++			}
++			if (statsafely(path, &sb)) {
++			    (void) statEx(pbuf, &sb, &ss);
++			    enss = errno;
++			} else {
++			    enss = 0;
++			    ss = SB_ALL;
++			}
+ 		    } else {
+-			enls = 0;
+-			ls = SB_ALL;
+-		    }
+-		    if (statsafely(path, &sb)) {
+-			(void) statEx(pbuf, &sb, &ss);
++			ls = lstat(path, &lsb) ? 0 : SB_ALL;
++			enls = errno;
++			ss = stat(path, &sb) ? 0 : SB_ALL;
+ 			enss = errno;
+-		    } else {
+-			enss = 0;
+-			ss = SB_ALL;
+ 		    }
+-		} else {
+-		    ls = lstat(path, &lsb) ? 0 : SB_ALL;
+-		    enls = errno;
+-		    ss = stat(path, &sb) ? 0 : SB_ALL;
+-		    enss = errno;
+-		}
+-		if (!ls && !Fwarn) {
+-		    (void) snpf(nmabuf, sizeof(nmabuf), "lstat: %s)",
+-			strerror(enls));
+-		    nmabuf[sizeof(nmabuf) - 1] = '\0';
+-		    (void) add_nma(nmabuf, strlen(nmabuf));
+-		}
+-		if (!ss && !Fwarn) {
+-		    (void) snpf(nmabuf, sizeof(nmabuf), "(stat: %s)",
+-			strerror(enss));
+-		    nmabuf[sizeof(nmabuf) - 1] = '\0';
+-		    (void) add_nma(nmabuf, strlen(nmabuf));
+-		}
+-		if (Ckscko) {
+-		    if ((ss & SB_MODE) && ((sb.st_mode & S_IFMT) == S_IFSOCK))
++		    if (!ls && !Fwarn) {
++			(void) snpf(nmabuf, sizeof(nmabuf), "lstat: %s)",
++			    strerror(enls));
++			nmabuf[sizeof(nmabuf) - 1] = '\0';
++			(void) add_nma(nmabuf, strlen(nmabuf));
++		    }
++		    if (!ss && !Fwarn) {
++			(void) snpf(nmabuf, sizeof(nmabuf), "(stat: %s)",
++			    strerror(enss));
++			nmabuf[sizeof(nmabuf) - 1] = '\0';
++			(void) add_nma(nmabuf, strlen(nmabuf));
++		    }
++		    if (Ckscko) {
++			if ((ss & SB_MODE)
++			&&  ((sb.st_mode & S_IFMT) == S_IFSOCK))
++			{
++			    pn = 1;
++			} else
++			    pn = 0;
++		    } else
+ 			pn = 1;
+-		    else
+-			pn = 0;
+-		} else
+-		    pn = 1;
++		}
+ 	    }
+-	    if (pn) {
++	    if (pn || (efs && lfr && oty)) {
+ 		if (oty) {
+ 		    (void) make_proc_path(ipath, j, &pathi, &pathil,
+ 					  fp->d_name);
+ 		    if ((av = get_fdinfo(pathi, &fi)) & FDINFO_POS) {
+-			ls |= SB_SIZE;
+-			lsb.st_size = fi.pos;
++			if (efs) {
++			    if (Foffset) {
++				lfr->off = (SZOFFTYPE)fi.pos;
++				lfr->off_def = 1;
++			    }
++			} else {
++			    ls |= SB_SIZE;
++			    lsb.st_size = fi.pos;
++			}
+ 		    } else
+ 			ls &= ~SB_SIZE;
+ 
+ #if	!defined(HASNOFSFLAGS)
+ 		    if ((av & FDINFO_FLAGS) && (Fsv & FSV_FG)) {
+-			Lf->ffg = (long)fi.flags;
+-			Lf->fsv |= FSV_FG;
++			if (efs) {
++			    lfr->ffg = (long)fi.flags;
++			    lfr->fsv |= FSV_FG;
++			} else {
++			    Lf->ffg = (long)fi.flags;
++			    Lf->fsv |= FSV_FG;
++			}
+ 		     }
+ # endif	/* !defined(HASNOFSFLAGS) */
+ 
+ 		}
+-		process_proc_node(lnk ? pbuf : path,
+-				  &sb, ss, &lsb, ls);
+-		if (Lf->sf)
+-		    link_lfile();
++		if (pn) {
++		    process_proc_node(lnk ? pbuf : path, &sb, ss, &lsb, ls);
++		    if (Lf->sf)
++			link_lfile();
++		}
+ 	    }
+ 	}
+ 	(void) closedir(fdp);
+@@ -1094,11 +1207,12 @@
+ {
+ 	char buf[MAXPATHLEN + 1], *ep, fmtbuf[32], **fp, nmabuf[MAXPATHLEN + 1];
+ 	dev_t dev;
+-	int ds, en, i, mss, nf, sv;
++	int ds, efs, en, i, mss, nf, sv;
+ 	int eb = 6;
+ 	INODETYPE inode;
+ 	MALLOC_S len;
+ 	long maj, min;
++	struct mounts *mp;
+ 	FILE *ms;
+ 	int ns = 0;
+ 	struct stat sb;
+@@ -1107,6 +1221,7 @@
+ 	    INODETYPE inode;
+ 	};
+ 	static struct saved_map *sm = (struct saved_map *)NULL;
++	efsys_list_t *rep;
+ 	static int sma = 0;
+ 	static char *vbuf = (char *)NULL;
+ 	static size_t vsz = (size_t)0;
+@@ -1187,7 +1302,7 @@
+ 		if (!sm) {
+ 		    (void) fprintf(stderr,
+ 			"%s: can't allocate %d bytes for saved maps, PID %d\n",
+-			Pn, len, Lp->pid);
++			Pn, (int)len, Lp->pid);
+ 		    Exit(1);
+ 		}
+ 	    }
+@@ -1195,17 +1310,25 @@
+ 	    sm[ns++].inode = inode;
+ 	/*
+ 	 * Allocate space for the mapped file, then get stat(2) information
+-	 * for it.
++	 * for it.  Skip the stat(2) operation if this is on a -e file system.
+ 	 */
+ 	    alloc_lfile("mem", -1);
+-	    if (HasNFS) {
+-		sv = statsafely(fp[6], &sb);
+-	    } else
+-		sv = stat(fp[6], &sb);
+-	    if (sv) {
++	    efs = 0;
++	    if (Efsysl && !isefsys(fp[6], (char *)NULL, 0, &rep, NULL)) {
++		if ((mp = rep->mp) && mp->dev && (mp->dev == dev))
++		    efs = sv = 1;
++	    }
++	    if (!efs) {
++		if (HasNFS)
++		    sv = statsafely(fp[6], &sb);
++		else
++		    sv = stat(fp[6], &sb);
++	    }
++	    if (sv || efs) {
+ 		en = errno;
+ 	    /*
+-	     * Applying stat(2) to the file failed, so manufacture a partial
++	     * Applying stat(2) to the file was not possible (file is on an
++	     * -e file system) or stat(2) failed, so manufacture a partial
+ 	     * stat(2) reply from the process' maps file entry.
+ 	     *
+ 	     * If the file has been deleted, reset its type to "DEL"; otherwise
+@@ -1218,7 +1341,7 @@
+ 		mss = SB_DEV | SB_INO | SB_MODE;
+ 		if (ds)
+ 		    alloc_lfile("DEL", -1);
+-		else {
++		else if (!efs) {
+ 		    (void) snpf(nmabuf, sizeof(nmabuf), "(stat: %s)",
+ 			strerror(en));
+ 		    nmabuf[sizeof(nmabuf) - 1] = '\0';
+@@ -1270,7 +1393,24 @@
+ 	/*
+ 	 * Record the file's information.
+ 	 */
+-	    process_proc_node(fp[6], &sb, mss, (struct stat *)NULL, 0);
++	    if (!efs)
++		process_proc_node(fp[6], &sb, mss, (struct stat *)NULL, 0);
++	    else {
++
++	    /*
++	     * If this file is on an -e specified file system, complete the
++	     * lfile structure.
++	     */
++		Lf->dev = sb.st_dev;
++		Lf->inode = (ino_t)sb.st_ino;
++		Lf->dev_def = Lf->inp_ty = 1;
++		(void) enter_nm(fp[6]);
++		(void) snpf(Lf->type, sizeof(Lf->type), "%s",
++			    (ds ? "UNKNdel" : "UNKNmem"));
++		(void) snpf(nmabuf, sizeof(nmabuf), "(-e %s)", rep->path);
++		nmabuf[sizeof(nmabuf) - 1] = '\0';
++		(void) add_nma(nmabuf, strlen(nmabuf));
++	    }
+ 	    if (Lf->sf)
+ 		link_lfile();
+ 	}
+@@ -1343,7 +1483,7 @@
+ 	     if (!cbf) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d bytes for command \"%s\"\n",
+-		    Pn, cbfa, cp);
++		    Pn, (int)cbfa, cp);
+ 		Exit(1);
+ 	     }
+ 	}
+@@ -1416,7 +1556,7 @@
+ 	}
+ 	(void) strcpy(cb, p);
+ /*
+- * Trim trailing leaves from the end of the path one at a time and do s safe
++ * Trim trailing leaves from the end of the path one at a time and do a safe
+  * stat() on each trimmed result.  Stop when a safe stat() succeeds or doesn't
+  * fail because of EACCES or EPERM.
+  */
+diff -Naur lsof_4.82-rh/dialects/linux/dsock.c lsof_4.83_src/dialects/linux/dsock.c
+--- lsof_4.82-rh/dialects/linux/dsock.c	2009-03-25 20:22:43.000000000 +0100
++++ lsof_4.83_src/dialects/linux/dsock.c	2011-08-23 15:49:42.021633946 +0200
+@@ -720,7 +720,7 @@
+ 	    if (!AX25sin) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d AX25 hash pointer bytes\n",
+-		    Pn, INOBUCKS * sizeof(struct ax25sin *));
++		    Pn, (int)(INOBUCKS * sizeof(struct ax25sin *)));
+ 		Exit(1);
+ 	    }
+ 	}
+@@ -792,7 +792,7 @@
+ 		if (!(da = (char *)malloc(len + 1))) {
+ 		    (void) fprintf(stderr,
+ 		      "%s: can't allocate %d destination AX25 addr bytes: %s\n",
+-		      Pn, len + 1, fp[3]);
++		      Pn, (int)(len + 1), fp[3]);
+ 		    Exit(1);
+ 		}
+ 		(void) snpf(da, len + 1, "%s", fp[3]);
+@@ -807,7 +807,7 @@
+ 		if (!(sa = (char *)malloc(len + 1))) {
+ 		    (void) fprintf(stderr,
+ 			"%s: can't allocate %d source AX25 address bytes: %s\n",
+-			Pn, len + 1, fp[2]);
++			Pn, (int)(len + 1), fp[2]);
+ 		    Exit(1);
+ 		}
+ 		(void) snpf(sa, len + 1, "%s", fp[2]);
+@@ -822,7 +822,7 @@
+ 		if (!(dev_ch = (char *)malloc(len + 1))) {
+ 		    (void) fprintf(stderr,
+ 		      "%s: can't allocate %d destination AX25 dev bytes: %s\n",
+-		      Pn, len + 1, fp[1]);
++		      Pn, (int)(len + 1), fp[1]);
+ 		    Exit(1);
+ 		}
+ 		(void) snpf(dev_ch, len + 1, "%s", fp[1]);
+@@ -835,7 +835,7 @@
+ 	    if (!(ap = (struct ax25sin *)malloc(sizeof(struct ax25sin)))) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d byte ax25sin structure\n",
+-		    Pn, sizeof(struct ax25sin));
++		    Pn, (int)sizeof(struct ax25sin));
+ 		Exit(1);
+ 	    }
+ 	    ap->da = da;
+@@ -893,7 +893,7 @@
+ 	    if (!Ipxsin) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d IPX hash pointer bytes\n",
+-		    Pn, INOBUCKS * sizeof(struct ipxsin *));
++		    Pn, (int)(INOBUCKS * sizeof(struct ipxsin *)));
+ 		Exit(1);
+ 	    }
+ 	}
+@@ -969,7 +969,7 @@
+ 		if (!(la = (char *)malloc(len + 1))) {
+ 		    (void) fprintf(stderr,
+ 			"%s: can't allocate %d local IPX address bytes: %s\n",
+-			Pn, len + 1, fp[0]);
++			Pn, (int)(len + 1), fp[0]);
+ 		    Exit(1);
+ 		}
+ 		(void) snpf(la, len + 1, "%s", fp[0]);
+@@ -984,7 +984,7 @@
+ 		if (!(ra = (char *)malloc(len + 1))) {
+ 		    (void) fprintf(stderr,
+ 			"%s: can't allocate %d remote IPX address bytes: %s\n",
+-			Pn, len + 1, fp[1]);
++			Pn, (int)(len + 1), fp[1]);
+ 		    Exit(1);
+ 		}
+ 		(void) snpf(ra, len + 1, "%s", fp[1]);
+@@ -997,7 +997,7 @@
+ 	    if (!(ip = (struct ipxsin *)malloc(sizeof(struct ipxsin)))) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d byte ipxsin structure\n",
+-		    Pn, sizeof(struct ipxsin));
++		    Pn, (int)sizeof(struct ipxsin));
+ 		Exit(1);
+ 	    }
+ 	    ip->inode = inode;
+@@ -1046,7 +1046,7 @@
+ 	    if (!Packin) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d packet hash pointer bytes\n",
+-		    Pn, INOBUCKS * sizeof(struct packin *));
++		    Pn, (int)(INOBUCKS * sizeof(struct packin *)));
+ 		Exit(1);
+ 	    }
+ 	}
+@@ -1112,7 +1112,7 @@
+ 	    if (!(pp = (struct packin *)malloc(sizeof(struct packin)))) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d byte packet structure\n",
+-		    Pn, sizeof(struct packin));
++		    Pn, (int)sizeof(struct packin));
+ 		Exit(1);
+ 	    }
+ 	    pp->inode = inode;
+@@ -1163,7 +1163,7 @@
+ 	    if (!Rawsin) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d raw hash pointer bytes\n",
+-		    Pn, INOBUCKS * sizeof(struct rawsin *));
++		    Pn, (int)(INOBUCKS * sizeof(struct rawsin *)));
+ 		Exit(1);
+ 	    }
+ 	}
+@@ -1222,7 +1222,7 @@
+ 		if (!(la = (char *)malloc(lal + 1))) {
+ 		    (void) fprintf(stderr,
+ 			"%s: can't allocate %d local raw address bytes: %s\n",
+-			Pn, lal + 1, fp[1]);
++			Pn, (int)(lal + 1), fp[1]);
+ 		    Exit(1);
+ 		}
+ 		(void) snpf(la, lal + 1, "%s", fp[1]);
+@@ -1234,7 +1234,7 @@
+ 		if (!(ra = (char *)malloc(ral + 1))) {
+ 		    (void) fprintf(stderr,
+ 			"%s: can't allocate %d remote raw address bytes: %s\n",
+-			Pn, ral + 1, fp[2]);
++			Pn, (int)(ral + 1), fp[2]);
+ 		    Exit(1);
+ 		}
+ 		(void) snpf(ra, ral + 1, "%s", fp[2]);
+@@ -1246,7 +1246,7 @@
+ 		if (!(sp = (char *)malloc(spl + 1))) {
+ 		    (void) fprintf(stderr,
+ 			"%s: can't allocate %d remote raw state bytes: %s\n",
+-			Pn, spl + 1, fp[2]);
++			Pn, (int)(spl + 1), fp[2]);
+ 		    Exit(1);
+ 		}
+ 		(void) snpf(sp, spl + 1, "%s", fp[3]);
+@@ -1258,7 +1258,7 @@
+ 	    if (!(rp = (struct rawsin *)malloc(sizeof(struct rawsin)))) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d byte rawsin structure\n",
+-		    Pn, sizeof(struct rawsin));
++		    Pn, (int)sizeof(struct rawsin));
+ 		Exit(1);
+ 	    }
+ 	    rp->inode = inode;
+@@ -1427,7 +1427,7 @@
+ 	    if (!(tp = (struct tcp_udp *)malloc(sizeof(struct tcp_udp)))) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d bytes for tcp_udp struct\n",
+-		    Pn, sizeof(struct tcp_udp));
++		    Pn, (int)sizeof(struct tcp_udp));
+ 		Exit(1);
+ 	    }
+ 	    tp->inode = inode;
+@@ -1485,7 +1485,7 @@
+ 	    if (!Rawsin6) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d raw6 hash pointer bytes\n",
+-		    Pn, INOBUCKS * sizeof(struct rawsin *));
++		    Pn, (int)(INOBUCKS * sizeof(struct rawsin *)));
+ 		Exit(1);
+ 	    }
+ 	}
+@@ -1544,7 +1544,7 @@
+ 		if (!(la = (char *)malloc(lal + 1))) {
+ 		    (void) fprintf(stderr,
+ 			"%s: can't allocate %d local raw6 address bytes: %s\n",
+-			Pn, lal + 1, fp[1]);
++			Pn, (int)(lal + 1), fp[1]);
+ 		    Exit(1);
+ 		}
+ 		(void) snpf(la, lal + 1, "%s", fp[1]);
+@@ -1556,7 +1556,7 @@
+ 		if (!(ra = (char *)malloc(ral + 1))) {
+ 		    (void) fprintf(stderr,
+ 			"%s: can't allocate %d remote raw6 address bytes: %s\n",
+-			Pn, ral + 1, fp[2]);
++			Pn, (int)(ral + 1), fp[2]);
+ 		    Exit(1);
+ 		}
+ 		(void) snpf(ra, ral + 1, "%s", fp[2]);
+@@ -1568,7 +1568,7 @@
+ 		if (!(sp = (char *)malloc(spl + 1))) {
+ 		    (void) fprintf(stderr,
+ 			"%s: can't allocate %d remote raw6 state bytes: %s\n",
+-			Pn, spl + 1, fp[2]);
++			Pn, (int)(spl + 1), fp[2]);
+ 		    Exit(1);
+ 		}
+ 		(void) snpf(sp, spl + 1, "%s", fp[3]);
+@@ -1580,7 +1580,7 @@
+ 	    if (!(rp = (struct rawsin *)malloc(sizeof(struct rawsin)))) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d byte rawsin structure for IPv6\n",
+-		    Pn, sizeof(struct rawsin));
++		    Pn, (int)sizeof(struct rawsin));
+ 		Exit(1);
+ 	    }
+ 	    rp->inode = inode;
+@@ -1755,7 +1755,7 @@
+ 	    if (!(tp6 = (struct tcp_udp6 *)malloc(sizeof(struct tcp_udp6)))) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d bytes for tcp_udp6 struct\n",
+-		    Pn, sizeof(struct tcp_udp6));
++		    Pn, (int)sizeof(struct tcp_udp6));
+ 		Exit(1);
+ 	    }
+ 	    tp6->inode = inode;
+@@ -1812,7 +1812,7 @@
+ 	    if (!Uxsin) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d bytes for Unix socket info\n",
+-		    Pn, INOBUCKS * sizeof(struct uxsin *));
++		    Pn, (int)(INOBUCKS * sizeof(struct uxsin *)));
+ 	    }
+ 	}
+ /*
+@@ -1871,7 +1871,7 @@
+ 		if (!(pcb = (char *)malloc(len + 1))) {
+ 		    (void) fprintf(stderr,
+ 			"%s: can't allocate %d bytes for UNIX PCB: %s\n",
+-			Pn, len + 1, fp[0]);
++			Pn, (int)(len + 1), fp[0]);
+ 		    Exit(1);
+ 		}
+ 		(void) snpf(pcb, len + 1, "0x%s", fp[0]);
+@@ -1882,7 +1882,7 @@
+ 		if (!(path = (char *)malloc(len + 1))) {
+ 		    (void) fprintf(stderr,
+ 			"%s: can't allocate %d bytes for UNIX path \"%s\"\n",
+-			Pn, len + 1, fp[7]);
++			Pn, (int)(len + 1), fp[7]);
+ 		    Exit(1);
+ 		}
+ 		(void) snpf(path, len + 1, "%s", fp[7]);
+@@ -1895,7 +1895,7 @@
+ 	    if (!(up = (struct uxsin *)malloc(sizeof(struct uxsin)))) {
+ 		(void) fprintf(stderr,
+ 		    "%s: can't allocate %d bytes for uxsin struct\n",
+-		    Pn, sizeof(struct uxsin));
++		    Pn, (int)sizeof(struct uxsin));
+ 		Exit(1);
+ 	    }
+ 	    up->inode = inode;
+@@ -2007,7 +2007,7 @@
+ 	if (!(cp = (char *)malloc(pl + 1))) {
+ 	    (void) fprintf(stderr,
+ 		"%s: can't allocate %d bytes for AX25 sock state, PID: %d\n",
+-		Pn, pl + 1, Lp->pid);
++		Pn, (int)(pl + 1), Lp->pid);
+ 	    Exit(1);
+ 	}
+ 	(void) snpf(cp, pl + 1, "%s", pbuf);
+@@ -2034,7 +2034,7 @@
+ 	if (!(cp = (char *)malloc(pl + 1))) {
+ 	    (void) fprintf(stderr,
+ 		"%s: can't allocate %d bytes for IPX sock state, PID: %d\n",
+-		Pn, pl + 1, Lp->pid);
++		Pn, (int)(pl + 1), Lp->pid);
+ 	    Exit(1);
+ 	}
+ 	(void) snpf(cp, pl + 1, "%s", pbuf);
+diff -Naur lsof_4.82-rh/dialects/linux/dstore.c lsof_4.83_src/dialects/linux/dstore.c
+--- lsof_4.82-rh/dialects/linux/dstore.c	2008-04-15 15:32:37.000000000 +0200
++++ lsof_4.83_src/dialects/linux/dstore.c	2011-08-23 15:49:42.023633694 +0200
+@@ -92,8 +92,15 @@
+ #endif	/* defined(O_RSYNC) */
+ 
+ #if	defined(O_LARGEFILE)
++# if	O_LARGEFILE==0
++	{ (long)0100000,	FF_LARGEFILE	},
++# else	/* O_LARGEFILE!=0 */
+ 	{ (long)O_LARGEFILE,	FF_LARGEFILE	},
++# endif	/* O_LARGEFILE==0 */
++#else	/* !defined(O_LARGEFILE) */
++	{ (long)0100000,	FF_LARGEFILE	},
+ #endif	/* defined(O_LARGEFILE) */
++
+ 	{ (long)0,		NULL		}
+ };
+ 
+diff -Naur lsof_4.82-rh/dialects/linux/machine.h lsof_4.83_src/dialects/linux/machine.h
+--- lsof_4.82-rh/dialects/linux/machine.h	2008-10-21 18:17:26.000000000 +0200
++++ lsof_4.83_src/dialects/linux/machine.h	2011-08-23 15:49:42.024633568 +0200
+@@ -141,6 +141,13 @@
+ 
+ 
+ /*
++ * HASEOPT is defined for dialects that support the -e option
++ */
++
++#define	HASEOPT	1
++
++
++/*
+  * HASFSINO is defined for those dialects that have the file system
+  * inode element, fs_ino, in the lfile structure definition in lsof.h.
+  */
+diff -Naur lsof_4.82-rh/lsof.8 lsof_4.83_src/lsof.8
+--- lsof_4.82-rh/lsof.8	2009-03-25 20:26:10.000000000 +0100
++++ lsof_4.83_src/lsof.8	2011-08-23 15:49:42.028633064 +0200
+@@ -18,6 +18,8 @@
+ ] [
+ .BI +|\-D " D"
+ ] [
++.BI +|\-e " s"
++] [
+ .B +|\-f [cfgGn]
+ ] [
+ .BI \-F " [f]"
+@@ -586,6 +588,57 @@
+ .B \-D
+ option has been specified.
+ .TP \w'names'u+4
++.BI +|\-e " s"
++exempts the file system whose path name is
++.I s
++from being subjected to kernel function calls that might block.
++The
++.B +e
++option exempts
++.IR stat (2),
++.IR lstat (2)
++and most
++.IR readlink (2)
++kernel function calls.
++The
++.B \-e
++option exempts only
++.IR stat(2)
++and
++.IR lstat (2)
++kernel function calls.
++Multiple file systems may be specified with separate
++.B +|\-e
++specifications and each may have
++.IR readlink (2)
++calls exempted or not.
++.IP
++This option is currently implemented only for Linux.
++.IP
++.B CAUTION:
++this option can easily be mis\-applied to other than
++the file system of interest, because it uses path name rather
++than the more reliable device and inode numbers.
++(Device and inode numbers are acquired via the potentially blocking
++.IR stat (2)
++kernel call and are thus not available, but see the
++.BI +|\-m " m"
++option as a possible alternative way to supply device numbers.)
++.IP
++\fBUse this option with great care and fully specify the path name of the
++file system to be exempted.\fP
++Consider, for example, that specifying ``-e\ /'' would exempt all file
++systems, since all their paths begin with a `/'.
++.IP
++When open files on exempted file systems are reported, it is not
++possible to obtain all their information.
++Therefore, some information columns will be blank, the characters ``UNKN''
++preface the values in the TYPE column, and the applicable exemption option
++is added in parentheses to the end of the NAME column.
++Some device number information might be made available via the
++.BI +|\-m " m"
++option.
++.TP \w'names'u+4
+ .B +|\-f [cfgGn]
+ .B f
+ by itself clarifies how path name arguments are to be interpreted.
+diff -Naur lsof_4.82-rh/lsof.h lsof_4.83_src/lsof.h
+--- lsof_4.82-rh/lsof.h	2009-03-25 20:20:40.000000000 +0100
++++ lsof_4.83_src/lsof.h	2011-08-23 15:49:42.030632811 +0200
+@@ -336,15 +336,17 @@
+ #define	N_PSEU		49		/* pseudofs node */
+ #define	N_SAMFS		41		/* Solaris SAM-FS */
+ #define	N_SANFS		42		/* AIX SANFS */
+-#define	N_SHARED	43		/* Solaris sharedfs */
+-#define	N_SOCK		44		/* sock_vnodeops node */
+-#define	N_SPEC		45		/* spec_vnodeops node */
+-#define	N_STREAM	46		/* stream node */
+-#define	N_TMP		47		/* tmpfs node */
+-#define	N_UFS		48		/* UNIX file system node */
+-#define	N_VXFS		49		/* Veritas file system node */
+-#define	N_XFS		50		/* XFS node */
+-#define	N_ZFS		51		/* ZFS node */
++#define	N_SDEV		43		/* Solaris sdev file system node */
++#define	N_SHARED	44		/* Solaris sharedfs */
++#define	N_SOCK		45		/* sock_vnodeops node */
++#define	N_SPEC		46		/* spec_vnodeops node */
++#define	N_STREAM	47		/* stream node */
++#define	N_TMP		48		/* tmpfs node */
++#define	N_UFS		49		/* UNIX file system node */
++#define	N_UNKN		50		/* unknown node type */
++#define	N_VXFS		51		/* Veritas file system node */
++#define	N_XFS		52		/* XFS node */
++#define	N_ZFS		53		/* ZFS node */
+ 
+ # if	!defined(OFFDECDIG)
+ #define	OFFDECDIG	8		/* maximum number of digits in the
+@@ -504,6 +506,17 @@
+  * Global storage definitions (including their structure definitions)
+  */
+ 
++typedef struct efsys_list {
++	char *path;			/* path to file system for which kernel
++					 * blocks are to be eliminated */
++	int pathl;			/* path length */
++	int rdlnk;			/* avoid readlink(2) if non-zero */
++	struct mounts *mp;		/* local mount table entry pointer */
++	struct efsys_list *next;	/* next efsys_list entry pointer */
++} efsys_list_t;
++extern efsys_list_t *Efsysl;		/* file systems for which kernel blocks
++					 * are to be eliminated */
++
+ struct int_lst {
+ 	int i;				/* integer argument */
+ 	int f;				/* find state -- meaningful only if
+diff -Naur lsof_4.82-rh/lsof.man lsof_4.83_src/lsof.man
+--- lsof_4.82-rh/lsof.man	2009-03-25 20:26:10.000000000 +0100
++++ lsof_4.83_src/lsof.man	2011-08-23 15:49:42.033632435 +0200
+@@ -10,11 +10,11 @@
+ 
+ SYNOPSIS
+      lsof [ -?abChlnNOPRtUvVX ] [ -A A ] [ -c c ] [ +c c ] [ +|-d
+-     d  ]  [ +|-D D ] [ +|-f [cfgGn] ] [ -F [f] ] [ -g [s] ] [ -i
+-     [i] ] [ -k k ] [ +|-L [l] ] [ +|-m m ] [ +|-M ] [ -o [o] ] [
+-     -p s ] [ +|-r [t[m<fmt>]] ] [ -s [p:s] ] [ -S [t] ] [ -T [t]
+-     ] [ -u s ] [ +|-w ] [ -x [fl] ] [ -z [z] ] [ -Z [Z] ] [ -- ]
+-     [names]
++     d  ]  [ +|-D D ] [ +|-e s ] [ +|-f [cfgGn] ] [ -F [f] ] [ -g
++     [s] ] [ -i[i] ] [ -k k ] [ +|-L [l] ] [ +|-m m ] [ +|-M ]  [
++     -o [o] ] [-p s ] [ +|-r [t[m<fmt>]] ] [ -s [p:s] ] [ -S  [t]
++     ] [ -T [t]] [ -u s ] [ +|-w ] [ -x [fl] ] [ -z [z] ] [ -Z [Z
++     ] ] [ -- ] [names]
+ 
+ DESCRIPTION
+      Lsof revision 4.82 lists on its standard output file  infor-
+@@ -445,14 +445,19 @@
+               This is the default device cache file function when
+               no -D option has been specified.
+ 
+-     +|-f [cfgGn]
+-              f by itself clarifies how path name  arguments  are
+-              to be interpreted.  When followed by c, f, g, G, or
+-              n in any combination it specifies that the  listing
+-              of  kernel  file  structure  information  is  to be
+-              enabled (`+') or inhibited (`-').
++     +|-e s   exempts the file system whose path name is  s  from
++              being subjected to kernel function calls that might
++              block.  The +e option exempts stat(2), lstat(2) and
++              most  readlink(2)  kernel  function  calls.  The -e
++              option exempts only  stat(2)  and  lstat(2)  kernel
++              function  calls.   Multiple  file  systems  may  be
++              specified with  separate  +|-e  specifications  and
++              each may have readlink(2) calls exempted or not.
+ 
+-              Normally a path name argument is taken to be a file
++              This  option  is  currently  implemented  only  for
++              Linux.
++
++              CAUTION: this option can easily be  mis-applied  to
+ 
+ 
+ 
+@@ -467,6 +472,37 @@
+ 
+ 
+ 
++              other  than the file system of interest, because it
++              uses path name rather than the more reliable device
++              and  inode  numbers.  (Device and inode numbers are
++              acquired via the potentially blocking stat(2)  ker-
++              nel  call  and  are thus not available, but see the
++              +|-m m option as a possible alternative way to sup-
++              ply device numbers.)
++
++              Use this option with great care and  fully  specify
++              the  path  name  of the file system to be exempted.
++              Consider, for  example,  that  specifying  ``-e /''
++              would  exempt  all  file  systems,  since all their
++              paths begin with a `/'.
++
++              When  open  files  on  exempted  file  systems  are
++              reported,  it  is  not possible to obtain all their
++              information.  Therefore, some  information  columns
++              will  be blank, the characters ``UNKN'' preface the
++              values in  the  TYPE  column,  and  the  applicable
++              exemption option is added in parentheses to the end
++              of the NAME column.  Some device number information
++              might be made available via the +|-m m option.
++
++     +|-f [cfgGn]
++              f by itself clarifies how path name  arguments  are
++              to be interpreted.  When followed by c, f, g, G, or
++              n in any combination it specifies that the  listing
++              of  kernel  file  structure  information  is  to be
++              enabled (`+') or inhibited (`-').
++
++              Normally a path name argument is taken to be a file
+               system  name  if  it matches a mounted-on directory
+               name reported by mount(8), or if  it  represents  a
+               block device, named in the mount output and associ-
+@@ -496,6 +532,20 @@
+               The listing of information from kernel file  struc-
+               tures,  requested  with the +f [cfgGn] option form,
+               is normally inhibited,  and  is  not  available  in
++
++
++
++SunOS 5.9          Last change: Revision-4.82                   8
++
++
++
++
++
++
++Maintenance Procedures                                    LSOF(8)
++
++
++
+               whole or part for some dialects - e.g., /proc-based
+               Linux kernels below 2.6.22.  When the prefix  to  f
+               is a plus sign (`+'), these characters request file
+@@ -520,19 +570,6 @@
+               file use, or lsof field output can be parsed by  an
+               AWK or Perl post-filter script, or by a C program.
+ 
+-
+-
+-SunOS 5.9          Last change: Revision-4.82                   8
+-
+-
+-
+-
+-
+-
+-Maintenance Procedures                                    LSOF(8)
+-
+-
+-
+      -F f     This option specifies a  character  list,  f,  that
+               selects  the  fields to be output for processing by
+               another program, and the character that  terminates
+@@ -580,12 +617,6 @@
+               PGID  numbers  that  begin  with   `^'   (negation)
+               represent exclusions.
+ 
+-              Multiple PGID numbers are joined in a  single  ORed
+-              set  before  participating in AND option selection.
+-              However, PGID exclusions are applied without  ORing
+-              or  ANDing  and  take effect before other selection
+-              criteria are applied.
+-
+ 
+ 
+ SunOS 5.9          Last change: Revision-4.82                   9
+@@ -599,6 +630,12 @@
+ 
+ 
+ 
++              Multiple PGID numbers are joined in a  single  ORed
++              set  before  participating in AND option selection.
++              However, PGID exclusions are applied without  ORing
++              or  ANDing  and  take effect before other selection
++              criteria are applied.
++
+               The -g option also enables the  output  display  of
+               PGID  numbers.   When  specified without a PGID set
+               that's all it does.
+diff -Naur lsof_4.82-rh/main.c lsof_4.83_src/main.c
+--- lsof_4.82-rh/main.c	2008-10-21 18:21:50.000000000 +0200
++++ lsof_4.83_src/main.c	2011-08-23 15:49:42.035632183 +0200
+@@ -154,7 +154,7 @@
+  * Create option mask.
+  */
+ 	(void) snpf(options, sizeof(options),
+-	    "?a%sbc:D:d:%sf:F:g:hi:%slL:%sMnNo:Op:Pr:%ss:S:tT:u:UvVwx:%s%s%s",
++	    "?a%sbc:%sD:d:%sf:F:g:hi:%slL:%sMnNo:Op:Pr:%ss:S:tT:u:UvVwx:%s%s%s",
+ 
+ #if	defined(HAS_AFS) && defined(HASAOPT)
+ 	    "A:",
+@@ -168,6 +168,12 @@
+ 	    "",
+ #endif	/* defined(HASNCACHE) */
+ 
++#if	defined(HASEOPT)
++	    "e:",
++#else	/* !defined(HASEOPT) */
++	    "",
++#endif	/* defined(HASEOPT) */
++
+ #if	defined(HASKOPT)
+ 	    "k:",
+ #else	/* !defined(HASKOPT) */
+@@ -295,6 +301,13 @@
+ 		break;
+ #endif	/* defined(HASNCACHE) */
+ 
++#if	defined(HASEOPT)
++	    case 'e':
++		if (enter_efsys(GOv, ((GOp == '+') ? 1 : 0)))
++		    err = 1;
++		break;
++#endif	/* defined(HASEOPT) */
++
+ 	    case 'd':
+ 		if (GOp == '+') {
+ 		    if (enter_dir(GOv, 0))
+@@ -1013,6 +1026,35 @@
+ 	    (void) fprintf(stderr, "%s: -x must accompany +d or +D\n", Pn);
+ 	    err++;
+ 	}
++
++#if	defined(HASEOPT)
++	if (Efsysl) {
++
++	/*
++	 * If there are file systems specified by -e options, check them.
++	 */
++	    efsys_list_t *ep;		/* Efsysl pointer */
++	    struct mounts *mp, *mpw;	/* local mount table pointers */
++
++	    if ((mp = readmnt())) {
++		for (ep = Efsysl; ep; ep = ep->next) {
++		    for (mpw = mp; mpw; mpw = mpw->next) {
++			if (!strcmp(mpw->dir, ep->path)) {
++			    ep->mp = mpw;
++			    break;
++			}
++		    }
++		    if (!ep->mp) {
++			(void) fprintf(stderr,
++			    "%s: \"-e %s\" is not a mounted file system.\n",
++			    Pn, ep->path);
++			err++;
++		    }
++		}
++	    }
++	}
++#endif	/* defined(HASEOPT) */
++
+ 	if (DChelp || err || Fhelp || fh || version)
+ 	    usage(err ? 1 : 0, fh, version);
+ /*
+diff -Naur lsof_4.82-rh/print.c lsof_4.83_src/print.c
+--- lsof_4.82-rh/print.c	2008-10-21 18:21:52.000000000 +0200
++++ lsof_4.83_src/print.c	2011-08-23 15:49:42.037631931 +0200
+@@ -2133,8 +2133,7 @@
+ 	)) {
+ 	    if (ps)
+ 		putchar(' ');
+-	    (void) print_tcptpi(1);
+-	    return;
++	    (void) print_tcptpi(0);
+ 	}
+ 	if (nl)
+ 	    putchar('\n');
+diff -Naur lsof_4.82-rh/proto.h lsof_4.83_src/proto.h
+--- lsof_4.82-rh/proto.h	2008-10-21 18:21:52.000000000 +0200
++++ lsof_4.83_src/proto.h	2011-08-23 15:49:42.038631805 +0200
+@@ -87,6 +87,11 @@
+ _PROTOTYPE(extern int enter_cmd_rx,(char *x));
+ _PROTOTYPE(extern void enter_dev_ch,(char *m));
+ _PROTOTYPE(extern int enter_dir,(char *d, int descend));
++
++# if	defined(HASEOPT)
++_PROTOTYPE(extern int enter_efsys,(char *e, int rdlnk));
++# endif	/* defined(HASEOPT) */
++
+ _PROTOTYPE(extern int enter_fd,(char *f));
+ _PROTOTYPE(extern int enter_network_address,(char *na));
+ _PROTOTYPE(extern int enter_id,(enum IDType ty, char *p));
+diff -Naur lsof_4.82-rh/store.c lsof_4.83_src/store.c
+--- lsof_4.82-rh/store.c	2008-10-21 18:21:54.000000000 +0200
++++ lsof_4.83_src/store.c	2011-08-23 15:49:42.039631679 +0200
+@@ -121,7 +121,9 @@
+ char **Dstk = (char **)NULL;	/* the directory stack */
+ int Dstkx = 0;			/* Dstk[] index */
+ int Dstkn = 0;			/* Dstk[] entries allocated */
+-
++efsys_list_t *Efsysl = (efsys_list_t *)NULL;
++				/* file systems for which kernel blocks are
++				 * to be eliminated */
+ int ErrStat = 0;		/* path stat() error count */
+ uid_t Euid;			/* effective UID of this lsof process */
+ int Fand = 0;			/* -a option status */
+diff -Naur lsof_4.82-rh/tests/LTnlink.c lsof_4.83_src/tests/LTnlink.c
+--- lsof_4.82-rh/tests/LTnlink.c	2008-06-04 22:16:59.000000000 +0200
++++ lsof_4.83_src/tests/LTnlink.c	2011-08-23 15:49:42.040631553 +0200
+@@ -211,7 +211,7 @@
+ 	PrtMsgX(em, Pn, cleanup, 1);
+     (void) snprintf(ibuf, sizeof(ibuf) - 1, "%u", (unsigned int)tfsb.st_ino);
+     ibuf[sizeof(szbuf) - 1] = '\0';
+-    (void) snprintf(xlnk, sizeof(xlnk) - 1, "%d", tfsb.st_nlink);
++    (void) snprintf(xlnk, sizeof(xlnk) - 1, "%d", (int)tfsb.st_nlink);
+     ibuf[sizeof(szbuf) - 1] = '\0';
+     (void) snprintf(szbuf, sizeof(szbuf) - 1, "%d", sz);
+     szbuf[sizeof(szbuf) - 1] = '\0';
+diff -Naur lsof_4.82-rh/tests/TestDB lsof_4.83_src/tests/TestDB
+--- lsof_4.82-rh/tests/TestDB	2009-03-25 20:15:42.000000000 +0100
++++ lsof_4.83_src/tests/TestDB	2011-08-23 15:49:42.041631427 +0200
+@@ -74,6 +74,7 @@
+ LT_BIGF LT_CC LT_DIAL_linux LT_VERS=26000 _FILE_OFFSET_BITS=64
+ LT_BIGF LT_CC LT_DIAL_linux LT_VERS=26018 _FILE_OFFSET_BITS=64
+ _FILE_OFFSET_BITS=64 LT_BIGF LT_CC LT_DIAL_linux LT_VERS=26022
++LT_BIGF LT_CC LT_DIAL_linux LT_VERS=26032 _FILE_OFFSET_BITS=64
+ LT_BIGF LT_CC LT_DIAL_netbsd LT_KMEM LT_VERS=1005000
+ LT_BIGF LT_CC LT_DIAL_netbsd LT_KMEM LT_VERS=1006000
+ LT_BIGF LT_CC LT_DIAL_netbsd LT_KMEM LT_VERS=2000000
+diff -Naur lsof_4.82-rh/usage.c lsof_4.83_src/usage.c
+--- lsof_4.82-rh/usage.c	2008-10-21 18:21:55.000000000 +0200
++++ lsof_4.83_src/usage.c	2011-08-23 15:49:42.042631301 +0200
+@@ -363,7 +363,7 @@
+ 		);
+ 
+ 	    (void) fprintf(stderr,
+-		" [+|-f%s%s%s%s%s%s]\n [-F [f]] [-g [s]] [-i [i]]",
++		" [+|-f%s%s%s%s%s%s]%s\n [-F [f]] [-g [s]] [-i [i]]",
+ 
+ #if	defined(HASFSTRUCT)
+ 		"[",
+@@ -392,11 +392,17 @@
+ 		"n",
+ # endif	/* defined(HASNOFSNADDR) */
+ 
+-		"]"
++		"]",
+ #else	/* !defined(HASFSTRUCT) */
+-		"", "", "", "", "", ""
++		"", "", "", "", "", "",
+ #endif	/* defined(HASFSTRUCT) */
+ 
++#if	defined(HASEOPT)
++		" [+|-e s]"
++#else	/* !defined(HASEOPT) */
++		""
++#endif	/* defined(HASEOPT) */
++
+ 		);
+ 
+ #if	defined(HASKOPT)
+@@ -488,6 +494,11 @@
+ #endif	/* defined(HASDCACHE) */
+ 
+ 	    (void) fprintf(stderr, "  %-23.23s", buf);
++
++#if	defined(HASEOPT)
++	    (void) fprintf(stderr, "  %-25.25s", "+|-e s  exempt s *RISKY*");
++#endif	/* defined(HASEOPT) */
++
+ 	    (void) snpf(buf, sizeof(buf), "-i select IPv%s files",
+ 
+ #if	defined(HASIPv6)
+@@ -497,14 +508,14 @@
+ #endif	/* defined(HASIPv6) */
+ 
+ 			  );
+-	    (void) fprintf(stderr, "  %-25.25s", buf);
+-	    (void) fprintf(stderr, "  %s\n", "-l list UID numbers");
+-	    (void) fprintf(stderr, "  %-23.23s", "-n no host names");
+-	    (void) fprintf(stderr, "  %-25.25s", "-N select NFS files");
+-	    (void) fprintf(stderr, "  %s\n", "-o list file offset");
+-	    (void) fprintf(stderr, "  %-23.23s", "-O avoid overhead *RISKY*");
+-	    (void) fprintf(stderr, "  %-25.25s", "-P no port names");
+-	    (void) fprintf(stderr, "  %s\n",
++	    (void) fprintf(stderr, "  %s\n", buf);
++	    (void) fprintf(stderr, "  %-23.23s", "-l list UID numbers");
++	    (void) fprintf(stderr, "  %-25.25s", "-n no host names");
++	    (void) fprintf(stderr, "  %s\n", "-N select NFS files");
++	    (void) fprintf(stderr, "  %-23.23s", "-o list file offset");
++	    (void) fprintf(stderr, "  %-25.25s", "-O avoid overhead *RISKY*");
++	    (void) fprintf(stderr, "  %s\n", "-P no port names");
++	    (void) fprintf(stderr, "  %-23.23s",
+ 
+ #if	defined(HASPPID)
+ 	 	"-R list paRent PID"
+@@ -513,12 +524,12 @@
+ #endif	/* defined(HASPPID) */
+ 
+ 	    );
+-	    (void) fprintf(stderr, "  %-23.23s", "-s list file size");
+-	    (void) fprintf(stderr, "  %-25.25s", "-t terse listing");
+-	    (void) fprintf(stderr, "  %s\n", "-T disable TCP/TPI info");
+-	    (void) fprintf(stderr, "  %-23.23s", "-U select Unix socket");
+-	    (void) fprintf(stderr, "  %-25.25s", "-v list version info");
+-	    (void) fprintf(stderr, "  %s\n", "-V verbose search");
++	    (void) fprintf(stderr, "  %-25.25s", "-s list file size");
++	    (void) fprintf(stderr, "  %s\n", "-t terse listing");
++	    (void) fprintf(stderr, "  %-23.23s", "-T disable TCP/TPI info");
++	    (void) fprintf(stderr, "  %-25.25s", "-U select Unix socket");
++	    (void) fprintf(stderr, "  %s\n", "-v list version info");
++	    (void) fprintf(stderr, "  %-23.23s", "-V verbose search");
+ 	    (void) snpf(buf, sizeof(buf), "+|-w  Warnings (%s)",
+ 
+ #if	defined(WARNINGSTATE)
+@@ -528,7 +539,7 @@
+ #endif	/* defined(WARNINGSTATE) */
+ 
+ 	    );
+-	    (void) fprintf(stderr, "  %-23.23s", buf);
++	    (void) fprintf(stderr, "  %-25.25s", buf);
+ 
+ #if	defined(HASXOPT)
+ # if	defined(HASXOPT_ROOT)
+@@ -544,15 +555,15 @@
+ #endif	/* defined(HASXOPT) */
+ 
+ 	    if (buf[0])
+-		(void) fprintf(stderr, "  %-25.25s", buf);
++		(void) fprintf(stderr, "  %s\n", buf);
+ 
+ #if	defined(HASZONES)
+ 	    (void) fprintf(stderr,
+-		(buf[0]) ? "  %s\n" : "  %-25.25s", "-z z  zone [z]");
++		(buf[0]) ? "  %s\n" : "  %-23.23s", "-z z  zone [z]");
+ #else	/* !defined(HASZONES) */
+ # if	defined(HASSELINUX)
+ 	    (void) fprintf(stderr,
+-		(buf[0]) ? "  %s\n" : "  %-25.25s", "-Z Z  context [Z]");
++		(buf[0]) ? "  %s\n" : "  %-23.23s", "-Z Z  context [Z]");
+ # endif	/* defined(HASSELINUX) */
+ #endif	/* defined(HASZONES) */
+ 
