@@ -1,0 +1,389 @@
+diff --git a/src/grep.h b/src/grep.h
+index 4935872..729c906 100644
+--- a/src/grep.h
++++ b/src/grep.h
+@@ -27,4 +27,19 @@ extern int match_words;		/* -w */
+ extern int match_lines;		/* -x */
+ extern unsigned char eolbyte;	/* -z */
+ 
++/* An enum textbin describes the file's type, inferred from data read
++   before the first line is selected for output.  */
++enum textbin
++  {
++    /* Binary, as it contains null bytes and the -z option is not in effect,
++       or it contains encoding errors.  */
++    TEXTBIN_BINARY = -1,
++
++    /* Not known yet.  Only text has been seen so far.  */
++    TEXTBIN_UNKNOWN = 0,
++
++    /* Text.  */
++    TEXTBIN_TEXT = 1
++  };
++
+ #endif
+diff --git a/src/pcresearch.c b/src/pcresearch.c
+index 820dd00..9938ffc 100644
+--- a/src/pcresearch.c
++++ b/src/pcresearch.c
+@@ -33,13 +33,19 @@ static pcre *cre;
+ /* Additional information about the pattern.  */
+ static pcre_extra *extra;
+ 
+-# ifdef PCRE_STUDY_JIT_COMPILE
+-static pcre_jit_stack *jit_stack;
+-# else
++# ifndef PCRE_STUDY_JIT_COMPILE
+ #  define PCRE_STUDY_JIT_COMPILE 0
+ # endif
+ #endif
+ 
++/* Table, indexed by ! (flag & PCRE_NOTBOL), of whether the empty
++   string matches when that flag is used.  */
++static int empty_match[2];
++
++/* This must be at least 2; everything after that is for performance
++   in pcre_exec.  */
++enum { NSUB = 300 };
++
+ void
+ Pcompile (char const *pattern, size_t size)
+ {
+@@ -52,13 +58,17 @@ Pcompile (char const *pattern, size_t size)
+   char const *ep;
+   char *re = xnmalloc (4, size + 7);
+   int flags = (PCRE_MULTILINE
+-               | (match_icase ? PCRE_CASELESS : 0)
+-               | (using_utf8 () ? PCRE_UTF8 : 0));
++               | (match_icase ? PCRE_CASELESS : 0));
+   char const *patlim = pattern + size;
+   char *n = re;
+   char const *p;
+   char const *pnul;
+ 
++  if (using_utf8 ())
++    flags |= PCRE_UTF8;
++  else if (MB_CUR_MAX != 1)
++    error (EXIT_TROUBLE, 0, _("-P supports only unibyte and UTF-8 locales"));
++
+   /* FIXME: Remove these restrictions.  */
+   if (memchr (pattern, '\n', size))
+     error (EXIT_TROUBLE, 0, _("the -P option only supports a single pattern"));
+@@ -114,14 +124,20 @@ Pcompile (char const *pattern, size_t size)
+       /* A 32K stack is allocated for the machine code by default, which
+          can grow to 512K if necessary. Since JIT uses far less memory
+          than the interpreter, this should be enough in practice.  */
+-      jit_stack = pcre_jit_stack_alloc (32 * 1024, 512 * 1024);
++      pcre_jit_stack *jit_stack = pcre_jit_stack_alloc (32 * 1024, 512 * 1024);
+       if (!jit_stack)
+         error (EXIT_TROUBLE, 0,
+                _("failed to allocate memory for the PCRE JIT stack"));
+       pcre_assign_jit_stack (extra, NULL, jit_stack);
+     }
++
+ # endif
+   free (re);
++
++  int sub[NSUB];
++  empty_match[false] = pcre_exec (cre, extra, "", 0, 0,
++                                  PCRE_NOTBOL, sub, NSUB);
++  empty_match[true] = pcre_exec (cre, extra, "", 0, 0, 0, sub, NSUB);
+ #endif /* HAVE_LIBPCRE */
+ }
+ 
+@@ -134,36 +150,110 @@ Pexecute (char const *buf, size_t size, size_t *match_size,
+   error (EXIT_TROUBLE, 0, _("internal error"));
+   return -1;
+ #else
+-  /* This array must have at least two elements; everything after that
+-     is just for performance improvement in pcre_exec.  */
+-  int sub[300];
+-
+-  const char *line_buf, *line_end, *line_next;
++  int sub[NSUB];
++  char const *p = start_ptr ? start_ptr : buf;
++  bool bol = p[-1] == eolbyte;
++  char const *line_start = buf;
+   int e = PCRE_ERROR_NOMATCH;
+-  ptrdiff_t start_ofs = start_ptr ? start_ptr - buf : 0;
++  char const *line_end;
+ 
+-  /* PCRE can't limit the matching to single lines, therefore we have to
+-     match each line in the buffer separately.  */
+-  for (line_next = buf;
+-       e == PCRE_ERROR_NOMATCH && line_next < buf + size;
+-       start_ofs -= line_next - line_buf)
++  /* If the input type is unknown, the caller is still testing the
++     input, which means the current buffer cannot contain encoding
++     errors and a multiline search is typically more efficient.
++     Otherwise, a single-line search is typically faster, so that
++     pcre_exec doesn't waste time validating the entire input
++     buffer.  */
++  bool multiline = TEXTBIN_UNKNOWN;
++
++  for (; p < buf + size; p = line_start = line_end + 1)
+     {
+-      line_buf = line_next;
+-      line_end = memchr (line_buf, eolbyte, (buf + size) - line_buf);
+-      if (line_end == NULL)
+-        line_next = line_end = buf + size;
+-      else
+-        line_next = line_end + 1;
++      bool too_big;
+ 
+-      if (start_ptr && start_ptr >= line_end)
+-        continue;
++      if (multiline)
++        {
++          size_t pcre_size_max = MIN (INT_MAX, SIZE_MAX - 1);
++          size_t scan_size = MIN (pcre_size_max + 1, buf + size - p);
++          line_end = memrchr (p, eolbyte, scan_size);
++          too_big = ! line_end;
++        }
++      else
++        {
++          line_end = memchr (p, eolbyte, buf + size - p);
++          too_big = INT_MAX < line_end - p;
++        }
+ 
+-      if (INT_MAX < line_end - line_buf)
++      if (too_big)
+         error (EXIT_TROUBLE, 0, _("exceeded PCRE's line length limit"));
+ 
+-      e = pcre_exec (cre, extra, line_buf, line_end - line_buf,
+-                     start_ofs < 0 ? 0 : start_ofs, 0,
+-                     sub, sizeof sub / sizeof *sub);
++      for (;;)
++        {
++          /* Skip past bytes that are easily determined to be encoding
++             errors, treating them as data that cannot match.  This is
++             faster than having pcre_exec check them.  */
++          while (mbclen_cache[to_uchar (*p)] == (size_t) -1)
++            {
++              p++;
++              bol = false;
++            }
++
++          /* Check for an empty match; this is faster than letting
++             pcre_exec do it.  */
++          int search_bytes = line_end - p;
++          if (search_bytes == 0)
++            {
++              sub[0] = sub[1] = 0;
++              e = empty_match[bol];
++              break;
++            }
++
++          int options = 0;
++          if (!bol)
++            options |= PCRE_NOTBOL;
++          if (multiline)
++            options |= PCRE_NO_UTF8_CHECK;
++
++          e = pcre_exec (cre, extra, p, search_bytes, 0,
++                         options, sub, NSUB);
++          if (e != PCRE_ERROR_BADUTF8)
++            {
++              if (0 < e && multiline && sub[1] - sub[0] != 0)
++                {
++                  char const *nl = memchr (p + sub[0], eolbyte,
++                                           sub[1] - sub[0]);
++                  if (nl)
++                    {
++                      /* This match crosses a line boundary; reject it.  */
++                      p += sub[0];
++                      line_end = nl;
++                      continue;
++                    }
++                }
++              break;
++            }
++          int valid_bytes = sub[0];
++
++          /* Try to match the string before the encoding error.
++             Again, handle the empty-match case specially, for speed.  */
++          if (valid_bytes == 0)
++            {
++              sub[1] = 0;
++              e = empty_match[bol];
++            }
++          else
++            e = pcre_exec (cre, extra, p, valid_bytes, 0,
++                           options | PCRE_NO_UTF8_CHECK | PCRE_NOTEOL,
++                           sub, NSUB);
++          if (e != PCRE_ERROR_NOMATCH || valid_bytes < 0)
++            break;
++
++          /* Treat the encoding error as data that cannot match.  */
++          p += valid_bytes + 1;
++          bol = false;
++        }
++
++      if (e != PCRE_ERROR_NOMATCH)
++        break;
++      bol = true;
+     }
+ 
+   if (e <= 0)
+@@ -171,7 +261,7 @@ Pexecute (char const *buf, size_t size, size_t *match_size,
+       switch (e)
+         {
+         case PCRE_ERROR_NOMATCH:
+-          return -1;
++          break;
+ 
+         case PCRE_ERROR_NOMEMORY:
+           error (EXIT_TROUBLE, 0, _("memory exhausted"));
+@@ -180,10 +270,6 @@ Pexecute (char const *buf, size_t size, size_t *match_size,
+           error (EXIT_TROUBLE, 0,
+                  _("exceeded PCRE's backtracking limit"));
+ 
+-        case PCRE_ERROR_BADUTF8:
+-          error (EXIT_TROUBLE, 0,
+-                 _("invalid UTF-8 byte sequence in input"));
+-
+         default:
+           /* For now, we lump all remaining PCRE failures into this basket.
+              If anyone cares to provide sample grep usage that can trigger
+@@ -192,30 +278,33 @@ Pexecute (char const *buf, size_t size, size_t *match_size,
+           error (EXIT_TROUBLE, 0, _("internal PCRE error: %d"), e);
+         }
+ 
+-      /* NOTREACHED */
+       return -1;
+     }
+   else
+     {
+-      /* Narrow down to the line we've found.  */
+-      char const *beg = line_buf + sub[0];
+-      char const *end = line_buf + sub[1];
+-      char const *buflim = buf + size;
+-      char eol = eolbyte;
+-      if (!start_ptr)
++      char const *matchbeg = p + sub[0];
++      char const *matchend = p + sub[1];
++      char const *beg;
++      char const *end;
++      if (start_ptr)
+         {
+-          /* FIXME: The case when '\n' is not found indicates a bug:
+-             Since grep is line oriented, the match should never contain
+-             a newline, so there _must_ be a newline following.
+-           */
+-          if (!(end = memchr (end, eol, buflim - end)))
+-            end = buflim;
+-          else
+-            end++;
+-          while (buf < beg && beg[-1] != eol)
+-            --beg;
++          beg = matchbeg;
++          end = matchend;
++        }
++      else if (multiline)
++        {
++          char const *prev_nl = memrchr (line_start - 1, eolbyte,
++                                         matchbeg - (line_start - 1));
++          char const *next_nl = memchr (matchend, eolbyte,
++                                        line_end + 1 - matchend);
++          beg = prev_nl + 1;
++          end = next_nl + 1;
++        }
++      else
++        {
++          beg = line_start;
++          end = line_end + 1;
+         }
+-
+       *match_size = end - beg;
+       return beg - buf;
+     }
+diff --git a/src/search.h b/src/search.h
+index 14877bc..e671bea 100644
+--- a/src/search.h
++++ b/src/search.h
+@@ -45,6 +45,7 @@ extern void kwsinit (kwset_t *);
+ 
+ extern char *mbtoupper (char const *, size_t *, mb_len_map_t **);
+ extern void build_mbclen_cache (void);
++extern size_t mbclen_cache[];
+ extern ptrdiff_t mb_goback (char const **, char const *, char const *);
+ extern wint_t mb_prev_wc (char const *, char const *, char const *);
+ extern wint_t mb_next_wc (char const *, char const *);
+diff --git a/src/searchutils.c b/src/searchutils.c
+index 5eb9a12..aba9335 100644
+--- a/src/searchutils.c
++++ b/src/searchutils.c
+@@ -22,7 +22,7 @@
+ 
+ #define NCHAR (UCHAR_MAX + 1)
+ 
+-static size_t mbclen_cache[NCHAR];
++size_t mbclen_cache[NCHAR];
+ 
+ void
+ kwsinit (kwset_t *kwset)
+diff --git a/tests/pcre-infloop b/tests/pcre-infloop
+index 1b33e72..8054844 100755
+--- a/tests/pcre-infloop
++++ b/tests/pcre-infloop
+@@ -18,16 +18,16 @@
+ # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ 
+ . "${srcdir=.}/init.sh"; path_prepend_ ../src
+-require_pcre_
+ require_timeout_
+ require_en_utf8_locale_
+ require_compiled_in_MB_support
++LC_ALL=en_US.UTF-8 require_pcre_
+ 
+ printf 'a\201b\r' > in || framework_failure_
+ 
+ fail=0
+ 
+ LC_ALL=en_US.UTF-8 timeout 3 grep -P 'a.?..b' in
+-test $? = 2 || fail_ "libpcre's match function appears to infloop"
++test $? = 1 || fail_ "libpcre's match function appears to infloop"
+ 
+ Exit $fail
+diff --git a/tests/pcre-invalid-utf8-input b/tests/pcre-invalid-utf8-input
+index 913e8ee..abcc7e8 100755
+--- a/tests/pcre-invalid-utf8-input
++++ b/tests/pcre-invalid-utf8-input
+@@ -8,14 +8,19 @@
+ # notice and this notice are preserved.
+ 
+ . "${srcdir=.}/init.sh"; path_prepend_ ../src
+-require_pcre_
++require_timeout_
+ require_en_utf8_locale_
++require_compiled_in_MB_support
++LC_ALL=en_US.UTF-8 require_pcre_
+ 
+ fail=0
+ 
+-printf 'j\202\nj\n' > in || framework_failure_
++printf 'j\202j\nj\nk\202\n' > in || framework_failure_
+ 
+-LC_ALL=en_US.UTF-8 grep -P j in
+-test $? -eq 2 || fail=1
++LC_ALL=en_US.UTF-8 timeout 3 grep -P j in
++test $? -eq 0 || fail=1
++
++LC_ALL=en_US.UTF-8 timeout 3 grep -P 'k$' in
++test $? -eq 1 || fail=1
+ 
+ Exit $fail
+diff --git a/tests/pcre-utf8 b/tests/pcre-utf8
+index 41676f4..2dda116 100755
+--- a/tests/pcre-utf8
++++ b/tests/pcre-utf8
+@@ -8,8 +8,8 @@
+ # notice and this notice are preserved.
+ 
+ . "${srcdir=.}/init.sh"; path_prepend_ ../src
+-require_pcre_
+ require_en_utf8_locale_
++LC_ALL=en_US.UTF-8 require_pcre_
+ 
+ fail=0
+ 
