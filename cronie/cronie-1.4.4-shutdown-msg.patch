@@ -1,0 +1,65 @@
+diff -up cronie-1.4.4/src/cron.c.shutdown-msg cronie-1.4.4/src/cron.c
+--- cronie-1.4.4/src/cron.c.shutdown-msg	2015-02-05 15:27:26.000000000 +0100
++++ cronie-1.4.4/src/cron.c	2015-02-05 15:35:17.445599800 +0100
+@@ -41,7 +41,7 @@ sigchld_handler(int),
+ sighup_handler(int),
+ sigchld_reaper(void), quit(int), parse_args(int c, char *v[]);
+ 
+-static volatile sig_atomic_t got_sighup, got_sigchld;
++static volatile sig_atomic_t got_sighup, got_sigchld, got_sigintterm;
+ static int timeRunning, virtualTime, clockTime;
+ static long GMToff;
+ static int DisableInotify;
+@@ -283,7 +283,7 @@ int main(int argc, char *argv[]) {
+ 	 * timeRunning: is the time we last awakened.
+ 	 * clockTime: is the time when set_time was last called.
+ 	 */
+-	while (TRUE) {
++	while (!got_sigintterm) {
+ 		int timeDiff;
+ 		enum timejump wakeupKind;
+ 
+@@ -291,7 +291,9 @@ int main(int argc, char *argv[]) {
+ 		do {
+ 			cron_sleep(timeRunning + 1, &database);
+ 			set_time(FALSE);
+-		} while (clockTime == timeRunning);
++		} while (!got_sigintterm && clockTime == timeRunning);
++		if (got_sigintterm)
++			break;
+ 		timeRunning = clockTime;
+ 
+ 		/*
+@@ -417,6 +419,12 @@ int main(int argc, char *argv[]) {
+ 	if (fd >= 0 && close(fd) < 0)
+ 		log_it("CRON", pid, "INFO", "Inotify close failed", errno);
+ #endif
++
++	log_it("CRON", pid, "INFO", "Shutting down", 0);
++
++	(void) unlink(_PATH_CRON_PID);
++
++	return 0;
+ }
+ 
+ static void run_reboot_jobs(cron_db * db) {
+@@ -567,6 +575,9 @@ static void cron_sleep(int target, cron_
+ 		while (seconds_to_wait > 0 && seconds_to_wait < 65) {
+ 		sleep((unsigned int) seconds_to_wait);
+ 
++		if (got_sigintterm)
++			return;
++
+ 		/*
+ 		 * Check to see if we were interrupted by a signal.
+ 		 * If so, service the signal(s) then continue sleeping
+@@ -589,8 +600,7 @@ static void sigchld_handler(int x) {
+ }
+ 
+ static void quit(int x) {
+-	(void) unlink(_PATH_CRON_PID);
+-	_exit(0);
++	got_sigintterm = 1;
+ }
+ 
+ static void sigchld_reaper(void) {

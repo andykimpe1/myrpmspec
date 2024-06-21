@@ -1,0 +1,102 @@
+diff -up cronie-1.4.4/src/env.c.lang cronie-1.4.4/src/env.c
+--- cronie-1.4.4/src/env.c.lang	2009-09-25 08:23:18.000000000 +0200
++++ cronie-1.4.4/src/env.c	2013-08-30 11:35:05.332992312 +0200
+@@ -20,6 +20,7 @@
+  */
+ 
+ #include <cron.h>
++#include <unistd.h>
+ 
+ char **env_init(void) {
+ 	char **p = (char **) malloc(sizeof (char **));
+@@ -59,7 +60,7 @@ char **env_copy(char **envp) {
+ 	return (p);
+ }
+ 
+-char **env_set(char **envp, char *envstr) {
++char **env_set(char **envp, const char *envstr) {
+ 	int count, found;
+ 	char **p, *envtmp;
+ 
+@@ -104,6 +105,47 @@ char **env_set(char **envp, char *envstr
+ 	return (p);
+ }
+ 
++int env_set_from_environ(char ***envpp) {
++       static const char *names[] = {
++               "LANG",
++               "LC_CTYPE",
++               "LC_NUMERIC",
++               "LC_TIME",
++               "LC_COLLATE",
++               "LC_MONETARY",
++               "LC_MESSAGES",
++               "LC_PAPER",
++               "LC_NAME",
++               "LC_ADDRESS",
++               "LC_TELEPHONE",
++               "LC_MEASUREMENT",
++               "LC_IDENTIFICATION",
++               "LC_ALL",
++               "LANGUAGE",
++               NULL
++       };
++       const char **name;
++       char **procenv;
++
++       for (procenv = environ; *procenv != NULL; ++procenv) {
++               for (name = names; *name != NULL; ++name) {
++                       size_t namelen;
++
++                       namelen = strlen(*name);
++                       if (strncmp(*name, *procenv, namelen) == 0 
++                           && (*procenv)[namelen] == '=') {
++                               char **tmpenv;
++
++                               tmpenv = env_set(*envpp, *procenv);
++                               if (tmpenv == NULL)
++                                       return FALSE;
++                               *envpp = tmpenv;
++                       }
++               }
++       }
++       return TRUE;
++}
++
+ /* The following states are used by load_env(), traversed in order: */
+ enum env_state {
+ 	NAMEI,	/* First char of NAME, may be quote */
+diff -up cronie-1.4.4/src/funcs.h.lang cronie-1.4.4/src/funcs.h
+--- cronie-1.4.4/src/funcs.h.lang	2013-08-30 11:35:05.300987152 +0200
++++ cronie-1.4.4/src/funcs.h	2013-08-30 11:35:05.333992435 +0200
+@@ -55,6 +55,7 @@ int		load_database(cron_db *),
+ 		swap_uids(void),
+ 		swap_uids_back(void),
+ 		load_env(char *, FILE *),
++		env_set_from_environ(char ***envpp),
+ 		cron_pclose(FILE *),
+ 		glue_strings(char *, size_t, const char *, const char *, char),
+ 		strcmp_until(const char *, const char *, char),
+@@ -69,7 +70,7 @@ char		*env_get(char *, char **),
+ 		*first_word(char *, char *),
+ 		**env_init(void),
+ 		**env_copy(char **),
+-		**env_set(char **, char *);
++		**env_set(char **, const char *);
+ 
+ user		*load_user(int, struct passwd *, const char *, const char *, const char *),
+ 		*find_user(cron_db *, const char *, const char *);
+diff -up cronie-1.4.4/src/user.c.lang cronie-1.4.4/src/user.c
+--- cronie-1.4.4/src/user.c.lang	2009-09-25 08:23:18.000000000 +0200
++++ cronie-1.4.4/src/user.c	2013-08-30 11:37:55.814999341 +0200
+@@ -89,6 +89,10 @@ load_user (int crontab_fd, struct passwd
+ 		return (NULL);
+ 	}
+ 
++	if (env_set_from_environ(&envp) == FALSE) {
++		save_errno = errno;
++	}
++
+ 	if (get_security_context(pw == NULL ? NULL : uname,
+ 		crontab_fd, &u->scontext, tabname) != 0) {
+ 		free_user (u);

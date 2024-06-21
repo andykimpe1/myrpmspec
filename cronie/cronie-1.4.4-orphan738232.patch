@@ -1,0 +1,143 @@
+diff -up cronie-1.4.4/src/cron.c.orphan cronie-1.4.4/src/cron.c
+--- cronie-1.4.4/src/cron.c.orphan	2013-04-22 11:57:52.000000000 +0200
++++ cronie-1.4.4/src/cron.c	2013-06-06 20:37:32.666976893 +0200
+@@ -282,6 +282,7 @@ int main(int argc, char *argv[]) {
+ 		 * clock.  Classify the change into one of 4 cases.
+ 		 */
+ 		timeDiff = timeRunning - virtualTime;
++		check_orphans(&database);
+ #if defined WITH_INOTIFY
+ 		if (inotify_enabled) {
+ 			check_inotify_database(&database);
+diff -up cronie-1.4.4/src/database.c.orphan cronie-1.4.4/src/database.c
+--- cronie-1.4.4/src/database.c.orphan	2009-09-25 08:27:51.000000000 +0200
++++ cronie-1.4.4/src/database.c	2013-06-06 20:41:06.496994781 +0200
+@@ -88,12 +88,81 @@ check_open(const char *tabname, const ch
+ 	return (crontab_fd);
+ }
+ 
++static orphan *orphans;
++
++static void
++free_orphan(orphan *o) {
++	free(o->tabname);
++	free(o->fname);
++	free(o->uname);
++	free(o);
++}
++
++void
++check_orphans(cron_db *db) {
++	orphan *prev_orphan = NULL;
++	orphan *o = orphans;
++
++	while (o != NULL) {
++		if (getpwnam(o->uname) != NULL) {
++			orphan *next = o->next;
++
++			if (prev_orphan == NULL) {
++				orphans = next;
++			} else {
++				prev_orphan->next = next;
++			}
++
++			process_crontab(o->uname, o->fname, o->tabname,
++				db, NULL);
++
++			/* process_crontab could have added a new orphan */
++			if (prev_orphan == NULL && orphans != next) {
++				prev_orphan = orphans;
++			}
++			free_orphan(o);
++			o = next;
++		} else {
++			prev_orphan = o;
++			o = o->next;
++		}
++	}
++}
++
++static void
++add_orphan(const char *uname, const char *fname, const char *tabname) {
++	orphan *o;
++
++	o = calloc(1, sizeof(*o));
++	if (o == NULL)
++		return;
++
++	if (uname)
++		if ((o->uname=strdup(uname)) == NULL)
++			goto cleanup;
++
++	if (fname)
++		if ((o->fname=strdup(fname)) == NULL)
++			goto cleanup;
++
++	if (tabname)
++		if ((o->tabname=strdup(tabname)) == NULL)
++			goto cleanup;
++
++	o->next = orphans;
++	orphans = o;
++	return;
++
++cleanup:
++	free_orphan(o);
++}
++
+ static void
+ process_crontab(const char *uname, const char *fname, const char *tabname,
+ 	cron_db * new_db, cron_db * old_db) {
+ 	struct passwd *pw = NULL;
+ 	int crontab_fd = -1;
+-	user *u;
++	user *u = NULL;
+ 	time_t mtime;
+ 	int crond_crontab = (fname == NULL) && (strcmp(tabname, SYSCRONTAB) != 0);
+ 
+@@ -106,6 +175,7 @@ process_crontab(const char *uname, const
+ 		/* file doesn't have a user in passwd file.
+ 		 */
+ 		log_it(uname, getpid(), "ORPHAN", "no passwd entry", 0);
++		add_orphan(uname, fname, tabname);
+ 		goto next_crontab;
+ 	}
+ 
+@@ -114,6 +184,7 @@ process_crontab(const char *uname, const
+ 
+ 	Debug(DLOAD, ("\t%s:", fname))
+ 
++	if (old_db != NULL)
+ 		u = find_user(old_db, fname, crond_crontab ? tabname : NULL);	/* find user in old_db */
+ 
+ 	if (u != NULL) {
+diff -up cronie-1.4.4/src/funcs.h.orphan cronie-1.4.4/src/funcs.h
+--- cronie-1.4.4/src/funcs.h.orphan	2010-01-13 13:25:35.000000000 +0100
++++ cronie-1.4.4/src/funcs.h	2013-06-06 20:41:55.141998914 +0200
+@@ -39,7 +39,8 @@ void		set_cron_uid(void),
+ 		acquire_daemonlock(int),
+ 		skip_comments(FILE *),
+ 		log_it(const char *, PID_T, const char *, const char *, int),
+-		log_close(void);
++		log_close(void),
++		check_orphans(cron_db *);
+ #if defined WITH_INOTIFY
+ void 		set_cron_watched(int ),
+ 		set_cron_unwatched(int ),
+diff -up cronie-1.4.4/src/structs.h.orphan cronie-1.4.4/src/structs.h
+--- cronie-1.4.4/src/structs.h.orphan	2009-09-25 08:23:18.000000000 +0200
++++ cronie-1.4.4/src/structs.h	2013-06-06 20:42:37.564002535 +0200
+@@ -57,6 +57,13 @@ typedef	struct _user {
+ 	security_context_t	scontext;    /* SELinux security context */
+ } user;
+ 
++typedef	struct _orphan {
++	struct _orphan	*next;		/* link */
++	char		*uname;
++	char		*fname;
++	char		*tabname;
++} orphan;
++
+ typedef	struct _cron_db {
+ 	user		*head, *tail;	/* links */
+ 	time_t		mtime;		/* last modtime on spooldir */

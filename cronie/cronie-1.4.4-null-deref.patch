@@ -1,0 +1,79 @@
+diff -up cronie-1.4.4/anacron/matchrx.c.null-deref cronie-1.4.4/anacron/matchrx.c
+--- cronie-1.4.4/anacron/matchrx.c.null-deref	2009-09-25 08:23:18.000000000 +0200
++++ cronie-1.4.4/anacron/matchrx.c	2015-02-05 15:12:03.336283388 +0100
+@@ -48,6 +48,8 @@ match_rx(const char *rx, char *string, i
+ 	char **substring;
+ 	regmatch_t *sub_offsets;
+ 	sub_offsets = malloc(sizeof(regmatch_t) * (n_sub + 1));
++	if (sub_offsets == NULL)
++	    return -1;
+ 	memset(sub_offsets, 0, sizeof(regmatch_t) * (n_sub + 1));
+ 
+ 	if (regcomp(&crx, rx, REG_EXTENDED)) {
+@@ -73,6 +75,7 @@ match_rx(const char *rx, char *string, i
+ 		if (substring != NULL)
+ 		{
+ 			if (sub_offsets[n].rm_so == -1) {
++			    va_end(va);
+ 			    free(sub_offsets);
+ 			    return - 1;
+ 			}
+diff -up cronie-1.4.4/anacron/readtab.c.null-deref cronie-1.4.4/anacron/readtab.c
+--- cronie-1.4.4/anacron/readtab.c.null-deref	2009-09-25 08:23:18.000000000 +0200
++++ cronie-1.4.4/anacron/readtab.c	2015-02-05 15:11:10.057032895 +0100
+@@ -240,6 +240,21 @@ register_period_job(const char *periods,
+ 	  jr->named_period, jr->delay, jr->ident, jr->command));
+ }
+ 
++static long int
++unbiased_rand(long int max)
++{
++    long int rn;
++    long int divisor;
++
++    divisor = RAND_MAX / (max + 1);
++
++    do {
++        rn = random() / divisor;
++    } while (rn > max);
++
++    return rn;
++}
++
+ static void
+ parse_tab_line(char *line)
+ {
+@@ -271,21 +286,23 @@ parse_tab_line(char *line)
+         if (strncmp(env_var, "START_HOURS_RANGE", 17) == 0)
+         {
+             r = match_rx("^([[:digit:]]+)-([[:digit:]]+)$", value, 2, &from, &to);
+-            if ((r == -1) || (from == NULL) || (to == NULL)) goto reg_invalid;
++            if (r == -1) goto reg_err;
++            if (r == 0) goto reg_invalid;
+             range_start = atoi(from);
+             range_stop = atoi(to);
++            if (range_stop < range_start) {
++                range_start = 0; range_stop = 0;
++                goto reg_invalid;
++            }
+             Debug(("Jobs will start in the %02d:00-%02d:00 range.", range_start, range_stop));
+         }
+-        if (strncmp(env_var, "RANDOM_DELAY", 12) == 0) {
++        else if (strncmp(env_var, "RANDOM_DELAY", 12) == 0) {
+             r = match_rx("^([[:digit:]]+)$", value, 0);
+-            if (r != -1) {
+-                int i = random();
+-                double x = 0;
+-                x = (double) i / (double) RAND_MAX * (double) (atoi(value));
+-                random_number = (int)x;
+-                Debug(("Randomized delay set: %d", random_number));
+-            }
+-        else goto reg_invalid;
++            if (r == -1) goto reg_err;
++            if (r == 0) goto reg_invalid;
++
++            random_number = (int)unbiased_rand(atoi(value));
++            Debug(("Randomized delay set: %d", random_number));
+         }
+ 	register_env(env_var, value);
+ 	return;

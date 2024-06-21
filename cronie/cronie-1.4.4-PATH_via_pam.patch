@@ -1,0 +1,82 @@
+diff -up cronie-1.4.4/man/cron.8.old cronie-1.4.4/man/cron.8
+--- cronie-1.4.4/man/cron.8.old	2010-01-05 16:43:59.000000000 +0100
++++ cronie-1.4.4/man/cron.8	2013-08-07 11:20:43.037048806 +0200
+@@ -144,6 +144,9 @@ Cron permit any crontab, which user set.
+ .TP
+ .B "\-x"
+ With this option is possible to set debug flags.
++.TP
++.B "\-P"
++Don't set PATH.  PATH is instead inherited from the environment.
+ .SH SIGNALS
+ On receipt of a \s-2SIGHUP\s+2, the cron daemon will close and reopen its
+ log file.  This is useful in scripts which rotate and age log files.  
+diff -up cronie-1.4.4/src/cron.c.old cronie-1.4.4/src/cron.c
+--- cronie-1.4.4/src/cron.c.old	2013-08-07 11:19:40.000000000 +0200
++++ cronie-1.4.4/src/cron.c	2013-08-07 11:23:35.340356910 +0200
+@@ -155,6 +155,7 @@ int main(int argc, char *argv[]) {
+ 
+ 	SyslogOutput = 0;
+ 	NoFork = 0;
++	ChangePath = 1;
+ 	parse_args(argc, argv);
+ 
+ 	bzero((char *) &sact, sizeof sact);
+@@ -175,9 +176,12 @@ int main(int argc, char *argv[]) {
+ 	set_cron_uid();
+ 	set_cron_cwd();
+ 
+-	if (putenv("PATH=" _PATH_DEFPATH) < 0) {
+-		log_it("CRON", pid, "DEATH", "can't putenv PATH", errno);
+-		exit(1);
++	if (ChangePath) {                                                                                                                                                                                                                    
++		if (setenv("PATH", _PATH_DEFPATH, 1) < 0) { 
++			log_it("CRON", pid, "DEATH", "can't putenv PATH",                                                                                                                                                                    
++				errno);                                                                                                                                                                                                      
++			exit(1);
++		}
+ 	}
+ 
+ 	/* Get the default locale character set for the mail 
+@@ -607,7 +611,7 @@ static void sigchld_reaper(void) {
+ static void parse_args(int argc, char *argv[]) {
+ 	int argch;
+ 
+-	while (-1 != (argch = getopt(argc, argv, "npsix:m:"))) {
++	while (-1 != (argch = getopt(argc, argv, "npsiPx:m:"))) {
+ 		switch (argch) {
+ 		default:
+ 			usage();
+@@ -627,6 +631,9 @@ static void parse_args(int argc, char *a
+ 		case 'i':
+ 			DisableInotify = 1;
+ 			break;
++		case 'P':
++			ChangePath = 0;
++			break;
+ 		case 'm':
+ 			strncpy(MailCmd, optarg, MAX_COMMAND);
+ 			break;
+diff -up cronie-1.4.4/src/entry.c.old cronie-1.4.4/src/entry.c
+--- cronie-1.4.4/src/entry.c.old	2013-08-07 11:23:43.782367125 +0200
++++ cronie-1.4.4/src/entry.c	2013-08-07 11:24:17.484399969 +0200
+@@ -295,7 +295,7 @@ entry *load_entry(FILE * file, void (*er
+ 	}
+ #ifndef LOGIN_CAP
+ 	/* If login.conf is in used we will get the default PATH later. */
+-	if (!env_get("PATH", e->envp)) {
++	if (ChangePath && !env_get("PATH", e->envp)) {
+ 		if (glue_strings(envstr, sizeof envstr, "PATH", _PATH_DEFPATH, '=')) {
+ 			if ((tenvp = env_set(e->envp, envstr)) == NULL) {
+ 				ecode = e_memory;
+diff -up cronie-1.4.4/src/globals.h.old cronie-1.4.4/src/globals.h
+--- cronie-1.4.4/src/globals.h.old	2013-08-07 11:24:23.981214732 +0200
++++ cronie-1.4.4/src/globals.h	2013-08-07 11:24:51.163103052 +0200
+@@ -67,6 +67,7 @@ XTRN int	NoFork;
+ XTRN int        PermitAnyCrontab;
+ XTRN char       MailCmd[MAX_COMMAND];
+ XTRN char       cron_default_mail_charset[MAX_ENVSTR];
++XTRN int        ChangePath;
+  
+ #if DEBUGGING
+ XTRN int	DebugFlags INIT(0);

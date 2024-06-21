@@ -1,0 +1,156 @@
+diff -up cronie-1.4.4/man/crontab.5.random cronie-1.4.4/man/crontab.5
+--- cronie-1.4.4/man/crontab.5.random	2009-09-25 08:23:18.000000000 +0200
++++ cronie-1.4.4/man/crontab.5	2013-08-07 15:34:13.820371841 +0200
+@@ -108,6 +108,13 @@ context.
+ See also the 
+ .BR crontab(1)\ -s\ option.
+ .PP
++The
++.I RANDOM_DELAY
++variable allows delaying job startups by random amount of minutes with
++upper limit specified by the variable. The random scaling factor is
++determined during the cron daemon startup so it remains constant for
++the whole run time of the daemon.
++.PP
+ The format of a cron command is very much the V7 standard, with a number of
+ upward-compatible extensions.  Each line has five time and date fields,
+ followed by a user name if this is the system crontab file,
+diff -up cronie-1.4.4/src/cron.c.random cronie-1.4.4/src/cron.c
+--- cronie-1.4.4/src/cron.c.random	2013-08-07 15:34:13.816038638 +0200
++++ cronie-1.4.4/src/cron.c	2013-08-07 15:37:03.854087883 +0200
+@@ -22,6 +22,7 @@
+ #define	MAIN_PROGRAM
+ 
+ #include <cron.h>
++#include <sys/time.h>
+ 
+ #if defined WITH_INOTIFY
+ int inotify_enabled;
+@@ -138,6 +139,9 @@ int main(int argc, char *argv[]) {
+ 	char *cs;
+ 	pid_t pid = getpid();
+ 	long oldGMToff;
++	struct timeval tv;
++	struct timezone tz;
++	char buf[256];
+ #if defined WITH_INOTIFY
+ 	int i;
+ #endif
+@@ -226,6 +230,15 @@ int main(int argc, char *argv[]) {
+ 	}
+ 
+ 	pid = getpid();
++
++	/* obtain a random scaling factor for RANDOM_DELAY */
++	if (gettimeofday(&tv, &tz) != 0)
++		tv.tv_usec = 0;
++	srandom(pid + tv.tv_usec);
++	RandomScale = random() / (double)RAND_MAX;
++	snprintf(buf, sizeof(buf), "RANDOM_DELAY will be scaled with factor %d%% if used.", (int)(RandomScale*100));
++	log_it("CRON", pid, "INFO", buf, 0);
++
+ 	acquire_daemonlock(0);
+ 	database.head = NULL;
+ 	database.tail = NULL;
+@@ -436,8 +449,6 @@ static void run_reboot_jobs(cron_db * db
+ 
+ static void find_jobs(int vtime, cron_db * db, int doWild, int doNonWild, long vGMToff) {
+ 	char *orig_tz, *job_tz;
+-	time_t virtualSecond = vtime * SECONDS_PER_MINUTE;
+-	time_t virtualGMTSecond = virtualSecond - vGMToff;
+ 	struct tm *tm;
+ 	int minute, hour, dom, month, dow;
+ 	user *u;
+@@ -471,11 +482,7 @@ static void find_jobs(int vtime, cron_db
+ 	} while (0)
+ 
+ 	orig_tz = getenv("TZ");
+-	maketime(NULL, orig_tz);
+ 
+-	Debug(DSCH, ("[%ld] tick(%d,%d,%d,%d,%d) %s %s\n",
+-			(long) getpid(), minute, hour, dom, month, dow,
+-			doWild ? " " : "No wildcard", doNonWild ? " " : "Wildcard only"))
+ 		/* the dom/dow situation is odd.  '* * 1,15 * Sun' will run on the
+ 		 * first and fifteenth AND every Sunday;  '* * * * Sun' will run *only*
+ 		 * on Sundays;  '* * 1,15 * *' will run *only* the 1st and 15th.  this
+@@ -490,6 +497,8 @@ static void find_jobs(int vtime, cron_db
+ 				uname = e->pwd->pw_name;
+ 			/* check if user exists in time of job is being run f.e. ldap */
+ 			if ((pw = getpwnam(uname)) != NULL) {
++				time_t virtualSecond = (vtime - e->delay) * SECONDS_PER_MINUTE;
++				time_t virtualGMTSecond = virtualSecond - vGMToff;
+ 				job_tz = env_get("CRON_TZ", e->envp);
+ 				maketime(job_tz, orig_tz);
+ 				/* here we test whether time is NOW */
+diff -up cronie-1.4.4/src/entry.c.random cronie-1.4.4/src/entry.c
+--- cronie-1.4.4/src/entry.c.random	2013-08-07 15:34:13.816038638 +0200
++++ cronie-1.4.4/src/entry.c	2013-08-07 15:34:13.820371841 +0200
+@@ -27,6 +27,7 @@
+  */
+ 
+ #include <cron.h>
++#include <errno.h>
+ 
+ typedef enum ecode {
+ 	e_none, e_minute, e_hour, e_dom, e_month, e_dow,
+@@ -83,6 +84,7 @@ entry *load_entry(FILE * file, void (*er
+ 	char cmd[MAX_COMMAND];
+ 	char envstr[MAX_ENVSTR];
+ 	char **tenvp;
++	char *p;
+ 
+ 	Debug(DPARS, ("load_entry()...about to eat comments\n"))
+ 
+@@ -263,6 +265,19 @@ entry *load_entry(FILE * file, void (*er
+ 		goto eof;
+ 	}
+ 	bzero(e->pwd->pw_passwd, strlen(e->pwd->pw_passwd));
++	p = env_get("RANDOM_DELAY", envp);
++	if (p) {
++		char *endptr;
++		long val;
++
++		errno = 0;    /* To distinguish success/failure after call */
++		val = strtol(p, &endptr, 10);
++		if (errno != 0 || val < 0 || val > 24*60) {
++			log_it("CRON", getpid(), "ERROR", "bad value of RANDOM_DELAY", 0);
++		} else {
++			e->delay = val * RandomScale;
++		}
++	}
+ 
+ 	/* copy and fix up environment.  some variables are just defaults and
+ 	 * others are overrides.
+diff -up cronie-1.4.4/src/env.c.random cronie-1.4.4/src/env.c
+--- cronie-1.4.4/src/env.c.random	2013-08-07 15:40:47.043179638 +0200
++++ cronie-1.4.4/src/env.c	2013-08-07 15:39:28.705058609 +0200
+@@ -122,6 +122,7 @@ int env_set_from_environ(char ***envpp)
+                "LC_IDENTIFICATION",
+                "LC_ALL",
+                "LANGUAGE",
++               "RANDOM_DELAY",
+                NULL
+        };
+        const char **name;
+diff -up cronie-1.4.4/src/globals.h.random cronie-1.4.4/src/globals.h
+--- cronie-1.4.4/src/globals.h.random	2013-08-07 15:34:13.816038638 +0200
++++ cronie-1.4.4/src/globals.h	2013-08-07 15:34:13.821455142 +0200
+@@ -68,6 +68,7 @@ XTRN int        PermitAnyCrontab;
+ XTRN char       MailCmd[MAX_COMMAND];
+ XTRN char       cron_default_mail_charset[MAX_ENVSTR];
+ XTRN int        ChangePath;
++XTRN double     RandomScale;
+  
+ #if DEBUGGING
+ XTRN int	DebugFlags INIT(0);
+diff -up cronie-1.4.4/src/structs.h.random cronie-1.4.4/src/structs.h
+--- cronie-1.4.4/src/structs.h.random	2013-08-07 15:34:13.807372231 +0200
++++ cronie-1.4.4/src/structs.h	2013-08-07 15:34:13.821455142 +0200
+@@ -30,6 +30,7 @@ typedef	struct _entry {
+ 	bitstr_t	bit_decl(month,  MONTH_COUNT);
+ 	bitstr_t	bit_decl(dow,    DOW_COUNT);
+ 	int		flags;
++	int		delay;
+ #define	MIN_STAR	0x01
+ #define	HR_STAR		0x02
+ #define	DOM_STAR	0x04
