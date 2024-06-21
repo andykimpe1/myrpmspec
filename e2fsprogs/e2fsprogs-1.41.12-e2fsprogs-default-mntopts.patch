@@ -1,0 +1,184 @@
+commit 9345f02671fd39cad69338080b62e12e8b86671d
+Author: Theodore Ts'o <tytso@mit.edu>
+Date:   Sat Sep 18 19:38:22 2010 -0400
+
+    tune2fs, debugfs, libext2fs: Add support for ext4 default mount options
+    
+    Add support for 2.6.35's new default mount options which can be
+    specified in the superblock.
+    
+    Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+
+Index: e2fsprogs-1.41.12/debugfs/set_fields.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/debugfs/set_fields.c
++++ e2fsprogs-1.41.12/debugfs/set_fields.c
+@@ -134,6 +134,7 @@ static struct field_set_info super_field
+ 	{ "raid_stripe_width", &set_sb.s_raid_stripe_width, 4, parse_uint },
+ 	{ "log_groups_per_flex", &set_sb.s_log_groups_per_flex, 1, parse_uint },
+ 	{ "kbytes_written", &set_sb.s_kbytes_written, 8, parse_uint },
++	{ "mount_opts",  &set_sb.s_mount_opts, 64, parse_string },
+ 	{ 0, 0, 0, 0 }
+ };
+ 
+Index: e2fsprogs-1.41.12/lib/e2p/ls.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/lib/e2p/ls.c
++++ e2fsprogs-1.41.12/lib/e2p/ls.c
+@@ -211,6 +211,8 @@ void list_super2(struct ext2_super_block
+ 	print_features(sb, f);
+ 	print_super_flags(sb, f);
+ 	print_mntopts(sb, f);
++	if (sb->s_mount_opts[0])
++		fprintf(f, "Mount options:            %s\n", sb->s_mount_opts);
+ 	fprintf(f, "Filesystem state:        ");
+ 	print_fs_state (f, sb->s_state);
+ 	fprintf(f, "\n");
+Index: e2fsprogs-1.41.12/lib/e2p/mntopts.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/lib/e2p/mntopts.c
++++ e2fsprogs-1.41.12/lib/e2p/mntopts.c
+@@ -31,6 +31,10 @@ static struct mntopt mntopt_list[] = {
+ 	{ EXT3_DEFM_JMODE_DATA, "journal_data" },
+ 	{ EXT3_DEFM_JMODE_ORDERED, "journal_data_ordered" },
+ 	{ EXT3_DEFM_JMODE_WBACK, "journal_data_writeback" },
++	{ EXT4_DEFM_NOBARRIER,	"nobarrier" },
++	{ EXT4_DEFM_BLOCK_VALIDITY, "block_validity" },
++	{ EXT4_DEFM_DISCARD,	"discard"},
++	{ EXT4_DEFM_NODELALLOC,	"nodelalloc"},
+ 	{ 0, 0 },
+ };
+ 
+Index: e2fsprogs-1.41.12/lib/ext2fs/ext2_fs.h
+===================================================================
+--- e2fsprogs-1.41.12.orig/lib/ext2fs/ext2_fs.h
++++ e2fsprogs-1.41.12/lib/ext2fs/ext2_fs.h
+@@ -581,7 +581,26 @@ struct ext2_super_block {
+ 	__u8    s_reserved_char_pad;
+ 	__u16	s_reserved_pad;		/* Padding to next 32bits */
+ 	__u64	s_kbytes_written;	/* nr of lifetime kilobytes written */
+-	__u32   s_reserved[160];        /* Padding to the end of the block */
++	__u32	s_snapshot_inum;	/* Inode number of active snapshot */
++	__u32	s_snapshot_id;		/* sequential ID of active snapshot */
++	__u64	s_snapshot_r_blocks_count; /* reserved blocks for active
++					      snapshot's future use */
++	__u32	s_snapshot_list;	/* inode number of the head of the on-disk snapshot list */
++#define EXT4_S_ERR_START ext4_offsetof(struct ext2_super_block, s_error_count)
++	__u32	s_error_count;		/* number of fs errors */
++	__u32	s_first_error_time;	/* first time an error happened */
++	__u32	s_first_error_ino;	/* inode involved in first error */
++	__u64	s_first_error_block;	/* block involved of first error */
++	__u8	s_first_error_func[32];	/* function where the error happened */
++	__u32	s_first_error_line;	/* line number where error happened */
++	__u32	s_last_error_time;	/* most recent time of an error */
++	__u32	s_last_error_ino;	/* inode involved in last error */
++	__u32	s_last_error_line;	/* line number where error happened */
++	__u64	s_last_error_block;	/* block involved of last error */
++	__u8	s_last_error_func[32];	/* function where the error happened */
++#define EXT4_S_ERR_END ext4_offsetof(struct ext2_super_block, s_mount_opts)
++	__u8	s_mount_opts[64];
++	__u32   s_reserved[112];        /* Padding to the end of the block */
+ };
+ 
+ /*
+@@ -672,6 +691,10 @@ struct ext2_super_block {
+ #define EXT3_DEFM_JMODE_DATA	0x0020
+ #define EXT3_DEFM_JMODE_ORDERED	0x0040
+ #define EXT3_DEFM_JMODE_WBACK	0x0060
++#define EXT4_DEFM_NOBARRIER	0x0100
++#define EXT4_DEFM_BLOCK_VALIDITY 0x0200
++#define EXT4_DEFM_DISCARD	0x0400
++#define EXT4_DEFM_NODELALLOC	0x0800
+ 
+ /*
+  * Structure of a directory entry
+Index: e2fsprogs-1.41.12/misc/tune2fs.8.in
+===================================================================
+--- e2fsprogs-1.41.12.orig/misc/tune2fs.8.in
++++ e2fsprogs-1.41.12/misc/tune2fs.8.in
+@@ -187,6 +187,26 @@ directories.  Valid algorithms accepted 
+ and
+ .IR tea .
+ .TP
++.BI mount_opts= mount_option_string
++Set a set of default mount options which will be used when the file
++system is mounted.  Unlike the bitmask-based default mount options which
++can be specified with the
++.B -o
++option,
++.I mount_option_string
++is an arbitrary string with a maximum length of 63 bytes, which is
++stored in the superblock.
++.IP
++The ext4 file system driver will first apply
++the bitmask-based default options, and then parse the
++.IR mount_option_string ,
++before parsing the mount options passed from the
++.BR mount (8)
++program.
++.IP
++This superblock setting is only honored in 2.6.35+ kernels;
++and not at all by the ext2 and ext3 file system drivers.
++.TP
+ .B test_fs
+ Set a flag in the filesystem superblock indicating that it may be
+ mounted using experimental kernel code, such as the ext4dev filesystem.
+@@ -419,6 +439,35 @@ When the filesystem is mounted with jour
+ written into the main filesystem after its metadata has been committed
+ to the journal.  This may increase throughput, however, it may allow old
+ data to appear in files after a crash and journal recovery.
++.TP
++.B nobarrier
++The file system will be mounted with barrier operations in the journal
++disabled.  (This option is currently only supported by the ext4 file
++system driver in 2.6.35+ kernels.)
++.TP
++.B block_validity
++The file system will be mounted with the block_validity option enabled,
++which causes extra checks to be performed after reading or writing from
++the file system.  This prevents corrupted metadata blocks from causing
++file system damage by overwriting parts of the inode table or block
++group descriptors.  This comes at the cost of increased memory and CPU
++overhead, so it is enabled only for debugging purposes.  (This option is
++currently only supported by the ext4 file system driver in 2.6.35+
++kernels.)
++.TP
++.B discard
++The file system will be mouinted with the discard mount option.  This will
++cause the file system driver to attempt to use the trim/discard feature
++of some storage devices (such as SSD's and thin-provisioned drives
++available in some enterprise storage arrays) to inform the storage
++device that blocks belonging to deleted files can be reused for other
++purposes.  (This option is currently only supported by the ext4 file
++system driver in 2.6.35+ kernels.)
++.TP
++.B nodelalloc
++The file system will be mounted with the nodelalloc mount option.  This
++will disable the delayed allocation feature.  (This option is currently
++only supported by the ext4 file system driver in 2.6.35+ kernels.)
+ .RE
+ .TP
+ .BR \-O " [^]\fIfeature\fR[,...]"
+Index: e2fsprogs-1.41.12/misc/tune2fs.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/misc/tune2fs.c
++++ e2fsprogs-1.41.12/misc/tune2fs.c
+@@ -941,6 +941,18 @@ static void parse_extended_opts(ext2_fil
+ 				 "to %s (%d)\n"),
+ 			       arg, hash_alg);
+ 			ext2fs_mark_super_dirty(fs);
++		} else if (strcmp(token, "mount-options")) {
++			if (!arg) {
++				r_usage++;
++				continue;
++			}
++			if (strlen(arg) >= sizeof(fs->super->s_mount_opts)) {
++				fprintf(stderr,
++					"Extended mount options too long\n");
++				continue;
++			}
++			strcpy(fs->super->s_mount_opts, arg);
++			ext2fs_mark_super_dirty(fs);
+ 		} else
+ 			r_usage++;
+ 	}

@@ -1,0 +1,54 @@
+[PATCH] filefrag: count optimize non-verbose mode; count 0 extents
+
+# rm -f a; touch a; filefrag -v a
+
+yields 1 extent when it should be 0.  Without -v, 0 is returned.
+
+Fix this up by special-casing no extents returned in verbose
+mode; skip printing the header for the columns too, since there
+are no columns to print.
+
+Also, in nonverbose mode we can set fm_extent_count to 0
+so that FIEMAP will just query the extent count without gathering
+details; as it is today I think a non-verbose query may under-report
+the extent count once "count" extents have been filled in.
+
+Addresses-redhat-bugzilla: 653234
+Signed-off-by: Eric Sandeen <sandeen@redhat.com>
+---
+
+Index: e2fsprogs-1.41.12/misc/filefrag.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/misc/filefrag.c
++++ e2fsprogs-1.41.12/misc/filefrag.c
+@@ -195,7 +195,14 @@ static int filefrag_fiemap(int fd, int b
+ 	do {
+ 		fiemap->fm_length = ~0ULL;
+ 		fiemap->fm_flags = flags;
+-		fiemap->fm_extent_count = count;
++		/*
++		 * If fm_extent_count == 0, FIEMAP returns count of
++		 * extents found without filling in details.
++		 */
++		if (!verbose)
++			fiemap->fm_extent_count = 0;
++		else
++			fiemap->fm_extent_count = count;
+ 		rc = ioctl(fd, FS_IOC_FIEMAP, (unsigned long) fiemap);
+ 		if (rc < 0) {
+ 			if (errno == EBADR && fiemap_incompat_printed == 0) {
+@@ -207,6 +214,14 @@ static int filefrag_fiemap(int fd, int b
+ 		}
+ 
+ 		if (verbose && !fiemap_header_printed) {
++			/*
++			 * No extents on first call?
++			 * Skip header and show 0 extents.
++			 */
++			if (fiemap->fm_mapped_extents == 0) {
++				*num_extents = 0;
++				goto out;
++			}
+ 			printf(" ext %*s %*s %*s length flags\n", logical_width,
+ 			       "logical", physical_width, "physical",
+ 			       physical_width, "expected");

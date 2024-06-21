@@ -1,0 +1,130 @@
+From: Eric Sandeen <sandeen@redhat.com>
+Date: Thu, 16 Dec 2010 04:37:34 +0000 (-0600)
+Subject: resize2fs: handle exactly-16T filesystems in resize2fs
+X-Git-Url: http://git.kernel.org/?p=fs%2Fext2%2Fe2fsprogs.git;a=commitdiff_plain;h=248eb837d0ffcc89c52356c98afbd1b5f15225c0
+
+resize2fs: handle exactly-16T filesystems in resize2fs
+
+Before we go whole-hog on 64-bit e2fsprogs, I wonder if this
+is worth considering as a last-minute addition to the 1.41
+stream.  Currently, mke2fs will shave a block off an exactly-16T
+device to fit*, but resize2fs does not do the same, leading
+to some asymmetry.  This patch fixes that up, and allows 16T
+devices to be handled more gracefully in offline resize.
+(in fact resize2fs will not even open a 16T device, today).
+
+*commit 37d17a65ecb4615546b417038190a41bafca7c51
+
+Signed-off-by: Eric Sandeen <sandeen@redhat.com>
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+
+=== Accepted upstream but not yet applied in git: ===
+
+[PATCH] resize2fs: do not clear resize inode for 0 resvd blocks
+
+I ran into odd behavior where mkfs.ext4 of a 16T filesystem would
+create a resize inode with 0 reserved blocks, and mark the resize_inode
+feature.
+
+A subsequent slight downward resize of the filesystem would remove
+the resize inode, making any further offline resizing impossible.
+
+This is especially odd in light of the fact that a large downward
+resize (say, to 8T) will actually add blocks to the resize inode -
+so a small resize removes it, a large resize expands it ...
+
+commit 8ade268cf2fde8629b51bfd1c044a83db88234cd had added this:
+
+  If the filesystem is grown to the point where the resize_inode is no
+  longer needed, clean it up properly so e2fsck doesn't have to.
+
+but, it seems e2fsck does not care about this situation, either.
+
+So, simply leave the resize_inode intact in this case, and everything
+seems to be happy.
+
+Note, this is for the 1.41.xx branch.
+
+Signed-off-by: Eric Sandeen <sandeen@redhat.com>
+---
+
+index e571254..bb04d0b 100644
+Index: e2fsprogs-1.41.12/resize/main.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/resize/main.c
++++ e2fsprogs-1.41.12/resize/main.c
+@@ -159,7 +159,7 @@ int main (int argc, char ** argv)
+ 	int		print_min_size = 0;
+ 	int		fd, ret;
+ 	blk_t		new_size = 0;
+-	blk_t		max_size = 0;
++	blk64_t		max_size = 0;
+ 	blk_t		min_size = 0;
+ 	io_manager	io_ptr;
+ 	char		*new_size_str = 0;
+@@ -374,7 +374,7 @@ int main (int argc, char ** argv)
+ 	 * defaults and for making sure the new filesystem doesn't
+ 	 * exceed the partition size.
+ 	 */
+-	retval = ext2fs_get_device_size(device_name, fs->blocksize,
++	retval = ext2fs_get_device_size2(device_name, fs->blocksize,
+ 					&max_size);
+ 	if (retval) {
+ 		com_err(program_name, retval,
+@@ -392,6 +392,14 @@ int main (int argc, char ** argv)
+ 			exit(1);
+ 		}
+ 	} else {
++		/* Take down devices exactly 16T to 2^32-1 blocks */
++		if (max_size == (1ULL << 32))
++			max_size--;
++		else if (max_size > (1ULL << 32)) {
++			com_err(program_name, 0, _("New size too large to be "
++				"expressed in 32 bits\n"));
++			exit(1);
++		}
+ 		new_size = max_size;
+ 		/* Round down to an even multiple of a pagesize */
+ 		if (sys_page_size > fs->blocksize)
+@@ -431,7 +439,7 @@ int main (int argc, char ** argv)
+ 	}
+ 	if (!force && (new_size > max_size)) {
+ 		fprintf(stderr, _("The containing partition (or device)"
+-			" is only %u (%dk) blocks.\nYou requested a new size"
++			" is only %llu (%dk) blocks.\nYou requested a new size"
+ 			" of %u blocks.\n\n"), max_size,
+ 			fs->blocksize / 1024, new_size);
+ 		exit(1);
+Index: e2fsprogs-1.41.12/resize/resize2fs.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/resize/resize2fs.c
++++ e2fsprogs-1.41.12/resize/resize2fs.c
+@@ -1711,7 +1711,6 @@ static errcode_t fix_resize_inode(ext2_f
+ 	struct ext2_inode	inode;
+ 	errcode_t		retval;
+ 	char *			block_buf;
+-	blk_t			blk;
+ 
+ 	if (!(fs->super->s_feature_compat &
+ 	      EXT2_FEATURE_COMPAT_RESIZE_INODE))
+@@ -1723,20 +1722,6 @@ static errcode_t fix_resize_inode(ext2_f
+ 	retval = ext2fs_read_inode(fs, EXT2_RESIZE_INO, &inode);
+ 	if (retval) goto errout;
+ 
+-	if (fs->super->s_reserved_gdt_blocks == 0) {
+-		fs->super->s_feature_compat &=
+-			~EXT2_FEATURE_COMPAT_RESIZE_INODE;
+-		ext2fs_mark_super_dirty(fs);
+-
+-		if ((blk = inode.i_block[EXT2_DIND_BLOCK]) != 0)
+-			ext2fs_block_alloc_stats(fs, blk, -1);
+-
+-		memset(&inode, 0, sizeof(inode));
+-
+-		retval = ext2fs_write_inode(fs, EXT2_RESIZE_INO, &inode);
+-		goto errout;
+-	}
+-
+ 	ext2fs_iblk_set(fs, &inode, 1);
+ 
+ 	retval = ext2fs_write_inode(fs, EXT2_RESIZE_INO, &inode);

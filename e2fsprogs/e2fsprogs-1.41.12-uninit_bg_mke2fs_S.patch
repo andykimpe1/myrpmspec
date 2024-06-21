@@ -1,0 +1,52 @@
+commit ba9e0afc5ab0d0ff26880e37ac71c281b644ce00
+Author: Theodore Ts'o <tytso@mit.edu>
+Date:   Thu Feb 16 23:16:34 2012 -0500
+
+    mke2fs: allow file systems w/ uninit_bg to be recovered with mke2fs -S
+    
+    The command mke2fs -S is used as a last ditch recovery command to
+    write new superblock and block group descriptors, but _not_ to destroy
+    the inode table in hopes of recovering from a badly corrupted file
+    system.  If the uninit_bg feature is enabled, we need to make sure to
+    clear the unused inodes count field in the block group descriptors or
+    else e2fsck -fy will leave the file system completely empty.
+    
+    Thanks to Akira Fujita for reporting this problem.
+    
+    Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+
+commit 30ac1ce7df719e40b0c3c612696ada7c9ebbaed2
+Author: Theodore Ts'o <tytso@mit.edu>
+Date:   Mon Feb 27 00:51:39 2012 -0500
+
+    mke2fs: make sure bg 0's unused inode count field is zero'ed for mke2fs -S
+    
+    There was a bug/typo in commit ba9e0afc5 which caused the first block
+    group (bg #0) to not have its unused inode count field to get set to
+    zero in the case of mke2fs -S.  This caused inodes in the first block
+    group to not be recoverable via mke2fs -S.  Oops.
+    
+    Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+
+Index: e2fsprogs-1.41.12/misc/mke2fs.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/misc/mke2fs.c
++++ e2fsprogs-1.41.12/misc/mke2fs.c
+@@ -2174,6 +2174,17 @@ int main (int argc, char *argv[])
+ 	if (super_only) {
+ 		fs->super->s_state |= EXT2_ERROR_FS;
+ 		fs->flags &= ~(EXT2_FLAG_IB_DIRTY|EXT2_FLAG_BB_DIRTY);
++		/* 
++		 * The command "mke2fs -S" is used to recover
++		 * corrupted file systems, so do not mark any of the
++		 * inodes as unused; we want e2fsck to consider all
++		 * inodes as potentially containing recoverable data.
++		 */
++		if (fs->super->s_feature_ro_compat &
++		    EXT4_FEATURE_RO_COMPAT_GDT_CSUM) {
++			for (i = 0; i < fs->group_desc_count; i++)
++				ext2fs_bg_itable_unused_set(fs, i, 0);
++		}
+ 	} else {
+ 		/* rsv must be a power of two (64kB is MD RAID sb alignment) */
+ 		unsigned int rsv = 65536 / fs->blocksize;

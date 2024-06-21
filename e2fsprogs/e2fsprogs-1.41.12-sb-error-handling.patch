@@ -1,0 +1,95 @@
+commit 993988f65527e5665181b3e4a6161f317e396489
+Author: Theodore Ts'o <tytso@mit.edu>
+Date:   Fri Jun 25 10:53:13 2010 -0400
+
+    Add superblock fields which track first and most recent fs errors
+    
+    Add superblock fields which track where and when the first and most
+    recent file system errors occured.  These fields are displayed by
+    dumpe2fs and cleared by e2fsck.
+    
+    Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+
+---
+
+Index: e2fsprogs-1.41.12/e2fsck/unix.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/e2fsck/unix.c
++++ e2fsprogs-1.41.12/e2fsck/unix.c
+@@ -1460,6 +1460,8 @@ no_journal:
+ 			sb->s_mnt_count = 0;
+ 			if (!(ctx->flags & E2F_FLAG_TIME_INSANE))
+ 				sb->s_lastcheck = ctx->now;
++			memset(((char *) sb) + EXT4_S_ERR_START, 0,
++			       EXT4_S_ERR_LEN);
+ 			ext2fs_mark_super_dirty(fs);
+ 		}
+ 	}
+Index: e2fsprogs-1.41.12/lib/e2p/ls.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/lib/e2p/ls.c
++++ e2fsprogs-1.41.12/lib/e2p/ls.c
+@@ -332,6 +332,37 @@ void list_super2(struct ext2_super_block
+ 			fprintf(f, "type %u\n", sb->s_jnl_backup_type);
+ 		}
+ 	}
++	if (sb->s_error_count)
++		fprintf(f, "FS Error count:           %u\n",
++			sb->s_error_count);
++	if (sb->s_first_error_time) {
++		tm = sb->s_first_error_time;
++		fprintf(f, "First error time:         %s", ctime(&tm));
++		memset(buf, 0, sizeof(buf));
++		strncpy(buf, (char *)sb->s_first_error_func,
++			sizeof(sb->s_first_error_func));
++		fprintf(f, "First error function:     %s\n", buf);
++		fprintf(f, "First error line #:       %u\n",
++			sb->s_first_error_line);
++		fprintf(f, "First error inode #:      %u\n",
++			sb->s_first_error_ino);
++		fprintf(f, "First error block #:      %llu\n",
++			sb->s_first_error_block);
++	}
++	if (sb->s_last_error_time) {
++		tm = sb->s_last_error_time;
++		fprintf(f, "Last error time:          %s", ctime(&tm));
++		memset(buf, 0, sizeof(buf));
++		strncpy(buf, (char *)sb->s_last_error_func,
++			sizeof(sb->s_last_error_func));
++		fprintf(f, "Last error function:      %s\n", buf);
++		fprintf(f, "Last error line #:        %u\n",
++			sb->s_last_error_line);
++		fprintf(f, "Last error inode #:       %u\n",
++			sb->s_last_error_ino);
++		fprintf(f, "Last error block #:       %llu\n",
++			sb->s_last_error_block);
++	}
+ }
+ 
+ void list_super (struct ext2_super_block * s)
+Index: e2fsprogs-1.41.12/lib/ext2fs/ext2_fs.h
+===================================================================
+--- e2fsprogs-1.41.12.orig/lib/ext2fs/ext2_fs.h
++++ e2fsprogs-1.41.12/lib/ext2fs/ext2_fs.h
+@@ -496,6 +496,12 @@ struct ext2_inode_large {
+ #define EXT2_ERRORS_PANIC		3	/* Panic */
+ #define EXT2_ERRORS_DEFAULT		EXT2_ERRORS_CONTINUE
+ 
++#if (__GNUC__ >= 4)
++#define ext4_offsetof(TYPE,MEMBER) __builtin_offsetof(TYPE,MEMBER)
++#else
++#define ext4_offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
++#endif
++
+ /*
+  * Structure of the super block
+  */
+@@ -606,6 +612,8 @@ struct ext2_super_block {
+ 	__u32   s_reserved[112];        /* Padding to the end of the block */
+ };
+ 
++#define EXT4_S_ERR_LEN (EXT4_S_ERR_END - EXT4_S_ERR_START)
++
+ /*
+  * Codes for operating systems
+  */

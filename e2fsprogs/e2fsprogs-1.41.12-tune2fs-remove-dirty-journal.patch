@@ -1,0 +1,63 @@
+commit 5fe2bd60844cfe5d805e62a4316afaa5cd9d7c83
+Author: Eric Sandeen <sandeen@redhat.com>
+Date:   Thu Feb 20 20:18:41 2014 -0500
+
+    tune2fs: allow removal of dirty journal with two "-f" options
+    
+    Jim pointed out that "tune2fs -f -O ^has_journal" won't remove the
+    journal if the needs_recovery flag is set; the manpage seems to indicate
+    that it should.  And if you've lost an external journal and can no longer
+    replay it, how should one proceed?
+    
+    Change tune2fs so that two "-f" options will allow removal of a dirty
+    journal from a filesystem, even if the filesystem needs recovery.
+    
+    e2fsck can then do its best to pick up the pieces.
+    
+    Addresses-Debian-Bug: #559301
+    
+    Reported-by: Jim Faulkner <james.faulkner@yale.edu>
+    Signed-off-by: Eric Sandeen <sandeen@redhat.com>
+    Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+
+Index: e2fsprogs-1.41.12/misc/tune2fs.8.in
+===================================================================
+--- e2fsprogs-1.41.12.orig/misc/tune2fs.8.in
++++ e2fsprogs-1.41.12/misc/tune2fs.8.in
+@@ -223,7 +223,10 @@ option is useful when removing the 
+ filesystem feature from a filesystem which has 
+ an external journal (or is corrupted
+ such that it appears to have an external journal), but that 
+-external journal is not available.   
++external journal is not available.   If the filesystem appears to require
++journal replay, the
++.B \-f
++flag must be specified twice to proceed.
+ .sp
+ .B WARNING:
+ Removing an external journal from a filesystem which was not cleanly unmounted
+Index: e2fsprogs-1.41.12/misc/tune2fs.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/misc/tune2fs.c
++++ e2fsprogs-1.41.12/misc/tune2fs.c
+@@ -376,8 +376,9 @@ static void update_feature_set(ext2_fils
+ 				"read-only.\n"), stderr);
+ 			exit(1);
+ 		}
+-		if (sb->s_feature_incompat &
+-		    EXT3_FEATURE_INCOMPAT_RECOVER) {
++		if ((sb->s_feature_incompat &
++		    EXT3_FEATURE_INCOMPAT_RECOVER) &&
++		    f_flag < 2) {
+ 			fputs(_("The needs_recovery flag is set.  "
+ 				"Please run e2fsck before clearing\n"
+ 				"the has_journal flag.\n"), stderr);
+@@ -647,7 +648,7 @@ static void parse_tune2fs_options(int ar
+ 			open_flag |= EXT2_FLAG_RW;
+ 			break;
+ 		case 'f': /* Force */
+-			f_flag = 1;
++			f_flag++;
+ 			break;
+ 		case 'g':
+ 			resgid = strtoul(optarg, &tmp, 0);

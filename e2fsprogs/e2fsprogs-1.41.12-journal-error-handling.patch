@@ -1,0 +1,118 @@
+commit 6d75685e2b76f4099589ad33732cf59f279b5d65
+Author: Theodore Ts'o <tytso@mit.edu>
+Date:   Thu May 31 19:19:02 2012 -0400
+
+    e2fsck: handle an already recovered journal with a non-zero s_error field
+    
+    If a file system was remounted read-only after a file system
+    corruption is detected, and then that file system is mounted and
+    unmounted by the kernel, the journal would have been recovered, but
+    the kernel currently leaves the s_errno field still set.  This is
+    arguably a bug, since it has already propgated the non-zero s_errno
+    field to the file system superblock, where it will be retained until
+    e2fsck has been run.
+    
+    However, e2fsck should handle this case for existing kernel by
+    checking the journal superblock's s_errno field even if journal
+    recovery is not required.
+    
+    Without this commit, e2fsck would not notice anything wrong with the
+    file system, but a subsequent mount of the file system by the kernel
+    would mark the file system's superblock as needing checking (since the
+    journal's s_errno field would still be set), resulting an full e2fsck
+    run at the next reboot, which would find nothing wrong --- and then
+    when the file system was mounted, the whole cycle would repeat again.
+    
+    I had seen reports of this in the past, but it wasn't until recently
+    that I realized exactly how this had come about, since normally e2fsck
+    would be run automatically before the file system is mounted again,
+    thus avoiding this problem.  However, a user using a rescue CD who
+    didn't run e2fsck before mounting the a file system in this condition
+    could trigger this situation, and unfortunately, with previous
+    versions of e2fsprogs and the kernel, there would be no way out no
+    matter what the user tried to do.
+    
+    Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+
+commit 63b3913dbc0bc7cdf8a63f3bdb0c8d7d605e9a40
+Author: Theodore Ts'o <tytso@mit.edu>
+Date:   Sun Jun 10 23:35:43 2012 -0400
+
+    e2fsck: correctly propagate error from journal to superblock
+    
+    If the file system is mounted read-only after a file system error has
+    been detected, the fact that an error occurred is written to the
+    journal.  This is important because while the journal is getting
+    replayed, the error indication in the superblock may very well get
+    overwritten.
+    
+    Unfortunately, the code to propagate the error indication from the
+    journal to superblock was broken because this was being done before
+    the old file system handle is thrown away and the file system is
+    re-opened to ensure that no stale data is in the file system handle.
+    As a result, the error indication in the superblock was never written
+    out.
+    
+    To fix this, we need to move the check if the journal's error
+    indicator has been set after the file system has been freed and
+    re-open.
+    
+    Reported-by: Ken Sumrall <ksumrall@google.com>
+    Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+
+Index: e2fsprogs-1.41.12/e2fsck/journal.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/e2fsck/journal.c
++++ e2fsprogs-1.41.12/e2fsck/journal.c
+@@ -798,6 +798,19 @@ no_has_journal:
+ 		 */
+ 	}
+ 
++	/*
++	 * If we don't need to do replay the journal, check to see if
++	 * the journal's errno is set; if so, we need to mark the file
++	 * system as being corrupt and clear the journal's s_errno.
++	 */
++	if (!(sb->s_feature_incompat & EXT3_FEATURE_INCOMPAT_RECOVER) &&
++		journal->j_superblock->s_errno) {
++		ctx->fs->super->s_state |= EXT2_ERROR_FS;
++		ext2fs_mark_super_dirty(ctx->fs);
++		journal->j_superblock->s_errno = 0;
++		mark_buffer_dirty(journal->j_sb_buffer);
++	}
++
+ 	e2fsck_journal_release(ctx, journal, reset, 0);
+ 	return retval;
+ }
+@@ -830,15 +843,7 @@ static errcode_t recover_ext3_journal(e2
+ 	if (journal->j_failed_commit) {
+ 		pctx.ino = journal->j_failed_commit;
+ 		fix_problem(ctx, PR_0_JNL_TXN_CORRUPT, &pctx);
+-		ctx->fs->super->s_state |= EXT2_ERROR_FS;
+-		ext2fs_mark_super_dirty(ctx->fs);
+-	}
+-
+-
+-	if (journal->j_superblock->s_errno) {
+-		ctx->fs->super->s_state |= EXT2_ERROR_FS;
+-		ext2fs_mark_super_dirty(ctx->fs);
+-		journal->j_superblock->s_errno = 0;
++		journal->j_superblock->s_errno = -EINVAL;
+ 		mark_buffer_dirty(journal->j_sb_buffer);
+ 	}
+ 
+@@ -895,7 +900,13 @@ int e2fsck_run_ext3_journal(e2fsck_t ctx
+ 
+ 	/* Set the superblock flags */
+ 	e2fsck_clear_recover(ctx, recover_retval);
+-	return recover_retval;
++
++	/*
++	 * Do one last sanity check, and propagate journal->s_errno to
++	 * the EXT2_ERROR_FS flag in the fs superblock if needed.
++	 */
++	retval = e2fsck_check_ext3_journal(ctx);
++	return retval ? retval : recover_retval;
+ }
+ 
+ /*

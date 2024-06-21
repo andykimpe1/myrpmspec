@@ -1,0 +1,80 @@
+e2fsck: Do not forget to discard last block group
+
+Previously when running e2fsck with '-E discard' argument the end of
+the last group has not been discarded. This patch fixes it so we
+always discard the end of the last group if needed.
+
+This commit also removes unneeded argument from the
+e2fsck_discard_blocks(). Simultaneously the commit causes the block
+groups with BLOCK_UNINIT flag not to be discarded, which makes
+sense because we do not need to reclaim the space since so far
+there has not been written anything.
+
+Signed-off-by: Lukas Czerner <lczerner@redhat.com>
+---
+ e2fsck/pass5.c |   24 ++++++++++++++++--------
+ 1 files changed, 16 insertions(+), 8 deletions(-)
+
+Index: e2fsprogs-1.41.12/e2fsck/pass5.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/e2fsck/pass5.c
++++ e2fsprogs-1.41.12/e2fsck/pass5.c
+@@ -73,8 +73,8 @@ void e2fsck_pass5(e2fsck_t ctx)
+ 	print_resource_track(ctx, _("Pass 5"), &rtrack, ctx->fs->io);
+ }
+ 
+-static void e2fsck_discard_blocks(e2fsck_t ctx, io_manager manager,
+-				  blk64_t start, blk64_t count)
++static void e2fsck_discard_blocks(e2fsck_t ctx, blk64_t start,
++				  blk64_t count)
+ {
+ 	ext2_filsys fs = ctx->fs;
+ 	int ret = 0;
+@@ -85,7 +85,7 @@ static void e2fsck_discard_blocks(e2fsck
+ 	 * not enough to fix the problem, hence it is not safe to run discard
+ 	 * in this case.
+ 	 */
+-	if (ext2fs_test_changed(ctx->fs))
++	if (ext2fs_test_changed(fs))
+ 		ctx->options &= ~E2F_OPT_DISCARD;
+ 
+ 	if ((ctx->options & E2F_OPT_DISCARD) &&
+@@ -136,7 +136,7 @@ static void e2fsck_discard_inodes(e2fsck
+ 	num = count / EXT2_INODES_PER_BLOCK(fs->super);
+ 
+ 	if (num > 0)
+-		e2fsck_discard_blocks(ctx, fs->io->manager, blk, num);
++		e2fsck_discard_blocks(ctx, blk, num);
+ }
+ 
+ 
+@@ -331,17 +331,23 @@ redo_counts:
+ 			free_blocks++;
+ 			if (first_free > i)
+ 				first_free = i;
+-		} else {
+-			if ((i > first_free) &&
+-			   (ctx->options & E2F_OPT_DISCARD)) {
+-				e2fsck_discard_blocks(ctx, manager, first_free,
+-						      (i - first_free));
+-			}
++		} else if (i > first_free) {
++			e2fsck_discard_blocks(ctx, first_free,
++					      (i - first_free));
+ 			first_free = ext2fs_blocks_count(fs->super);
+ 		}
+ 		blocks ++;
+ 		if ((blocks == fs->super->s_blocks_per_group) ||
+ 		    (i == fs->super->s_blocks_count-1)) {
++			/*
++			 * If the last block of this group is free, then we can
++			 * discard it as well.
++			 */
++			if (i >= first_free)
++				e2fsck_discard_blocks(ctx, first_free,
++						      (i - first_free) + 1);
++			first_free = ext2fs_blocks_count(fs->super);
++
+ 			free_array[group] = group_free;
+ 			group ++;
+ 			blocks = 0;

@@ -1,0 +1,76 @@
+commit 732e26b98e5c79a4298dbe341f43b54b354bb241
+Author: Andreas Dilger <adilger@whamcloud.com>
+Date:   Thu May 24 15:34:56 2012 -0600
+
+    e2fsck: fix checks done for mounted vs. read-only
+    
+    Currently, if e2fsck is run without the "-n" flag (i.e. it
+    might modify the filesystem), there is no guarantee that it will
+    open the filesystem with the EXCLUSIVE flag (i.e. O_EXCL) to
+    prevent the block device from being checked (in most cases this
+    means mounted, but it could also be an MD/LVM member device).
+    
+    Conversely, if e2fsck is run with "-n" (i.e. read-only), and
+    /etc/mtab or /proc/mounts does not report the block device as
+    mounted then e2fsck thinks the filesystem is unmounted.  In this
+    case, e2fsck incorrectly sets the EXCLUSIVE flag, which causes
+    the check to fail, even though e2fsck is running read-only.
+    
+    To fix this, do not open with EXCLUSIVE if it is a read-only check,
+    and always open with EXCLUSIVE if the filesystem might be changed.
+    This also prevents filesystem mounts while e2fsck is running.
+    
+    Also refuse allow e2fsck to run at all if the filesystem is BUSY.
+    The e2fsck check_mount() was checking for MOUNTED, but not BUSY,
+    and it should refuse to run outright if the block device is BUSY.
+    The previous MOUNTED heuristics pre-date the O_EXCL reservation
+    by the kernel, so there could be uncertainty due to stale /etc/mtab
+    data, but with newer kernels a busy device should never be modified.
+    
+    Signed-off-by: Andreas Dilger <adilger@whamcloud.com>
+    Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+
+Index: e2fsprogs-1.41.12/e2fsck/unix.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/e2fsck/unix.c
++++ e2fsprogs-1.41.12/e2fsck/unix.c
+@@ -214,7 +214,7 @@ static void check_mount(e2fsck_t ctx)
+ 	 * filesystem and it's mounted read-only, and we're not doing
+ 	 * a read/write check, then everything's fine.
+ 	 */
+-	if ((!(ctx->mount_flags & EXT2_MF_MOUNTED)) ||
++	if ((!(ctx->mount_flags & (EXT2_MF_MOUNTED | EXT2_MF_BUSY))) ||
+ 	    ((ctx->mount_flags & EXT2_MF_ISROOT) &&
+ 	     (ctx->mount_flags & EXT2_MF_READONLY) &&
+ 	     !(ctx->options & E2F_OPT_WRITECHECK)))
+@@ -222,12 +222,16 @@ static void check_mount(e2fsck_t ctx)
+ 
+ 	if ((ctx->options & E2F_OPT_READONLY) &&
+ 	    !(ctx->options & E2F_OPT_WRITECHECK)) {
+-		printf(_("Warning!  %s is mounted.\n"), ctx->filesystem_name);
++		printf(_("Warning!  %s is %s.\n"),
++			ctx->filesystem_name,
++			ctx->mount_flags & EXT2_MF_MOUNTED ?
++				"mounted" : "in use");
+ 		return;
+ 	}
+ 
+-	printf(_("%s is mounted.  "), ctx->filesystem_name);
+-	if (!ctx->interactive)
++	printf(_("%s is %s.\n"), ctx->filesystem_name,
++		ctx->mount_flags & EXT2_MF_MOUNTED ? "mounted" : "in use");
++	if (!ctx->interactive || ctx->mount_flags & EXT2_MF_BUSY)
+ 		fatal_error(ctx, _("Cannot continue, aborting.\n\n"));
+ 	printf(_("\n\n\007\007\007\007WARNING!!!  "
+ 	       "The filesystem is mounted.   If you continue you ***WILL***\n"
+@@ -1036,9 +1040,7 @@ restart:
+ 		io_ptr = unix_io_manager;
+ 	flags = EXT2_FLAG_NOFREE_ON_ERROR;
+ 	if ((ctx->options & E2F_OPT_READONLY) == 0)
+-		flags |= EXT2_FLAG_RW;
+-	if ((ctx->mount_flags & EXT2_MF_MOUNTED) == 0)
+-		flags |= EXT2_FLAG_EXCLUSIVE;
++		flags |= EXT2_FLAG_RW | EXT2_FLAG_EXCLUSIVE;
+ 
+ 	retval = try_open_fs(ctx, flags, io_ptr, &fs);
+ 

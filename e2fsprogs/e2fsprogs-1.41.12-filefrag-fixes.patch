@@ -1,0 +1,147 @@
+Several upstream commits:
+
+339e457939bf1663ac2dbd52e47cd6e145726771 filefrag: fix segfault on virtual fs
+036fda6d487737eac9be086d999b7480a81d37ea filefrag: fix report of number of extents
+605cf6edaf6fce6a3810cda24c6ceca90af1a096 filefrag: fix infinite loop in filefrag
+9c58eaf7d3a47d83945bd3756271e7ae675b25e1 filefrag: fix an off by one error in when printing the next expected block
+a00be17e4768c5ce55f74be518f35f5d5d1b158b filefrag: Display the number of contiguous, not physical, extents
+1e003cc77d43ee01eeaae962ff6d264c9a74a363 filefrag: Fix uninitialized "expected" value
+a8d8432b584c222dc7960c15cd7b9acbc7c72352 filefrag: count 0 extents properly when verbose
+b637f8e7ed4309ec39d87ea0cf07f48fc0610266 filefrag: remove useless assignment
+
+---
+
+Index: e2fsprogs-1.41.12/misc/filefrag.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/misc/filefrag.c
++++ e2fsprogs-1.41.12/misc/filefrag.c
+@@ -170,22 +170,17 @@ static int filefrag_fiemap(int fd, int b
+ 	struct fiemap_extent *fm_ext = &fiemap->fm_extents[0];
+ 	int count = (sizeof(buf) - sizeof(*fiemap)) /
+ 			sizeof(struct fiemap_extent);
+-	unsigned long long last_blk = 0;
++	unsigned long long expected = 0;
+ 	unsigned long flags = 0;
+ 	unsigned int i;
+ 	static int fiemap_incompat_printed;
+ 	int fiemap_header_printed = 0;
+-	int tot_extents = 1, n = 0;
++	int tot_extents = 0, n = 0;
+ 	int last = 0;
+ 	int rc;
+ 
+-	fiemap->fm_length = ~0ULL;
+-
+ 	memset(fiemap, 0, sizeof(struct fiemap));
+ 
+-	if (!verbose)
+-		count = 0;
+-
+ 	if (sync_file)
+ 		flags |= FIEMAP_FLAG_SYNC;
+ 
+@@ -195,14 +190,7 @@ static int filefrag_fiemap(int fd, int b
+ 	do {
+ 		fiemap->fm_length = ~0ULL;
+ 		fiemap->fm_flags = flags;
+-		/*
+-		 * If fm_extent_count == 0, FIEMAP returns count of
+-		 * extents found without filling in details.
+-		 */
+-		if (!verbose)
+-			fiemap->fm_extent_count = 0;
+-		else
+-			fiemap->fm_extent_count = count;
++		fiemap->fm_extent_count = count;
+ 		rc = ioctl(fd, FS_IOC_FIEMAP, (unsigned long) fiemap);
+ 		if (rc < 0) {
+ 			if (errno == EBADR && fiemap_incompat_printed == 0) {
+@@ -213,30 +201,17 @@ static int filefrag_fiemap(int fd, int b
+ 			return rc;
+ 		}
+ 
++		/* If 0 extents are returned, then more ioctls are not needed */
++		if (fiemap->fm_mapped_extents == 0)
++			break;
++
+ 		if (verbose && !fiemap_header_printed) {
+-			/*
+-			 * No extents on first call?
+-			 * Skip header and show 0 extents.
+-			 */
+-			if (fiemap->fm_mapped_extents == 0) {
+-				*num_extents = 0;
+-				goto out;
+-			}
+ 			printf(" ext %*s %*s %*s length flags\n", logical_width,
+ 			       "logical", physical_width, "physical",
+ 			       physical_width, "expected");
+ 			fiemap_header_printed = 1;
+ 		}
+ 
+-		if (!verbose) {
+-			*num_extents = fiemap->fm_mapped_extents;
+-			goto out;
+-		}
+-
+-		/* If 0 extents are returned, then more ioctls are not needed */
+-		if (fiemap->fm_mapped_extents == 0)
+-			break;
+-
+ 		for (i = 0; i < fiemap->fm_mapped_extents; i++) {
+ 			__u64 phy_blk, logical_blk;
+ 			unsigned long ext_len;
+@@ -245,13 +220,18 @@ static int filefrag_fiemap(int fd, int b
+ 			ext_len = fm_ext[i].fe_length >> blk_shift;
+ 			logical_blk = fm_ext[i].fe_logical >> blk_shift;
+ 
+-			if (logical_blk && phy_blk != last_blk + 1)
++			if (logical_blk && phy_blk != expected) {
+ 				tot_extents++;
+-			else
+-				last_blk = 0;
+-			print_extent_info(&fm_ext[i], n, last_blk, blk_shift);
++			} else {
++				expected = 0;
++				if (!tot_extents)
++					tot_extents = 1;
++			}
++			if (verbose)
++				print_extent_info(&fm_ext[i], n, expected,
++						  blk_shift);
+ 
+-			last_blk = phy_blk + ext_len - 1;
++			expected = phy_blk + ext_len;
+ 			if (fm_ext[i].fe_flags & FIEMAP_EXTENT_LAST)
+ 				last = 1;
+ 			n++;
+@@ -278,7 +258,7 @@ static void frag_report(const char *file
+ #endif
+ 	int		bs;
+ 	long		fd;
+-	unsigned long	block, last_block = 0, numblocks, i, count;
++	unsigned long	block, last_block = 0, numblocks, i, count = 0;
+ 	long		bpib;	/* Blocks per indirect block */
+ 	long		cylgroups;
+ 	int		num_extents = 0, expected;
+@@ -379,11 +359,13 @@ static void frag_report(const char *file
+ 		printf("%s: 1 extent found", filename);
+ 	else
+ 		printf("%s: %d extents found", filename, num_extents);
+-	expected = (count/((bs*8)-(fsinfo.f_files/8/cylgroups)-3))+1;
+-	if (is_ext2 && expected < num_extents)
+-		printf(", perfection would be %d extent%s\n", expected,
+-			(expected>1) ? "s" : "");
+-	else
++	/* count, and thus expected, only set for indirect FIBMAP'd files */
++	if (is_ext2) {
++		expected = (count/((bs*8)-(fsinfo.f_files/8/cylgroups)-3))+1;
++		if (expected && expected < num_extents)
++			printf(", perfection would be %d extent%s\n", expected,
++				(expected>1) ? "s" : "");
++	} else
+ 		fputc('\n', stdout);
+ 	close(fd);
+ 	once = 0;
+
+

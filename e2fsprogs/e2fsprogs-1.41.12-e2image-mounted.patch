@@ -1,0 +1,99 @@
+From 6c327e9ca47fa4e51efe3a6601ad661b8c1a3964 Mon Sep 17 00:00:00 2001
+From: Carlos Maiolino <cmaiolino@redhat.com>
+Date: Fri, 11 Oct 2013 21:38:53 -0400
+Subject: e2image: complain if running e2image -r or -Q on a mounted filesystem
+
+Several users have used e2image on a mounted RW filesystem, resulting in
+inconsistent, useless e2images for debugging purposes.
+
+This commit will forbid this and print an error message, although the
+user can override this using a new force option.
+
+Signed-off-by: Carlos Maiolino <cmaiolino@redhat.com>
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+
+Index: e2fsprogs-1.41.12/misc/e2image.8.in
+===================================================================
+--- e2fsprogs-1.41.12.orig/misc/e2image.8.in
++++ e2fsprogs-1.41.12/misc/e2image.8.in
+@@ -30,6 +30,16 @@ recovering catastrophically corrupted fi
+ e2fsck will be enhanced to be able to use the image file to help
+ recover a badly damaged filesystem.
+ .PP
++When saving an e2image for debugging purposes, using either the
++.B \-r
++or
++.B \-Q
++options, the filesystem must be unmounted or be mounted read/only, in order
++for the image file to be in a consistent state.  This requirement can be
++overridden using the
++.B -f
++option, but the resulting image file is very likely not going to be useful.
++.PP
+ If  
+ .I image-file
+ is \-, then the output of 
+Index: e2fsprogs-1.41.12/misc/e2image.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/misc/e2image.c
++++ e2fsprogs-1.41.12/misc/e2image.c
+@@ -83,7 +83,7 @@ static int get_bits_from_size(size_t siz
+ 
+ static void usage(void)
+ {
+-	fprintf(stderr, _("Usage: %s [-rsIQ] device image_file\n"),
++	fprintf(stderr, _("Usage: %s [-rsIQf] device image_file\n"),
+ 		program_name);
+ 	exit (1);
+ }
+@@ -1241,9 +1241,11 @@ int main (int argc, char ** argv)
+ 	int open_flag = 0;
+ 	int img_type = 0;
+ 	int flags = 0;
++	int mount_flags = 0;
+ 	int qcow2_fd = 0;
+ 	int fd = 0;
+ 	int ret = 0;
++	int ignore_rw_mount = 0;
+ 
+ #ifdef ENABLE_NLS
+ 	setlocale(LC_MESSAGES, "");
+@@ -1256,7 +1258,7 @@ int main (int argc, char ** argv)
+ 	if (argc && *argv)
+ 		program_name = *argv;
+ 	add_error_table(&et_ext2_error_table);
+-	while ((c = getopt(argc, argv, "rsIQ")) != EOF)
++	while ((c = getopt(argc, argv, "rsIQf")) != EOF)
+ 		switch (c) {
+ 		case 'I':
+ 			flags |= E2IMAGE_INSTALL_FLAG;
+@@ -1274,6 +1276,9 @@ int main (int argc, char ** argv)
+ 		case 's':
+ 			flags |= E2IMAGE_SCRAMBLE_FLAG;
+ 			break;
++		case 'f':
++			ignore_rw_mount = 1;
++			break;
+ 		default:
+ 			usage();
+ 		}
+@@ -1282,6 +1287,19 @@ int main (int argc, char ** argv)
+ 	device_name = argv[optind];
+ 	image_fn = argv[optind+1];
+ 
++	ext2fs_check_if_mounted(device_name, &mount_flags);
++
++	if (img_type && !ignore_rw_mount &&
++	    (mount_flags & EXT2_MF_MOUNTED) &&
++	   !(mount_flags & EXT2_MF_READONLY)) {
++		fprintf(stderr, "\nRunning e2image on a R/W mounted "
++			"filesystem can result in an\n"
++			"inconsistent image which will not be useful "
++			"for debugging purposes.\n"
++			"Use -f option if you really want to do that.\n");
++		exit(1);
++	}
++
+ 	if (flags & E2IMAGE_INSTALL_FLAG) {
+ 		install_image(device_name, image_fn, img_type);
+ 		exit (0);

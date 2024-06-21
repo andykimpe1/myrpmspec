@@ -1,0 +1,58 @@
+[PATCH] e2fsprogs: Don't report uninit extents past EOF invalid
+
+Commit d3f32c2db8 caused e2fsck misbehavior during xfstests runs.
+It reported that uninitialized extents created by fallocate() at
+the end of file with the FALLOC_FL_KEEP_SIZE flag were invalid.
+Because FALLOC_FL_KEEP_SIZE does not increase the file size when
+an extent is fallocated, an uninitialized extent can legally contain
+blocks past the end of file.
+
+The information reported by ext2fs_extent_get() and used by the commit
+to determine legal extent ranges is limited by the value of i_size
+(determines end_blk in the root extent index), so block values greater
+than that containing i_size were reported as invalid.
+
+To fix this, filter out possible invalid extent candidates if they are
+uninitialized and extend past the block containing the end of file.
+
+Signed-off-by: Eric Whitney <enwlinux@gmail.com>
+---
+
+(modified by Eric Sandeen to not impact public interfaces)
+
+
+
+Index: e2fsprogs-1.41.12/e2fsck/pass1.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/e2fsck/pass1.c
++++ e2fsprogs-1.41.12/e2fsck/pass1.c
+@@ -1677,7 +1677,7 @@ static void scan_extent_node(e2fsck_t ct
+ 			     ext2_extent_handle_t ehandle)
+ {
+ 	struct ext2fs_extent	extent;
+-	blk_t			blk, last_lblk;
++	blk_t			blk, last_lblk, eof_blk;
+ 	e2_blkcnt_t		blockcnt;
+ 	unsigned int		i;
+ 	int			is_dir, is_leaf;
+@@ -1688,6 +1688,9 @@ static void scan_extent_node(e2fsck_t ct
+ 	if (pctx->errcode)
+ 		return;
+ 
++	eof_blk = (EXT2_I_SIZE(pctx->inode) + ctx->fs->blocksize - 1) >>
++		   EXT2_BLOCK_SIZE_BITS(ctx->fs->super);
++
+ 	pctx->errcode = ext2fs_extent_get(ehandle, EXT2_EXTENT_FIRST_SIB,
+ 					  &extent);
+ 	while (!pctx->errcode && info.num_entries-- > 0) {
+@@ -1702,7 +1705,9 @@ static void scan_extent_node(e2fsck_t ct
+ 			problem = PR_1_EXTENT_BAD_START_BLK;
+ 		else if (extent.e_lblk < start_block)
+ 			problem = PR_1_OUT_OF_ORDER_EXTENTS;
+-		else if (end_block && last_lblk > end_block)
++		else if ((end_block && last_lblk > end_block) &&
++			 (!(extent.e_flags & EXT2_EXTENT_FLAGS_UNINIT &&
++			    last_lblk > eof_blk - 1)))
+ 			problem = PR_1_EXTENT_END_OUT_OF_BOUNDS;
+ 		else if (is_leaf &&
+ 			 (extent.e_pblk + extent.e_len) >

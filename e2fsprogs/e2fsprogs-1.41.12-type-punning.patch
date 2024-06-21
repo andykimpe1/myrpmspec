@@ -1,0 +1,73 @@
+[PATCH] e2fsprogs: fix type-punning warnings
+
+Flags used during RHEL/Fedora builds lead to a couple type-punning
+warnings:
+
+  recovery.c: In function 'do_one_pass':
+  recovery.c:539: warning: dereferencing type-punned pointer will break strict-aliasing rules
+  ./csum.c: In function 'print_csum':
+  ./csum.c:170: warning: dereferencing type-punned pointer will break strict-aliasing rules
+
+The two changes below fix this up.
+
+Note that the csum test binary output changes slightly, but this does
+not break any tests.
+
+Signed-off-by: Eric Sandeen <sandeen@redhat.com>
+---
+
+Index: e2fsprogs-1.41.12/e2fsck/recovery.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/e2fsck/recovery.c
++++ e2fsprogs-1.41.12/e2fsck/recovery.c
+@@ -536,8 +536,10 @@ static int do_one_pass(journal_t *journa
+ 					memcpy(nbh->b_data, obh->b_data,
+ 							journal->j_blocksize);
+ 					if (flags & JFS_FLAG_ESCAPE) {
+-						*((__be32 *)nbh->b_data) =
+-						cpu_to_be32(JFS_MAGIC_NUMBER);
++						journal_header_t *header;
++
++						header = (journal_header_t *) &nbh->b_data[0];
++						header->h_magic = cpu_to_be32(JFS_MAGIC_NUMBER);
+ 					}
+ 
+ 					BUFFER_TRACE(nbh, "marking dirty");
+Index: e2fsprogs-1.41.12/lib/ext2fs/Makefile.in
+===================================================================
+--- e2fsprogs-1.41.12.orig/lib/ext2fs/Makefile.in
++++ e2fsprogs-1.41.12/lib/ext2fs/Makefile.in
+@@ -317,7 +317,7 @@ tst_extents: $(srcdir)/extent.c extent_d
+ tst_csum: csum.c $(STATIC_LIBEXT2FS) $(DEPLIBCOM_ERR)
+ 	$(E) "	LD $@"
+ 	$(Q) $(CC) -o tst_csum $(srcdir)/csum.c -DDEBUG \
+-		$(ALL_CFLAGS) $(STATIC_LIBEXT2FS) $(LIBCOM_ERR)
++		$(ALL_CFLAGS) $(STATIC_LIBEXT2FS) $(LIBCOM_ERR) $(LIBE2P)
+ 
+ mkjournal: mkjournal.c $(STATIC_LIBEXT2FS) $(DEPLIBCOM_ERR)
+ 	$(E) "	LD $@"
+Index: e2fsprogs-1.41.12/lib/ext2fs/csum.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/lib/ext2fs/csum.c
++++ e2fsprogs-1.41.12/lib/ext2fs/csum.c
+@@ -17,6 +17,7 @@
+ #include "ext2_fs.h"
+ #include "ext2fs.h"
+ #include "crc16.h"
++#include "e2p/e2p.h"
+ #include <assert.h>
+ 
+ #ifndef offsetof
+@@ -166,9 +166,9 @@ void print_csum(const char *msg, ext2_fi
+ 	crc2 = ext2fs_crc16(crc1, &swabgroup, sizeof(swabgroup));
+ 	crc3 = ext2fs_crc16(crc2, desc,
+ 			    offsetof(struct ext2_group_desc, bg_checksum));
+-	printf("%s: UUID %016Lx%016Lx(%04x), grp %u(%04x): %04x=%04x\n",
+-	       msg, *(long long *)&sb->s_uuid, *(long long *)&sb->s_uuid[8],
+-	       crc1, group, crc2, crc3, ext2fs_group_desc_csum(fs, group));
++	printf("%s: UUID %s(%04x), grp %u(%04x): %04x=%04x\n",
++	       msg, e2p_uuid2str(sb->s_uuid), crc1, group, crc2,crc3,
++	       ext2fs_group_desc_csum(fs, group));
+ }
+ 
+ unsigned char sb_uuid[16] = { 0x4f, 0x25, 0xe8, 0xcf, 0xe7, 0x97, 0x48, 0x23,

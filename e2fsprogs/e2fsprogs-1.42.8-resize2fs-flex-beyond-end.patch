@@ -1,0 +1,66 @@
+From 80391dcd2ec853981a11e1178ff7a19598a4e81c Mon Sep 17 00:00:00 2001
+From: Eric Sandeen <sandeen@redhat.com>
+Date: Wed, 19 Jun 2013 01:37:05 +0000
+Subject: resize2fs: move bitmaps if shrinking would orphan them
+
+It is possible to have a flex_bg filesystem with block groups
+which have inode & block bitmaps at some point well past the
+start of the group.
+
+If an offline shrink puts the new size somewhere between
+the start of the block group and the (old) location of
+the bitmaps, they can be left beyond the end of the filesystem,
+i.e. result in fs corruption.
+
+Check each remaining block group for whether its bitmaps
+are beyond the end of the new filesystem, and reallocate
+them in a new location if needed.
+
+Signed-off-by: Eric Sandeen <sandeen@redhat.com>
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+---
+Index: e2fsprogs-1.41.12/resize/resize2fs.c
+===================================================================
+--- e2fsprogs-1.41.12.orig/resize/resize2fs.c
++++ e2fsprogs-1.41.12/resize/resize2fs.c
+@@ -776,6 +776,7 @@ static errcode_t blocks_to_move(ext2_res
+ 	dgrp_t		i, max_groups, g;
+ 	blk_t		blk, group_blk;
+ 	unsigned long	old_blocks, new_blocks;
++	blk64_t		new_size;
+ 	unsigned int	meta_bg, meta_bg_size;
+ 	errcode_t	retval;
+ 	ext2_filsys 	fs, old_fs;
+@@ -804,6 +805,32 @@ static errcode_t blocks_to_move(ext2_res
+ 	fs = rfs->new_fs;
+ 
+ 	/*
++	 * If we're shrinking the filesystem, we need to move any group's
++	 * bitmaps which are beyond the end of the new filesystem.
++	 */
++	new_size = ext2fs_blocks_count(fs->super);
++	if (new_size < ext2fs_blocks_count(old_fs->super)) {
++		for (g = 0; g < fs->group_desc_count; g++) {
++			/*
++			 * ext2fs_allocate_group_table re-allocates bitmaps
++			 * which are set to block 0.
++			 */
++			if (ext2fs_block_bitmap_loc(fs, g) >= new_size) {
++				ext2fs_block_bitmap_loc_set(fs, g, 0);
++				retval = ext2fs_allocate_group_table(fs, g, 0);
++				if (retval)
++					return retval;
++			}
++			if (ext2fs_inode_bitmap_loc(fs, g) >= new_size) {
++				ext2fs_inode_bitmap_loc_set(fs, g, 0);
++				retval = ext2fs_allocate_group_table(fs, g, 0);
++				if (retval)
++					return retval;
++			}
++		}
++	}
++
++	/*
+ 	 * If we're shrinking the filesystem, we need to move all of
+ 	 * the blocks that don't fit any more
+ 	 */
