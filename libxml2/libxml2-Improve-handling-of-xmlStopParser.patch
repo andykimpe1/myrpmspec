@@ -1,0 +1,309 @@
+commit ad5a4deec5c19e7c2060eccb87b95757a31f8757
+Author: Daniel Veillard <veillard@redhat.com>
+Date:   Thu Apr 11 15:54:51 2013 +0800
+
+    Improve handling of xmlStopParser()
+    
+    Add a specific parser error
+    Try to stop parsing as quickly as possible
+
+diff --git a/include/libxml/xmlerror.h b/include/libxml/xmlerror.h
+index b5e8c77..2ad02fe 100644
+--- a/include/libxml/xmlerror.h
++++ b/include/libxml/xmlerror.h
+@@ -206,6 +206,7 @@ typedef enum {
+     XML_ERR_UNKNOWN_VERSION, /* 108 */
+     XML_ERR_VERSION_MISMATCH, /* 109 */
+     XML_ERR_NAME_TOO_LONG, /* 110 */
++    XML_ERR_USER_STOP, /* 111 */
+     XML_NS_ERR_XML_NAMESPACE = 200,
+     XML_NS_ERR_UNDEFINED_NAMESPACE, /* 201 */
+     XML_NS_ERR_QNAME, /* 202 */
+diff --git a/parser.c b/parser.c
+index 23d8e6c..31256ee 100644
+--- a/parser.c
++++ b/parser.c
+@@ -2392,6 +2392,8 @@ xmlParserHandlePEReference(xmlParserCtxtPtr ctxt) {
+ 	    NEXT;
+ 	    if ((ctxt->sax != NULL) && (ctxt->sax->getParameterEntity != NULL))
+ 		entity = ctxt->sax->getParameterEntity(ctxt->userData, name);
++	    if (ctxt->instate == XML_PARSER_EOF)
++	        return;
+ 	    if (entity == NULL) {
+ 	        
+ 		/*
+@@ -4836,7 +4838,8 @@ get_more:
+ 		    }
+ 		    if (buf != NULL)
+ 		        xmlFree(buf);
+-		    ctxt->instate = state;
++		    if (ctxt->instate != XML_PARSER_EOF)
++			ctxt->instate = state;
+ 		    return;
+ 		}
+ 		if (buf != NULL)
+@@ -5423,6 +5426,8 @@ xmlParseEntityDecl(xmlParserCtxtPtr ctxt) {
+ 		}
+ 	    }
+ 	}
++	if (ctxt->instate == XML_PARSER_EOF)
++	    return;
+ 	SKIP_BLANKS;
+ 	if (RAW != '>') {
+ 	    xmlFatalErrMsgStr(ctxt, XML_ERR_ENTITY_NOT_FINISHED,
+@@ -7409,6 +7414,8 @@ xmlParseEntityRef(xmlParserCtxtPtr ctxt) {
+ 	    ent = xmlSAX2GetEntity(ctxt, name);
+ 	}
+     }
++    if (ctxt->instate == XML_PARSER_EOF)
++	return(NULL);
+     /*
+      * [ WFC: Entity Declared ]
+      * In a document without any DTD, a document with only an
+@@ -7599,6 +7606,10 @@ xmlParseStringEntityRef(xmlParserCtxtPtr ctxt, const xmlChar ** str) {
+ 	    ent = xmlSAX2GetEntity(ctxt, name);
+ 	}
+     }
++    if (ctxt->instate == XML_PARSER_EOF) {
++	xmlFree(name);
++	return;
++    }
+ 
+     /*
+      * [ WFC: Entity Declared ]
+@@ -7760,8 +7771,9 @@ xmlParsePEReference(xmlParserCtxtPtr ctxt)
+      */
+     if ((ctxt->sax != NULL) &&
+ 	(ctxt->sax->getParameterEntity != NULL))
+-	entity = ctxt->sax->getParameterEntity(ctxt->userData,
+-					       name);
++	entity = ctxt->sax->getParameterEntity(ctxt->userData, name);
++    if (ctxt->instate == XML_PARSER_EOF)
++	return;
+     if (entity == NULL) {
+ 	/*
+ 	 * [ WFC: Entity Declared ]
+@@ -7989,8 +8001,11 @@ xmlParseStringPEReference(xmlParserCtxtPtr ctxt, const xmlChar **str) {
+      */
+     if ((ctxt->sax != NULL) &&
+ 	(ctxt->sax->getParameterEntity != NULL))
+-	entity = ctxt->sax->getParameterEntity(ctxt->userData,
+-					       name);
++	entity = ctxt->sax->getParameterEntity(ctxt->userData, name);
++    if (ctxt->instate == XML_PARSER_EOF) {
++	xmlFree(name);
++	return;
++    }
+     if (entity == NULL) {
+ 	/*
+ 	 * [ WFC: Entity Declared ]
+@@ -8092,6 +8107,8 @@ xmlParseDocTypeDecl(xmlParserCtxtPtr ctxt) {
+     if ((ctxt->sax != NULL) && (ctxt->sax->internalSubset != NULL) &&
+ 	(!ctxt->disableSAX))
+ 	ctxt->sax->internalSubset(ctxt->userData, name, ExternalID, URI);
++    if (ctxt->instate == XML_PARSER_EOF)
++	return;
+ 
+     /*
+      * Is there any internal subset declarations ?
+@@ -9850,6 +9867,8 @@ xmlParseElement(xmlParserCtxtPtr ctxt) {
+      * Parse the content of the element:
+      */
+     xmlParseContent(ctxt);
++    if (ctxt->instate == XML_PARSER_EOF)
++	return;
+     if (!IS_BYTE_CHAR(RAW)) {
+         xmlFatalErrMsgStrIntStr(ctxt, XML_ERR_TAG_NOT_FINISHED,
+ 	 "Premature end of data in tag %s line %d\n",
+@@ -10415,6 +10434,8 @@ xmlParseDocument(xmlParserCtxtPtr ctxt) {
+      */
+     if ((ctxt->sax) && (ctxt->sax->setDocumentLocator))
+         ctxt->sax->setDocumentLocator(ctxt->userData, &xmlDefaultSAXLocator);
++    if (ctxt->instate == XML_PARSER_EOF)
++	return(-1);
+ 
+     if ((ctxt->encoding == (const xmlChar *)XML_CHAR_ENCODING_NONE) &&
+         ((ctxt->input->end - ctxt->input->cur) >= 4)) {
+@@ -10466,6 +10487,8 @@ xmlParseDocument(xmlParserCtxtPtr ctxt) {
+     }
+     if ((ctxt->sax) && (ctxt->sax->startDocument) && (!ctxt->disableSAX))
+         ctxt->sax->startDocument(ctxt->userData);
++    if (ctxt->instate == XML_PARSER_EOF)
++	return(-1);
+ 
+     /*
+      * The Misc part of the Prolog
+@@ -10485,6 +10508,8 @@ xmlParseDocument(xmlParserCtxtPtr ctxt) {
+ 	if (RAW == '[') {
+ 	    ctxt->instate = XML_PARSER_DTD;
+ 	    xmlParseInternalSubset(ctxt);
++	    if (ctxt->instate == XML_PARSER_EOF)
++		return(-1);
+ 	}
+ 
+ 	/*
+@@ -10495,6 +10520,8 @@ xmlParseDocument(xmlParserCtxtPtr ctxt) {
+ 	    (!ctxt->disableSAX))
+ 	    ctxt->sax->externalSubset(ctxt->userData, ctxt->intSubName,
+ 	                              ctxt->extSubSystem, ctxt->extSubURI);
++	if (ctxt->instate == XML_PARSER_EOF)
++	    return(-1);
+ 	ctxt->inSubset = 0;
+ 
+         xmlCleanSpecialAttr(ctxt);
+@@ -10635,6 +10662,8 @@ xmlParseExtParsedEnt(xmlParserCtxtPtr ctxt) {
+     }
+     if ((ctxt->sax) && (ctxt->sax->startDocument) && (!ctxt->disableSAX))
+         ctxt->sax->startDocument(ctxt->userData);
++    if (ctxt->instate == XML_PARSER_EOF)
++	return(-1);
+ 
+     /*
+      * Doing validity checking on chunk doesn't make sense
+@@ -10645,7 +10674,10 @@ xmlParseExtParsedEnt(xmlParserCtxtPtr ctxt) {
+     ctxt->depth = 0;
+ 
+     xmlParseContent(ctxt);
+-   
++
++    if (ctxt->instate == XML_PARSER_EOF)
++	return(-1);
++
+     if ((RAW == '<') && (NXT(1) == '/')) {
+ 	xmlFatalErr(ctxt, XML_ERR_NOT_WELL_BALANCED, NULL);
+     } else if (RAW != 0) {
+@@ -10952,7 +10984,7 @@ xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
+     }
+     xmlParseGetLasts(ctxt, &lastlt, &lastgt);
+ 
+-    while (1) {
++    while (ctxt->instate != XML_PARSER_EOF) {
+ 	if ((ctxt->errNo != XML_ERR_OK) && (ctxt->disableSAX == 1))
+ 	    return(0);
+ 
+@@ -11192,6 +11224,8 @@ xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
+ 			    ctxt->sax->endElement(ctxt->userData, name);
+ #endif /* LIBXML_SAX1_ENABLED */
+ 		    }
++		    if (ctxt->instate == XML_PARSER_EOF)
++			goto done;
+ 		    spacePop(ctxt);
+ 		    if (ctxt->nameNr == 0) {
+ 			ctxt->instate = XML_PARSER_EPILOG;
+@@ -11382,6 +11416,8 @@ xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
+ 				ctxt->sax->characters(ctxt->userData,
+ 				                      ctxt->input->cur, tmp);
+ 			}
++			if (ctxt->instate == XML_PARSER_EOF)
++			    goto done;
+ 			SKIPL(tmp);
+ 			ctxt->checkIndex = 0;
+ 		    }
+@@ -11417,6 +11453,8 @@ xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
+ 			    ctxt->sax->characters(ctxt->userData,
+ 						  ctxt->input->cur, base);
+ 		    }
++		    if (ctxt->instate == XML_PARSER_EOF)
++			goto done;
+ 		    SKIPL(base + 3);
+ 		    ctxt->checkIndex = 0;
+ 		    ctxt->instate = XML_PARSER_CONTENT;
+@@ -11450,6 +11488,8 @@ xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
+ 			    "PP: Parsing PI\n");
+ #endif
+ 		    xmlParsePI(ctxt);
++		    if (ctxt->instate == XML_PARSER_EOF)
++			goto done;
+ 		    ctxt->instate = XML_PARSER_MISC;
+                     ctxt->progressive = 1;
+ 		    ctxt->checkIndex = 0;
+@@ -11466,6 +11506,8 @@ xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
+ 			    "PP: Parsing Comment\n");
+ #endif
+ 		    xmlParseComment(ctxt);
++		    if (ctxt->instate == XML_PARSER_EOF)
++			goto done;
+ 		    ctxt->instate = XML_PARSER_MISC;
+                     ctxt->progressive = 1;
+ 		    ctxt->checkIndex = 0;
+@@ -11490,6 +11532,8 @@ xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
+                     ctxt->progressive = 0;
+ 		    ctxt->checkIndex = 0;
+ 		    xmlParseDocTypeDecl(ctxt);
++		    if (ctxt->instate == XML_PARSER_EOF)
++			goto done;
+ 		    if (RAW == '[') {
+ 			ctxt->instate = XML_PARSER_DTD;
+ #ifdef DEBUG_PUSH
+@@ -11548,6 +11592,8 @@ xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
+ 			    "PP: Parsing PI\n");
+ #endif
+ 		    xmlParsePI(ctxt);
++		    if (ctxt->instate == XML_PARSER_EOF)
++			goto done;
+ 		    ctxt->instate = XML_PARSER_PROLOG;
+                     ctxt->progressive = 1;
+ 		} else if ((cur == '<') && (next == '!') &&
+@@ -11562,6 +11608,8 @@ xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
+ 			    "PP: Parsing Comment\n");
+ #endif
+ 		    xmlParseComment(ctxt);
++		    if (ctxt->instate == XML_PARSER_EOF)
++			goto done;
+ 		    ctxt->instate = XML_PARSER_PROLOG;
+                     ctxt->progressive = 1;
+ 		} else if ((cur == '<') && (next == '!') &&
+@@ -11599,6 +11647,8 @@ xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
+ 			    "PP: Parsing PI\n");
+ #endif
+ 		    xmlParsePI(ctxt);
++		    if (ctxt->instate == XML_PARSER_EOF)
++			goto done;
+ 		    ctxt->instate = XML_PARSER_EPILOG;
+                     ctxt->progressive = 1;
+ 		} else if ((cur == '<') && (next == '!') &&
+@@ -11613,6 +11663,8 @@ xmlParseTryOrFinish(xmlParserCtxtPtr ctxt, int terminate) {
+ 			    "PP: Parsing Comment\n");
+ #endif
+ 		    xmlParseComment(ctxt);
++		    if (ctxt->instate == XML_PARSER_EOF)
++			goto done;
+ 		    ctxt->instate = XML_PARSER_EPILOG;
+                     ctxt->progressive = 1;
+ 		} else if ((cur == '<') && (next == '!') &&
+@@ -11747,6 +11799,8 @@ not_end_of_int_subset:
+ found_end_int_subset:
+                 ctxt->checkIndex = 0;
+ 		xmlParseInternalSubset(ctxt);
++		if (ctxt->instate == XML_PARSER_EOF)
++		    goto done;
+ 		ctxt->inSubset = 2;
+ 		if ((ctxt->sax != NULL) && (!ctxt->disableSAX) &&
+ 		    (ctxt->sax->externalSubset != NULL))
+@@ -11754,6 +11808,8 @@ found_end_int_subset:
+ 			    ctxt->extSubSystem, ctxt->extSubURI);
+ 		ctxt->inSubset = 0;
+ 		xmlCleanSpecialAttr(ctxt);
++		if (ctxt->instate == XML_PARSER_EOF)
++		    goto done;
+ 		ctxt->instate = XML_PARSER_PROLOG;
+ 		ctxt->checkIndex = 0;
+ #ifdef DEBUG_PUSH
+@@ -12021,6 +12077,9 @@ xmldecl_done:
+                                      avail - old_avail)))
+             xmlParseTryOrFinish(ctxt, terminate);
+     }
++    if (ctxt->instate == XML_PARSER_EOF)
++        return(ctxt->errNo);
++
+     if ((ctxt->input != NULL) &&
+          (((ctxt->input->end - ctxt->input->cur) > XML_MAX_LOOKUP_LIMIT) ||
+          ((ctxt->input->cur - ctxt->input->base) > XML_MAX_LOOKUP_LIMIT)) &&
+@@ -12224,6 +12283,7 @@ xmlStopParser(xmlParserCtxtPtr ctxt) {
+     if (ctxt == NULL)
+         return;
+     ctxt->instate = XML_PARSER_EOF;
++    ctxt->errNo = XML_ERR_USER_STOP;
+     ctxt->disableSAX = 1;
+     if (ctxt->input != NULL) {
+ 	ctxt->input->cur = BAD_CAST"";
