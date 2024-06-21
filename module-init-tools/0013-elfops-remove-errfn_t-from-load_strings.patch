@@ -1,0 +1,145 @@
+From 3b12271f62b17448d98c89daf366ba71c644b5e9 Mon Sep 17 00:00:00 2001
+From: Andreas Robinson <andr345@gmail.com>
+Date: Sun, 4 Oct 2009 17:00:43 +0200
+Subject: [PATCH 13/19] elfops: remove errfn_t from load_strings
+
+Commit 528db92ab1dd0d75dba415b9f3dc81f5a34773ce added an errfn_t
+parameter to elfops_core.c:load_strings. This was for the purpose
+of detecting missing terminators at the end of ELF-sections with
+strings in them, such as .modinfo.
+
+However, the committer (that'd be me) forgot to add any actual code to
+load_strings() and now the errfn_t parameter complicates the error
+handling when softdep is used.
+
+This commit removes that parameter and adds a non-fatal warning message.
+
+Signed-off-by: Andreas Robinson <andr345@gmail.com>
+(cherry picked from commit d7a8758609dc13d048a249295c2dcc4345cbf40f)
+---
+ depmod.c      |  8 ++++----
+ elfops.h      |  2 +-
+ elfops_core.c | 12 ++++++++----
+ modinfo.c     |  2 +-
+ modprobe.c    |  2 +-
+ 5 files changed, 15 insertions(+), 11 deletions(-)
+
+diff --git a/depmod.c b/depmod.c
+index 245386a..033a742 100644
+--- a/depmod.c
++++ b/depmod.c
+@@ -802,13 +802,13 @@ static void output_aliases(struct module *modules, FILE *out, char *dirname)
+ 		filename2modname(modname, i->pathname);
+ 
+ 		/* Grab from old-style .modalias section. */
+-		tbl = file->ops->load_strings(file, ".modalias", NULL, fatal);
++		tbl = file->ops->load_strings(file, ".modalias", NULL);
+ 		for (j = 0; tbl && j < tbl->cnt; j++)
+ 			fprintf(out, "alias %s %s\n", tbl->str[j], modname);
+ 		strtbl_free(tbl);
+ 
+ 		/* Grab from new-style .modinfo section. */
+-		tbl = file->ops->load_strings(file, ".modinfo", NULL, fatal);
++		tbl = file->ops->load_strings(file, ".modinfo", NULL);
+ 		for (j = 0; tbl && j < tbl->cnt; j++) {
+ 			const char *p = tbl->str[j];
+ 			if (strstarts(p, "alias="))
+@@ -838,7 +838,7 @@ static void output_aliases_bin(struct module *modules, FILE *out, char *dirname)
+ 		filename2modname(modname, i->pathname);
+ 
+ 		/* Grab from old-style .modalias section. */
+-		tbl = file->ops->load_strings(file, ".modalias", NULL, fatal);
++		tbl = file->ops->load_strings(file, ".modalias", NULL);
+ 		for (j = 0; tbl && j < tbl->cnt; j++) {
+ 			alias = NOFAIL(strdup(tbl->str[j]));
+ 			underscores(alias);
+@@ -851,7 +851,7 @@ static void output_aliases_bin(struct module *modules, FILE *out, char *dirname)
+ 		strtbl_free(tbl);
+ 
+ 		/* Grab from new-style .modinfo section. */
+-		tbl = file->ops->load_strings(file, ".modinfo", NULL, fatal);
++		tbl = file->ops->load_strings(file, ".modinfo", NULL);
+ 		for (j = 0; tbl && j < tbl->cnt; j++) {
+ 			const char *p = tbl->str[j];
+ 			if (strstarts(p, "alias=")) {
+diff --git a/elfops.h b/elfops.h
+index c3d2e33..9e97859 100644
+--- a/elfops.h
++++ b/elfops.h
+@@ -73,7 +73,7 @@ struct module_ops
+ 	void *(*load_section)(struct elf_file *module,
+ 		const char *secname, unsigned long *secsize);
+ 	struct string_table *(*load_strings)(struct elf_file *module,
+-		const char *secname, struct string_table *tbl, errfn_t error);
++		const char *secname, struct string_table *tbl);
+ 	struct string_table *(*load_symbols)(struct elf_file *module);
+ 	struct string_table *(*load_dep_syms)(const char *pathname,
+ 		struct elf_file *module, struct string_table **types);
+diff --git a/elfops_core.c b/elfops_core.c
+index c5e84ba..5819149 100644
+--- a/elfops_core.c
++++ b/elfops_core.c
+@@ -80,14 +80,18 @@ static void *PERBIT(load_section)(struct elf_file *module,
+ 
+ static struct string_table *PERBIT(load_strings)(struct elf_file *module,
+ 						 const char *secname,
+-						 struct string_table *tbl,
+-						 errfn_t error)
++						 struct string_table *tbl)
+ {
+ 	unsigned long size;
+ 	const char *strings;
+ 
+ 	strings = PERBIT(load_section)(module, secname, &size);
+ 	if (strings) {
++		if (strings[size-1] != 0) {
++			warn("%s may be corrupt; an unterminated string"
++			     " was found at the end of section %s\n",
++			     module->pathname, secname);
++		}
+ 		/* Skip any zero padding. */
+ 		while (!strings[0]) {
+ 			strings++;
+@@ -109,11 +113,11 @@ static struct string_table *PERBIT(load_symbols)(struct elf_file *module)
+ 	symtbl = NULL;
+ 
+ 	/* New-style: strings are in this section. */
+-	symtbl = PERBIT(load_strings)(module, "__ksymtab_strings", symtbl, fatal);
++	symtbl = PERBIT(load_strings)(module, "__ksymtab_strings", symtbl);
+ 	if (symtbl) {
+ 		/* GPL symbols too */
+ 		return PERBIT(load_strings)(module, "__ksymtab_strings_gpl",
+-			symtbl, fatal);
++			symtbl);
+ 	}
+ 
+ 	/* Old-style. */
+diff --git a/modinfo.c b/modinfo.c
+index c2d733f..90e9ad3 100644
+--- a/modinfo.c
++++ b/modinfo.c
+@@ -307,7 +307,7 @@ int main(int argc, char *argv[])
+ 			ret = 1;
+ 			continue;
+ 		}
+-		tags = mod->ops->load_strings(mod, ".modinfo", NULL, error);
++		tags = mod->ops->load_strings(mod, ".modinfo", NULL);
+ 		if (!tags) {
+ 			release_elf_file(mod);
+ 			continue;
+diff --git a/modprobe.c b/modprobe.c
+index 6ce17c5..af2a1a2 100644
+--- a/modprobe.c
++++ b/modprobe.c
+@@ -344,7 +344,7 @@ static void clear_magic(struct elf_file *module)
+ 	module->ops->strip_section(module, "__vermagic");
+ 
+ 	/* New-style: in .modinfo section */
+-	tbl = module->ops->load_strings(module, ".modinfo", NULL, fatal);
++	tbl = module->ops->load_strings(module, ".modinfo", NULL);
+ 	for (j = 0; tbl && j < tbl->cnt; j++) {
+ 		const char *p = tbl->str[j];
+ 		if (strstarts(p, "vermagic=")) {
+-- 
+1.9.0
+

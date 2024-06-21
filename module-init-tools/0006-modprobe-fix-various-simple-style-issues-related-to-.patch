@@ -1,0 +1,214 @@
+From 85685cc1f72e30e3da2ab2b1d239b04700da89f3 Mon Sep 17 00:00:00 2001
+From: Andreas Robinson <andr345@gmail.com>
+Date: Mon, 15 Jun 2009 19:45:02 +0200
+Subject: [PATCH 06/19] modprobe: fix various simple style issues related to
+ the option flags
+
+Changes suggested by Alan:
+
+* Rename ignore_inuse => ignore_loaded
+* Put the flags parameter last in handle_module/insmod/rmmod/do_modprobe
+  function declarations.
+  (The errfn was moved too, to just before the flags.)
+* Don't change more than one flag per statement,
+  i.e flags |= (foo | bar); => flags |= foo; flags |= bar;
+
+Signed-off-by: Andreas Robinson <andr345@gmail.com>
+(cherry picked from commit 6453e02887b672f621243b074a7f208993ac3b4c)
+---
+ modprobe.c | 69 +++++++++++++++++++++++++++++++-------------------------------
+ 1 file changed, 35 insertions(+), 34 deletions(-)
+
+diff --git a/modprobe.c b/modprobe.c
+index fd32c3e..4ba5d04 100644
+--- a/modprobe.c
++++ b/modprobe.c
+@@ -67,7 +67,7 @@ typedef enum
+ 	mit_first_time = 4,
+ 	mit_use_blacklist = 8,
+ 	mit_ignore_commands = 16,
+-	mit_ignore_inuse = 32,
++	mit_ignore_loaded = 32,
+ 	mit_strip_vermagic = 64,
+ 	mit_strip_modversion = 128
+ 
+@@ -618,14 +618,14 @@ static void do_command(const char *modname,
+ }
+ 
+ /* Actually do the insert.  Frees second arg. */
+-static int insmod(modprobe_flags_t flags,
+-		   struct list_head *list,
++static int insmod(struct list_head *list,
+ 		   char *optstring,
+ 		   const char *newname,
+-		   errfn_t error,
+ 		   const struct module_options *options,
+ 		   const struct module_command *commands,
+ 		   const char *cmdline_opts,
++		   errfn_t error,
++		   modprobe_flags_t flags,
+                    int io_flags)
+ {
+ 	int ret, fd;
+@@ -642,8 +642,8 @@ static int insmod(modprobe_flags_t flags,
+ 		modprobe_flags_t f = flags;
+ 		f &= ~mit_first_time;
+ 		f &= ~mit_ignore_commands;
+-		if ((rc = insmod(f, list, NOFAIL(strdup("")), NULL, warn,
+-		       options, commands, "", io_flags)) != 0) {
++		if ((rc = insmod(list, NOFAIL(strdup("")), NULL,
++		       options, commands, "", warn, f, io_flags)) != 0) {
+ 			error("Error inserting %s (%s): %s\n",
+ 				mod->modname, mod->filename,
+ 				insert_moderror(errno));
+@@ -659,7 +659,7 @@ static int insmod(modprobe_flags_t flags,
+ 	}
+ 
+ 	/* Don't do ANYTHING if already in kernel. */
+-	if (!(flags & mit_ignore_inuse)
++	if (!(flags & mit_ignore_loaded)
+ 	    && module_in_kernel(newname ?: mod->modname, NULL) == 1) {
+ 		if (flags & mit_first_time)
+ 			error("Module %s already in kernel.\n",
+@@ -756,12 +756,12 @@ static int insmod(modprobe_flags_t flags,
+ }
+ 
+ /* Do recursive removal. */
+-static void rmmod(modprobe_flags_t flags,
+-		  struct list_head *list,
++static void rmmod(struct list_head *list,
+ 		  const char *name,
+-		  errfn_t error,
+ 		  struct module_command *commands,
+ 		  const char *cmdline_opts,
++		  errfn_t error,
++		  modprobe_flags_t flags,
+ 		  int io_flags)
+ {
+ 	const char *command;
+@@ -786,7 +786,7 @@ static void rmmod(modprobe_flags_t flags,
+ 		goto nonexistent_module;
+ 
+ 	if (usecount != 0) {
+-		if (!(flags & mit_ignore_inuse))
++		if (!(flags & mit_ignore_loaded))
+ 			error("Module %s is in use.\n", name);
+ 		goto remove_rest;
+ 	}
+@@ -807,10 +807,11 @@ static void rmmod(modprobe_flags_t flags,
+  remove_rest:
+ 	/* Now do things we depend. */
+ 	if (!list_empty(list)) {
+-		flags &= ~(mit_first_time | mit_ignore_commands);
+-		flags |= mit_ignore_inuse;
++		flags &= ~mit_first_time;
++		flags &= ~mit_ignore_commands;
++		flags |= mit_ignore_loaded;
+ 
+-		rmmod(flags, list, NULL, warn, commands, "", io_flags);
++		rmmod(list, NULL, commands, "", warn, flags, io_flags);
+ 	}
+ 	return;
+ 
+@@ -1283,15 +1284,15 @@ static char *gather_options(char *argv[])
+ 	return optstring;
+ }
+ 
+-static int handle_module(modprobe_flags_t flags,
+-			  const char *modname,
++static int handle_module(const char *modname,
+ 			  struct list_head *todo_list,
+ 			  const char *newname,
+ 			  char *options,
+-			  errfn_t error,
+ 			  struct module_options *modoptions,
+ 			  struct module_command *commands,
+ 			  const char *cmdline_opts,
++			  errfn_t error,
++			  modprobe_flags_t flags,
+ 			  int io_flags)
+ {
+ 	if (list_empty(todo_list)) {
+@@ -1312,24 +1313,24 @@ static int handle_module(modprobe_flags_t flags,
+ 	}
+ 
+ 	if (flags & mit_remove) {
+-		flags &= ~mit_ignore_inuse;
+-		rmmod(flags, todo_list, newname, error, commands, cmdline_opts, io_flags);
++		flags &= ~mit_ignore_loaded;
++		rmmod(todo_list, newname, commands, cmdline_opts, error, flags, io_flags);
+ 	} else
+-		insmod(flags, todo_list, NOFAIL(strdup(options)), newname,
+-		       error, modoptions, commands, cmdline_opts, io_flags);
++		insmod(todo_list, NOFAIL(strdup(options)), newname,
++		       modoptions, commands, cmdline_opts, error, flags, io_flags);
+ 
+ 	return 0;
+ }
+ 
+-int do_modprobe(modprobe_flags_t flags,
+-		errfn_t error,
+-		char *modname,
++int do_modprobe(char *modname,
+ 		char *newname,
+ 		char *cmdline_opts,
+ 		const char *configname,
+ 		const char *dirname,
+ 		const char *aliasfilename,
+ 		const char *symfilename,
++		errfn_t error,
++		modprobe_flags_t flags,
+ 		int io_flags)
+ {
+ 	struct module_command *commands = NULL;
+@@ -1384,9 +1385,9 @@ int do_modprobe(modprobe_flags_t flags,
+ 						 opts, modoptions);
+ 
+ 			read_depends(dirname, aliases->module, &list);
+-			failed |= handle_module(flags, aliases->module,
+-				&list, newname, opts, err, modoptions,
+-				commands, cmdline_opts, io_flags);
++			failed |= handle_module(aliases->module,
++				&list, newname, opts, modoptions,
++				commands, cmdline_opts, err, flags, io_flags);
+ 
+ 			aliases = aliases->next;
+ 			INIT_LIST_HEAD(&list);
+@@ -1396,9 +1397,8 @@ int do_modprobe(modprobe_flags_t flags,
+ 		    && find_blacklist(modname, blacklist))
+ 			return failed;
+ 
+-		failed |= handle_module(flags, modname, &list,
+-			newname, cmdline_opts, error, modoptions,
+-			commands, cmdline_opts, io_flags);
++		failed |= handle_module(modname, &list, newname, cmdline_opts,
++			modoptions, commands, cmdline_opts, error, flags, io_flags);
+ 	}
+ 	return failed;
+ }
+@@ -1478,7 +1478,8 @@ int main(int argc, char *argv[])
+ 			add_to_env_var("-q");
+ 			break;
+ 		case 'D':
+-			flags |= mit_dry_run | mit_ignore_inuse;
++			flags |= mit_dry_run;
++			flags |= mit_ignore_loaded;
+ 			verbose = 1;
+ 			add_to_env_var("-D");
+ 			break;
+@@ -1598,9 +1599,9 @@ int main(int argc, char *argv[])
+ 		if (dump_modver)
+ 			dump_modversions(modname, error);
+ 		else
+-			failed |= do_modprobe(flags, error, modname,
+-				newname, cmdline_opts, configname, dirname,
+-				aliasfilename, symfilename, io_flags);
++			failed |= do_modprobe(modname, newname, cmdline_opts,
++				configname, dirname, aliasfilename, symfilename,
++				error, flags, io_flags);
+ 
+ 	}
+ 	if (logging)
+-- 
+1.9.0
+

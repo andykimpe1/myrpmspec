@@ -1,0 +1,79 @@
+From 244dd9eb687d8066fcf59fe719441fc69769789b Mon Sep 17 00:00:00 2001
+From: Alan Jenkins <alan-jenkins@tuffmail.co.uk>
+Date: Mon, 15 Mar 2010 15:34:38 +0000
+Subject: [PATCH 19/19] modprobe: fix softdep flags
+
+1. When a softdep is present, all the flags e.g.
+   --use-blacklist are being ignored.  Fix that.
+
+2. When processing softdeps, mask out the "first_time"
+   flag.  This brings them into line with both install
+   commands and normal dependencies.  (We don't need to
+   worry about "ignore_commands", because it would
+   prevent softdeps from being loaded in the first
+   place).  If we're unloading, we should also mask in
+   the "quiet_inuse" flag.
+
+(cherry picked from commit 7a623868b280b0f8c38e0652ac9442a23c569b17)
+---
+ modprobe.c | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/modprobe.c b/modprobe.c
+index be22875..e27e177 100644
+--- a/modprobe.c
++++ b/modprobe.c
+@@ -674,8 +674,12 @@ static void do_softdep(const struct module_softdep *softdep,
+ 		      int io_flags)
+ {
+        struct string_table *pre_modnames, *post_modnames;
++       modprobe_flags_t softdep_flags = flags;
+        int i, j;
+ 
++       softdep_flags &= ~mit_first_time;
++       softdep_flags &= ~mit_ignore_commands;
++
+        if (++recursion_depth >= MAX_RECURSION)
+ 	    fatal("modprobe: softdep dependency loop encountered %s %s\n",
+ 		    (flags & mit_remove) ? "removing" : "inserting",
+@@ -697,7 +701,7 @@ static void do_softdep(const struct module_softdep *softdep,
+                j = (flags & mit_remove) ? pre_modnames->cnt-1 - i : i;
+ 
+                do_modprobe(pre_modnames->str[j], NULL, "",
+-                       configname, dirname, warn, flags, io_flags);
++                       configname, dirname, warn, softdep_flags, io_flags);
+        }
+ 
+        /* Modprobe main module, passing cmdline_opts, ignoring softdep */
+@@ -712,7 +716,7 @@ static void do_softdep(const struct module_softdep *softdep,
+                j = (flags & mit_remove) ? post_modnames->cnt-1 - i : i;
+ 
+                do_modprobe(post_modnames->str[j], NULL, "", configname,
+-                       dirname, warn, flags, io_flags);
++                       dirname, warn, softdep_flags, io_flags);
+        }
+ }
+ 
+@@ -775,8 +779,7 @@ static int insmod(struct list_head *list,
+ 	softdep = find_softdep(mod->modname, softdeps);
+ 	if (softdep && !(flags & mit_ignore_commands)) {
+ 		close_file(fd);
+-		do_softdep(softdep, cmdline_opts, configname, dirname, 
+-			   error, flags & (mit_remove | mit_dry_run), io_flags);
++		do_softdep(softdep, cmdline_opts, configname, dirname, error, flags, io_flags);
+ 		goto out_optstring;
+ 	}
+ 
+@@ -895,8 +898,7 @@ static void rmmod(struct list_head *list,
+ 
+ 	softdep = find_softdep(mod->modname, softdeps);
+ 	if (softdep && !(flags & mit_ignore_commands)) {
+-		do_softdep(softdep, cmdline_opts, configname, dirname,
+-			error, flags & (mit_remove | mit_dry_run), io_flags);
++		do_softdep(softdep, cmdline_opts, configname, dirname, error, flags, io_flags);
+ 		goto remove_rest;
+ 	}
+ 
+-- 
+1.9.0
+
