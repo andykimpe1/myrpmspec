@@ -1,0 +1,720 @@
+diff -up ./doc/aide.conf.5.in.syslog ./doc/aide.conf.5.in
+--- ./doc/aide.conf.5.in.syslog	2010-02-17 15:22:11.000000000 -0500
++++ ./doc/aide.conf.5.in	2016-12-07 10:19:15.648001476 -0500
+@@ -44,6 +44,25 @@ inclusive. This parameter can only be gi
+ occurence is used. If \-\-verbose or \-V is used then the value from that
+ is used. The default is 5. If verbosity is 20 then additional report
+ output is written when doing \-\-check, \-\-update or \-\-compare.
++.IP "syslog_format"
++Valid values are yes,true,no and false. This option enables new syslog format
++which is suitable for logging. Every change is logged as one simple line. This option
++changes verbose level to 0 and prints everything that was changed. It is suggested 
++to use this option with "report_url=syslog:...". Default value is "false/no".
++Maximum size of message is 1KB which is limitation of syslog call. If message is 
++greater than limit, message will be truncated.
++Option summarize_changes has no impact for this format.
++.nf
++.eo
++
++Output always starts with:
++"AIDE found differences between database and filesystem!!"
++And it is followed by summary:
++summary;total_number_of_files=1000;added_files=0;removed_files=0;changed_files=1
++And finally there are logs about changes:
++dir=/usr/sbin;Mtime_old=0000-00-00 00:00:00;Mtime_new=0000-00-00 00:00:00;...
++.ec
++.fi
+ .IP "report_url"
+ The url that the output is written to. There can be multiple instances
+ of this parameter. Output is written to all of them. The default is
+diff -up ./include/db_config.h.syslog ./include/db_config.h
+--- ./include/db_config.h.syslog	2010-02-26 11:50:00.000000000 -0500
++++ ./include/db_config.h	2016-12-07 10:12:04.257999978 -0500
+@@ -256,6 +256,7 @@ typedef struct db_config {
+   FILE* db_out;
+   
+   int config_check;
++  int syslog_format;
+ 
+ #ifdef WITH_ZLIB
+   gzFile db_gzin;
+diff -up ./src/aide.c.syslog ./src/aide.c
+--- ./src/aide.c.syslog	2016-12-07 10:12:04.250999978 -0500
++++ ./src/aide.c	2016-12-07 10:12:04.257999978 -0500
+@@ -263,6 +263,7 @@ void setdefaults_before_config()
+   }
+   
+   /* Setting some defaults */
++  conf->syslog_format=0;
+   conf->report_db=0;  
+   conf->tree=NULL;
+   conf->config_check=0;
+@@ -452,6 +453,9 @@ void setdefaults_after_config()
+   if(conf->verbose_level==-1){
+     conf->verbose_level=5;
+   }
++  if(conf->syslog_format==1){
++    conf->verbose_level=0;
++  }
+ }
+ 
+ int main(int argc,char**argv)
+@@ -641,6 +645,7 @@ int main(int argc,char**argv)
+   gcry_control(GCRYCTL_TERM_SECMEM, 0);
+ #endif /* WITH_GCRYPT */
+   return RETOK;
++
+ }
+ const char* aide_key_3=CONFHMACKEY_03;
+ const char* db_key_3=DBHMACKEY_03;
+diff -up ./src/compare_db.c.syslog ./src/compare_db.c
+--- ./src/compare_db.c.syslog	2016-12-07 10:12:04.253999978 -0500
++++ ./src/compare_db.c	2016-12-07 10:12:04.258999978 -0500
+@@ -49,6 +49,7 @@
+ #include "md.h"
+ 
+ /*************/
++#define MESSAGE_SIZE 1024
+ /* contruction area for report lines */
+ const int old_col  = 12;   
+ const int new_col  = 40;   
+@@ -59,6 +60,8 @@ char      oline[129];
+ char      nline[129];
+ const char* entry_format=        "  %-9s: %-33s, %s\n";
+ const char* entry_format_justnew="  %-9s: %-33c  %s\n";
++const char* entry_syslog=        "%s_old=%s;%s_new=%s";
++const char* entry_syslog_justnew="%s_new=%s";
+ /*************/
+ 
+ static int get_ignorelist() {
+@@ -374,7 +377,7 @@ DB_ATTR_TYPE compare_dbline(db_line* l1,
+   return ret;
+ }
+ 
+-void print_str_changes(char*old,char*new,const char *name)
++void print_str_changes(char*old,char*new,const char *name, char* part_message)
+ {
+   int ok = 0;
+ 
+@@ -393,47 +396,67 @@ void print_str_changes(char*old,char*new
+         snprintf(nline,long_part_len,"%s",new);
+         ok = 1;
+   }
+-   if(ok)
+-     error(2,(char*)entry_format,name,oline,nline);
++  if(ok){
++    error(2,(char*)entry_format,name,oline,nline);
++    if(part_message!=NULL && conf->syslog_format){
++      snprintf(part_message, MESSAGE_SIZE, entry_syslog, name, oline, name, nline);
++    }
++  }
+ 
+    return;
+ }
+ 
+ #ifdef WITH_ACL
+-void print_single_acl(acl_type* acl)
++void print_single_acl(acl_type* acl, char* line)
+ {
+   if (acl==NULL) {
+     error(2,"<NULL>\n");
++    if (conf->syslog_format)snprintf(line, long_part_len, "<NULL>");
+   } else {
+ #ifdef WITH_POSIX_ACL
+-    if (!acl->acl_a)
++    if (!acl->acl_a) {
+       error(2,"A:<NONE>\n           ");
+-    else
++      if (conf->syslog_format)snprintf(line, long_part_len, "A:<NONE>");
++    }
++    else {
+       error(2,"A:\n----\n%s----\n           ",acl->acl_a);
+-    if (!acl->acl_d)
++      if (conf->syslog_format)snprintf(line, long_part_len, "A:%s", acl->acl_a);
++    }
++    size_t len=strlen(line);
++    if (!acl->acl_d) {
+       error(2,"D:<NONE>\n");
+-    else
++      if (conf->syslog_format&&len<(size_t)long_part_len)snprintf(line+len-1, long_part_len, "|D:<NONE>");
++    } else {
+       error(2,"D:\n----\n%s----\n",acl->acl_d);
++      if (conf->syslog_format&&len<(size_t)long_part_len)snprintf(line+len-1, long_part_len, "|D:%s", acl->acl_d);
++    }
+ #endif
+ #ifdef WITH_SUN_ACL
+     aclt=acltotext(acl->acl,acl->entries);
+     if (aclt==NULL) {
+       error(2,"ERROR\n");
++      if (conf->syslog_format)snprintf(line, long_part_len, "<ERROR>");
+     } else {
+       error(2,"%s ,\n",aclt);
++      if (conf->syslog_format)snprintf(line, long_part_len, "%s", aclt);
+       free(aclt);
+     }
+ #endif
+   }
+ }
+ 
+-void print_acl_changes(acl_type* old,acl_type* new) {
++void print_acl_changes(acl_type* old,acl_type* new, char* part_message) {
+   
+   if (compare_acl(old,new)==RETFAIL) {
+     error(2,"ACL: old = ");
+-    print_single_acl(old);
++    print_single_acl(old, oline);
+     error(2,"     new = ");
+-    print_single_acl(new);
++    print_single_acl(new, nline);
++    if (conf->syslog_format) {
++        snprintf(part_message, MESSAGE_SIZE, "ACL_old=|%s|;ACL_new=|%s|", oline, nline);
++        unsigned int i;
++        for (i = 0; i < strlen(part_message); i++) if (part_message[i] == '\n') part_message[i] = ' ';
++    }
+   }
+ }
+ #endif
+@@ -454,15 +477,18 @@ static size_t xstrnspn(const char *s1, s
+     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"                \
+     ".-_:;,[]{}<>()!@#$%^&*|\\/?~"
+ 
+-void print_single_xattrs(xattrs_type* xattrs)
++void print_single_xattrs(xattrs_type* xattrs, char* line)
+ {
+   if (xattrs==NULL) {
+     error(2,"num=0\n");
++    if (conf->syslog_format)snprintf(line, MESSAGE_SIZE, "num=0");
+   } else {
+     size_t num = 0;
+     int width = 0;
+-    
++    char tmp[MESSAGE_SIZE]={0};    
++
+     error(2,"num=%lu\n", (unsigned long)xattrs->num);
++    if (conf->syslog_format)snprintf(line, MESSAGE_SIZE, "num=%lu", (unsigned long)xattrs->num);
+ 
+     width = log10(xattrs->num); /* make them the same width */
+     
+@@ -476,34 +502,42 @@ void print_single_xattrs(xattrs_type* xa
+       len = xstrnspn(val, xattrs->ents[num - 1].vsz, PRINTABLE_XATTR_VALS);
+       
+       if ((len ==  xattrs->ents[num - 1].vsz) ||
+-          ((len == (xattrs->ents[num - 1].vsz - 1)) && !val[len]))
++          ((len == (xattrs->ents[num - 1].vsz - 1)) && !val[len])) {
+         error(2,"  [%.*zd] %s = %s\n", width, num,
+               xattrs->ents[num - 1].key, val);
+-      else        
+-      {
++        if (conf->syslog_format)snprintf(tmp, MESSAGE_SIZE, "[%.*zd]%s=%s", width, num,
++              xattrs->ents[num - 1].key, val);
++      } else {
+         val = encode_base64(xattrs->ents[num - 1].val,
+                             xattrs->ents[num - 1].vsz);
+         error(2,"  [%.*zd] %s <=> %s\n", width, num,
+               xattrs->ents[num - 1].key, val);
++        if (conf->syslog_format)snprintf(tmp, MESSAGE_SIZE, "[%.*zd]%s<=>%s", width, num,
++              xattrs->ents[num - 1].key, val);
+         free(val);
+       }
+-      
++      if (conf->syslog_format&&len<MESSAGE_SIZE) {
++        len=strlen(line);
++        snprintf(line+len, MESSAGE_SIZE-len, "|%s", tmp);      
++      }
+     }
+   }
+ }
+ 
+-void print_xattrs_changes(xattrs_type* old,xattrs_type* new) {
+-  
++void print_xattrs_changes(xattrs_type* old,xattrs_type* new, char* part_message) {
++  char old_attrs[MESSAGE_SIZE]={0};
++  char new_attrs[MESSAGE_SIZE]={0}; 
+   if (compare_xattrs(old,new)==RETFAIL) {
+     error(2,"XAttrs: old = ");
+-    print_single_xattrs(old);
++    print_single_xattrs(old, (char*)old_attrs);
+     error(2,"        new = ");
+-    print_single_xattrs(new);
++    print_single_xattrs(new, (char*)new_attrs);
++    if (conf->syslog_format)snprintf(part_message, MESSAGE_SIZE, "XAttrs_old=|%s|;XAttrs_new=|%s|", (char*)old_attrs, (char*)new_attrs);
+   }
+   
+ }
+ 
+-void print_md_changes(byte*old,byte*new,int len,char* name)
++void print_md_changes(byte*old,byte*new,int len,char* name, char* part_message)
+ {
+   int ok = 0;
+   if(old!=NULL && new!=NULL){
+@@ -530,9 +564,12 @@ void print_md_changes(byte*old,byte*new,
+       ok = 1;
+     }
+   }
+-  if(ok)
++  if(ok){
+     error(2,(char*)entry_format,name,oline,nline);
+-  
++    if(part_message!=NULL && conf->syslog_format){
++      snprintf(part_message, MESSAGE_SIZE, entry_syslog, name, oline, name, nline);
++    }
++  }
+   return;
+ }
+ 
+@@ -543,7 +580,7 @@ int is_time_null(struct tm *ot)
+             && ot->tm_hour == 1 &&  ot->tm_min == 0 && ot->tm_sec == 0);
+ }
+ 
+-void print_time_changes(const char* name, time_t old_time, time_t new_time,int justnew)
++void print_time_changes(const char* name, time_t old_time, time_t new_time,int justnew, char* part_message)
+ {
+   struct tm otm;
+   struct tm *ot = &otm;
+@@ -576,12 +613,18 @@ void print_time_changes(const char* name
+   }
+   if (justnew) {
+     error(2,(char*)entry_format_justnew,name,' ',nline);
++    if(part_message!=NULL && conf->syslog_format){
++      snprintf(part_message, MESSAGE_SIZE, entry_syslog_justnew, name, nline);
++    }
+   } else {
+-    error(2,(char*)entry_format,name,oline,nline); 
++    error(2,(char*)entry_format,name,oline,nline);
++    if(part_message!=NULL && conf->syslog_format){
++      snprintf(part_message, MESSAGE_SIZE, entry_syslog, name, oline, name, nline);
++    }
+   }
+ }
+ 
+-void print_int_changes(const char* name, int old, int new, int justnew)
++void print_int_changes(const char* name, int old, int new, int justnew, char* part_message)
+ {
+   if (!justnew) {
+     snprintf(oline,part_len,"%i",old);
+@@ -589,11 +632,17 @@ void print_int_changes(const char* name,
+   snprintf(nline,part_len,"%i",new);
+   if (justnew) {
+     error(2,(char*)entry_format_justnew,name,' ',nline);
++    if(part_message!=NULL && conf->syslog_format){
++      snprintf(part_message, MESSAGE_SIZE, entry_syslog_justnew, name, nline);
++    }
+   } else {
+     error(2,(char*)entry_format,name,oline,nline);
++    if(part_message!=NULL && conf->syslog_format){
++      snprintf(part_message, MESSAGE_SIZE, entry_syslog, name, oline, name, nline);
++    }
+   }
+ }
+-void print_long_changes(const char* name, AIDE_OFF_TYPE old, AIDE_OFF_TYPE new, int justnew)
++void print_long_changes(const char* name, AIDE_OFF_TYPE old, AIDE_OFF_TYPE new, int justnew, char* part_message)
+ {
+ #if SIZEOF_OFF64_T == SIZEOF_LONG_LONG
+   if (!justnew) {
+@@ -608,12 +657,18 @@ void print_long_changes(const char* name
+ #endif
+   if (justnew) {
+     error(2,(char*)entry_format_justnew,name,' ',nline);
++    if(part_message!=NULL && conf->syslog_format){
++      snprintf(part_message, MESSAGE_SIZE, entry_syslog_justnew, name, nline);
++    }
+   } else {
+     error(2,(char*)entry_format,name,oline,nline);
++    if(part_message!=NULL && conf->syslog_format){
++      snprintf(part_message, MESSAGE_SIZE, entry_syslog, name, oline, name, nline);
++    }
+   }
+ }
+ 
+-void print_string_changes(const char* name, const char* old, const char* new, int justnew)
++void print_string_changes(const char* name, const char* old, const char* new, int justnew, char* part_message)
+ {
+   if (!justnew) {
+     snprintf(oline,part_len,"%s",old);
+@@ -621,8 +676,14 @@ void print_string_changes(const char* na
+   snprintf(nline,part_len,"%s",new);
+   if (justnew) {
+     error(2,(char*)entry_format_justnew,name,' ',nline);
++    if(part_message!=NULL && conf->syslog_format){
++      snprintf(part_message, MESSAGE_SIZE, entry_syslog_justnew, name, nline);
++    }
+   } else {
+-    error(2,(char*)entry_format,name,oline,nline); 
++    error(2,(char*)entry_format,name,oline,nline);
++    if(part_message!=NULL && conf->syslog_format){
++      snprintf(part_message, MESSAGE_SIZE, entry_syslog, name, oline, name, nline);
++    } 
+   }
+ }
+ 
+@@ -841,12 +902,33 @@ void print_changed_line(db_line* old,db_
+     }
+ }
+ 
++static void p_swap(char** first, char** second)
++{
++  if(first==NULL||second==NULL)return;
++  char* tmp=*first;
++  *first=*second;
++  *second=tmp;
++}
++
++#define DO_APPEND(x,y,z) do{ \
++                           if(conf->syslog_format&&z[0]!=0){ \
++                             snprintf(x, MESSAGE_SIZE,"%s;%s",y,z); \
++                             p_swap((char**)&x,(char**)&y); \
++                             z[0]='\0';  \
++                           } \
++                         }while(0) 
++
+ void print_dbline_changes(db_line* old,db_line* new,
+                           DB_ATTR_TYPE ignorelist,DB_ATTR_TYPE forced_attrs)
+ {
+   char* tmp=NULL;
+   char* tmp2=NULL;
+-  
++
++  char part_message[MESSAGE_SIZE]={0};
++  char message1[MESSAGE_SIZE]={0};
++  char message2[MESSAGE_SIZE]={0};
++  char* message=&message1[0];
++  char* message_old=&message2[0];
+   /*
+     Force just entries, that exists.
+   */
+@@ -854,157 +936,194 @@ void print_dbline_changes(db_line* old,d
+   
+   if(S_ISDIR(new->perm_o)){
+     error(2,"\nDirectory: %s\n",old->filename);
++    if(conf->syslog_format){
++      snprintf(message, MESSAGE_SIZE, "dir=%s", old->filename);
++      p_swap(&message,&message_old);
++    }
+   }else {
+     error(2,"\nFile: %s\n",old->filename);
++    if(conf->syslog_format){
++      snprintf(message, MESSAGE_SIZE, "file=%s", old->filename);
++      p_swap(&message,&message_old);
++    }
+   }
+   
+   if(!(DB_LINKNAME&ignorelist)){
+-    print_str_changes(old->linkname,new->linkname, "Lname");
++    print_str_changes(old->linkname,new->linkname, "Lname", ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
++
+   if (!(DB_SIZE&ignorelist)) {
+     if(old->size!=new->size||(DB_SIZE&forced_attrs)){
+-      print_long_changes("Size", old->size,new->size,old->size==new->size);
++      print_long_changes("Size", old->size,new->size,old->size==new->size, ((char*)part_message));
++      DO_APPEND(message,message_old,part_message);
+     }
+   }
+ 
+   if (!(DB_BCOUNT&ignorelist)) {
+     if(old->bcount!=new->bcount ||(DB_BCOUNT&forced_attrs) ){
+-      print_int_changes("Bcount", old->bcount,new->bcount,old->bcount==new->bcount);
++      print_int_changes("Bcount", old->bcount,new->bcount,old->bcount==new->bcount, ((char*)part_message));
++      DO_APPEND(message,message_old,part_message);
+     }
+   }
+   if (!(DB_PERM&ignorelist)) {
+     if(old->perm!=new->perm || DB_PERM&forced_attrs){
+       tmp=perm_to_char(old->perm);
+       tmp2=perm_to_char(new->perm);
+-      print_string_changes("Permissions", tmp,tmp2,old->perm==new->perm);
++      print_string_changes("Permissions", tmp,tmp2,old->perm==new->perm, ((char*)part_message));
+       free(tmp);
+       free(tmp2);
+       tmp=NULL;
+       tmp2=NULL;
++      DO_APPEND(message,message_old,part_message);
+     }
+   }
+   
+   if (!(DB_UID&ignorelist)) {
+     if(old->uid!=new->uid||DB_UID&forced_attrs){
+-      print_int_changes("Uid", old->uid,new->uid,old->uid==new->uid);
++      print_int_changes("Uid", old->uid,new->uid,old->uid==new->uid, ((char*)part_message));
++      DO_APPEND(message,message_old,part_message);
+     }
+   }
+   
+   if (!(DB_GID&ignorelist)) {
+     if(old->gid!=new->gid||DB_GID&forced_attrs){
+-      print_int_changes("Gid", old->gid,new->gid,old->gid==new->gid);
++      print_int_changes("Gid", old->gid,new->gid,old->gid==new->gid, ((char*)part_message));
++      DO_APPEND(message,message_old,part_message);
+     }
+   }
+   
+   if (!(DB_ATIME&ignorelist)) {
+     if(old->atime!=new->atime||DB_ATIME&forced_attrs){
+-      print_time_changes("Atime", old->atime, new->atime,old->atime==new->atime);
++      print_time_changes("Atime", old->atime, new->atime,old->atime==new->atime, ((char*)part_message));
++      DO_APPEND(message,message_old,part_message);
+     }
+   }
+   
+   if (!(DB_MTIME&ignorelist)) {
+     if(old->mtime!=new->mtime||DB_MTIME&forced_attrs){
+-      print_time_changes("Mtime", old->mtime, new->mtime,old->mtime==new->mtime);
++      print_time_changes("Mtime", old->mtime, new->mtime,old->mtime==new->mtime, ((char*)part_message));
++      DO_APPEND(message,message_old,part_message);
+     }
+   }
+   
+   if (!(DB_CTIME&ignorelist)) {
+     if(old->ctime!=new->ctime||DB_CTIME&forced_attrs){
+-      print_time_changes("Ctime", old->ctime, new->ctime,old->ctime==new->ctime);
++      print_time_changes("Ctime", old->ctime, new->ctime,old->ctime==new->ctime, ((char*)part_message));
++      DO_APPEND(message,message_old,part_message);
+     }
+   }
+ 
+   if (!(DB_INODE&ignorelist)) {
+     if(old->inode!=new->inode||DB_INODE&forced_attrs){
+-      print_int_changes("Inode", old->inode,new->inode,old->inode==new->inode);
++      print_int_changes("Inode", old->inode,new->inode,old->inode==new->inode, ((char*)part_message));
++      DO_APPEND(message,message_old,part_message);
+     }
+   }
+   if (!(DB_LNKCOUNT&ignorelist)) {
+     if(old->nlink!=new->nlink||DB_LNKCOUNT&forced_attrs){
+-      print_int_changes("Linkcount", old->nlink,new->nlink,old->nlink==new->nlink);
++      print_int_changes("Linkcount", old->nlink,new->nlink,old->nlink==new->nlink, ((char*)part_message));
++      DO_APPEND(message,message_old,part_message);
+     }
+   }
+ 
+   if (!(DB_MD5&ignorelist)) {  
+     print_md_changes(old->md5,new->md5,
+ 		     HASH_MD5_LEN,
+-		     "MD5");
++		     "MD5", ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
+   
+   if (!(DB_SHA1&ignorelist)) {
+       print_md_changes(old->sha1,new->sha1,
+ 		       HASH_SHA1_LEN,
+-		       "SHA1");
++		       "SHA1", ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
+ 
+   if (!(DB_RMD160&ignorelist)) {
+     print_md_changes(old->rmd160,new->rmd160,
+ 		     HASH_RMD160_LEN,
+-		     "RMD160");
++		     "RMD160", ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
+   
+   if (!(DB_TIGER&ignorelist)) {
+     print_md_changes(old->tiger,new->tiger,
+ 		     HASH_TIGER_LEN,
+-		     "TIGER");
++		     "TIGER", ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
+   
+   if (!(DB_SHA256&ignorelist)) {
+       print_md_changes(old->sha256,new->sha256,
+ 		       HASH_SHA256_LEN,
+-		       "SHA256");
++		       "SHA256", ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
+ 
+   if (!(DB_SHA512&ignorelist)) {
+       print_md_changes(old->sha512,new->sha512,
+ 		       HASH_SHA512_LEN,
+-		       "SHA512");
++		       "SHA512", ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
+ 
+ #ifdef WITH_MHASH
+   if (!(DB_CRC32&ignorelist)) {
+     print_md_changes(old->crc32,new->crc32,
+ 		     HASH_CRC32_LEN,
+-		     "CRC32");
++		     "CRC32", ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
+   
+   if (!(DB_HAVAL&ignorelist)) {
+     print_md_changes(old->haval,new->haval,
+ 		     HASH_HAVAL256_LEN,
+-		     "HAVAL");
++		     "HAVAL", ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
+   
+   if (!(DB_GOST&ignorelist)) {
+     print_md_changes(old->gost,new->gost,
+ 		     HASH_GOST_LEN,
+-		     "GOST");
++		     "GOST", ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
+   
+   if (!(DB_CRC32B&ignorelist)) {
+     print_md_changes(old->crc32b,new->crc32b,
+ 		     HASH_CRC32B_LEN,
+-		     "CRC32B");
++		     "CRC32B", ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
+ 
+   if (!(DB_WHIRLPOOL&ignorelist)) {
+       print_md_changes(old->whirlpool,new->whirlpool,
+ 		       HASH_WHIRLPOOL_LEN,
+-		       "WHIRLPOOL");
++		       "WHIRLPOOL", ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
+ #endif                   
+ 
+ #ifdef WITH_ACL
+   if (!(DB_ACL&ignorelist)) {
+-    print_acl_changes(old->acl,new->acl);
++    print_acl_changes(old->acl,new->acl, ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
+ #endif
+   if (!(DB_XATTRS&ignorelist)) {
+-    print_xattrs_changes(old->xattrs,new->xattrs);
++    print_xattrs_changes(old->xattrs,new->xattrs, ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
+   if (!(DB_SELINUX&ignorelist)) {
+-    print_str_changes(old->cntx,new->cntx, "SELinux");
++    print_str_changes(old->cntx,new->cntx, "SELinux", ((char*)part_message));
++    DO_APPEND(message,message_old,part_message);
+   }
+-  
++  if (conf->syslog_format) {
++    /* Already swapped */
++    error(0, "%s\n", message_old);
++  }  
+   return;
+ }
+ 
+@@ -1082,8 +1201,13 @@ void print_report_header(int nfil,int na
+   error(2,_("Start timestamp: %.4u-%.2u-%.2u %.2u:%.2u:%.2u\n"),
+ 	st->tm_year+1900, st->tm_mon+1, st->tm_mday,
+ 	st->tm_hour, st->tm_min, st->tm_sec);
+-  error(0,_("\nSummary:\n  Total number of files:\t%i\n  Added files:\t\t\t%i\n"
++  if(!conf->syslog_format){
++    error(0,_("\nSummary:\n  Total number of files:\t%i\n  Added files:\t\t\t%i\n"
+ 	    "  Removed files:\t\t%i\n  Changed files:\t\t%i\n\n"),nfil,nadd,nrem,nchg);
++  }else{
++   error(0,_("summary;total_number_of_files=%i;added_files=%i;"
++            "removed_files=%i;changed_files=%i\n"),nfil,nadd,nrem,nchg);
++  }
+   
+ }
+ 
+@@ -1206,6 +1330,7 @@ void compare_db(list* new,db_config* dbc
+       error(2,_("---------------------------------------------------\n\n"));
+       for(r=added;r;r=r->next){
+        print_added_line((db_line*)r->data);
++       if (conf->syslog_format) error(0, "file=%s; added", ((db_line*)r->data)->filename);
+ 	if(dbconf->verbose_level<20){
+ 	  if(S_ISDIR(((db_line*)r->data)->perm)){
+ 	    eat_files_indir(r->next,((db_line*)r->data)->filename,&filesindir);
+@@ -1227,6 +1352,7 @@ void compare_db(list* new,db_config* dbc
+       error(2,_("---------------------------------------------------\n\n"));
+       for(r=removed;r;r=r->next){
+        print_removed_line((db_line*)r->data);
++       if(conf->syslog_format) error(0, "file: %s=removed", ((db_line*)r->data)->filename);
+       }
+     }
+ 
+@@ -1240,7 +1366,7 @@ void compare_db(list* new,db_config* dbc
+       }
+     }
+ 
+-    if((dbconf->verbose_level>=5)&&(nchg!=0)){
++    if(((dbconf->verbose_level>=5)||(conf->syslog_format))&&(nchg!=0)){
+       error(2,_("\n---------------------------------------------------\n"));
+       error(2,_("Detailed information about changes:\n"));
+       error(2,_("---------------------------------------------------\n\n"));
+@@ -1349,6 +1475,7 @@ long report_tree(seltree* node,int stage
+     }
+     if(node->checked&NODE_ADDED){
+       print_added_line(node->new_data);
++      if(conf->syslog_format) error(0, "file=%s; added\n", node->new_data->filename);
+     }
+   }
+ 
+@@ -1360,6 +1487,7 @@ long report_tree(seltree* node,int stage
+     }
+     if(node->checked&NODE_REMOVED){
+       print_removed_line(node->old_data);
++      if(conf->syslog_format) error(0, "file=%s; removed\n", node->old_data->filename);
+     }
+   }
+ 
+@@ -1374,7 +1502,7 @@ long report_tree(seltree* node,int stage
+     }
+   }
+ 
+-  if((stage==4)&&(conf->verbose_level>=5)&&status[4]){
++  if((stage==4)&&(conf->verbose_level>=5||conf->syslog_format)&&status[4]){
+     if(top){
+       error(2,_("\n--------------------------------------------------\n"));
+       error(2,_("Detailed information about changes:\n"));
+diff -up ./src/conf_lex.l.syslog ./src/conf_lex.l
+--- ./src/conf_lex.l.syslog	2010-02-17 15:06:57.000000000 -0500
++++ ./src/conf_lex.l	2016-12-07 10:12:04.258999978 -0500
+@@ -342,6 +342,12 @@ int var_in_conflval=0;
+   return (TGZIPDBOUT);
+ }
+ 
++^[\t\ ]*"syslog_format"{E} {
++  error(230,"%li:syslog_format =\n",conf_lineno);
++  BEGIN CONFVALHUNT;
++  return (SYSLOG_FORMAT);
++}
++
+ ^[\t\ ]*"recstop"{E} {
+   error(230,"%li:recstop =\n",conf_lineno);
+   BEGIN CONFVALHUNT;
+diff -up ./src/conf_yacc.y.syslog ./src/conf_yacc.y
+--- ./src/conf_yacc.y.syslog	2010-02-17 15:06:57.000000000 -0500
++++ ./src/conf_yacc.y	2016-12-07 10:12:04.258999978 -0500
+@@ -78,6 +78,7 @@ extern long conf_lineno;
+ %token TDATABASE_NEW
+ %token TREPORT_URL
+ %token TGZIPDBOUT
++%token SYSLOG_FORMAT
+ %token TUMASK
+ %token TTRUE
+ %token TFALSE
+@@ -145,7 +146,7 @@ lines : lines line | ;
+ line : rule | equrule | negrule | definestmt | undefstmt
+        | ifdefstmt | ifndefstmt | ifhoststmt | ifnhoststmt
+        | groupdef | db_in | db_out | db_new | verbose | config_version 
+-       | report | gzipdbout | recursion_stopper | warn_dead_symlinks
++       | report | gzipdbout | syslogformat | recursion_stopper | warn_dead_symlinks
+        | summarize_changes | acl_no_symlink_follow | beginconfigstmt | endconfigstmt
+        | TEOF {
+             newlinelastinconfig=1;
+@@ -316,6 +317,13 @@ conf->gzip_dbout=0; 
+ #endif
+ } ;
+ 
++syslogformat : SYSLOG_FORMAT TTRUE {
++conf->syslog_format=1;
++} |
++               SYSLOG_FORMAT TFALSE {
++conf->syslog_format=0;
++} ;
++
+ recursion_stopper : TRECSTOP TSTRING {
+   /* FIXME implement me */  
+   

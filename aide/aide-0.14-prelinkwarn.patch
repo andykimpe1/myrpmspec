@@ -1,0 +1,78 @@
+diff -up aide-0.14/src/do_md.c.prelinkwarn aide-0.14/src/do_md.c
+--- aide-0.14/src/do_md.c.prelinkwarn	2014-05-21 13:58:53.237985817 +0200
++++ aide-0.14/src/do_md.c	2014-05-21 13:58:58.625005982 +0200
+@@ -69,6 +69,40 @@
+ #ifdef WITH_PRELINK
+ #include <sys/wait.h>
+ #include <gelf.h>
++#include <stdbool.h>
++
++bool g_prelink_present = false;
++bool g_prelink_detect = true;
++bool g_noprelink_warn = true;
++
++bool prelink_present(void)
++{
++	/* don't perform the check if we already did it */
++	if (!g_prelink_detect)
++		return g_prelink_present;
++
++	/* check whether the prelink binary is present and executable */
++	if (access(PRELINK_PATH, X_OK) == 0)
++		g_prelink_present = true;
++	else
++		g_prelink_present = false;
++
++	g_prelink_detect = false;
++	return g_prelink_present;
++}
++
++void noprelink_warn(void)
++{
++	if (g_noprelink_warn) {
++		error(0,
++		      "WARNING: AIDE detected prelinked binary objects on your"
++		      " system but the prelink tool (%s) is missing!\n", PRELINK_PATH);
++		error(0,
++		      "WARNING: prelinked files will be processed without a prelink undo operation!"
++		      " Please install prelink to fix this.\n");
++		g_noprelink_warn = false;
++	}
++}
+ 
+ /*
+  *  Is file descriptor prelinked binary/library?
+@@ -264,12 +298,19 @@ void calc_md(struct AIDE_STAT_TYPE* old_
+      */
+     pid=0;
+     if ( is_prelinked(filedes) ) {
+-      close(filedes);
+-      pid = open_prelinked(line->filename, &filedes);
+-      if (pid == 0) {
+-        error(0, "Error on starting prelink undo\n");
+-	return;
+-      }
++	    /* first detect whether the prelink binary is available */
++	    if (prelink_present()) {
++		    close(filedes);
++		    pid = open_prelinked(line->filename, &filedes);
++		    if (pid == 0) {
++			    error(0, "Error on starting prelink undo\n");
++			    return;
++		    }
++	    } else {
++		    /* we've detected a prelinked file but the prelink binary is not available */
++		    /* warn the user about this situation (once) and process the file as is */
++		    noprelink_warn();
++	    }
+     }
+ #endif
+ 
+@@ -295,6 +336,7 @@ void calc_md(struct AIDE_STAT_TYPE* old_
+ #ifdef __hpux
+            buf = mmap(0,r_size,PROT_READ,MAP_PRIVATE,filedes,curpos);
+ #else
++
+            buf = mmap(0,r_size,PROT_READ,MAP_SHARED,filedes,curpos);
+ #endif
+            curpos+=r_size;
