@@ -1,0 +1,130 @@
+diff -urNp coreutils-8.4-orig/src/ls.c coreutils-8.4/src/ls.c
+--- coreutils-8.4-orig/src/ls.c	2015-10-21 10:57:03.972471722 +0200
++++ coreutils-8.4/src/ls.c	2015-10-21 10:57:39.885760847 +0200
+@@ -2692,6 +2692,7 @@ has_capability (char const *name)
+ static bool
+ has_capability (char const *name ATTRIBUTE_UNUSED)
+ {
++  errno = ENOTSUP;
+   return false;
+ }
+ #endif
+@@ -2735,10 +2736,90 @@ clear_files (void)
+   file_size_width = 0;
+ }
+ 
++/* Return true if ERR implies lack-of-support failure by a
++   getxattr-calling function like getfilecon or file_has_acl.  */
++static bool
++errno_unsupported (int err)
++{
++  return (err == EINVAL
++          || err == ENOSYS
++          || err == ENOTSUP
++          || err == EOPNOTSUPP);
++}
++
++/* Cache *getfilecon failure, when it's trivial to do so.
++   Like getfilecon/lgetfilecon, but when F's st_dev says it's on a known-
++   SELinux-challenged file system, fail with ENOTSUP immediately.  */
++static int
++getfilecon_cache (char const *file, struct fileinfo *f, bool deref)
++{
++  /* st_dev of the most recently processed device for which we've
++     found that [l]getfilecon fails indicating lack of support.  */
++  static dev_t unsupported_device;
++
++  if (f->stat.st_dev == unsupported_device)
++    {
++      errno = ENOTSUP;
++      return -1;
++    }
++  int r = (deref
++           ? getfilecon (file, &f->scontext)
++           : lgetfilecon (file, &f->scontext));
++  if (r < 0 && errno_unsupported (errno))
++    unsupported_device = f->stat.st_dev;
++  return r;
++}
++
++/* Cache file_has_acl failure, when it's trivial to do.
++   Like file_has_acl, but when F's st_dev says it's on a file
++   system lacking ACL support, return 0 with ENOTSUP immediately.  */
++static int
++file_has_acl_cache (char const *file, struct fileinfo *f)
++{
++  /* st_dev of the most recently processed device for which we've
++     found that file_has_acl fails indicating lack of support.  */
++  static dev_t unsupported_device;
++
++  if (f->stat.st_dev == unsupported_device)
++    {
++      errno = ENOTSUP;
++      return 0;
++    }
++
++  /* Zero errno so that we can distinguish between two 0-returning cases:
++     "has-ACL-support, but only a default ACL" and "no ACL support". */
++  errno = 0;
++  int n = file_has_acl (file, &f->stat);
++  if (n <= 0 && errno_unsupported (errno))
++    unsupported_device = f->stat.st_dev;
++  return n;
++}
++
++/* Cache has_capability failure, when it's trivial to do.
++   Like has_capability, but when F's st_dev says it's on a file
++   system lacking capability support, return 0 with ENOTSUP immediately.  */
++static bool
++has_capability_cache (char const *file, struct fileinfo *f)
++{
++  /* st_dev of the most recently processed device for which we've
++     found that has_capability fails indicating lack of support.  */
++  static dev_t unsupported_device;
++
++  if (f->stat.st_dev == unsupported_device)
++    {
++      errno = ENOTSUP;
++      return 0;
++    }
++
++  bool b = has_capability (file);
++  if ( !b && errno_unsupported (errno))
++    unsupported_device = f->stat.st_dev;
++  return b;
++}
++
+ /* Add a file to the current table of files.
+    Verify that the file exists, and print an error message if it does not.
+    Return the number of blocks that the file occupies.  */
+-
+ static uintmax_t
+ gobble_file (char const *name, enum filetype type, ino_t inode,
+              bool command_line_arg, char const *dirname)
+@@ -2868,15 +2951,13 @@ gobble_file (char const *name, enum file
+       /* Note has_capability() adds around 30% runtime to `ls --color`  */
+       if ((type == normal || S_ISREG (f->stat.st_mode))
+           && print_with_color && is_colored (C_CAP))
+-        f->has_capability = has_capability (absolute_name);
++        f->has_capability = has_capability_cache (absolute_name, f);
+ 
+       if (format == long_format || format == security_format || print_scontext)
+         {
+           bool have_selinux = false;
+           bool have_acl = false;
+-          int attr_len = (do_deref
+-                          ?  getfilecon (absolute_name, &f->scontext)
+-                          : lgetfilecon (absolute_name, &f->scontext));
++          int attr_len = getfilecon_cache (absolute_name, f, do_deref);
+           err = (attr_len < 0);
+ 
+           if (err == 0)
+@@ -2895,7 +2976,7 @@ gobble_file (char const *name, enum file
+ 
+           if (err == 0 && (format == long_format || format == security_format))
+             {
+-              int n = file_has_acl (absolute_name, &f->stat);
++              int n = file_has_acl_cache (absolute_name, f);
+               err = (n < 0);
+               have_acl = (0 < n);
+             }

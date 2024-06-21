@@ -1,0 +1,84 @@
+From 3976ef5a20369d8b490907ab2cba2d617305a5e0 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Mon, 30 May 2016 16:19:20 +0200
+Subject: [PATCH] sort: do not use static array 'blanks' in human_numcompare()
+
+... because the array is not initialized with MB locales.  Note this is
+rather a conservative fix.  I plan to do more cleanup of the i18n patch
+in Fedora to prevent mistakes like this in future updates of coreutils.
+---
+ src/sort.c | 29 ++++++++++++++++++++++++-----
+ 1 file changed, 24 insertions(+), 5 deletions(-)
+
+diff --git a/src/sort.c b/src/sort.c
+index 9e07ad8..e47b039 100644
+--- a/src/sort.c
++++ b/src/sort.c
+@@ -751,6 +751,8 @@ static char *
+ (*begfield) (const struct line*, const struct keyfield *);
+ static char *
+ (*limfield) (const struct line*, const struct keyfield *);
++static void
++(*skipblanks) (char **ptr, char *lim);
+ static int
+ (*getmonth) (char const *, size_t);
+ static int
+@@ -1866,6 +1868,23 @@ limfield_mb (const struct line *line, const struct keyfield *key)
+ }
+ #endif
+ 
++static void
++skipblanks_uni (char **ptr, char *lim)
++{
++  while (*ptr < lim && blanks[to_uchar (**ptr)])
++    ++(*ptr);
++}
++
++#if HAVE_MBRTOWC
++static void
++skipblanks_mb (char **ptr, char *lim)
++{
++  size_t mblength;
++  while (*ptr < lim && ismbblank (*ptr, lim - *ptr, &mblength))
++    (*ptr) += mblength;
++}
++#endif
++
+ /* Fill BUF reading from FP, moving buf->left bytes from the end
+    of buf->buf to the beginning first.  If EOF is reached and the
+    file wasn't terminated by a newline, supply one.  Set up BUF's line
+@@ -2097,12 +2116,10 @@ find_unit_order (const char *number, struct keyfield *key)
+    i.e. input will never have both 6000K and 5M.  */
+ 
+ static int
+-human_numcompare (const char *a, const char *b, struct keyfield *key)
++human_numcompare (char *a, char *b, struct keyfield *key)
+ {
+-  while (blanks[to_uchar (*a)])
+-    a++;
+-  while (blanks[to_uchar (*b)])
+-    b++;
++  skipblanks(&a, a + strlen(a));
++  skipblanks(&b, b + strlen(b));
+ 
+   int order_a = find_unit_order (a, key);
+   int order_b = find_unit_order (b, key);
+@@ -3801,6 +3818,7 @@ main (int argc, char **argv)
+       inittables = inittables_mb;
+       begfield = begfield_mb;
+       limfield = limfield_mb;
++      skipblanks = skipblanks_mb;
+       getmonth = getmonth_mb;
+       keycompare = keycompare_mb;
+       numcompare = numcompare_mb;
+@@ -3811,6 +3829,7 @@ main (int argc, char **argv)
+       inittables = inittables_uni;
+       begfield = begfield_uni;
+       limfield = limfield_uni;
++      skipblanks = skipblanks_uni;
+       getmonth = getmonth_uni;
+       keycompare = keycompare_uni;
+       numcompare = numcompare_uni;
+-- 
+2.5.5
+

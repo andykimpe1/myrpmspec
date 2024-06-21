@@ -1,0 +1,233 @@
+diff -urNp coreutils-8.4-orig/doc/coreutils.texi coreutils-8.4/doc/coreutils.texi
+--- coreutils-8.4-orig/doc/coreutils.texi	2014-06-13 12:41:39.918334695 +0200
++++ coreutils-8.4/doc/coreutils.texi	2014-06-13 12:44:04.598393422 +0200
+@@ -7776,10 +7776,12 @@ Skip @var{blocks} @samp{ibs}-byte blocks
+ @opindex seek
+ Skip @var{blocks} @samp{obs}-byte blocks in the output file before copying.
+ 
+-@item count=@var{blocks}
++@item count=@var{n}
+ @opindex count
+-Copy @var{blocks} @samp{ibs}-byte blocks from the input file, instead
++Copy @var{n} @samp{ibs}-byte blocks from the input file, instead
+ of everything until the end of the file.
++if @samp{iflag=count_bytes} is specified, @var{n} is interpreted
++as a byte count rather than a block count.
+ 
+ @item status=@var{which}
+ @opindex status
+@@ -8030,6 +8032,14 @@ When that happens, continue calling @cod
+ of the block.
+ This flag can be used only with @code{iflag}.
+ 
++@item count_bytes
++@opindex count_bytes
++Interpret the @samp{count=} operand as a byte count,
++rather than a block count, which allows specifying
++a length that is not a multiple of the I/O block size.
++This flag can be used only with @code{iflag}.
++
++
+ @end table
+ 
+ These flags are not supported on all systems, and @samp{dd} rejects
+diff -urNp coreutils-8.4-orig/src/dd.c coreutils-8.4/src/dd.c
+--- coreutils-8.4-orig/src/dd.c	2014-06-13 12:41:39.919334702 +0200
++++ coreutils-8.4/src/dd.c	2014-06-13 13:09:37.884950256 +0200
+@@ -167,6 +167,9 @@ static uintmax_t seek_records = 0;
+ /* Whether the final output was done with a seek (rather than a write). */
+ static bool final_op_was_seek;
+ 
++/* Copy this many bytes in addition to 'max_records' records.  */
++static size_t max_bytes = 0;
++
+ /* Copy only this many records.  The default is effectively infinity.  */
+ static uintmax_t max_records = (uintmax_t) -1;
+ 
+@@ -243,7 +246,7 @@ static sig_atomic_t volatile info_signal
+ static ssize_t (*iread_fnc) (int fd, char *buf, size_t size);
+ 
+ /* A longest symbol in the struct symbol_values tables below.  */
+-#define LONGEST_SYMBOL "fdatasync"
++#define LONGEST_SYMBOL "count_bytes"
+ 
+ /* A symbol and the corresponding integer value.  */
+ struct symbol_value
+@@ -274,6 +277,7 @@ static struct symbol_value const convers
+   {"", 0}
+ };
+ 
++#define FFS_MASK(x) ((x) ^ ((x) & ((x) - 1)))
+ enum
+   {
+     /* Compute a value that's bitwise disjoint from the union
+@@ -294,16 +298,21 @@ enum
+           | O_TEXT
+           ),
+     /* Use its lowest bit.  */
+-    O_FULLBLOCK = v ^ (v & (v - 1))
++    O_FULLBLOCK = FFS_MASK (v),
++    v2 = v ^ O_FULLBLOCK,
++
++    O_COUNT_BYTES = FFS_MASK (v2)
+   };
+ 
+ /* Ensure that we got something.  */
+ verify (O_FULLBLOCK != 0);
++verify (O_COUNT_BYTES != 0);
+ 
+ #define MULTIPLE_BITS_SET(i) (((i) & ((i) - 1)) != 0)
+ 
+ /* Ensure that this is a single-bit value.  */
+ verify ( ! MULTIPLE_BITS_SET (O_FULLBLOCK));
++verify ( ! MULTIPLE_BITS_SET (O_COUNT_BYTES));
+ 
+ /* Flags, for iflag="..." and oflag="...".  */
+ static struct symbol_value const flags[] =
+@@ -322,6 +331,7 @@ static struct symbol_value const flags[]
+   {"sync",	O_SYNC},
+   {"text",	O_TEXT},
+   {"fullblock", O_FULLBLOCK}, /* Accumulate full blocks from input.  */
++  {"count_bytes", O_COUNT_BYTES},
+   {"",		0}
+ };
+ 
+@@ -486,7 +496,7 @@ Copy a file, converting and formatting a
+   bs=BYTES        read and write BYTES bytes at a time (also see ibs=,obs=)\n\
+   cbs=BYTES       convert BYTES bytes at a time\n\
+   conv=CONVS      convert the file as per the comma separated symbol list\n\
+-  count=BLOCKS    copy only BLOCKS input blocks\n\
++  count=N         copy only N input blocks\n\
+   ibs=BYTES       read BYTES bytes at a time (default: 512)\n\
+ "), stdout);
+       fputs (_("\
+@@ -565,6 +575,9 @@ Each FLAG symbol may be:\n\
+         fputs (_("  binary    use binary I/O for data\n"), stdout);
+       if (O_TEXT)
+         fputs (_("  text      use text I/O for data\n"), stdout);
++      if (O_COUNT_BYTES)
++         fputs (_("  count_bytes  treat 'count=N' as a byte count (iflag only)\n\
++"), stdout);
+ 
+       {
+         char const *siginfo_name = (SIGINFO == SIGUSR1 ? "USR1" : "INFO");
+@@ -1059,6 +1072,7 @@ scanargs (int argc, char *const *argv)
+ {
+   int i;
+   size_t blocksize = 0;
++  uintmax_t count = (uintmax_t) -1;
+ 
+   for (i = optind; i < argc; i++)
+     {
+@@ -1118,7 +1132,7 @@ scanargs (int argc, char *const *argv)
+           else if (operand_is (name, "seek"))
+             seek_records = n;
+           else if (operand_is (name, "count"))
+-            max_records = n;
++            count = n;
+           else
+             {
+               error (0, 0, _("unrecognized operand %s"), quote (name));
+@@ -1149,11 +1163,26 @@ scanargs (int argc, char *const *argv)
+   if (input_flags & (O_DSYNC | O_SYNC))
+     input_flags |= O_RSYNC;
+ 
++  if (output_flags & O_COUNT_BYTES)
++    {
++      error (0, 0, "%s: %s", _("invalid output flag"), "'count_bytes'");
++      usage (EXIT_FAILURE);
++    }
++
++  if (input_flags & O_COUNT_BYTES && count != (uintmax_t) -1)
++    {
++      max_records = count / input_blocksize;
++      max_bytes = count % input_blocksize;
++    }
++  else if (count != (uintmax_t) -1)
++    max_records = count;
++
+   if (output_flags & O_FULLBLOCK)
+     {
+       error (0, 0, "%s: %s", _("invalid output flag"), "'fullblock'");
+       usage (EXIT_FAILURE);
+     }
++
+   iread_fnc = ((input_flags & O_FULLBLOCK)
+                ? iread_fullblock
+                : iread);
+@@ -1717,12 +1746,12 @@ dd_copy (void)
+         }
+     }
+ 
+-  if (max_records == 0)
++  if (max_records == 0 && max_bytes == 0)
+     return exit_status;
+ 
+   while (1)
+     {
+-      if (r_partial + r_full >= max_records)
++      if (r_partial + r_full >= max_records + !!max_bytes)
+         break;
+ 
+       /* Zero the buffer before reading, so that if we get a read error,
+@@ -1733,7 +1762,10 @@ dd_copy (void)
+                 (conversions_mask & (C_BLOCK | C_UNBLOCK)) ? ' ' : '\0',
+                 input_blocksize);
+ 
+-      nread = iread_fnc (STDIN_FILENO, ibuf, input_blocksize);
++      if (r_partial + r_full >= max_records)
++        nread = iread_fnc (STDIN_FILENO, ibuf, max_bytes);
++      else
++        nread = iread_fnc (STDIN_FILENO, ibuf, input_blocksize);
+ 
+       if (nread == 0)
+         break;			/* EOF.  */
+diff -urNp coreutils-8.4-orig/tests/dd/bytes coreutils-8.4/tests/dd/bytes
+--- coreutils-8.4-orig/tests/dd/bytes	1970-01-01 01:00:00.000000000 +0100
++++ coreutils-8.4/tests/dd/bytes	2014-06-13 13:08:15.130469630 +0200
+@@ -0,0 +1,34 @@
++#!/bin/sh
++#ensure dd's iflag=count_bytes works
++
++# Copyright (C) 2012 Free Software Foundation, Inc.
++
++# This program is free software: you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation, either version 3 of the License, or
++# (at your option) any later version.
++
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++if test "$VERBOSE" = yes; then
++  set -x
++  dd --version
++fi
++
++. $srcdir/test-lib.sh
++
++# count_bytes
++echo 0123456789abcdefghijklm > in || framework_failure_
++dd count=14 conv=swab iflag=count_bytes < in > out 2> /dev/null || fail=1
++case `cat out` in
++ 1032547698badc) ;;
++ *) fail=1 ;;
++esac
++
++Exit $fail
+diff -urNp coreutils-8.4-orig/tests/Makefile.am coreutils-8.4/tests/Makefile.am
+--- coreutils-8.4-orig/tests/Makefile.am	2014-06-13 12:41:39.932334793 +0200
++++ coreutils-8.4/tests/Makefile.am	2014-06-13 13:08:45.699647040 +0200
+@@ -320,6 +320,7 @@ TESTS =						\
+   cp/symlink-slash				\
+   cp/thru-dangling				\
+   df/unreadable					\
++  dd/bytes                                      \
+   dd/direct					\
+   dd/misc					\
+   dd/not-rewound				\

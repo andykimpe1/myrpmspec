@@ -1,0 +1,289 @@
+diff -urNp coreutils-8.4-orig/src/mkdir.c coreutils-8.4/src/mkdir.c
+--- coreutils-8.4-orig/src/mkdir.c	2016-01-14 11:19:19.218449549 +0100
++++ coreutils-8.4/src/mkdir.c	2016-01-14 12:51:38.895640917 +0100
+@@ -84,8 +84,8 @@ struct mkdir_options
+      made.  */
+   int (*make_ancestor_function) (char const *, char const *, void *);
+ 
+-  /* Mode for ancestor directory.  */
+-  mode_t ancestor_mode;
++  /* Umask value in effect.  */
++  mode_t umask_value;
+ 
+   /* Mode for directory itself.  */
+   mode_t mode;
+@@ -115,10 +115,23 @@ static int
+ make_ancestor (char const *dir, char const *component, void *options)
+ {
+   struct mkdir_options const *o = options;
+-  int r = mkdir (component, o->ancestor_mode);
++  int r;
++  mode_t user_wx = S_IWUSR | S_IXUSR;
++  bool self_denying_umask = (o->umask_value & user_wx) != 0;
++  bool default_acls = (getenv ("COREUTILS_CHILD_DEFAULT_ACLS") != NULL);
++
++  if (self_denying_umask && default_acls)
++     umask (o->umask_value & ~user_wx);
++  r = mkdir (component, default_acls ? S_IRWXUGO : o->umask_value);
++  if (self_denying_umask && default_acls)
++    {
++      int mkdir_errno = errno;
++      umask (o->umask_value);
++      errno = mkdir_errno;
++    }
+   if (r == 0)
+     {
+-      r = ! (o->ancestor_mode & S_IRUSR);
++      r = (o->umask_value & S_IRUSR) != 0;
+       announce_mkdir (dir, options);
+     }
+   return r;
+@@ -143,6 +156,7 @@ main (int argc, char **argv)
+   int optc;
+   security_context_t scontext = NULL;
+   struct mkdir_options options;
++  bool default_acls = (getenv ("COREUTILS_CHILD_DEFAULT_ACLS") != NULL); 
+ 
+   options.make_ancestor_function = NULL;
+   options.mode = S_IRWXUGO;
+@@ -195,7 +209,9 @@ main (int argc, char **argv)
+     {
+       mode_t umask_value = umask (0);
+ 
+-      options.ancestor_mode = (S_IRWXUGO & ~umask_value) | (S_IWUSR | S_IXUSR);
++      if (default_acls)
++        umask (umask_value);
++      options.umask_value = default_acls ? umask_value : (S_IRWXUGO & ~umask_value) | (S_IWUSR | S_IXUSR);
+ 
+       if (specified_mode)
+         {
+@@ -208,7 +224,10 @@ main (int argc, char **argv)
+           free (change);
+         }
+       else
+-        options.mode = S_IRWXUGO & ~umask_value;
++        if (default_acls)
++          options.mode = S_IRWXUGO;
++        else
++          options.mode = S_IRWXUGO & ~umask_value;
+     }
+ 
+   exit (savewd_process_files (argc - optind, argv + optind,
+diff -urNp coreutils-8.4-orig/src/mkfifo.c coreutils-8.4/src/mkfifo.c
+--- coreutils-8.4-orig/src/mkfifo.c	2010-01-03 18:06:20.000000000 +0100
++++ coreutils-8.4/src/mkfifo.c	2016-01-14 13:04:19.357187414 +0100
+@@ -78,6 +78,7 @@ main (int argc, char **argv)
+   int exit_status = EXIT_SUCCESS;
+   int optc;
+   security_context_t scontext = NULL;
++  bool default_acls = (getenv ("COREUTILS_CHILD_DEFAULT_ACLS") != NULL); 
+ 
+   initialize_main (&argc, &argv);
+   set_program_name (argv[0]);
+@@ -118,10 +119,19 @@ main (int argc, char **argv)
+   newmode = (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+   if (specified_mode)
+     {
++      mode_t umask_value;
++
+       struct mode_change *change = mode_compile (specified_mode);
+       if (!change)
+         error (EXIT_FAILURE, 0, _("invalid mode"));
+-      newmode = mode_adjust (newmode, false, umask (0), change, NULL);
++      if (default_acls)
++        {
++          umask_value = umask (0);
++          umask (umask_value);
++          newmode = mode_adjust (newmode, false, umask_value, change, NULL);
++        }
++      else
++        newmode = mode_adjust (newmode, false, umask (0), change, NULL);
+       free (change);
+       if (newmode & ~S_IRWXUGO)
+         error (EXIT_FAILURE, 0,
+@@ -134,6 +144,12 @@ main (int argc, char **argv)
+         error (0, errno, _("cannot create fifo %s"), quote (argv[optind]));
+         exit_status = EXIT_FAILURE;
+       }
++    else if (specified_mode && default_acls && lchmod (argv[optind], newmode) != 0)
++      {
++        error (0, errno, _("cannot set permissions of `%s'"),
++               quote (argv[optind]));
++        exit_status = EXIT_FAILURE;        
++      }
+ 
+   exit (exit_status);
+ }
+diff -urNp coreutils-8.4-orig/src/mknod.c coreutils-8.4/src/mknod.c
+--- coreutils-8.4-orig/src/mknod.c	2016-01-14 11:19:19.219449566 +0100
++++ coreutils-8.4/src/mknod.c	2016-01-14 13:08:25.655227817 +0100
+@@ -95,6 +95,7 @@ main (int argc, char **argv)
+   int expected_operands;
+   mode_t node_type;
+   security_context_t scontext = NULL;
++  bool default_acls = (getenv ("COREUTILS_CHILD_DEFAULT_ACLS") != NULL); 
+ 
+   initialize_main (&argc, &argv);
+   set_program_name (argv[0]);
+@@ -124,10 +125,18 @@ main (int argc, char **argv)
+   newmode = (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+   if (specified_mode)
+     {
++      mode_t umask_value;
+       struct mode_change *change = mode_compile (specified_mode);
+       if (!change)
+         error (EXIT_FAILURE, 0, _("invalid mode"));
+-      newmode = mode_adjust (newmode, false, umask (0), change, NULL);
++      if (default_acls)
++        {
++          umask_value = umask (0);
++          umask (umask_value);
++          newmode = mode_adjust (newmode, false, umask_value, change, NULL);
++        }
++      else
++        newmode = mode_adjust (newmode, false, umask (0), change, NULL);
+       free (change);
+       if (newmode & ~S_IRWXUGO)
+         error (EXIT_FAILURE, 0,
+@@ -228,5 +237,9 @@ main (int argc, char **argv)
+       usage (EXIT_FAILURE);
+     }
+ 
++  if (specified_mode && default_acls && lchmod (argv[optind], newmode) != 0)
++    error (EXIT_FAILURE, errno, _("cannot set permissions of `%s'"),
++           quote (argv[optind]));
++
+   exit (EXIT_SUCCESS);
+ }
+diff -urNp coreutils-8.4-orig/tests/Makefile.am coreutils-8.4/tests/Makefile.am
+--- coreutils-8.4-orig/tests/Makefile.am	2016-01-14 11:19:19.299450878 +0100
++++ coreutils-8.4/tests/Makefile.am	2016-01-14 13:10:34.548301546 +0100
+@@ -405,6 +405,7 @@ TESTS =						\
+   mkdir/selinux					\
+   mkdir/special-1				\
+   mkdir/t-slash					\
++  mkdir/p-acl.sh                                \
+   mv/acl					\
+   mv/atomic					\
+   mv/atomic2					\
+diff -urNp coreutils-8.4-orig/tests/mkdir/p-acl.sh coreutils-8.4/tests/mkdir/p-acl.sh
+--- coreutils-8.4-orig/tests/mkdir/p-acl.sh	1970-01-01 01:00:00.000000000 +0100
++++ coreutils-8.4/tests/mkdir/p-acl.sh	2016-01-14 13:09:43.393874946 +0100
+@@ -0,0 +1,38 @@
++#!/bin/sh
++# Test "mkdir -p" with default ACLs.
++
++# Copyright (C) 1997-2013 Free Software Foundation, Inc.
++
++# This program is free software: you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation, either version 3 of the License, or
++# (at your option) any later version.
++
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++. $srcdir/test-lib.sh
++if test "$VERBOSE" = yes; then
++  set -x
++  mkdir --version
++fi
++
++require_setfacl_
++
++mkdir d || framework_failure
++setfacl -d -m group::rwx d || framework_failure
++umask 077
++
++COREUTILS_CHILD_DEFAULT_ACLS=yes mkdir --parents d/e || fail=1
++ls_l=$(ls -ld d/e) || fail=1
++case $ls_l in
++  d???rw[sx]*) ;;
++  *) fail=1 ;;
++esac
++
++Exit $fail
+diff -urNp coreutils-8.4-orig/doc/coreutils.texi coreutils-8.4/doc/coreutils.texi
+--- coreutils-8.4-orig/doc/coreutils.texi	2016-01-19 12:56:14.164815692 +0100
++++ coreutils-8.4/doc/coreutils.texi	2016-01-19 13:12:45.427913813 +0100
+@@ -9145,6 +9145,10 @@ To set a parent's special mode bits as w
+ Setgid}, for how the set-user-ID and set-group-ID bits of
+ newly-created parent directories are inherited.
+ 
++When COREUTILS_CHILD_DEFAULT_ACLS environment variable is set,
++@option{parents}, @option{-p} respects default umask and ACLs, as it does in
++Red Hat Enterprise Linux 7.
++
+ @item -v
+ @itemx --verbose
+ @opindex -v
+@@ -9197,7 +9201,11 @@ The program accepts the following option
+ Set the mode of created FIFOs to @var{mode}, which is symbolic as in
+ @command{chmod} and uses @samp{a=rw} (read and write allowed for everyone)
+ for the point of departure.  @var{mode} should specify only file
+-permission bits.  @xref{File permissions}.
++permission bits.  
++When COREUTILS_CHILD_DEFAULT_ACLS environment variable is set,
++@option{mode},@option{-m} respects default umask and ACLs, as it does in
++Red Hat Enterprise Linux 7.
++@xref{File permissions}.
+ 
+ @item -Z @var{context}
+ @itemx --context=@var{context}
+@@ -9280,6 +9288,9 @@ The program accepts the following option
+ Set the mode of created files to @var{mode}, which is symbolic as in
+ @command{chmod} and uses @samp{a=rw} as the point of departure.
+ @var{mode} should specify only file permission bits.
++When COREUTILS_CHILD_DEFAULT_ACLS environment variable is set,
++@option{mode},@option{-m} respects default umask and ACLs, as it does in
++Red Hat Enterprise Linux 7.
+ @xref{File permissions}.
+ 
+ @item -Z @var{context}
+diff -urNp coreutils-8.4-orig/src/mkdir.c coreutils-8.4/src/mkdir.c
+--- coreutils-8.4-orig/src/mkdir.c	2016-01-19 12:56:14.174815773 +0100
++++ coreutils-8.4/src/mkdir.c	2016-01-19 13:13:22.723218300 +0100
+@@ -70,6 +70,10 @@ Mandatory arguments to long options are
+   -Z, --context=CTX  set the SELinux security context of each created\n\
+                       directory to CTX\n\
+ "), stdout);
++      fputs (_("\
++      When COREUTILS_CHILD_DEFAULT_ACLS environment variable is set, -p/--parents\n\
++      option respects default umask and ACLs, as it does in Red Hat Enterprise Linux 7 by default\n\
++      "), stdout);
+       fputs (HELP_OPTION_DESCRIPTION, stdout);
+       fputs (VERSION_OPTION_DESCRIPTION, stdout);
+       emit_ancillary_info ();
+diff -urNp coreutils-8.4-orig/src/mkfifo.c coreutils-8.4/src/mkfifo.c
+--- coreutils-8.4-orig/src/mkfifo.c	2016-01-19 12:56:14.175815781 +0100
++++ coreutils-8.4/src/mkfifo.c	2016-01-19 13:06:51.094026843 +0100
+@@ -63,6 +63,10 @@ Mandatory arguments to long options are
+       fputs (_("\
+   -Z, --context=CTX  set the SELinux security context of each NAME to CTX\n\
+ "), stdout);
++      fputs (_("\
++      When COREUTILS_CHILD_DEFAULT_ACLS environment variable is set, -m/--mode\n\
++      option respects default umask and ACLs, as it does in Red Hat Enterprise Linux 7 by default\n\
++      "), stdout);
+       fputs (HELP_OPTION_DESCRIPTION, stdout);
+       fputs (VERSION_OPTION_DESCRIPTION, stdout);
+       emit_ancillary_info ();
+diff -urNp coreutils-8.4-orig/src/mknod.c coreutils-8.4/src/mknod.c
+--- coreutils-8.4-orig/src/mknod.c	2016-01-19 12:56:14.175815781 +0100
++++ coreutils-8.4/src/mknod.c	2016-01-19 13:06:12.334710406 +0100
+@@ -65,6 +65,10 @@ Mandatory arguments to long options are
+       fputs (_("\
+   -Z, --context=CTX  set the SELinux security context of NAME to CTX\n\
+ "), stdout);
++      fputs (_("\
++      When COREUTILS_CHILD_DEFAULT_ACLS environment variable is set, -m/--mode\n\
++      option respects default umask and ACLs, as it does in Red Hat Enterprise Linux 7 by default\n\
++      "), stdout);
+       fputs (HELP_OPTION_DESCRIPTION, stdout);
+       fputs (VERSION_OPTION_DESCRIPTION, stdout);
+       fputs (_("\

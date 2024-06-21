@@ -1,0 +1,78 @@
+From 2486e6f0e5f8a4120ce884c9bc24c010f5ae9cde Mon Sep 17 00:00:00 2001
+From: Karel Zak <kzak@redhat.com>
+Date: Tue, 27 Aug 2013 11:23:54 +0200
+Subject: [PATCH] su: suppress PAM info messages for -c or non-login sessions
+
+The 'Last login:' messages from PAM lastlogin module is unexpected
+for non-login sessions or when -c <command> executed.
+
+For example:
+
+  $ su - -c id
+  Last login: Wed Jul 24 08:36:28 CEST 2013 from dhcp-25-161.brq.redhat.com on pts/18
+  uid=0(root) gid=0(root) skupiny=0(root)
+
+this makes 'su' useless in scripts.
+
+This patch suppress all PAM_TEXT_INFO messages for -c and for
+non-login session ('-' is not specified) after pam_authenticate() and
+pam_acct_mgmt().
+
+Note that the new PAM conversation function checks the first message
+in the msg[] array only. It seems good enough as PAM internally uses
+pam_info() function that does not use multiple messages for one conv
+call.
+
+References: https://bugzilla.redhat.com/show_bug.cgi?id=987787
+Signed-off-by: Karel Zak <kzak@redhat.com>
+
+Upstream-commit: fb4edda749e4c81e9ce713a017240ded8f521d07
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ src/su.c | 22 +++++++++++++++++++++-
+ 1 file changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/src/su.c b/src/su.c
+index d0d89ff..ce0ff75 100644
+--- a/src/su.c
++++ b/src/su.c
+@@ -263,8 +263,24 @@ log_su (struct passwd const *pw, bool successful)
+ #ifdef USE_PAM
+ static pam_handle_t *pamh = NULL;
+ static int retval;
++
++/* Don't print PAM info messages (Last login, etc.). */
++static bool suppress_pam_info;
++
++static int su_pam_conv(int num_msg, const struct pam_message **msg,
++                       struct pam_response **resp, void *appdata_ptr)
++{
++  if (suppress_pam_info
++      && num_msg == 1
++      && msg
++      && msg[0]->msg_style == PAM_TEXT_INFO)
++    return PAM_SUCCESS;
++
++  return misc_conv(num_msg, msg, resp, appdata_ptr);
++}
++
+ static struct pam_conv conv = {
+-  misc_conv,
++  su_pam_conv,
+   NULL
+ };
+ 
+@@ -490,6 +506,10 @@ run_shell (char const *shell, char const *command, char **additional_args,
+   sigset_t blockset, ourset;
+   int status;
+ 
++  if (!simulate_login || command)
++    /* don't print PAM info messages */
++    suppress_pam_info = true;
++
+   retval = pam_open_session(pamh,0);
+   if (retval != PAM_SUCCESS) {
+     fprintf (stderr, "could not open session\n");
+-- 
+2.5.2
+
