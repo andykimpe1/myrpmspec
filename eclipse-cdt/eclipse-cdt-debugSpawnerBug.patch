@@ -1,0 +1,153 @@
+### Eclipse Workspace Patch 1.0
+#P org.eclipse.cdt.core
+Index: utils/org/eclipse/cdt/utils/pty/PTYInputStream.java
+===================================================================
+RCS file: /cvsroot/tools/org.eclipse.cdt/all/org.eclipse.cdt.core/utils/org/eclipse/cdt/utils/pty/PTYInputStream.java,v
+retrieving revision 1.13
+diff -u -r1.13 PTYInputStream.java
+--- utils/org/eclipse/cdt/utils/pty/PTYInputStream.java	3 Jun 2010 17:36:01 -0000	1.13
++++ utils/org/eclipse/cdt/utils/pty/PTYInputStream.java	17 Dec 2010 22:18:06 -0000
+@@ -14,7 +14,6 @@
+ import java.io.IOException;
+ import java.io.InputStream;
+ 
+-import org.eclipse.cdt.core.CCorePlugin;
+ import org.eclipse.cdt.utils.pty.PTY.MasterFD;
+ 
+ class PTYInputStream extends InputStream {
+@@ -74,9 +73,10 @@
+ 	public void close() throws IOException {
+ 		if (master.getFD() == -1)
+ 			return;
+-		int status = close0(master.getFD());
+-		if (status == -1)
+-			throw new IOException(CCorePlugin.getResourceString("Util.exception.closeError")); //$NON-NLS-1$
++		close0(master.getFD());
++		// ignore error on close - see bug 286162
++//		if (status == -1)
++//			throw new IOException(CCorePlugin.getResourceString("Util.exception.closeError")); //$NON-NLS-1$
+ 		master.setFD(-1);
+ 	}
+ 
+Index: utils/org/eclipse/cdt/utils/spawner/Spawner.java
+===================================================================
+RCS file: /cvsroot/tools/org.eclipse.cdt/all/org.eclipse.cdt.core/utils/org/eclipse/cdt/utils/spawner/Spawner.java,v
+retrieving revision 1.21
+diff -u -r1.21 Spawner.java
+--- utils/org/eclipse/cdt/utils/spawner/Spawner.java	30 Apr 2010 21:06:54 -0000	1.21
++++ utils/org/eclipse/cdt/utils/spawner/Spawner.java	17 Dec 2010 22:18:06 -0000
+@@ -66,6 +66,7 @@
+ 	OutputStream out;
+ 	InputStream in;
+ 	InputStream err;
++	private PTY fPty;
+ 
+ 	public Spawner(String command, boolean bNoRedirect) throws IOException {
+ 		StringTokenizer tokenizer = new StringTokenizer(command);
+@@ -92,6 +93,7 @@
+ 		String dirpath = "."; //$NON-NLS-1$
+ 		if (dir != null)
+ 			dirpath = dir.getAbsolutePath();
++		fPty = pty;
+ 		exec_pty(cmdarray, envp, dirpath, pty);
+ 	}
+ 	/**
+@@ -144,8 +146,13 @@
+ 	 **/
+ 	@Override
+ 	public InputStream getInputStream() {
+-		if(null == in)
+-			in = new SpawnerInputStream(fChannels[1]);
++		if(null == in) {
++			if (fPty != null) {
++				in = fPty.getInputStream();
++			} else {
++				in = new SpawnerInputStream(fChannels[1]);
++			}
++		}
+ 		return in;
+ 	}
+ 
+@@ -154,8 +161,13 @@
+ 	 **/
+ 	@Override
+ 	public OutputStream getOutputStream() {
+-		if(null == out)
+-			out = new SpawnerOutputStream(fChannels[0]);
++		if(null == out) {
++			if (fPty != null) {
++				out = fPty.getOutputStream();
++			} else {
++				out = new SpawnerOutputStream(fChannels[0]);
++			}
++		}
+ 		return out;
+ 	}
+ 
+@@ -165,7 +177,34 @@
+ 	@Override
+ 	public InputStream getErrorStream() {
+ 		if(null == err)
+-			err = new SpawnerInputStream(fChannels[2]);
++			if (fPty != null && !fPty.isConsole()) {
++				// If PTY is used and it's not in "Console" mode, then stderr is
++				// redirected to the PTY's output stream.  Therefore, return a 
++				// dummy stream for error stream.
++				err = new InputStream() {
++					boolean fClosed = false;
++					@Override
++					public synchronized int read() throws IOException {
++						while (!fClosed) {
++							try {
++								wait();
++							} catch (InterruptedException e) {}
++						}
++						return -1;
++					}
++					
++					@Override
++					public void close() throws IOException {
++						synchronized(this) {
++							fClosed = true;
++							notifyAll();
++						}
++						super.close();
++					}
++				};
++			} else {
++				err = new SpawnerInputStream(fChannels[2]);
++			}
+ 		return err;
+ 	}
+ 
+@@ -179,12 +218,11 @@
+ 		}
+ 		try {
+ 			if(null == err)
+-				((SpawnerInputStream)getErrorStream()).close();
++				getErrorStream().close();
+ 			if(null == in)
+-				((SpawnerInputStream)getInputStream()).close();
++				getInputStream().close();
+ 			if(null == out)
+-				((SpawnerOutputStream)getOutputStream()).close();
+-			
++				getOutputStream().close();
+ 		} catch (IOException e) {
+ 		}
+ 		return status;
+@@ -211,11 +249,11 @@
+ 		// Close the streams on this side.
+ 		try {
+ 			if(null == err)
+-				((SpawnerInputStream)getErrorStream()).close();
++				getErrorStream().close();
+ 			if(null == in)
+-				((SpawnerInputStream)getInputStream()).close();
++				getInputStream().close();
+ 			if(null == out)
+-				((SpawnerOutputStream)getOutputStream()).close();
++				getOutputStream().close();
+ 		} catch (IOException e) {
+ 		}
+ 		// Grace before using the heavy gone.
