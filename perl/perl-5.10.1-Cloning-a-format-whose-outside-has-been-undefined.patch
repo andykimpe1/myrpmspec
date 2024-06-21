@@ -1,0 +1,117 @@
+From 47647baba2b7b88a005d578b7cb0a05128f228a0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Tue, 12 Mar 2013 10:13:06 +0100
+Subject: [PATCH] Cloning a format whose outside has been undefined
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Port to 5.10.1:
+
+commit f2ead8b816519a65496980beeb8606954f270d43
+Author: Father Chrysostomos <sprout@cpan.org>
+Date:   Sat Jun 30 12:43:26 2012 -0700
+
+    Cloning a format whose outside has been undefined
+
+    This has crashed ever since 71f882da8, because the format tries to
+    close over a pad that does not exist:
+
+    sub x {
+        {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
+        my $z;
+        format =
+    @<<<
+    $z
+    .
+    }
+    undef &x;
+    write;
+
+    This commit adds checks for nonexistent pads, producing the ‘Variable
+    is not available’ warning in cases like this.
+
+<https://bugzilla.redhat.com/show_bug.cgi?id=920132>
+---
+ pad.c               | 12 +++++++-----
+ t/comp/form_scope.t | 23 ++++++++++++++++++++++-
+ 2 files changed, 29 insertions(+), 6 deletions(-)
+
+diff --git a/pad.c b/pad.c
+index 5a471f8..88fcd75 100644
+--- a/pad.c
++++ b/pad.c
+@@ -1492,7 +1492,7 @@ Perl_cv_clone(pTHX_ CV *proto)
+     assert(depth || SvTYPE(proto) == SVt_PVFM);
+     if (!depth)
+ 	depth = 1;
+-    assert(CvPADLIST(outside));
++    assert(CvPADLIST(outside) || SvTYPE(proto) == SVt_PVFM);
+ 
+     ENTER;
+     SAVESPTR(PL_compcv);
+@@ -1527,18 +1527,20 @@ Perl_cv_clone(pTHX_ CV *proto)
+ 
+     PL_curpad = AvARRAY(PL_comppad);
+ 
+-    outpad = AvARRAY(AvARRAY(CvPADLIST(outside))[depth]);
++    outpad = CvPADLIST(outside)
++	? AvARRAY(AvARRAY(CvPADLIST(outside))[depth])
++	: NULL;
+ 
+     for (ix = fpad; ix > 0; ix--) {
+ 	SV* const namesv = (ix <= fname) ? pname[ix] : NULL;
+ 	SV *sv = NULL;
+ 	if (namesv && namesv != &PL_sv_undef) { /* lexical */
+ 	    if (SvFAKE(namesv)) {   /* lexical from outside? */
+-		sv = outpad[PARENT_PAD_INDEX(namesv)];
+-		/* formats may have an inactive parent,
++		/* formats may have an inactive, or even undefined, parent,
+ 		   while my $x if $false can leave an active var marked as
+ 		   stale. And state vars are always available */
+-		if (!sv || (SvPADSTALE(sv) && !SvPAD_STATE(namesv))) {
++		if (!outpad || !(sv = outpad[PARENT_PAD_INDEX(namesv)])
++		 || (SvPADSTALE(sv) && !SvPAD_STATE(namesv))) {
+ 		    if (ckWARN(WARN_CLOSURE))
+ 			Perl_warner(aTHX_ packWARN(WARN_CLOSURE),
+ 			    "Variable \"%s\" is not available", SvPVX_const(namesv));
+diff --git a/t/comp/form_scope.t b/t/comp/form_scope.t
+index 4487ff3..c0654d8 100644
+--- a/t/comp/form_scope.t
++++ b/t/comp/form_scope.t
+@@ -1,6 +1,6 @@
+ #!./perl
+ 
+-print "1..5\n";
++print "1..7\n";
+  
+ # Tests bug #22977.  Test case from Dave Mitchell.
+ sub f ($);
+@@ -74,3 +74,24 @@ defined $x ? "not ok 4 - $x" : "ok 4"
+   print "not " unless $w =~ /^Variable "\$x" is not available at/;
+   print "ok 5 - closure var not available when outer sub is inactive\n";
+ }
++
++# Cloning a format whose outside has been undefined
++sub x {
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    my $z;
++    format STDOUT6 =
++@<<<<<<<<<<<<<<<<<<<<<<<<<
++defined $z ? "not ok 6 - $z" : "ok 6"
++.
++}
++undef &x;
++*STDOUT = *STDOUT6{FORMAT};
++{
++  local $^W = 1;
++  my $w;
++  local $SIG{__WARN__} = sub { $w = shift };
++  write;
++  print "not " unless $w =~ /^Variable "\$z" is not available at/;
++  print "ok 7 - closure var not available when outer sub is undefined\n";
++}
++
+-- 
+1.8.1.4
+

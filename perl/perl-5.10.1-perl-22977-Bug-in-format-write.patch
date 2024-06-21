@@ -1,0 +1,85 @@
+From a0e4ea31269a5616de739ff9739b32045f3d1268 Mon Sep 17 00:00:00 2001
+From: Zefram <zefram@fysh.org>
+Date: Mon, 11 Mar 2013 17:27:09 +0100
+Subject: [PATCH] [perl #22977] Bug in format/write
+
+Petr Pisar: Port to 5.10.1 commit:
+
+From 421f30ed1e95009450bdc7905bf3433ee806ea4f Mon Sep 17 00:00:00 2001
+From: Zefram <zefram@fysh.org>
+Date: Tue, 15 Dec 2009 11:48:31 +0100
+Subject: [PATCH] [perl #22977] Bug in format/write
+
+<https://bugzilla.redhat.com/show_bug.cgi?id=920132>
+---
+ MANIFEST            |  1 +
+ perly.y             |  8 +++++++-
+ t/comp/form_scope.t | 18 ++++++++++++++++++
+ 3 files changed, 26 insertions(+), 1 deletion(-)
+ create mode 100644 t/comp/form_scope.t
+
+diff --git a/MANIFEST b/MANIFEST
+index e78e559..6bdb637 100644
+--- a/MANIFEST
++++ b/MANIFEST
+@@ -3944,6 +3944,7 @@ t/comp/cpp.aux			main file for cpp.t
+ t/comp/cpp.t			See if C preprocessor works
+ t/comp/decl.t			See if declarations work
+ t/comp/fold.t			See if constant folding works
++t/comp/form_scope.t		See if format scoping works
+ t/comp/hints.t			See if %^H works
+ t/comp/multiline.t		See if multiline strings work
+ t/comp/opsubs.t			See if q() etc. are not parsed as functions
+diff --git a/perly.y b/perly.y
+index 6b8b4e3..9164cab 100644
+--- a/perly.y
++++ b/perly.y
+@@ -506,7 +506,9 @@ peg	:	PEG
+ 	;
+ 
+ format	:	FORMAT startformsub formname block
+-			{ SvREFCNT_inc_simple_void(PL_compcv);
++			{
++			  CV *fmtcv = PL_compcv;
++			  SvREFCNT_inc_simple_void(PL_compcv);
+ #ifdef MAD
+ 			  $$ = newFORM($2, $3, $4);
+ 			  prepend_madprops($1->tk_mad, $$, 'F');
+@@ -516,6 +518,10 @@ format	:	FORMAT startformsub formname block
+ 			  newFORM($2, $3, $4);
+ 			  $$ = (OP*)NULL;
+ #endif
++			  if (CvOUTSIDE(fmtcv) && !CvUNIQUE(CvOUTSIDE(fmtcv))) {
++			    SvREFCNT_inc_simple_void(fmtcv);
++			    pad_add_anon((SV*)fmtcv, OP_NULL);
++			  }
+ 			}
+ 	;
+ 
+diff --git a/t/comp/form_scope.t b/t/comp/form_scope.t
+new file mode 100644
+index 0000000..3ef891e
+--- /dev/null
++++ b/t/comp/form_scope.t
+@@ -0,0 +1,18 @@
++#!./perl
++#
++# Tests bug #22977.  Test case from Dave Mitchell.
++
++print "1..2\n";
++
++sub f ($);
++sub f ($) {
++my $test = $_[0];
++write;
++format STDOUT =
++ok @<<<<<<<
++$test
++.
++}
++
++f(1);
++f(2);
+-- 
+1.8.1.4
+

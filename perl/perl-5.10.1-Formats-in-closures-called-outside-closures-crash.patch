@@ -1,0 +1,118 @@
+From f1119f516b4d4a2c5074950d42f2e39e8d1813be Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Tue, 12 Mar 2013 09:34:00 +0100
+Subject: [PATCH] =?UTF-8?q?Formats=20in=20closures=20called=20outside=20cl?=
+ =?UTF-8?q?osures=20=E2=86=92=20crash?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Port to 5.10.1:
+
+commit af41786fe5732d5ec7932b946eec99a695ac6e43
+Author: Father Chrysostomos <sprout@cpan.org>
+Date:   Thu Jun 28 20:28:09 2012 -0700
+
+    Formats in closures called outside closures → crash
+
+    If a format closing over lexical variables is defined inside a clo-
+    sure, it must only be called directly inside that closure, not from
+    any other eval, sub, or format.
+
+    Calling it from anywhere else started causing a crash in 5.10.0,
+    because the format would try to close over variables in the currently-
+    running sub, using padoffsets intended for a completely unrelated pad.
+
+    This commit stops it from crashing by checking whether the currently-
+    running sub is a clone of the format’s outer sub (a closure proto-
+    type).  If it is not, the outer closure prototype is used, resulting
+    in ‘Variable is not available’ warnings.
+
+    This makes things work as well as they did in 5.8.  Ideally, we should
+    search the call stack for the topmost clone of the format’s outer sub;
+    but I’m saving that for another commit.
+
+<https://bugzilla.redhat.com/show_bug.cgi?id=920132>
+---
+ pad.c               | 10 +++++++---
+ t/comp/form_scope.t | 26 +++++++++++++++++++++++++-
+ 2 files changed, 32 insertions(+), 4 deletions(-)
+
+diff --git a/pad.c b/pad.c
+index d58e7d2..5a471f8 100644
+--- a/pad.c
++++ b/pad.c
+@@ -1478,11 +1478,16 @@ Perl_cv_clone(pTHX_ CV *proto)
+ 
+     /* Since cloneable anon subs can be nested, CvOUTSIDE may point
+      * to a prototype; we instead want the cloned parent who called us.
+-     * Note that in general for formats, CvOUTSIDE != find_runcv */
++     * Note that in general for formats, CvOUTSIDE != find_runcv; formats
++     * inside closures, however, only work if CvOUTSIDE == find_runcv.
++     */
+ 
+     outside = CvOUTSIDE(proto);
+     if (outside && CvCLONE(outside) && ! CvCLONED(outside))
+ 	outside = find_runcv(NULL);
++    if (SvTYPE(proto) == SVt_PVFM
++     && CvROOT(outside) != CvROOT(CvOUTSIDE(proto)))
++	outside = CvOUTSIDE(proto);
+     depth = CvDEPTH(outside);
+     assert(depth || SvTYPE(proto) == SVt_PVFM);
+     if (!depth)
+@@ -1530,11 +1535,10 @@ Perl_cv_clone(pTHX_ CV *proto)
+ 	if (namesv && namesv != &PL_sv_undef) { /* lexical */
+ 	    if (SvFAKE(namesv)) {   /* lexical from outside? */
+ 		sv = outpad[PARENT_PAD_INDEX(namesv)];
+-		assert(sv);
+ 		/* formats may have an inactive parent,
+ 		   while my $x if $false can leave an active var marked as
+ 		   stale. And state vars are always available */
+-		if (SvPADSTALE(sv) && !SvPAD_STATE(namesv)) {
++		if (!sv || (SvPADSTALE(sv) && !SvPAD_STATE(namesv))) {
+ 		    if (ckWARN(WARN_CLOSURE))
+ 			Perl_warner(aTHX_ packWARN(WARN_CLOSURE),
+ 			    "Variable \"%s\" is not available", SvPVX_const(namesv));
+diff --git a/t/comp/form_scope.t b/t/comp/form_scope.t
+index 8428325..4487ff3 100644
+--- a/t/comp/form_scope.t
++++ b/t/comp/form_scope.t
+@@ -1,6 +1,6 @@
+ #!./perl
+ 
+-print "1..3\n";
++print "1..5\n";
+  
+ # Tests bug #22977.  Test case from Dave Mitchell.
+ sub f ($);
+@@ -50,3 +50,27 @@ sub foo {
+ undef *bar;
+ write;
+ 
++# A regression introduced in 5.10; format cloning would close over the
++# variables in the currently-running sub (the main CV in this test) if the
++# outer sub were an inactive closure.
++sub baz {
++  my $a;
++  sub {
++    $a;
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t)}
++    my $x;
++    format STDOUT3 =
++@<<<<<<<<<<<<<<<<<<<<<<<<<
++defined $x ? "not ok 4 - $x" : "ok 4"
++.
++  }
++}
++*STDOUT = *STDOUT3{FORMAT};
++{
++  local $^W = 1;
++  my $w;
++  local $SIG{__WARN__} = sub { $w = shift };
++  write;
++  print "not " unless $w =~ /^Variable "\$x" is not available at/;
++  print "ok 5 - closure var not available when outer sub is inactive\n";
++}
+-- 
+1.8.1.4
+

@@ -1,0 +1,163 @@
+From 05da129150ace2606c67752be58f362ce6978ade Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Fri, 6 Jun 2014 14:31:59 +0200
+Subject: [PATCH] Destroy {GDBM,NDBM,ODBM,SDBM}_File objects only from original
+ thread context
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This patch fixes a crash when destroing a hash tied to a *_File
+database after spawning a thread:
+
+use Fcntl;
+use SDBM_File;
+use threads;
+tie(my %dbtest, 'SDBM_File', "test.db", O_RDWR|O_CREAT, 0666);
+threads->new(sub {})->join;
+
+This crashed or paniced depending on how perl was configured.
+
+Closes RT#61912.
+
+Signed-off-by: Petr Písař <ppisar@redhat.com>
+---
+ ext/GDBM_File/GDBM_File.xs |  8 ++++++--
+ ext/NDBM_File/NDBM_File.xs |  8 ++++++--
+ ext/ODBM_File/ODBM_File.xs | 10 +++++++---
+ ext/SDBM_File/SDBM_File.xs |  4 +++-
+ 4 files changed, 22 insertions(+), 8 deletions(-)
+
+diff --git a/ext/GDBM_File/GDBM_File.xs b/ext/GDBM_File/GDBM_File.xs
+index 5f88223..e1e5ea8 100644
+--- a/ext/GDBM_File/GDBM_File.xs
++++ b/ext/GDBM_File/GDBM_File.xs
+@@ -6,6 +6,7 @@
+ #include <fcntl.h>
+ 
+ typedef struct {
++	tTHX    owner;
+ 	GDBM_FILE 	dbp ;
+ 	SV *    filter_fetch_key ;
+ 	SV *    filter_store_key ;
+@@ -74,6 +75,7 @@ gdbm_TIEHASH(dbtype, name, read_write, mode, fatal_func = (FATALFUNC)croak)
+ 	    if ((dbp =  gdbm_open(name, GDBM_BLOCKSIZE, read_write, mode, fatal_func))) {
+ 	        RETVAL = (GDBM_File)safemalloc(sizeof(GDBM_File_type)) ;
+     	        Zero(RETVAL, 1, GDBM_File_type) ;
++		RETVAL->owner = aTHX;
+ 		RETVAL->dbp = dbp ;
+ 	    }
+ 	    
+@@ -92,8 +94,10 @@ void
+ gdbm_DESTROY(db)
+ 	GDBM_File	db
+ 	CODE:
+-	gdbm_close(db);
+-	safefree(db);
++	if (db && db->owner == aTHX) {
++	    gdbm_close(db);
++	    safefree(db);
++	}
+ 
+ #define gdbm_FETCH(db,key)			gdbm_fetch(db->dbp,key)
+ datum_value
+diff --git a/ext/NDBM_File/NDBM_File.xs b/ext/NDBM_File/NDBM_File.xs
+index aa769ec..61ee4f1 100644
+--- a/ext/NDBM_File/NDBM_File.xs
++++ b/ext/NDBM_File/NDBM_File.xs
+@@ -26,6 +26,7 @@ END_EXTERN_C
+ #endif
+ 
+ typedef struct {
++	tTHX    owner;
+ 	DBM * 	dbp ;
+ 	SV *    filter_fetch_key ;
+ 	SV *    filter_store_key ;
+@@ -68,6 +69,7 @@ ndbm_TIEHASH(dbtype, filename, flags, mode)
+ 	    if ((dbp =  dbm_open(filename, flags, mode))) {
+ 	        RETVAL = (NDBM_File)safemalloc(sizeof(NDBM_File_type)) ;
+     	        Zero(RETVAL, 1, NDBM_File_type) ;
++		RETVAL->owner = aTHX;
+ 		RETVAL->dbp = dbp ;
+ 	    }
+ 	    
+@@ -79,8 +81,10 @@ void
+ ndbm_DESTROY(db)
+ 	NDBM_File	db
+ 	CODE:
+-	dbm_close(db->dbp);
+-	safefree(db);
++	if (db && db->owner == aTHX) {
++	    dbm_close(db->dbp);
++	    safefree(db);
++	}
+ 
+ #define ndbm_FETCH(db,key)			dbm_fetch(db->dbp,key)
+ datum_value
+diff --git a/ext/ODBM_File/ODBM_File.xs b/ext/ODBM_File/ODBM_File.xs
+index 2510d5e..6eb3f06 100644
+--- a/ext/ODBM_File/ODBM_File.xs
++++ b/ext/ODBM_File/ODBM_File.xs
+@@ -38,6 +38,7 @@ datum	nextkey(datum key);
+ #include <fcntl.h>
+ 
+ typedef struct {
++	tTHX    owner;
+ 	void * 	dbp ;
+ 	SV *    filter_fetch_key ;
+ 	SV *    filter_store_key ;
+@@ -109,6 +110,7 @@ odbm_TIEHASH(dbtype, filename, flags, mode)
+ 	    dbp = (void*)(dbminit(filename) >= 0 ? &dbmrefcnt : 0);
+ 	    RETVAL = (ODBM_File)safemalloc(sizeof(ODBM_File_type)) ;
+     	    Zero(RETVAL, 1, ODBM_File_type) ;
++	    RETVAL->owner = aTHX;
+ 	    RETVAL->dbp = dbp ;
+ 	    ST(0) = sv_mortalcopy(&PL_sv_undef);
+ 	    sv_setptrobj(ST(0), RETVAL, dbtype);
+@@ -120,9 +122,11 @@ DESTROY(db)
+ 	PREINIT:
+ 	dMY_CXT;
+ 	CODE:
+-	dbmrefcnt--;
+-	dbmclose();
+-	safefree(db);
++	if (db && db->owner == aTHX) {
++	    dbmrefcnt--;
++	    dbmclose();
++	    safefree(db);
++	}
+ 
+ datum_value
+ odbm_FETCH(db, key)
+diff --git a/ext/SDBM_File/SDBM_File.xs b/ext/SDBM_File/SDBM_File.xs
+index 6aafb6b..8e0e68f 100644
+--- a/ext/SDBM_File/SDBM_File.xs
++++ b/ext/SDBM_File/SDBM_File.xs
+@@ -5,6 +5,7 @@
+ #include "sdbm/sdbm.h"
+ 
+ typedef struct {
++	tTHX    owner;
+ 	DBM * 	dbp ;
+ 	SV *    filter_fetch_key ;
+ 	SV *    filter_store_key ;
+@@ -42,6 +43,7 @@ sdbm_TIEHASH(dbtype, filename, flags, mode)
+ 	    if ((dbp = sdbm_open(filename,flags,mode))) {
+ 	        RETVAL = (SDBM_File)safemalloc(sizeof(SDBM_File_type)) ;
+     	        Zero(RETVAL, 1, SDBM_File_type) ;
++		RETVAL->owner = aTHX;
+ 		RETVAL->dbp = dbp ;
+ 	    }
+ 	    
+@@ -53,7 +55,7 @@ void
+ sdbm_DESTROY(db)
+ 	SDBM_File	db
+ 	CODE:
+-	if (db) {
++	if (db && db->owner == aTHX) {
+ 	    sdbm_close(db->dbp);
+ 	    if (db->filter_fetch_key)
+ 		SvREFCNT_dec(db->filter_fetch_key) ;
+-- 
+1.9.3
+

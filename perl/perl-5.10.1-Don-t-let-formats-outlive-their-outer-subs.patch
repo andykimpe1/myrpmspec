@@ -1,0 +1,140 @@
+From 01f983d0c98447cd4c4733b940da538c3ce13358 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Mon, 11 Mar 2013 18:20:16 +0100
+Subject: [PATCH] =?UTF-8?q?Don=E2=80=99t=20let=20formats=20outlive=20their?=
+ =?UTF-8?q?=20outer=20subs?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Ported to 5.10.1:
+
+commit e09ac076a1dab8e2c5712775f478fcfb61cb7eb3
+Author: Father Chrysostomos <sprout@cpan.org>
+Date:   Thu Jun 28 16:31:17 2012 -0700
+
+    Don’t let formats outlive their outer subs
+
+<https://bugzilla.redhat.com/show_bug.cgi?id=920132>
+---
+ pad.c               | 25 +++++++++++++++++++++++--
+ t/comp/form_scope.t | 42 ++++++++++++++++++++++++++++++++++++++----
+ 2 files changed, 61 insertions(+), 6 deletions(-)
+
+diff --git a/pad.c b/pad.c
+index 90fc23d..d58e7d2 100644
+--- a/pad.c
++++ b/pad.c
+@@ -292,6 +292,7 @@ Perl_pad_undef(pTHX_ CV* cv)
+ 		CV * const innercv = MUTABLE_CV(curpad[ix]);
+ 		U32 inner_rc = SvREFCNT(innercv);
+ 		assert(inner_rc);
++		assert(SvTYPE(innercv) != SVt_PVFM);
+ 		namepad[ix] = NULL;
+ 		SvREFCNT_dec(namesv);
+ 
+@@ -510,12 +511,19 @@ Perl_pad_add_anon(pTHX_ SV* sv, OPCODE op_type)
+     ix = pad_alloc(op_type, SVs_PADMY);
+     av_store(PL_comppad_name, ix, name);
+     /* XXX DAPM use PL_curpad[] ? */
+-    av_store(PL_comppad, ix, sv);
++    if (SvTYPE(sv) == SVt_PVCV || !CvOUTSIDE((const CV *)(sv)))
++	av_store(PL_comppad, ix, sv);
++    else {
++	SV *rv = newRV_inc(sv);
++	sv_rvweaken(rv);
++	assert (SvTYPE(sv) == SVt_PVFM);
++	av_store(PL_comppad, ix, rv);
++    }
+     SvPADMY_on(sv);
+ 
+     /* to avoid ref loops, we never have parent + child referencing each
+      * other simultaneously */
+-    if (CvOUTSIDE((const CV *)sv)) {
++    if (CvOUTSIDE((const CV *)sv) && SvTYPE(sv) == SVt_PVCV) {
+ 	assert(!CvWEAKOUTSIDE((const CV *)sv));
+ 	CvWEAKOUTSIDE_on(MUTABLE_CV(sv));
+ 	SvREFCNT_dec(CvOUTSIDE(MUTABLE_CV(sv)));
+@@ -1618,10 +1626,23 @@ Perl_pad_fixup_inner_anons(pTHX_ PADLIST *padlist, CV *old_cv, CV *new_cv)
+ 	if (namesv && namesv != &PL_sv_undef
+ 	    && *SvPVX_const(namesv) == '&')
+ 	{
++	  if (SvTYPE(curpad[ix]) == SVt_PVCV) {
+ 	    CV * const innercv = MUTABLE_CV(curpad[ix]);
+ 	    assert(CvWEAKOUTSIDE(innercv));
+ 	    assert(CvOUTSIDE(innercv) == old_cv);
+ 	    CvOUTSIDE(innercv) = new_cv;
++	  }
++	  else { /* format reference */
++	    SV * const rv = curpad[ix];
++	    CV *innercv;
++	    if (!SvOK(rv)) continue;
++	    assert(SvROK(rv));
++	    assert(SvWEAKREF(rv));
++	    innercv = (CV *)SvRV(rv);
++	    assert(!CvWEAKOUTSIDE(innercv));
++	    SvREFCNT_dec(CvOUTSIDE(innercv));
++	    CvOUTSIDE(innercv) = (CV *)SvREFCNT_inc_simple_NN(new_cv);
++	  }
+ 	}
+     }
+ }
+diff --git a/t/comp/form_scope.t b/t/comp/form_scope.t
+index 3ef891e..8428325 100644
+--- a/t/comp/form_scope.t
++++ b/t/comp/form_scope.t
+@@ -1,9 +1,8 @@
+ #!./perl
+-#
+-# Tests bug #22977.  Test case from Dave Mitchell.
+-
+-print "1..2\n";
+ 
++print "1..3\n";
++ 
++# Tests bug #22977.  Test case from Dave Mitchell.
+ sub f ($);
+ sub f ($) {
+ my $test = $_[0];
+@@ -16,3 +15,38 @@ $test
+ 
+ f(1);
+ f(2);
++
++# A bug caused by the fix for #22977/50528
++sub foo {
++  sub bar {
++    # Fill the pad with alphabet soup, to give the closed-over variable a
++    # high padoffset (more likely to trigger the bug and crash).
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    {my ($a,$b,$c,$d,$e,$f,$g,$h,$i,$j,$k,$l,$m,$n,$o,$p,$q,$r,$s,$t,$u)}
++    my $x;
++    format STDOUT2 =
++@<<<<<<
++"ok 3".$x # $x is not available, but this should not crash
++.
++  }
++}
++*STDOUT = *STDOUT2{FORMAT};
++undef *bar;
++write;
++
+-- 
+1.8.1.4
+

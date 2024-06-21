@@ -1,0 +1,76 @@
+From 31879459221cecdd2098020b953fce31d9871952 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Petr=20P=C3=ADsa=C5=99?= <ppisar@redhat.com>
+Date: Tue, 12 Mar 2013 10:54:29 +0100
+Subject: [PATCH] =?UTF-8?q?Don=E2=80=99t=20leak=20formats=20defined=20insi?=
+ =?UTF-8?q?de=20subs?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Port to 5.10.1:
+
+commit 7c93c29bad5a630df394ef899b8f995cc29154c8
+Author: Father Chrysostomos <sprout@cpan.org>
+Date:   Fri Aug 17 14:24:05 2012 -0700
+
+    Don’t leak formats defined inside subs
+
+    I made them leak inadvertently in 5.17.2 with commit e09ac076a1da.
+
+    This was unfortunately backported to 5.16.1 (as 3149499832) without
+    anybody noticing the bug.
+
+<https://bugzilla.redhat.com/show_bug.cgi?id=920132>
+---
+ pad.c        |  2 +-
+ t/op/write.t | 14 +++++++++++++-
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/pad.c b/pad.c
+index 88fcd75..31a533e 100644
+--- a/pad.c
++++ b/pad.c
+@@ -514,7 +514,7 @@ Perl_pad_add_anon(pTHX_ SV* sv, OPCODE op_type)
+     if (SvTYPE(sv) == SVt_PVCV || !CvOUTSIDE((const CV *)(sv)))
+ 	av_store(PL_comppad, ix, sv);
+     else {
+-	SV *rv = newRV_inc(sv);
++	SV *rv = newRV_noinc(sv);
+ 	sv_rvweaken(rv);
+ 	assert (SvTYPE(sv) == SVt_PVFM);
+ 	av_store(PL_comppad, ix, rv);
+diff --git a/t/op/write.t b/t/op/write.t
+index f13ac5f..4a8d6d8 100755
+--- a/t/op/write.t
++++ b/t/op/write.t
+@@ -61,7 +61,7 @@ for my $tref ( @NumTests ){
+ my $bas_tests = 20;
+ 
+ # number of tests in section 3
+-my $bug_tests = 4 + 3 * 3 * 5 * 2 * 3 + 2 + 1 + 1;
++my $bug_tests = 4 + 3 * 3 * 5 * 2 * 3 + 2 + 1 + 1 + 1;
+ 
+ # number of tests in section 4
+ my $hmb_tests = 35;
+@@ -627,6 +627,18 @@ format =
+ write;
+ EOP
+ 
++SKIP: {
++   skip "no weak refs" unless eval { require Scalar::Util };
++   sub Potshriggley {
++format Potshriggley =
++.
++   }
++   Scalar::Util::weaken(my $x = *Potshriggley{FORMAT});
++   undef *Potshriggley;
++   is $x, undef, 'formats in subs do not leak';
++   use Devel::Peek; Dump $x if $x;
++}
++
+ #############################
+ ## Section 4
+ ## Add new tests *above* here
+-- 
+1.8.1.4
+
