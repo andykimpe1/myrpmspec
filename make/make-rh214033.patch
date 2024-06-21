@@ -1,0 +1,90 @@
+diff -Nrup a/job.c b/job.c
+--- a/job.c	2015-12-17 10:29:36.708577222 -0500
++++ b/job.c	2015-12-17 17:08:24.181670402 -0500
+@@ -1236,6 +1236,12 @@ start_job_command (struct child *child)
+       if (job_rfd >= 0)
+ 	CLOSE_ON_EXEC (job_rfd);
+ 
++#ifdef SET_STACK_SIZE
++          /* Reset limits, if necessary.  */
++          if (stack_limit.rlim_cur)
++            setrlimit (RLIMIT_STACK, &stack_limit);
++#endif
++
+       /* Never use fork()/exec() here! Use spawn() instead in exec_command() */
+       child->pid = child_execute_job (child->good_stdin ? 0 : bad_stdin, 1,
+                                       argv, child->environment);
+@@ -1996,6 +2002,7 @@ exec_command (char **argv, char **envp)
+ #ifdef SIGCHLD
+   signal (SIGCHLD,SIG_IGN);
+ #endif
++
+   /* Run the program.  */
+   execve (argv[0], argv, envp);
+   perror_with_name ("execve: ", argv[0]);
+@@ -2078,7 +2085,13 @@ exec_command (char **argv, char **envp)
+ 
+ # else
+ 
+-  /* Run the program.  */
++  /* Run the program. */
++#ifdef SET_STACK_SIZE
++          /* Reset limits, if necessary.  */
++          if (stack_limit.rlim_cur)
++            setrlimit (RLIMIT_STACK, &stack_limit);
++#endif
++
+   environ = envp;
+   execvp (argv[0], argv);
+ 
+diff -Nrup a/main.c b/main.c
+--- a/main.c	2015-12-17 10:29:36.713577168 -0500
++++ b/main.c	2015-12-17 15:25:47.855335470 -0500
+@@ -213,6 +213,12 @@ int print_version_flag = 0;
+ 
+ static struct stringlist *makefiles = 0;
+ 
++/* Size of the stack when we started.  */
++
++#ifdef SET_STACK_SIZE
++struct rlimit stack_limit;
++#endif
++
+ /* Number of job slots (commands that can be run at once).  */
+ 
+ unsigned int job_slots = 1;
+@@ -920,11 +926,15 @@ main (int argc, char **argv, char **envp
+     struct rlimit rlim;
+ 
+     /* Set the stack limit huge so that alloca does not fail.  */
+-    if (getrlimit (RLIMIT_STACK, &rlim) == 0)
++    if (getrlimit (RLIMIT_STACK, &rlim) == 0
++        && rlim.rlim_cur > 0 && rlim.rlim_cur < rlim.rlim_max)
+       {
++        stack_limit = rlim;
+         rlim.rlim_cur = rlim.rlim_max;
+         setrlimit (RLIMIT_STACK, &rlim);
+       }
++    else
++      stack_limit.rlim_cur = 0;
+   }
+ #endif
+ 
+diff -Nrup a/make.h b/make.h
+--- a/make.h	2015-12-17 10:29:36.702577286 -0500
++++ b/make.h	2015-12-17 12:42:30.752287387 -0500
+@@ -385,6 +385,14 @@ struct floc
+   };
+ #define NILF ((struct floc *)0)
+ 
++#if defined(HAVE_SYS_RESOURCE_H) && defined(HAVE_GETRLIMIT) && defined(HAVE_SETRLIMIT)
++# define SET_STACK_SIZE
++#endif
++#ifdef SET_STACK_SIZE
++# include <sys/resource.h>
++extern struct rlimit stack_limit;
++#endif
++
+ #define STRING_SIZE_TUPLE(_s) (_s), (sizeof (_s)-1)
+ 
+ 
