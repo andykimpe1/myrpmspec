@@ -1,0 +1,1646 @@
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 6731ff9..73284c8 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -5,6 +5,7 @@
+ ## program built.  We also don't bother trying to assemble code, or
+ ## anything like that.
+ 
++noinst_HEADERS = rpc_com.h debug.h
+ 
+ INCLUDES = -I$(top_srcdir)/tirpc -DPORTMAP -DINET6 -DVERSION="\"$(VERSION)\"" \
+ 		-D_GNU_SOURCE -Wall -pipe  
+@@ -50,7 +51,7 @@ libtirpc_la_SOURCES = auth_none.c auth_unix.c authunix_prot.c bindresvport.c cln
+         rpc_callmsg.c rpc_generic.c rpc_soc.c rpcb_clnt.c rpcb_prot.c \
+         rpcb_st_xdr.c svc.c svc_auth.c svc_dg.c svc_auth_unix.c svc_generic.c \
+         svc_raw.c svc_run.c svc_simple.c svc_vc.c getpeereid.c \
+-        auth_time.c auth_des.c authdes_prot.c
++        auth_time.c auth_des.c authdes_prot.c debug.c
+ 
+ ## XDR
+ libtirpc_la_SOURCES += xdr.c xdr_rec.c xdr_array.c xdr_float.c xdr_mem.c xdr_reference.c xdr_stdio.c
+diff --git a/src/auth_des.c b/src/auth_des.c
+index f0c8b8c..cff777c 100644
+--- a/src/auth_des.c
++++ b/src/auth_des.c
+@@ -54,6 +54,8 @@
+ #endif
+ #include <sys/cdefs.h>
+ 
++#include "debug.h"
++
+ #define USEC_PER_SEC		1000000
+ #define RTIME_TIMEOUT		5	/* seconds to wait for sync */
+ 
+@@ -399,7 +401,7 @@ authdes_validate(AUTH *auth, struct opaque_auth *rverf)
+ 	 */
+ 	if (bcmp((char *)&ad->ad_timestamp, (char *)&verf.adv_timestamp,
+ 		 sizeof(struct timeval)) != 0) {
+-		syslog(LOG_DEBUG, "authdes_validate: verifier mismatch");
++		LIBTIRPC_DEBUG(1, ("authdes_validate: verifier mismatch"));
+ 		return (FALSE);
+ 	}
+ 
+@@ -433,16 +435,15 @@ authdes_refresh(AUTH *auth, void *dummy)
+ 			 * Hope the clocks are synced!
+ 			 */
+ 			ad->ad_dosync = 0;
+-			syslog(LOG_DEBUG,
+-			    "authdes_refresh: unable to synchronize clock");
++			LIBTIRPC_DEBUG(1, ("authdes_refresh: unable to synchronize clock"));
+ 		 }
+ 	}
+ 	ad->ad_xkey = auth->ah_key;
+ 	pkey.n_bytes = (char *)(ad->ad_pkey);
+ 	pkey.n_len = (u_int)strlen((char *)ad->ad_pkey) + 1;
+ 	if (key_encryptsession_pk(ad->ad_servername, &pkey, &ad->ad_xkey) < 0) {
+-		syslog(LOG_INFO,
+-		    "authdes_refresh: keyserv(1m) is unable to encrypt session key");
++		LIBTIRPC_DEBUG(1,
++		    ("authdes_refresh: keyserv(1m) is unable to encrypt session key"));
+ 		return (FALSE);
+ 	}
+ 	cred->adc_fullname.key = ad->ad_xkey;
+diff --git a/src/auth_gss.c b/src/auth_gss.c
+index 6cc8b59..19e72b1 100644
+--- a/src/auth_gss.c
++++ b/src/auth_gss.c
+@@ -49,6 +49,8 @@
+ #include <netinet/in.h>
+ #include <gssapi/gssapi.h>
+ 
++#include "debug.h"
++
+ static void	authgss_nextverf();
+ static bool_t	authgss_marshal();
+ static bool_t	authgss_refresh();
+@@ -58,7 +60,6 @@ static void	authgss_destroy_context();
+ static bool_t	authgss_wrap();
+ static bool_t	authgss_unwrap();
+ 
+-
+ /*
+  * from mit-krb5-1.2.1 mechglue/mglueP.h:
+  * Array of context IDs typed by mechanism OID
+@@ -78,7 +79,6 @@ static struct auth_ops authgss_ops = {
+ 	authgss_unwrap
+ };
+ 
+-#ifdef DEBUG
+ 
+ /* useful as i add more mechanisms */
+ void
+@@ -87,9 +87,12 @@ print_rpc_gss_sec(struct rpc_gss_sec *ptr)
+ int i;
+ char *p;
+ 
+-	log_debug("rpc_gss_sec:");
++	if (libtirpc_debug_level < 4 || log_stderr == 0)
++		return;
++
++	gss_log_debug("rpc_gss_sec:");
+ 	if(ptr->mech == NULL)
+-		log_debug("NULL gss_OID mech");
++		gss_log_debug("NULL gss_OID mech");
+ 	else {
+ 		fprintf(stderr, "     mechanism_OID: {");
+ 		p = (char *)ptr->mech->elements;
+@@ -126,7 +129,6 @@ char *p;
+ 	fprintf(stderr, "     service: %d\n", ptr->svc);
+ 	fprintf(stderr, "     cred: %p\n", ptr->cred);
+ }
+-#endif /*DEBUG*/
+ 
+ struct rpc_gss_data {
+ 	bool_t			 established;	/* context established */
+@@ -151,7 +153,7 @@ authgss_create(CLIENT *clnt, gss_name_t name, struct rpc_gss_sec *sec)
+ 	struct rpc_gss_data	*gd;
+ 	OM_uint32		min_stat = 0;
+ 
+-	log_debug("in authgss_create()");
++	gss_log_debug("in authgss_create()");
+ 
+ 	memset(&rpc_createerr, 0, sizeof(rpc_createerr));
+ 
+@@ -166,9 +168,7 @@ authgss_create(CLIENT *clnt, gss_name_t name, struct rpc_gss_sec *sec)
+ 		free(auth);
+ 		return (NULL);
+ 	}
+-#ifdef DEBUG
+-	fprintf(stderr, "authgss_create: name is %p\n", name);
+-#endif
++	LIBTIRPC_DEBUG(3, ("authgss_create: name is %p", name));
+ 	if (name != GSS_C_NO_NAME) {
+ 		if (gss_duplicate_name(&min_stat, name, &gd->name)
+ 						!= GSS_S_COMPLETE) {
+@@ -181,9 +181,7 @@ authgss_create(CLIENT *clnt, gss_name_t name, struct rpc_gss_sec *sec)
+ 	else
+ 		gd->name = name;
+ 
+-#ifdef DEBUG
+-	fprintf(stderr, "authgss_create: gd->name is %p\n", gd->name);
+-#endif
++	LIBTIRPC_DEBUG(3, ("authgss_create: gd->name is %p", gd->name));
+ 	gd->clnt = clnt;
+ 	gd->ctx = GSS_C_NO_CONTEXT;
+ 	gd->sec = *sec;
+@@ -216,7 +214,7 @@ authgss_create_default(CLIENT *clnt, char *service, struct rpc_gss_sec *sec)
+ 	gss_buffer_desc		 sname;
+ 	gss_name_t		 name = GSS_C_NO_NAME;
+ 
+-	log_debug("in authgss_create_default()");
++	gss_log_debug("in authgss_create_default()");
+ 
+ 
+ 	sname.value = service;
+@@ -227,7 +225,8 @@ authgss_create_default(CLIENT *clnt, char *service, struct rpc_gss_sec *sec)
+ 		&name);
+ 
+ 	if (maj_stat != GSS_S_COMPLETE) {
+-		log_status("gss_import_name", maj_stat, min_stat);
++		gss_log_status("authgss_create_default: gss_import_name", 
++			maj_stat, min_stat);
+ 		rpc_createerr.cf_stat = RPC_AUTHERROR;
+ 		return (NULL);
+ 	}
+@@ -235,9 +234,7 @@ authgss_create_default(CLIENT *clnt, char *service, struct rpc_gss_sec *sec)
+ 	auth = authgss_create(clnt, name, sec);
+ 
+ 	if (name != GSS_C_NO_NAME) {
+-#ifdef DEBUG
+-	fprintf(stderr, "authgss_create_default: freeing name %p\n", name);
+-#endif
++		LIBTIRPC_DEBUG(3, ("authgss_create_default: freeing name %p", name));
+  		gss_release_name(&min_stat, &name);
+ 	}
+ 
+@@ -249,7 +246,7 @@ authgss_get_private_data(AUTH *auth, struct authgss_private_data *pd)
+ {
+ 	struct rpc_gss_data	*gd;
+ 
+-	log_debug("in authgss_get_private_data()");
++	gss_log_debug("in authgss_get_private_data()");
+ 
+ 	if (!auth || !pd)
+ 		return (FALSE);
+@@ -279,7 +276,7 @@ bool_t
+ authgss_free_private_data(struct authgss_private_data *pd)
+ {
+ 	OM_uint32	min_stat;
+-	log_debug("in authgss_free_private_data()");
++	gss_log_debug("in authgss_free_private_data()");
+ 
+ 	if (!pd)
+ 		return (FALSE);
+@@ -295,7 +292,7 @@ authgss_free_private_data(struct authgss_private_data *pd)
+ static void
+ authgss_nextverf(AUTH *auth)
+ {
+-	log_debug("in authgss_nextverf()");
++	gss_log_debug("in authgss_nextverf()");
+ 	/* no action necessary */
+ }
+ 
+@@ -309,7 +306,7 @@ authgss_marshal(AUTH *auth, XDR *xdrs)
+ 	OM_uint32		 maj_stat, min_stat;
+ 	bool_t			 xdr_stat;
+ 
+-	log_debug("in authgss_marshal()");
++	gss_log_debug("in authgss_marshal()");
+ 
+ 	gd = AUTH_PRIVATE(auth);
+ 
+@@ -344,7 +341,8 @@ authgss_marshal(AUTH *auth, XDR *xdrs)
+ 			    &rpcbuf, &checksum);
+ 
+ 	if (maj_stat != GSS_S_COMPLETE) {
+-		log_status("gss_get_mic", maj_stat, min_stat);
++		gss_log_status("authgss_marshal: gss_get_mic", 
++			maj_stat, min_stat);
+ 		if (maj_stat == GSS_S_CONTEXT_EXPIRED) {
+ 			gd->established = FALSE;
+ 			authgss_destroy_context(auth);
+@@ -369,7 +367,7 @@ authgss_validate(AUTH *auth, struct opaque_auth *verf)
+ 	gss_buffer_desc		 signbuf, checksum;
+ 	OM_uint32		 maj_stat, min_stat;
+ 
+-	log_debug("in authgss_validate()");
++	gss_log_debug("in authgss_validate()");
+ 
+ 	gd = AUTH_PRIVATE(auth);
+ 
+@@ -404,8 +402,10 @@ authgss_validate(AUTH *auth, struct opaque_auth *verf)
+ 
+ 	maj_stat = gss_verify_mic(&min_stat, gd->ctx, &signbuf,
+ 				  &checksum, &qop_state);
++
+ 	if (maj_stat != GSS_S_COMPLETE || qop_state != gd->sec.qop) {
+-		log_status("gss_verify_mic", maj_stat, min_stat);
++		gss_log_status("authgss_validate: gss_verify_mic", 
++			maj_stat, min_stat);
+ 		if (maj_stat == GSS_S_CONTEXT_EXPIRED) {
+ 			gd->established = FALSE;
+ 			authgss_destroy_context(auth);
+@@ -423,7 +423,7 @@ authgss_refresh(AUTH *auth)
+ 	gss_buffer_desc		*recv_tokenp, send_token;
+ 	OM_uint32		 maj_stat, min_stat, call_stat, ret_flags;
+ 
+-	log_debug("in authgss_refresh()");
++	gss_log_debug("in authgss_refresh()");
+ 
+ 	gd = AUTH_PRIVATE(auth);
+ 
+@@ -434,19 +434,15 @@ authgss_refresh(AUTH *auth)
+ 	memset(&gr, 0, sizeof(gr));
+ 	recv_tokenp = GSS_C_NO_BUFFER;
+ 
+-#ifdef DEBUG
+ 	print_rpc_gss_sec(&gd->sec);
+-#endif /*DEBUG*/
+ 
+ 	for (;;) {
+-#ifdef DEBUG
+ 		/* print the token we just received */
+ 		if (recv_tokenp != GSS_C_NO_BUFFER) {
+-			log_debug("The token we just received (length %d):",
++			gss_log_debug("The token we just received (length %d):",
+ 				  recv_tokenp->length);
+-			log_hexdump(recv_tokenp->value, recv_tokenp->length, 0);
++			gss_log_hexdump(recv_tokenp->value, recv_tokenp->length, 0);
+ 		}
+-#endif
+ 		maj_stat = gss_init_sec_context(&min_stat,
+ 						gd->sec.cred,
+ 						&gd->ctx,
+@@ -467,18 +463,17 @@ authgss_refresh(AUTH *auth)
+ 		}
+ 		if (maj_stat != GSS_S_COMPLETE &&
+ 		    maj_stat != GSS_S_CONTINUE_NEEDED) {
+-			log_status("gss_init_sec_context", maj_stat, min_stat);
++			gss_log_status("authgss_refresh: gss_init_sec_context", 
++				maj_stat, min_stat);
+ 			break;
+ 		}
+ 		if (send_token.length != 0) {
+ 			memset(&gr, 0, sizeof(gr));
+ 
+-#ifdef DEBUG
+ 			/* print the token we are about to send */
+-			log_debug("The token being sent (length %d):",
++			gss_log_debug("The token being sent (length %d):",
+ 				  send_token.length);
+-			log_hexdump(send_token.value, send_token.length, 0);
+-#endif
++			gss_log_hexdump(send_token.value, send_token.length, 0);
+ 
+ 			call_stat = clnt_call(gd->clnt, NULLPROC,
+ 					      (xdrproc_t)xdr_rpc_gss_init_args,
+@@ -526,7 +521,8 @@ authgss_refresh(AUTH *auth)
+ 
+ 			if (maj_stat != GSS_S_COMPLETE
+ 					|| qop_state != gd->sec.qop) {
+-				log_status("gss_verify_mic", maj_stat, min_stat);
++				gss_log_status("authgss_refresh: gss_verify_mic", 
++					maj_stat, min_stat);
+ 				if (maj_stat == GSS_S_CONTEXT_EXPIRED) {
+ 					gd->established = FALSE;
+ 					authgss_destroy_context(auth);
+@@ -559,7 +555,7 @@ authgss_service(AUTH *auth, int svc)
+ {
+ 	struct rpc_gss_data	*gd;
+ 
+-	log_debug("in authgss_service()");
++	gss_log_debug("in authgss_service()");
+ 
+ 	if (!auth)
+ 		return(FALSE);
+@@ -577,7 +573,7 @@ authgss_destroy_context(AUTH *auth)
+ 	struct rpc_gss_data	*gd;
+ 	OM_uint32		 min_stat;
+ 
+-	log_debug("in authgss_destroy_context()");
++	gss_log_debug("in authgss_destroy_context()");
+ 
+ 	gd = AUTH_PRIVATE(auth);
+ 
+@@ -621,15 +617,13 @@ authgss_destroy(AUTH *auth)
+ 	struct rpc_gss_data	*gd;
+ 	OM_uint32		 min_stat;
+ 
+-	log_debug("in authgss_destroy()");
++	gss_log_debug("in authgss_destroy()");
+ 
+ 	gd = AUTH_PRIVATE(auth);
+ 
+ 	authgss_destroy_context(auth);
+ 
+-#ifdef DEBUG
+-	fprintf(stderr, "authgss_destroy: freeing name %p\n", gd->name);
+-#endif
++	LIBTIRPC_DEBUG(3, ("authgss_destroy: freeing name %p", gd->name));
+ 	if (gd->name != GSS_C_NO_NAME)
+ 		gss_release_name(&min_stat, &gd->name);
+ 
+@@ -642,7 +636,7 @@ authgss_wrap(AUTH *auth, XDR *xdrs, xdrproc_t xdr_func, caddr_t xdr_ptr)
+ {
+ 	struct rpc_gss_data	*gd;
+ 
+-	log_debug("in authgss_wrap()");
++	gss_log_debug("in authgss_wrap()");
+ 
+ 	gd = AUTH_PRIVATE(auth);
+ 
+@@ -659,7 +653,7 @@ authgss_unwrap(AUTH *auth, XDR *xdrs, xdrproc_t xdr_func, caddr_t xdr_ptr)
+ {
+ 	struct rpc_gss_data	*gd;
+ 
+-	log_debug("in authgss_unwrap()");
++	gss_log_debug("in authgss_unwrap()");
+ 
+ 	gd = AUTH_PRIVATE(auth);
+ 
+diff --git a/src/authgss_prot.c b/src/authgss_prot.c
+index 0168318..292ab8e 100644
+--- a/src/authgss_prot.c
++++ b/src/authgss_prot.c
+@@ -42,8 +42,11 @@
+ #include <rpc/auth.h>
+ #include <rpc/auth_gss.h>
+ #include <rpc/rpc.h>
++#include <ctype.h>
+ #include <gssapi/gssapi.h>
+ 
++#include "debug.h"
++
+ /* additional space needed for encoding */
+ #define RPC_SLACK_SPACE 1024
+ 
+@@ -64,10 +67,10 @@ xdr_rpc_gss_buf(XDR *xdrs, gss_buffer_t buf, u_int maxsize)
+ 	if (xdr_stat && xdrs->x_op == XDR_DECODE)
+ 		buf->length = tmplen;
+ 
+-	log_debug("xdr_rpc_gss_buf: %s %s (%p:%d)",
+-		  (xdrs->x_op == XDR_ENCODE) ? "encode" : "decode",
+-		  (xdr_stat == TRUE) ? "success" : "failure",
+-		  buf->value, buf->length);
++	gss_log_debug("xdr_rpc_gss_buf: %s %s (%p:%d)",
++		      (xdrs->x_op == XDR_ENCODE) ? "encode" : "decode",
++		      (xdr_stat == TRUE) ? "success" : "failure",
++		      buf->value, buf->length);
+ 
+ 	return xdr_stat;
+ }
+@@ -83,12 +86,12 @@ xdr_rpc_gss_cred(XDR *xdrs, struct rpc_gss_cred *p)
+ 		    xdr_enum(xdrs, (enum_t *)&p->gc_svc) &&
+ 		    xdr_rpc_gss_buf(xdrs, &p->gc_ctx, MAX_AUTH_BYTES));
+ 
+-	log_debug("xdr_rpc_gss_cred: %s %s "
+-		  "(v %d, proc %d, seq %d, svc %d, ctx %p:%d)",
+-		  (xdrs->x_op == XDR_ENCODE) ? "encode" : "decode",
+-		  (xdr_stat == TRUE) ? "success" : "failure",
+-		  p->gc_v, p->gc_proc, p->gc_seq, p->gc_svc,
+-		  p->gc_ctx.value, p->gc_ctx.length);
++	gss_log_debug("xdr_rpc_gss_cred: %s %s "
++		      "(v %d, proc %d, seq %d, svc %d, ctx %p:%d)",
++		      (xdrs->x_op == XDR_ENCODE) ? "encode" : "decode",
++		      (xdr_stat == TRUE) ? "success" : "failure",
++		      p->gc_v, p->gc_proc, p->gc_seq, p->gc_svc,
++		      p->gc_ctx.value, p->gc_ctx.length);
+ 
+ 	return (xdr_stat);
+ }
+@@ -101,10 +104,10 @@ xdr_rpc_gss_init_args(XDR *xdrs, gss_buffer_desc *p)
+ 
+ 	xdr_stat = xdr_rpc_gss_buf(xdrs, p, maxlen);
+ 
+-	log_debug("xdr_rpc_gss_init_args: %s %s (token %p:%d)",
+-		  (xdrs->x_op == XDR_ENCODE) ? "encode" : "decode",
+-		  (xdr_stat == TRUE) ? "success" : "failure",
+-		  p->value, p->length);
++	gss_log_debug("xdr_rpc_gss_init_args: %s %s (token %p:%d)",
++		      (xdrs->x_op == XDR_ENCODE) ? "encode" : "decode",
++		      (xdr_stat == TRUE) ? "success" : "failure",
++		      p->value, p->length);
+ 
+ 	return (xdr_stat);
+ }
+@@ -123,13 +126,13 @@ xdr_rpc_gss_init_res(XDR *xdrs, struct rpc_gss_init_res *p)
+ 		    xdr_u_int(xdrs, &p->gr_win) &&
+ 		    xdr_rpc_gss_buf(xdrs, &p->gr_token, tok_maxlen));
+ 
+-	log_debug("xdr_rpc_gss_init_res %s %s "
+-		  "(ctx %p:%d, maj %d, min %d, win %d, token %p:%d)",
+-		  (xdrs->x_op == XDR_ENCODE) ? "encode" : "decode",
+-		  (xdr_stat == TRUE) ? "success" : "failure",
+-		  p->gr_ctx.value, p->gr_ctx.length,
+-		  p->gr_major, p->gr_minor, p->gr_win,
+-		  p->gr_token.value, p->gr_token.length);
++	gss_log_debug("xdr_rpc_gss_init_res %s %s "
++		      "(ctx %p:%d, maj %d, min %d, win %d, token %p:%d)",
++		      (xdrs->x_op == XDR_ENCODE) ? "encode" : "decode",
++		      (xdr_stat == TRUE) ? "success" : "failure",
++		      p->gr_ctx.value, p->gr_ctx.length,
++		      p->gr_major, p->gr_minor, p->gr_win,
++		      p->gr_token.value, p->gr_token.length);
+ 
+ 	return (xdr_stat);
+ }
+@@ -175,7 +178,8 @@ xdr_rpc_gss_wrap_data(XDR *xdrs, xdrproc_t xdr_func, caddr_t xdr_ptr,
+ 		maj_stat = gss_get_mic(&min_stat, ctx, qop,
+ 				       &databuf, &wrapbuf);
+ 		if (maj_stat != GSS_S_COMPLETE) {
+-			log_debug("gss_get_mic failed");
++			gss_log_status("xdr_rpc_gss_wrap_data: gss_get_mic", 
++				maj_stat, min_stat);
+ 			return (FALSE);
+ 		}
+ 		/* Marshal checksum. */
+@@ -189,7 +193,8 @@ xdr_rpc_gss_wrap_data(XDR *xdrs, xdrproc_t xdr_func, caddr_t xdr_ptr,
+ 		maj_stat = gss_wrap(&min_stat, ctx, TRUE, qop, &databuf,
+ 				    &conf_state, &wrapbuf);
+ 		if (maj_stat != GSS_S_COMPLETE) {
+-			log_status("gss_wrap", maj_stat, min_stat);
++			gss_log_status("xdr_rpc_gss_wrap_data: gss_wrap", 
++				maj_stat, min_stat);
+ 			return (FALSE);
+ 		}
+ 		/* Marshal databody_priv. */
+@@ -222,13 +227,13 @@ xdr_rpc_gss_unwrap_data(XDR *xdrs, xdrproc_t xdr_func, caddr_t xdr_ptr,
+ 	if (svc == RPCSEC_GSS_SVC_INTEGRITY) {
+ 		/* Decode databody_integ. */
+ 		if (!xdr_rpc_gss_buf(xdrs, &databuf, (u_int)-1)) {
+-			log_debug("xdr decode databody_integ failed");
++			LIBTIRPC_DEBUG(1, ("xdr_rpc_gss_unwrap_data: decode databody_integ failed"));
+ 			return (FALSE);
+ 		}
+ 		/* Decode checksum. */
+ 		if (!xdr_rpc_gss_buf(xdrs, &wrapbuf, (u_int)-1)) {
+ 			gss_release_buffer(&min_stat, &databuf);
+-			log_debug("xdr decode checksum failed");
++			LIBTIRPC_DEBUG(1, ("xdr_rpc_gss_unwrap_data: decode checksum failed"));
+ 			return (FALSE);
+ 		}
+ 		/* Verify checksum and QOP. */
+@@ -238,14 +243,15 @@ xdr_rpc_gss_unwrap_data(XDR *xdrs, xdrproc_t xdr_func, caddr_t xdr_ptr,
+ 
+ 		if (maj_stat != GSS_S_COMPLETE || qop_state != qop) {
+ 			gss_release_buffer(&min_stat, &databuf);
+-			log_status("gss_verify_mic", maj_stat, min_stat);
++			gss_log_status("xdr_rpc_gss_unwrap_data: gss_verify_mic", 
++				maj_stat, min_stat);
+ 			return (FALSE);
+ 		}
+ 	}
+ 	else if (svc == RPCSEC_GSS_SVC_PRIVACY) {
+ 		/* Decode databody_priv. */
+ 		if (!xdr_rpc_gss_buf(xdrs, &wrapbuf, (u_int)-1)) {
+-			log_debug("xdr decode databody_priv failed");
++			LIBTIRPC_DEBUG(1, ("xdr_rpc_gss_unwrap_data: decode databody_priv failed"));
+ 			return (FALSE);
+ 		}
+ 		/* Decrypt databody. */
+@@ -258,7 +264,8 @@ xdr_rpc_gss_unwrap_data(XDR *xdrs, xdrproc_t xdr_func, caddr_t xdr_ptr,
+ 		if (maj_stat != GSS_S_COMPLETE || qop_state != qop ||
+ 			conf_state != TRUE) {
+ 			gss_release_buffer(&min_stat, &databuf);
+-			log_status("gss_unwrap", maj_stat, min_stat);
++			gss_log_status("xdr_rpc_gss_unwrap_data: gss_unwrap", 
++				maj_stat, min_stat);
+ 			return (FALSE);
+ 		}
+ 	}
+@@ -271,7 +278,8 @@ xdr_rpc_gss_unwrap_data(XDR *xdrs, xdrproc_t xdr_func, caddr_t xdr_ptr,
+ 
+ 	/* Verify sequence number. */
+ 	if (xdr_stat == TRUE && seq_num != seq) {
+-		log_debug("wrong sequence number in databody");
++		LIBTIRPC_DEBUG(1, 
++			("xdr_rpc_gss_unwrap_data: wrong sequence number in databody"));
+ 		return (FALSE);
+ 	}
+ 	return (xdr_stat);
+@@ -296,47 +304,52 @@ xdr_rpc_gss_data(XDR *xdrs, xdrproc_t xdr_func, caddr_t xdr_ptr,
+ 	return (FALSE);
+ }
+ 
+-#ifdef DEBUG
+-#include <ctype.h>
+-
+ void
+ log_debug(const char *fmt, ...)
+ {
+ 	va_list ap;
+ 
+ 	va_start(ap, fmt);
+-	fprintf(stderr, "rpcsec_gss: ");
+-	vfprintf(stderr, fmt, ap);
+-	fprintf(stderr, "\n");
++	vlibtirpc_log_dbg(2, fmt, ap);
+ 	va_end(ap);
+ }
+-
+ void
+-log_status(char *m, OM_uint32 maj_stat, OM_uint32 min_stat)
++gss_log_debug(const char *fmt, ...)
+ {
+-	OM_uint32 min;
+-	gss_buffer_desc msg;
+-	int msg_ctx = 0;
++	va_list ap;
+ 
+-	fprintf(stderr, "rpcsec_gss: %s: ", m);
++	va_start(ap, fmt);
++	vlibtirpc_log_dbg(2, fmt, ap);
++	va_end(ap);
++}
+ 
+-	gss_display_status(&min, maj_stat, GSS_C_GSS_CODE, GSS_C_NULL_OID,
+-			   &msg_ctx, &msg);
+-	fprintf(stderr, "%s - ", (char *)msg.value);
+-	gss_release_buffer(&min, &msg);
++void
++gss_log_status(char *m, OM_uint32 maj_stat, OM_uint32 min_stat)
++{
++	OM_uint32 min, maj;
++	gss_buffer_desc maj_msg, min_msg;
++	u_int32_t msg_ctx = 0;
+ 
++	gss_display_status(&maj, maj_stat, GSS_C_GSS_CODE, GSS_C_NULL_OID,
++			   &msg_ctx, &maj_msg);
+ 	gss_display_status(&min, min_stat, GSS_C_MECH_CODE, GSS_C_NULL_OID,
+-			   &msg_ctx, &msg);
+-	fprintf(stderr, "%s\n", (char *)msg.value);
+-	gss_release_buffer(&min, &msg);
++			   &msg_ctx, &min_msg);
++
++	LIBTIRPC_DEBUG(1, ("%s: %s - %s", m, (char *)maj_msg.value, (char *)min_msg.value));
++
++	gss_release_buffer(&maj, &maj_msg);
++	gss_release_buffer(&min, &min_msg);
+ }
+ 
+ void
+-log_hexdump(const u_char *buf, int len, int offset)
++gss_log_hexdump(const u_char *buf, int len, int offset)
+ {
+ 	u_int i, j, jm;
+ 	int c;
+ 
++	if (libtirpc_debug_level < 4 || log_stderr == 0)
++		return;
++
+ 	fprintf(stderr, "\n");
+ 	for (i = 0; i < len; i += 0x10) {
+ 		fprintf(stderr, "  %04x: ", (u_int)(i + offset));
+@@ -364,23 +377,3 @@ log_hexdump(const u_char *buf, int len, int offset)
+ 	}
+ }
+ 
+-#else
+-
+-void
+-log_debug(const char *fmt, ...)
+-{
+-}
+-
+-void
+-log_status(char *m, OM_uint32 maj_stat, OM_uint32 min_stat)
+-{
+-}
+-
+-void
+-log_hexdump(const u_char *buf, int len, int offset)
+-{
+-}
+-
+-#endif
+-
+-
+diff --git a/src/clnt_bcast.c b/src/clnt_bcast.c
+index 140407b..229c07b 100644
+--- a/src/clnt_bcast.c
++++ b/src/clnt_bcast.c
+@@ -58,9 +58,7 @@
+ #endif				/* PORTMAP */
+ #include <rpc/nettype.h>
+ #include <arpa/inet.h>
+-#ifdef RPC_DEBUG
+ #include <stdio.h>
+-#endif
+ #include <errno.h>
+ #include <stdlib.h>
+ #include <unistd.h>
+@@ -69,6 +67,8 @@
+ #include <string.h>
+ 
+ #include "rpc_com.h"
++#include "debug.h"
++extern void log_debug(const char *fmt, ...);
+ 
+ #define	MAXBCAST 20	/* Max no of broadcasting transports */
+ #define	INITTIME 4000	/* Time to wait initially */
+@@ -457,20 +457,15 @@ rpc_broadcast_exp(prog, vers, proc, xargs, argsp, xresults, resultsp,
+ 					    outlen, 0, (struct sockaddr*)addr,
+ 					    (size_t)fdlist[i].asize) !=
+ 					    outlen) {
+-#ifdef RPC_DEBUG
+-						perror("sendto");
+-#endif
+-						warnx("clnt_bcast: cannot send"
+-						      "broadcast packet");
++						LIBTIRPC_DEBUG(1, 
++							("rpc_broadcast_exp: sendto failed: errno %d", errno));
++						warnx("rpc_broadcast_exp: cannot send broadcast packet");
+ 						stat = RPC_CANTSEND;
+ 						continue;
+ 					};
+-#ifdef RPC_DEBUG
+ 				if (!__rpc_lowvers)
+-					fprintf(stderr, "Broadcast packet sent "
+-						"for %s\n",
+-						 fdlist[i].nconf->nc_netid);
+-#endif
++					LIBTIRPC_DEBUG(3, ("rpc_broadcast_exp: Broadcast packet sent for %s\n",
++						 fdlist[i].nconf->nc_netid));
+ #ifdef PORTMAP
+ 				/*
+ 				 * Send the version 2 packet also
+@@ -488,11 +483,8 @@ rpc_broadcast_exp(prog, vers, proc, xargs, argsp, xresults, resultsp,
+ 						continue;
+ 					}
+ 				}
+-#ifdef RPC_DEBUG
+-				fprintf(stderr, "PMAP Broadcast packet "
+-					"sent for %s\n",
+-					fdlist[i].nconf->nc_netid);
+-#endif
++				LIBTIRPC_DEBUG(3, ("rpc_broadcast_exp: PMAP Broadcast packet sent for %s\n",
++					fdlist[i].nconf->nc_netid));
+ #endif				/* PORTMAP */
+ 			}
+ 			/* End for sending all packets on this transport */
+@@ -535,10 +527,8 @@ rpc_broadcast_exp(prog, vers, proc, xargs, argsp, xresults, resultsp,
+ 				continue;
+ 			} else
+ 				fds_found++;
+-#ifdef RPC_DEBUG
+-			fprintf(stderr, "response for %s\n",
+-				fdlist[i].nconf->nc_netid);
+-#endif
++			LIBTIRPC_DEBUG(3, ("rpc_broadcast_exp: response for %s\n", 
++				fdlist[i].nconf->nc_netid));
+ 		try_again:
+ 			inlen = recvfrom(fdlist[i].fd, inbuf, fdlist[i].dsize,
+ 			    0, (struct sockaddr *)(void *)&fdlist[i].raddr,
+@@ -599,10 +589,7 @@ rpc_broadcast_exp(prog, vers, proc, xargs, argsp, xresults, resultsp,
+ 						    &taddr, fdlist[i].nconf);
+ 					} else {
+ #endif				/* PORTMAP */
+-#ifdef RPC_DEBUG
+-						fprintf(stderr, "uaddr %s\n",
+-						    uaddrp);
+-#endif
++						LIBTIRPC_DEBUG(3, ("rpc_broadcast_exp: uaddr %s\n", uaddrp));
+ 						np = uaddr2taddr(
+ 						    fdlist[i].nconf, uaddrp);
+ 						done = (*eachresult)(resultsp,
+diff --git a/src/debug.c b/src/debug.c
+new file mode 100644
+index 0000000..b40ff37
+--- /dev/null
++++ b/src/debug.c
+@@ -0,0 +1,65 @@
++/*
++ * debug.c -- debugging routines for libtirpc
++ *
++ * Copyright (C) 2014  Red Hat, Steve Dickson <steved@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * as published by the Free Software Foundation; either version 2
++ * of the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301, USA.
++ */
++#include <sys/types.h>
++#include <stdio.h>
++#include <stdarg.h>
++#include <unistd.h>
++#include <syslog.h>
++#include <string.h>
++
++#include "debug.h"
++
++/* library global debug level */
++int libtirpc_debug_level = 0;
++int  log_stderr = 1; /* log to stderr instead of systlog */
++
++/*
++ * Set the debug level for the entire library.
++ * Different area will used the value to determin
++ * the verbosity of the debugging output.
++ */
++void
++libtirpc_set_debug(char *name, int level, int use_stderr)
++{
++	if (level < 0)
++		level = 0;
++
++	log_stderr = use_stderr;
++	if (!use_stderr)
++		openlog(name, LOG_PID, LOG_DAEMON);
++
++	libtirpc_debug_level = level;
++	LIBTIRPC_DEBUG(1, ("libtirpc: debug level %d", libtirpc_debug_level));
++}
++
++void
++libtirpc_log_dbg(char *fmt, ...)
++{
++	va_list args;
++
++	va_start(args, fmt);
++	if (log_stderr) {
++		vfprintf(stderr, fmt, args);
++		fprintf(stderr, "\n");
++	} else
++		vsyslog(LOG_NOTICE, fmt, args);
++	va_end(args);
++}
+diff --git a/src/debug.h b/src/debug.h
+new file mode 100644
+index 0000000..c971ac3
+--- /dev/null
++++ b/src/debug.h
+@@ -0,0 +1,51 @@
++/*
++ * debug.h -- debugging routines for libtirpc
++ *
++ * Copyright (C) 2014  Red Hat, Steve Dickson <steved@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * as published by the Free Software Foundation; either version 2
++ * of the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor,
++ * Boston, MA 02110-1301, USA.
++ */
++
++#ifndef _DEBUG_H
++#define _DEBUG_H
++
++#include <stdarg.h>
++#include <syslog.h>
++
++extern int libtirpc_debug_level;
++extern int  log_stderr;
++
++void    libtirpc_log_dbg(char *format, ...);
++void 	libtirpc_set_debug(char *name, int level, int use_stderr);
++
++#define LIBTIRPC_DEBUG(level, msg) \
++	do { \
++		if (level <= libtirpc_debug_level) \
++			libtirpc_log_dbg msg; \
++	} while (0)
++
++static inline void 
++vlibtirpc_log_dbg(int level, const char *fmt, va_list args)
++{
++	if (level <= libtirpc_debug_level) {
++		if (log_stderr) {
++			vfprintf(stderr, fmt, args);
++			fprintf(stderr, "\n");
++		} else
++			vsyslog(LOG_NOTICE, fmt, args);
++	}
++}
++#endif /* _DEBUG_H */
+diff --git a/src/getpublickey.c b/src/getpublickey.c
+index 332c725..85935d8 100644
+--- a/src/getpublickey.c
++++ b/src/getpublickey.c
+@@ -46,6 +46,8 @@
+ #include <string.h>
+ #include <stdlib.h>
+ 
++#include "debug.h"
++
+ #define PKFILE "/etc/publickey"
+ 
+ /*
+@@ -120,9 +122,8 @@ getpublicandprivatekey(key, ret)
+ 			lookup = NULL;
+ 			err = yp_match(domain, PKMAP, key, strlen(key), &lookup, &len);
+ 			if (err) {
+-#ifdef DEBUG
+-				fprintf(stderr, "match failed error %d\n", err);
+-#endif
++				LIBTIRPC_DEBUG(1, 
++					("getpublicandprivatekey: match failed error %d\n", err));
+ 				continue;
+ 			}
+ 			lookup[len] = 0;
+@@ -131,10 +132,8 @@ getpublicandprivatekey(key, ret)
+ 			free(lookup);
+ 			return (2);
+ #else /* YP */
+-#ifdef DEBUG
+-			fprintf(stderr,
+-"Bad record in %s '+' -- NIS not supported in this library copy\n", PKFILE);
+-#endif /* DEBUG */
++			LIBTIRPC_DEBUG(1, 
++("Bad record in %s '+' -- NIS not supported in this library copy\n", PKFILE));
+ 			continue;
+ #endif /* YP */
+ 		} else {
+diff --git a/src/key_call.c b/src/key_call.c
+index 709ac70..68283cf 100644
+--- a/src/key_call.c
++++ b/src/key_call.c
+@@ -59,16 +59,11 @@
+ #include <sys/wait.h>
+ #include <sys/fcntl.h>
+ 
++#include "dump.h"
+ 
+ #define	KEY_TIMEOUT	5	/* per-try timeout in seconds */
+ #define	KEY_NRETRY	12	/* number of retries */
+ 
+-#ifdef DEBUG
+-#define	debug(msg)	(void) fprintf(stderr, "%s\n", msg);
+-#else
+-#define	debug(msg)
+-#endif /* DEBUG */
+-
+ /*
+  * Hack to allow the keyserver to use AUTH_DES (for authenticated
+  * NIS+ calls, for example).  The only functions that get called
+@@ -96,7 +91,7 @@ key_setsecret(secretkey)
+ 		return (-1);
+ 	}
+ 	if (status != KEY_SUCCESS) {
+-		debug("set status is nonzero");
++		LIBTIRPC_DEBUG(1, ("key_setsecret: set status is nonzero"));
+ 		return (-1);
+ 	}
+ 	return (0);
+@@ -144,7 +139,7 @@ key_encryptsession_pk(remotename, remotekey, deskey)
+ 		return (-1);
+ 	}
+ 	if (res.status != KEY_SUCCESS) {
+-		debug("encrypt status is nonzero");
++		LIBTIRPC_DEBUG(1, ("key_encryptsession_pk: encrypt status is nonzero"));
+ 		return (-1);
+ 	}
+ 	*deskey = res.cryptkeyres_u.deskey;
+@@ -168,7 +163,7 @@ key_decryptsession_pk(remotename, remotekey, deskey)
+ 		return (-1);
+ 	}
+ 	if (res.status != KEY_SUCCESS) {
+-		debug("decrypt status is nonzero");
++		LIBTIRPC_DEBUG(1, ("key_decryptsession_pk: decrypt status is nonzero"));
+ 		return (-1);
+ 	}
+ 	*deskey = res.cryptkeyres_u.deskey;
+@@ -190,7 +185,7 @@ key_encryptsession(remotename, deskey)
+ 		return (-1);
+ 	}
+ 	if (res.status != KEY_SUCCESS) {
+-		debug("encrypt status is nonzero");
++		LIBTIRPC_DEBUG(1, ("key_encryptsession: encrypt status is nonzero"));
+ 		return (-1);
+ 	}
+ 	*deskey = res.cryptkeyres_u.deskey;
+@@ -212,7 +207,7 @@ key_decryptsession(remotename, deskey)
+ 		return (-1);
+ 	}
+ 	if (res.status != KEY_SUCCESS) {
+-		debug("decrypt status is nonzero");
++		LIBTIRPC_DEBUG(1, ("key_decryptsession: decrypt status is nonzero"));
+ 		return (-1);
+ 	}
+ 	*deskey = res.cryptkeyres_u.deskey;
+@@ -243,7 +238,7 @@ struct key_netstarg *arg;
+ 	}
+ 
+ 	if (status != KEY_SUCCESS) {
+-		debug("key_setnet status is nonzero");
++		LIBTIRPC_DEBUG(1, ("key_setnet: key_setnet status is nonzero"));
+ 		return (-1);
+ 	}
+ 	return (1);
+@@ -262,7 +257,7 @@ key_get_conv(pkey, deskey)
+ 		return (-1);
+ 	}
+ 	if (res.status != KEY_SUCCESS) {
+-		debug("get_conv status is nonzero");
++		LIBTIRPC_DEBUG(1, ("key_get_conv: get_conv status is nonzero"));
+ 		return (-1);
+ 	}
+ 	*deskey = res.cryptkeyres_u.deskey;
+diff --git a/src/netnamer.c b/src/netnamer.c
+index 9b3b7dc..53ba73b 100644
+--- a/src/netnamer.c
++++ b/src/netnamer.c
+@@ -47,6 +47,8 @@
+ #include <stdlib.h>
+ #include <unistd.h>
+ 
++#include "debug.h"
++
+ static char    *OPSYS = "unix";
+ static char    *NETID = "netid.byname";
+ static char    *NETIDFILE = "/etc/netid";
+@@ -159,10 +161,8 @@ _getgroups(uname, groups)
+ 		for (i = 0; grp->gr_mem[i]; i++)
+ 			if (!strcmp(grp->gr_mem[i], uname)) {
+ 				if (ngroups == NGROUPS) {
+-#ifdef DEBUG
+-					fprintf(stderr,
+-				"initgroups: %s is in too many groups\n", uname);
+-#endif
++					LIBTIRPC_DEBUG(1,
++				("_getgroups: %s is in too many groups\n", uname));
+ 					goto toomany;
+ 				}
+ 				/* filter out duplicate group entries */
+@@ -279,9 +279,7 @@ getnetid(key, ret)
+ 			err = yp_match(domain, NETID, key,
+ 				strlen(key), &lookup, &len);
+ 			if (err) {
+-#ifdef DEBUG
+-				fprintf(stderr, "match failed error %d\n", err);
+-#endif
++				LIBTIRPC_DEBUG(1, ("getnetid: match failed error %d", err));
+ 				continue;
+ 			}
+ 			lookup[len] = 0;
+@@ -291,11 +289,9 @@ getnetid(key, ret)
+ 				fclose(fd);
+ 			return (2);
+ #else	/* YP */
+-#ifdef DEBUG
+-			fprintf(stderr,
+-"Bad record in %s '+' -- NIS not supported in this library copy\n",
+-				NETIDFILE);
+-#endif
++			LIBTIRPC_DEBUG(1,
++("Bad record in %s '+' -- NIS not supported in this library copy\n",
++				NETIDFILE));
+ 			continue;
+ #endif	/* YP */
+ 		} else {
+diff --git a/src/rpcb_clnt.c b/src/rpcb_clnt.c
+index 312967c..41ea62b 100644
+--- a/src/rpcb_clnt.c
++++ b/src/rpcb_clnt.c
+@@ -54,6 +54,7 @@
+ #include <assert.h>
+ 
+ #include "rpc_com.h"
++#include "debug.h"
+ 
+ static struct timeval tottimeout = { 60, 0 };
+ static const struct timeval rmttimeout = { 3, 0 };
+@@ -152,10 +153,8 @@ check_cache(host, netid)
+ 	for (cptr = front; cptr != NULL; cptr = cptr->ac_next) {
+ 		if (!strcmp(cptr->ac_host, host) &&
+ 		    !strcmp(cptr->ac_netid, netid)) {
+-#ifdef ND_DEBUG
+-			fprintf(stderr, "Found cache entry for %s: %s\n",
+-				host, netid);
+-#endif
++			LIBTIRPC_DEBUG(3, ("check_cache: Found cache entry for %s: %s\n", 
++				host, netid));
+ 			return (cptr);
+ 		}
+ 	}
+@@ -214,9 +213,7 @@ add_cache(host, netid, taddr, uaddr)
+ 	if (ad_cache->ac_taddr->buf == NULL)
+ 		goto out_free;
+ 	memcpy(ad_cache->ac_taddr->buf, taddr->buf, taddr->len);
+-#ifdef ND_DEBUG
+-	fprintf(stderr, "Added to cache: %s : %s\n", host, netid);
+-#endif
++	LIBTIRPC_DEBUG(3, ("add_cache: Added to cache: %s : %s\n", host, netid));
+ 
+ /* VARIABLES PROTECTED BY rpcbaddr_cache_lock:  cptr */
+ 
+@@ -234,10 +231,8 @@ add_cache(host, netid, taddr, uaddr)
+ 			cptr = cptr->ac_next;
+ 		}
+ 
+-#ifdef ND_DEBUG
+-		fprintf(stderr, "Deleted from cache: %s : %s\n",
+-			cptr->ac_host, cptr->ac_netid);
+-#endif
++		LIBTIRPC_DEBUG(3, ("add_cache: Deleted from cache: %s : %s\n",
++			cptr->ac_host, cptr->ac_netid));
+ 		free(cptr->ac_host);
+ 		free(cptr->ac_netid);
+ 		free(cptr->ac_taddr->buf);
+@@ -338,17 +333,14 @@ getclnthandle(host, nconf, targaddr)
+ 	hints.ai_socktype = si.si_socktype;
+ 	hints.ai_protocol = si.si_proto;
+ 
+-#ifdef CLNT_DEBUG
+-	printf("trying netid %s family %d proto %d socktype %d\n",
+-	    nconf->nc_netid, si.si_af, si.si_proto, si.si_socktype);
+-#endif
++	LIBTIRPC_DEBUG(3, ("getclnthandle: trying netid %s family %d proto %d socktype %d\n",
++	    nconf->nc_netid, si.si_af, si.si_proto, si.si_socktype));
+ 
+ 	if (nconf->nc_protofmly != NULL && strcmp(nconf->nc_protofmly, NC_LOOPBACK) == 0) {
+ 		client = local_rpcb();
+ 		if (! client) {
+-#ifdef ND_DEBUG
+-			clnt_pcreateerror("rpcbind clnt interface");
+-#endif
++			LIBTIRPC_DEBUG(1, ("getclnthandle: %s", 
++				clnt_spcreateerror("local_rpcb failed")));
+ 			goto out_err;
+ 		} else {
+ 			struct sockaddr_un sun;
+@@ -370,19 +362,13 @@ getclnthandle(host, nconf, targaddr)
+ 		taddr.buf = tres->ai_addr;
+ 		taddr.len = taddr.maxlen = tres->ai_addrlen;
+ 
+-#ifdef ND_DEBUG
+-		{
++		if (libtirpc_debug_level > 3 && log_stderr) {
+ 			char *ua;
++			int i;
+ 
+ 			ua = taddr2uaddr(nconf, &taddr);
+-			fprintf(stderr, "Got it [%s]\n", ua);
++			fprintf(stderr, "Got it [%s]\n", ua); 
+ 			free(ua);
+-		}
+-#endif
+-
+-#ifdef ND_DEBUG
+-		{
+-			int i;
+ 
+ 			fprintf(stderr, "\tnetbuf len = %d, maxlen = %d\n",
+ 				taddr.len, taddr.maxlen);
+@@ -391,14 +377,13 @@ getclnthandle(host, nconf, targaddr)
+ 				fprintf(stderr, "%u.", ((char *)(taddr.buf))[i]);
+ 			fprintf(stderr, "\n");
+ 		}
+-#endif
++
+ 		client = clnt_tli_create(RPC_ANYFD, nconf, &taddr,
+ 		    (rpcprog_t)RPCBPROG, (rpcvers_t)RPCBVERS4, 0, 0);
+-#ifdef ND_DEBUG
+ 		if (! client) {
+-			clnt_pcreateerror("rpcbind clnt interface");
++			LIBTIRPC_DEBUG(1, ("getclnthandle: %s", 
++				clnt_spcreateerror("clnt_tli_create failed")));
+ 		}
+-#endif
+ 
+ 		if (client) {
+ 			tmpaddr = targaddr ? taddr2uaddr(nconf, &taddr) : NULL;
+@@ -640,13 +625,8 @@ got_entry(relp, nconf)
+ 		    (nconf->nc_semantics == rmap->r_nc_semantics) &&
+ 		    (rmap->r_maddr != NULL) && (rmap->r_maddr[0] != 0)) {
+ 			na = uaddr2taddr(nconf, rmap->r_maddr);
+-#ifdef ND_DEBUG
+-			fprintf(stderr, "\tRemote address is [%s].\n",
+-				rmap->r_maddr);
+-			if (!na)
+-				fprintf(stderr,
+-				    "\tCouldn't resolve remote address!\n");
+-#endif
++			LIBTIRPC_DEBUG(3, ("got_entry: Remote address is [%s] %s", 
++				rmap->r_maddr, (na ? "Resolvable" : "Not Resolvable")));
+ 			break;
+ 		}
+ 	}
+@@ -874,12 +854,9 @@ try_rpcbind:
+ 				goto error;
+ 			}
+ 			address = uaddr2taddr(nconf, ua);
+-#ifdef ND_DEBUG
+-			fprintf(stderr, "\tRemote address is [%s]\n", ua);
+-			if (!address)
+-				fprintf(stderr,
+-					"\tCouldn't resolve remote address!\n");
+-#endif
++			LIBTIRPC_DEBUG(3, ("__rpcb_findaddr_timed: Remote address is [%s] %s", 
++				ua, (address ? "Resolvable" : "Not Resolvable")));
++
+ 			xdr_free((xdrproc_t)xdr_wrapstring,
+ 			    (char *)(void *)&ua);
+ 
+diff --git a/src/svc_auth_des.c b/src/svc_auth_des.c
+index e0ff6cb..08e2bee 100644
+--- a/src/svc_auth_des.c
++++ b/src/svc_auth_des.c
+@@ -64,9 +64,9 @@
+ #include <libc_private.h>
+ #endif
+ 
+-extern int key_decryptsession_pk(const char *, netobj *, des_block *);
++#include "debug.h"
+ 
+-#define debug(msg)	 printf("svcauth_des: %s\n", msg) 
++extern int key_decryptsession_pk(const char *, netobj *, des_block *);
+ 
+ #define USEC_PER_SEC ((u_long) 1000000L)
+ #define BEFORE(t1, t2) timercmp(t1, t2, <)
+@@ -178,20 +178,20 @@ _svcauth_des(rqst, msg)
+ 
+ 		sessionkey = &cred->adc_fullname.key;
+ 		if (! getpublickey(cred->adc_fullname.name, pkey_data)) {
+-			debug("getpublickey");
++			LIBTIRPC_DEBUG(1, ("_svcauth_des: getpublickey failed"));
+ 			return(AUTH_BADCRED);
+ 		}
+ 		pkey.n_bytes = pkey_data;
+ 		pkey.n_len = strlen(pkey_data) + 1;
+ 		if (key_decryptsession_pk(cred->adc_fullname.name, &pkey,
+ 				       sessionkey) < 0) {
+-			debug("decryptsessionkey");
++			LIBTIRPC_DEBUG(1, ("_svcauth_des: key_decryptsessionkey failed"));
+ 			return (AUTH_BADCRED); /* key not found */
+ 		}
+ 	} else { /* ADN_NICKNAME */	
+ 		sid = (short)cred->adc_nickname;
+ 		if (sid < 0 || sid >= AUTHDES_CACHESZ) {
+-			debug("bad nickname");
++			LIBTIRPC_DEBUG(1, ("_svcauth_des: bad nickname"));
+ 			return (AUTH_BADCRED);	/* garbled credential */
+ 		}
+ 		sessionkey = &authdes_cache[sid].key;
+@@ -214,7 +214,7 @@ _svcauth_des(rqst, msg)
+ 			sizeof(des_block), DES_DECRYPT | DES_HW);
+ 	}
+ 	if (DES_FAILED(status)) {
+-		debug("decryption failure");
++		LIBTIRPC_DEBUG(1, ("_svcauth_des: decryption failure"));
+ 		return (AUTH_FAILED);	/* system error */
+ 	}
+ 
+@@ -240,13 +240,13 @@ _svcauth_des(rqst, msg)
+ 			window = IXDR_GET_U_LONG(ixdr);
+ 			winverf = IXDR_GET_U_LONG(ixdr);
+ 			if (winverf != window - 1) {
+-				debug("window verifier mismatch");
++				LIBTIRPC_DEBUG(1, ("_svcauth_des: window verifier mismatch"));
+ 				return (AUTH_BADCRED);	/* garbled credential */
+ 			}
+ 			sid = cache_spot(sessionkey, cred->adc_fullname.name, 
+ 			    &timestamp);
+ 			if (sid < 0) {
+-				debug("replayed credential");
++				LIBTIRPC_DEBUG(1, ("_svcauth_des: replayed credential"));
+ 				return (AUTH_REJECTEDCRED);	/* replay */
+ 			}
+ 			nick = 0;
+@@ -256,19 +256,19 @@ _svcauth_des(rqst, msg)
+ 		}
+ 
+ 		if ((u_long)timestamp.tv_usec >= USEC_PER_SEC) {
+-			debug("invalid usecs");
++			LIBTIRPC_DEBUG(1, ("_svcauth_des: invalid usecs"));
+ 			/* cached out (bad key), or garbled verifier */
+ 			return (nick ? AUTH_REJECTEDVERF : AUTH_BADVERF);
+ 		}
+ 		if (nick && BEFORE(&timestamp, 
+ 				   &authdes_cache[sid].laststamp)) {
+-			debug("timestamp before last seen");
++			LIBTIRPC_DEBUG(1, ("_svcauth_des: timestamp before last seen"));
+ 			return (AUTH_REJECTEDVERF);	/* replay */
+ 		}
+ 		(void) gettimeofday(&current, (struct timezone *)NULL);
+ 		current.tv_sec -= window;	/* allow for expiration */
+ 		if (!BEFORE(&current, &timestamp)) {
+-			debug("timestamp expired");
++			LIBTIRPC_DEBUG(1, ("_svcauth_des: timestamp expired"));
+ 			/* replay, or garbled credential */
+ 			return (nick ? AUTH_REJECTEDVERF : AUTH_BADCRED);
+ 		}
+@@ -292,7 +292,7 @@ _svcauth_des(rqst, msg)
+ 	status = ecb_crypt((char *)sessionkey, (char *)cryptbuf,
+ 	    sizeof(des_block), DES_ENCRYPT | DES_HW);
+ 	if (DES_FAILED(status)) {
+-		debug("encryption failure");
++		LIBTIRPC_DEBUG(1, ("_svcauth_des: encryption failure"));
+ 		return (AUTH_FAILED);	/* system error */
+ 	}
+ 	verf.adv_xtimestamp = cryptbuf[0];
+@@ -328,7 +328,7 @@ _svcauth_des(rqst, msg)
+ 		if (entry->rname != NULL) {
+ 			(void) strcpy(entry->rname, cred->adc_fullname.name);
+ 		} else {
+-			debug("out of memory");
++			LIBTIRPC_DEBUG(1, ("_svcauth_des: out of memory"));
+ 		}
+ 		entry->key = *sessionkey;
+ 		entry->window = window;
+@@ -472,7 +472,7 @@ authdes_getucred(adc, uid, gid, grouplen, groups)
+ 
+ 	sid = adc->adc_nickname;
+ 	if (sid >= AUTHDES_CACHESZ) {
+-		debug("invalid nickname");
++		LIBTIRPC_DEBUG(1, ("authdes_getucred: invalid nickname"));
+ 		return (0);
+ 	}
+ 	cred = (struct bsdcred *)authdes_cache[sid].localcred;
+@@ -488,11 +488,11 @@ authdes_getucred(adc, uid, gid, grouplen, groups)
+ 		if (!netname2user(adc->adc_fullname.name, &i_uid, &i_gid, 
+ 			&i_grouplen, groups))
+ 		{
+-			debug("unknown netname");
++			LIBTIRPC_DEBUG(1, ("authdes_getucred: unknown netname"));
+ 			cred->grouplen = UNKNOWN;	/* mark as lookup up, but not found */
+ 			return (0);
+ 		}
+-		debug("missed ucred cache");
++		LIBTIRPC_DEBUG(1, ("authdes_getucred: missed ucred cache"));
+ 		*uid = cred->uid = i_uid;
+ 		*gid = cred->gid = i_gid;
+ 		*grouplen = cred->grouplen = i_grouplen;
+diff --git a/src/svc_auth_gss.c b/src/svc_auth_gss.c
+index 8027d82..1950cd1 100644
+--- a/src/svc_auth_gss.c
++++ b/src/svc_auth_gss.c
+@@ -87,13 +87,14 @@ svcauth_gss_set_svc_name(gss_name_t name)
+ {
+ 	OM_uint32	maj_stat, min_stat;
+ 
+-	log_debug("in svcauth_gss_set_svc_name()");
++	gss_log_debug("in svcauth_gss_set_svc_name()");
+ 
+ 	if (_svcauth_gss_name != NULL) {
+ 		maj_stat = gss_release_name(&min_stat, &_svcauth_gss_name);
+ 
+ 		if (maj_stat != GSS_S_COMPLETE) {
+-			log_status("gss_release_name", maj_stat, min_stat);
++			gss_log_status("svcauth_gss_set_svc_name: gss_release_name", 
++				maj_stat, min_stat);
+ 			return (FALSE);
+ 		}
+ 		_svcauth_gss_name = NULL;
+@@ -101,7 +102,8 @@ svcauth_gss_set_svc_name(gss_name_t name)
+ 	maj_stat = gss_duplicate_name(&min_stat, name, &_svcauth_gss_name);
+ 
+ 	if (maj_stat != GSS_S_COMPLETE) {
+-		log_status("gss_duplicate_name", maj_stat, min_stat);
++		gss_log_status("svcauth_gss_set_svc_name: gss_duplicate_name", 
++			maj_stat, min_stat);
+ 		return (FALSE);
+ 	}
+ 
+@@ -115,7 +117,7 @@ svcauth_gss_import_name(char *service)
+ 	gss_buffer_desc	namebuf;
+ 	OM_uint32	maj_stat, min_stat;
+ 
+-	log_debug("in svcauth_gss_import_name()");
++	gss_log_debug("in svcauth_gss_import_name()");
+ 
+ 	namebuf.value = service;
+ 	namebuf.length = strlen(service);
+@@ -124,7 +126,8 @@ svcauth_gss_import_name(char *service)
+ 				   (gss_OID)GSS_C_NT_HOSTBASED_SERVICE, &name);
+ 
+ 	if (maj_stat != GSS_S_COMPLETE) {
+-		log_status("gss_import_name", maj_stat, min_stat);
++		gss_log_status("svcauth_gss_import_name: gss_import_name", 
++			maj_stat, min_stat);
+ 		return (FALSE);
+ 	}
+ 	if (svcauth_gss_set_svc_name(name) != TRUE) {
+@@ -139,14 +142,15 @@ svcauth_gss_acquire_cred(void)
+ {
+ 	OM_uint32	maj_stat, min_stat;
+ 
+-	log_debug("in svcauth_gss_acquire_cred()");
++	gss_log_debug("in svcauth_gss_acquire_cred()");
+ 
+ 	maj_stat = gss_acquire_cred(&min_stat, _svcauth_gss_name, 0,
+ 				    GSS_C_NULL_OID_SET, GSS_C_ACCEPT,
+ 				    &_svcauth_gss_creds, NULL, NULL);
+ 
+ 	if (maj_stat != GSS_S_COMPLETE) {
+-		log_status("gss_acquire_cred", maj_stat, min_stat);
++		gss_log_status("svcauth_gss_acquire_cred: gss_acquire_cred", 
++			maj_stat, min_stat);
+ 		return (FALSE);
+ 	}
+ 	return (TRUE);
+@@ -157,12 +161,13 @@ svcauth_gss_release_cred(void)
+ {
+ 	OM_uint32	maj_stat, min_stat;
+ 
+-	log_debug("in svcauth_gss_release_cred()");
++	gss_log_debug("in svcauth_gss_release_cred()");
+ 
+ 	maj_stat = gss_release_cred(&min_stat, &_svcauth_gss_creds);
+ 
+ 	if (maj_stat != GSS_S_COMPLETE) {
+-		log_status("gss_release_cred", maj_stat, min_stat);
++		gss_log_status("svcauth_gss_release_cred: gss_release_cred", 
++			maj_stat, min_stat);
+ 		return (FALSE);
+ 	}
+ 
+@@ -181,7 +186,7 @@ svcauth_gss_accept_sec_context(struct svc_req *rqst,
+ 	gss_OID			 mech;
+ 	OM_uint32		 maj_stat = 0, min_stat = 0, ret_flags, seq;
+ 
+-	log_debug("in svcauth_gss_accept_context()");
++	gss_log_debug("in svcauth_gss_accept_context()");
+ 
+ 	gd = SVCAUTH_PRIVATE(rqst->rq_xprt->xp_auth);
+ 	gc = (struct rpc_gss_cred *)rqst->rq_clntcred;
+@@ -208,7 +213,8 @@ svcauth_gss_accept_sec_context(struct svc_req *rqst,
+ 
+ 	if (gr->gr_major != GSS_S_COMPLETE &&
+ 	    gr->gr_major != GSS_S_CONTINUE_NEEDED) {
+-		log_status("accept_sec_context", gr->gr_major, gr->gr_minor);
++		gss_log_status("svcauth_gss_accept_sec_context: accept_sec_context",
++			gr->gr_major, gr->gr_minor);
+ 		gd->ctx = GSS_C_NO_CONTEXT;
+ 		gss_release_buffer(&min_stat, &gr->gr_token);
+ 		return (FALSE);
+@@ -238,31 +244,30 @@ svcauth_gss_accept_sec_context(struct svc_req *rqst,
+ 		maj_stat = gss_display_name(&min_stat, gd->client_name,
+ 					    &gd->cname, &gd->sec.mech);
+ 		if (maj_stat != GSS_S_COMPLETE) {
+-			log_status("display_name", maj_stat, min_stat);
++			gss_log_status("svcauth_gss_accept_sec_context: display_name", 
++				maj_stat, min_stat);
+ 			return (FALSE);
+ 		}
+-#ifdef DEBUG
+ #ifdef HAVE_KRB5
+ 		{
+ 			gss_buffer_desc mechname;
+ 
+ 			gss_oid_to_str(&min_stat, mech, &mechname);
+ 
+-			log_debug("accepted context for %.*s with "
+-				  "<mech %.*s, qop %d, svc %d>",
+-				  gd->cname.length, (char *)gd->cname.value,
+-				  mechname.length, (char *)mechname.value,
+-				  gd->sec.qop, gd->sec.svc);
++			gss_log_debug("accepted context for %.*s with "
++				      "<mech %.*s, qop %d, svc %d>",
++				      gd->cname.length, (char *)gd->cname.value,
++				      mechname.length, (char *)mechname.value,
++				      gd->sec.qop, gd->sec.svc);
+ 
+ 			gss_release_buffer(&min_stat, &mechname);
+ 		}
+ #elif HAVE_HEIMDAL
+-		log_debug("accepted context for %.*s with "
+-			  "<mech {}, qop %d, svc %d>",
+-			  gd->cname.length, (char *)gd->cname.value,
+-			  gd->sec.qop, gd->sec.svc);
++		gss_log_debug("accepted context for %.*s with "
++			      "<mech {}, qop %d, svc %d>",
++			      gd->cname.length, (char *)gd->cname.value,
++			      gd->sec.qop, gd->sec.svc);
+ #endif
+-#endif /* DEBUG */
+ 		seq = htonl(gr->gr_win);
+ 		seqbuf.value = &seq;
+ 		seqbuf.length = sizeof(seq);
+@@ -289,7 +294,7 @@ svcauth_gss_validate(struct svc_rpc_gss_data *gd, struct rpc_msg *msg)
+ 	u_char			 *rpchdr;
+ 	int32_t			*buf;
+ 
+-	log_debug("in svcauth_gss_validate()");
++	gss_log_debug("in svcauth_gss_validate()");
+ 
+ 	/* XXX - Reconstruct RPC header for signing (from xdr_callmsg). */
+ 	oa = &msg->rm_call.cb_cred;
+@@ -326,7 +331,8 @@ svcauth_gss_validate(struct svc_rpc_gss_data *gd, struct rpc_msg *msg)
+ 	free(rpchdr);
+ 
+ 	if (maj_stat != GSS_S_COMPLETE) {
+-		log_status("gss_verify_mic", maj_stat, min_stat);
++		gss_log_status("svcauth_gss_validate: gss_verify_mic", 
++			maj_stat, min_stat);
+ 		return (FALSE);
+ 	}
+ 	return (TRUE);
+@@ -339,7 +345,7 @@ svcauth_gss_nextverf(struct svc_req *rqst, u_int num)
+ 	gss_buffer_desc		 signbuf, checksum;
+ 	OM_uint32		 maj_stat, min_stat;
+ 
+-	log_debug("in svcauth_gss_nextverf()");
++	gss_log_debug("in svcauth_gss_nextverf()");
+ 
+ 	if (rqst->rq_xprt->xp_auth == NULL)
+ 		return (FALSE);
+@@ -353,7 +359,8 @@ svcauth_gss_nextverf(struct svc_req *rqst, u_int num)
+ 			       &signbuf, &checksum);
+ 
+ 	if (maj_stat != GSS_S_COMPLETE) {
+-		log_status("gss_get_mic", maj_stat, min_stat);
++		gss_log_status("svcauth_gss_nextverf: gss_get_mic", 
++			maj_stat, min_stat);
+ 		return (FALSE);
+ 	}
+ 	rqst->rq_xprt->xp_verf.oa_flavor = RPCSEC_GSS;
+@@ -373,7 +380,7 @@ _svcauth_gss(struct svc_req *rqst, struct rpc_msg *msg, bool_t *no_dispatch)
+ 	struct rpc_gss_init_res	 gr;
+ 	int			 call_stat, offset;
+ 
+-	log_debug("in svcauth_gss()");
++	gss_log_debug("in svcauth_gss()");
+ 
+ 	/* Initialize reply. */
+ 	rqst->rq_xprt->xp_verf = _null_auth;
+@@ -519,7 +526,7 @@ svcauth_gss_destroy(SVCAUTH *auth)
+ 	struct svc_rpc_gss_data	*gd;
+ 	OM_uint32		 min_stat;
+ 
+-	log_debug("in svcauth_gss_destroy()");
++	gss_log_debug("in svcauth_gss_destroy()");
+ 
+ 	gd = SVCAUTH_PRIVATE(auth);
+ 
+@@ -540,7 +547,7 @@ svcauth_gss_wrap(SVCAUTH *auth, XDR *xdrs, xdrproc_t xdr_func, caddr_t xdr_ptr)
+ {
+ 	struct svc_rpc_gss_data	*gd;
+ 
+-	log_debug("in svcauth_gss_wrap()");
++	gss_log_debug("in svcauth_gss_wrap()");
+ 
+ 	gd = SVCAUTH_PRIVATE(auth);
+ 
+@@ -557,7 +564,7 @@ svcauth_gss_unwrap(SVCAUTH *auth, XDR *xdrs, xdrproc_t xdr_func, caddr_t xdr_ptr
+ {
+ 	struct svc_rpc_gss_data	*gd;
+ 
+-	log_debug("in svcauth_gss_unwrap()");
++	gss_log_debug("in svcauth_gss_unwrap()");
+ 
+ 	gd = SVCAUTH_PRIVATE(auth);
+ 
+diff --git a/src/svc_dg.c b/src/svc_dg.c
+index 224a075..05378c5 100644
+--- a/src/svc_dg.c
++++ b/src/svc_dg.c
+@@ -49,13 +49,11 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+-#ifdef RPC_CACHE_DEBUG
+ #include <netconfig.h>
+-#include <netdir.h>
+-#endif
+ #include <err.h>
+ 
+ #include "rpc_com.h"
++#include "debug.h"
+ 
+ #define	su_data(xprt)	((struct svc_dg_data *)(xprt->xp_p2))
+ #define	rpc_buffer(xprt) ((xprt)->xp_p1)
+@@ -235,8 +233,8 @@ svc_dg_reply(xprt, msg)
+ 	bool_t stat = FALSE;
+ 	size_t slen;
+ 
+-	xdrproc_t xdr_results;
+-	caddr_t xdr_location;
++	xdrproc_t xdr_results = NULL;
++	caddr_t xdr_location = NULL;
+ 	bool_t has_args;
+ 
+ 	if (msg->rm_reply.rp_stat == MSG_ACCEPTED &&
+@@ -506,10 +504,8 @@ cache_set(xprt, replylen)
+ 	struct cl_cache *uc = (struct cl_cache *) su->su_cache;
+ 	u_int loc;
+ 	char *newbuf;
+-#ifdef RPC_CACHE_DEBUG
+ 	struct netconfig *nconf;
+ 	char *uaddr;
+-#endif
+ 
+ 	mutex_lock(&dupreq_lock);
+ 	/*
+@@ -549,17 +545,17 @@ cache_set(xprt, replylen)
+ 	/*
+ 	 * Store it away
+ 	 */
+-#ifdef RPC_CACHE_DEBUG
+-	if (nconf = getnetconfigent(xprt->xp_netid)) {
+-		uaddr = taddr2uaddr(nconf, &xprt->xp_rtaddr);
+-		freenetconfigent(nconf);
+-		printf(
+-	"cache set for xid= %x prog=%d vers=%d proc=%d for rmtaddr=%s\n",
+-			su->su_xid, uc->uc_prog, uc->uc_vers,
+-			uc->uc_proc, uaddr);
+-		free(uaddr);
++	if (libtirpc_debug_level > 3) {
++		if ((nconf = getnetconfigent(xprt->xp_netid))) {
++			uaddr = taddr2uaddr(nconf, &xprt->xp_rtaddr);
++			freenetconfigent(nconf);
++			LIBTIRPC_DEBUG(4,
++				("cache set for xid= %x prog=%d vers=%d proc=%d for rmtaddr=%s\n",
++				su->su_xid, uc->uc_prog, uc->uc_vers,
++				uc->uc_proc, uaddr));
++			free(uaddr);
++		}
+ 	}
+-#endif
+ 	victim->cache_replylen = replylen;
+ 	victim->cache_reply = rpc_buffer(xprt);
+ 	rpc_buffer(xprt) = newbuf;
+@@ -596,10 +592,8 @@ cache_get(xprt, msg, replyp, replylenp)
+ 	cache_ptr ent;
+ 	struct svc_dg_data *su = su_data(xprt);
+ 	struct cl_cache *uc = (struct cl_cache *) su->su_cache;
+-#ifdef RPC_CACHE_DEBUG
+ 	struct netconfig *nconf;
+ 	char *uaddr;
+-#endif
+ 
+ 	mutex_lock(&dupreq_lock);
+ 	loc = CACHE_LOC(xprt, su->su_xid);
+@@ -611,18 +605,19 @@ cache_get(xprt, msg, replyp, replylenp)
+ 			ent->cache_addr.len == xprt->xp_rtaddr.len &&
+ 			(memcmp(ent->cache_addr.buf, xprt->xp_rtaddr.buf,
+ 				xprt->xp_rtaddr.len) == 0)) {
+-#ifdef RPC_CACHE_DEBUG
+-			if (nconf = getnetconfigent(xprt->xp_netid)) {
+-				uaddr = taddr2uaddr(nconf, &xprt->xp_rtaddr);
+-				freenetconfigent(nconf);
+-				printf(
+-	"cache entry found for xid=%x prog=%d vers=%d proc=%d for rmtaddr=%s\n",
+-					su->su_xid, msg->rm_call.cb_prog,
+-					msg->rm_call.cb_vers,
+-					msg->rm_call.cb_proc, uaddr);
+-				free(uaddr);
++			if (libtirpc_debug_level > 3) {
++				if ((nconf = getnetconfigent(xprt->xp_netid))) {
++					uaddr = taddr2uaddr(nconf, &xprt->xp_rtaddr);
++					freenetconfigent(nconf);
++					LIBTIRPC_DEBUG(4,
++						("cache entry found for xid=%x prog=%d" 
++						"vers=%d proc=%d for rmtaddr=%s\n",
++						su->su_xid, msg->rm_call.cb_prog,
++						msg->rm_call.cb_vers,
++						msg->rm_call.cb_proc, uaddr));
++					free(uaddr);
++				}
+ 			}
+-#endif
+ 			*replyp = ent->cache_reply;
+ 			*replylenp = ent->cache_replylen;
+ 			mutex_unlock(&dupreq_lock);
+diff --git a/src/svc_vc.c b/src/svc_vc.c
+index 4c70de8..eff2cdd 100644
+--- a/src/svc_vc.c
++++ b/src/svc_vc.c
+@@ -673,8 +673,8 @@ svc_vc_reply(xprt, msg)
+ 	XDR *xdrs;
+ 	bool_t rstat;
+ 
+-	xdrproc_t xdr_results;
+-	caddr_t xdr_location;
++	xdrproc_t xdr_results = NULL;
++	caddr_t xdr_location = NULL;
+ 	bool_t has_args;
+ 
+ 	assert(xprt != NULL);
+diff --git a/tirpc/rpc/auth_gss.h b/tirpc/rpc/auth_gss.h
+index 2f5c913..d6f2bbd 100644
+--- a/tirpc/rpc/auth_gss.h
++++ b/tirpc/rpc/auth_gss.h
+@@ -121,10 +121,10 @@ bool_t authgss_get_private_data	__P((AUTH *auth,
+ 	    			     struct authgss_private_data *));
+ bool_t authgss_free_private_data __P((struct authgss_private_data *));
+ 
+-void	log_debug		__P((const char *fmt, ...));
+-void	log_status		__P((char *m, OM_uint32 major,
++void	gss_log_debug		__P((const char *fmt, ...));
++void	gss_log_status		__P((char *m, OM_uint32 major,
+ 				     OM_uint32 minor));
+-void	log_hexdump		__P((const u_char *buf, int len, int offset));
++void	gss_log_hexdump		__P((const u_char *buf, int len, int offset));
+ 
+ __END_DECLS
+ 
