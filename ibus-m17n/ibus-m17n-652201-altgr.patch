@@ -1,0 +1,96 @@
+From c73eeec94f766631e3e3aab608014c7907f07ca3 Mon Sep 17 00:00:00 2001
+From: Daiki Ueno <ueno@unixuser.org>
+Date: Thu, 19 Aug 2010 11:42:01 +0900
+Subject: [PATCH] Prefix "G-" for m17n keysym for AltGr.
+
+---
+ src/engine.c |   37 +++++++++++++++++++++++++++++++++++--
+ 1 files changed, 35 insertions(+), 2 deletions(-)
+
+diff --git a/src/engine.c b/src/engine.c
+index dcfbe48..2b10c53 100644
+--- a/src/engine.c
++++ b/src/engine.c
+@@ -262,22 +262,51 @@ ibus_m17n_engine_commit_string (IBusM17NEngine *m17n,
+     ibus_engine_commit_text ((IBusEngine *)m17n, text);
+ }
+ 
++/* Note on AltGr (Level3 Shift) handling: While currently we expect
++   AltGr == mod5, it would be better to not expect the modifier always
++   be assigned to particular modX.  However, it needs some code like:
++
++   KeyCode altgr = XKeysymToKeycode (display, XK_ISO_Level3_Shift);
++   XModifierKeymap *mods = XGetModifierMapping (display);
++   for (i = 3; i < 8; i++)
++     for (j = 0; j < mods->max_keypermod; j++) {
++       KeyCode code = mods->modifiermap[i * mods->max_keypermod + j];
++       if (code == altgr)
++         ...
++     }
++                
++   Since IBus engines are supposed to be cross-platform, the code
++   should go into IBus core, instead of ibus-m17n. */
+ MSymbol
+-ibus_m17n_key_event_to_symbol (guint keyval,
++ibus_m17n_key_event_to_symbol (guint keycode,
++                               guint keyval,
+                                guint modifiers)
+ {
+     GString *keysym;
+     MSymbol mkeysym = Mnil;
+     guint mask = 0;
++    IBusKeymap *keymap;
+ 
+     if (keyval >= IBUS_Shift_L && keyval <= IBUS_Hyper_R) {
+         return Mnil;
+     }
+ 
++    /* Here, keyval is already translated by IBUS_MOD5_MASK.  Obtain
++       the untranslated keyval from the underlying keymap and
++       represent the translated keyval as the form "G-<untranslated
++       keyval>", which m17n-lib accepts. */
++    if (modifiers & IBUS_MOD5_MASK) {
++        keymap = ibus_keymap_get ("us");
++        keyval = ibus_keymap_lookup_keysym (keymap, keycode,
++                                            modifiers & ~IBUS_MOD5_MASK);
++        g_object_unref (keymap);
++    }
++
+     keysym = g_string_new ("");
+ 
+     if (keyval >= IBUS_space && keyval <= IBUS_asciitilde) {
+         gint c = keyval;
++
+         if (keyval == IBUS_space && modifiers & IBUS_SHIFT_MASK)
+             mask |= IBUS_SHIFT_MASK;
+ 
+@@ -299,6 +328,7 @@ ibus_m17n_key_event_to_symbol (guint keyval,
+     }
+ 
+     mask |= modifiers & (IBUS_MOD1_MASK |
++                         IBUS_MOD5_MASK |
+                          IBUS_META_MASK |
+                          IBUS_SUPER_MASK |
+                          IBUS_HYPER_MASK);
+@@ -310,6 +340,9 @@ ibus_m17n_key_event_to_symbol (guint keyval,
+     if (mask & IBUS_SUPER_MASK) {
+         g_string_prepend (keysym, "s-");
+     }
++    if (mask & IBUS_MOD5_MASK) {
++        g_string_prepend (keysym, "G-");
++    }
+     if (mask & IBUS_MOD1_MASK) {
+         g_string_prepend (keysym, "A-");
+     }
+@@ -372,7 +405,7 @@ ibus_m17n_engine_process_key_event (IBusEngine     *engine,
+ 
+     if (modifiers & IBUS_RELEASE_MASK)
+         return FALSE;
+-    MSymbol m17n_key = ibus_m17n_key_event_to_symbol (keyval, modifiers);
++    MSymbol m17n_key = ibus_m17n_key_event_to_symbol (keycode, keyval, modifiers);
+ 
+     if (m17n_key == Mnil)
+         return FALSE;
+-- 
+1.7.3.4
+
