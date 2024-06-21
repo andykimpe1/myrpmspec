@@ -1,0 +1,104 @@
+diff -up libselinux-2.0.94/src/matchpathcon.c.thread libselinux-2.0.94/src/matchpathcon.c
+--- libselinux-2.0.94/src/matchpathcon.c.thread	2011-04-06 11:19:55.427610211 -0400
++++ libselinux-2.0.94/src/matchpathcon.c	2011-04-06 11:45:03.082818337 -0400
+@@ -18,6 +18,7 @@ static __thread int con_array_used;
+ 
+ static pthread_once_t once = PTHREAD_ONCE_INIT;
+ static pthread_key_t destructor_key;
++static int destructor_key_initialized = 0;
+ 
+ static int add_array_elt(char *con)
+ {
+@@ -286,9 +287,21 @@ void matchpathcon_filespec_destroy(void)
+ 	fl_head = NULL;
+ }
+ 
++static void matchpathcon_thread_destructor(void __attribute__((unused)) *ptr)
++{
++	matchpathcon_fini();
++}
++
++void __attribute__((destructor)) matchpathcon_lib_destructor(void)
++{
++	if (destructor_key_initialized)
++		__selinux_key_delete(destructor_key);
++}
++
+ static void matchpathcon_init_once(void)
+ {
+-	__selinux_key_create(&destructor_key, free_array_elts);
++	if (__selinux_key_create(&destructor_key, matchpathcon_thread_destructor) == 0)
++		destructor_key_initialized = 1;
+ }
+ 
+ int matchpathcon_init_prefix(const char *path, const char *subset)
+@@ -317,6 +330,8 @@ int matchpathcon_init(const char *path)
+ 
+ void matchpathcon_fini(void)
+ {
++	free_array_elts();
++
+ 	if (hnd) {
+ 		selabel_close(hnd);
+ 		hnd = NULL;
+diff -up libselinux-2.0.94/src/selinux_internal.h.thread libselinux-2.0.94/src/selinux_internal.h
+--- libselinux-2.0.94/src/selinux_internal.h.thread	2011-04-06 11:19:55.427610211 -0400
++++ libselinux-2.0.94/src/selinux_internal.h	2011-04-06 11:30:40.768623445 -0400
+@@ -98,6 +98,7 @@ extern int selinux_page_size hidden;
+ /* Make pthread_once optional */
+ #pragma weak pthread_once
+ #pragma weak pthread_key_create
++#pragma weak pthread_key_delete
+ #pragma weak pthread_setspecific
+ 
+ /* Call handler iff the first call.  */
+@@ -113,9 +114,12 @@ extern int selinux_page_size hidden;
+ 
+ /* Pthread key macros */
+ #define __selinux_key_create(KEY, DESTRUCTOR)			\
++	(pthread_key_create != NULL ? pthread_key_create(KEY, DESTRUCTOR) : -1)
++
++#define __selinux_key_delete(KEY)				\
+ 	do {							\
+-		if (pthread_key_create != NULL)			\
+-			pthread_key_create(KEY, DESTRUCTOR);	\
++		if (pthread_key_delete != NULL)			\
++			pthread_key_delete(KEY);		\
+ 	} while (0)
+ 
+ #define __selinux_setspecific(KEY, VALUE)			\
+diff -up libselinux-2.0.94/src/setrans_client.c.thread libselinux-2.0.94/src/setrans_client.c
+--- libselinux-2.0.94/src/setrans_client.c.thread	2011-04-06 11:19:55.428610219 -0400
++++ libselinux-2.0.94/src/setrans_client.c	2011-04-06 11:24:48.023090983 -0400
+@@ -35,6 +35,7 @@ static __thread security_context_t prev_
+ 
+ static pthread_once_t once = PTHREAD_ONCE_INIT;
+ static pthread_key_t destructor_key;
++static int destructor_key_initialized = 0;
+ static __thread char destructor_initialized;
+ 
+ /*
+@@ -252,6 +253,12 @@ static void setrans_thread_destructor(vo
+ 	free(prev_r2c_raw);
+ }
+ 
++void __attribute__((destructor)) setrans_lib_destructor(void)
++{
++	if (destructor_key_initialized)
++		__selinux_key_delete(destructor_key);
++}
++
+ static inline void init_thread_destructor(void)
+ {
+ 	if (destructor_initialized == 0) {
+@@ -262,7 +269,9 @@ static inline void init_thread_destructo
+ 
+ static void init_context_translations(void)
+ {
+-	__selinux_key_create(&destructor_key, setrans_thread_destructor);
++	if (__selinux_key_create(&destructor_key, setrans_thread_destructor) == 0)
++		destructor_key_initialized = 1;
++
+ 	mls_enabled = is_selinux_mls_enabled();
+ }
+ 

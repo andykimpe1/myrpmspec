@@ -1,0 +1,233 @@
+diff -r -u libselinux-2.0.94/include/selinux/selinux.h libselinux-2.0.94.new/include/selinux/selinux.h
+--- libselinux-2.0.94/include/selinux/selinux.h	2014-05-12 14:48:12.600365649 -0400
++++ libselinux-2.0.94.new/include/selinux/selinux.h	2014-05-12 14:46:51.645467998 -0400
+@@ -512,7 +512,10 @@
+    Normally, this is determined automatically during libselinux 
+    initialization, but this is not always possible, e.g. for /sbin/init
+    which performs the initial mount of selinuxfs. */
+-void set_selinuxmnt(char *mnt);
++void set_selinuxmnt(const char *mnt);
++
++/* Check if selinuxfs exists as a kernel filesystem */
++int selinuxfs_exists(void);
+ 
+ /* clear selinuxmnt variable and free allocated memory */
+ void fini_selinuxmnt(void);
+diff -r -u libselinux-2.0.94/src/enabled.c libselinux-2.0.94.new/src/enabled.c
+--- libselinux-2.0.94/src/enabled.c	2010-03-24 15:52:20.000000000 -0400
++++ libselinux-2.0.94.new/src/enabled.c	2014-05-12 14:31:12.413685821 -0400
+@@ -11,10 +11,6 @@
+ 
+ int is_selinux_enabled(void)
+ {
+-	char *buf=NULL;
+-	FILE *fp;
+-	ssize_t num;
+-	size_t len;
+ 	int enabled = 0;
+ 	security_context_t con;
+ 
+@@ -32,37 +28,8 @@
+ 				enabled = 0;
+ 			freecon(con);
+ 		}
+-		return enabled;
+         }
+ 
+-	/* Drop back to detecting it the long way. */
+-	fp = fopen("/proc/filesystems", "r");
+-	if (!fp)
+-		return -1;
+-
+-	__fsetlocking(fp, FSETLOCKING_BYCALLER);
+-	while ((num = getline(&buf, &len, fp)) != -1) {
+-		if (strstr(buf, "selinuxfs")) {
+-			enabled = 1;
+-			break;
+-		}
+-	}
+-
+-	if (num < 0)
+-		goto out;
+-
+-	/* Since an selinux file system is available, we consider
+-	 * selinux enabled. If getcon_raw fails, selinux is still
+-	 * enabled. We only consider it disabled if no policy is loaded. */
+-	if (getcon_raw(&con) == 0) {
+-		if (!strcmp(con, "kernel"))
+-			enabled = 0;
+-		freecon(con);
+-	}
+-
+-      out:
+-	free(buf);
+-	fclose(fp);
+ 	return enabled;
+ }
+ 
+diff -r -u libselinux-2.0.94/src/init.c libselinux-2.0.94.new/src/init.c
+--- libselinux-2.0.94/src/init.c	2014-05-12 14:48:12.600365649 -0400
++++ libselinux-2.0.94.new/src/init.c	2014-05-12 14:42:36.972791552 -0400
+@@ -7,6 +7,7 @@
+ #include <stdio.h>
+ #include <stdio_ext.h>
+ #include <dlfcn.h>
++#include <sys/statvfs.h>
+ #include <sys/vfs.h>
+ #include <stdint.h>
+ #include <limits.h>
+@@ -20,48 +21,80 @@
+ int selinux_page_size = 0;
+ int obj_class_compat = 1;
+ 
+-static void init_selinuxmnt(void)
++/* Verify the mount point for selinux file system has a selinuxfs.
++   If the file system:
++   * Exist,
++   * Is mounted with an selinux file system,
++   * The file system is read/write
++   * then set this as the default file system.
++*/
++static int verify_selinuxmnt(const char *mnt)
+ {
+-	char *buf=NULL, *p;
+-	FILE *fp=NULL;
+ 	struct statfs sfbuf;
+ 	int rc;
+-	size_t len;
+-	ssize_t num;
+-	int exists = 0;
+ 
+-	if (selinux_mnt)
+-		return;
+-
+-	/* We check to see if the preferred mount point for selinux file
+-	 * system has a selinuxfs. */
+ 	do {
+-		rc = statfs(SELINUXMNT, &sfbuf);
++		rc = statfs(mnt, &sfbuf);
+ 	} while (rc < 0 && errno == EINTR);
+ 	if (rc == 0) {
+ 		if ((uint32_t)sfbuf.f_type == (uint32_t)SELINUX_MAGIC) {
+-			selinux_mnt = strdup(SELINUXMNT);
+-			return;
++			struct statvfs vfsbuf;
++			rc = statvfs(mnt, &vfsbuf);
++			if (rc == 0) {
++				if (!(vfsbuf.f_flag & ST_RDONLY)) {
++					set_selinuxmnt(mnt);
++				}
++				return 0;
++			}
+ 		}
+-	} 
++	}
++
++	return -1;
++}
++
++int selinuxfs_exists(void)
++{
++	int exists = 0;
++	FILE *fp = NULL;
++	char *buf = NULL;
++	size_t len;
++	ssize_t num;
+ 
+-	/* Drop back to detecting it the long way. */
+ 	fp = fopen("/proc/filesystems", "r");
+ 	if (!fp)
+-		return;
+-
++		return 1; /* Fail as if it exists */
+ 	__fsetlocking(fp, FSETLOCKING_BYCALLER);
+-	while ((num = getline(&buf, &len, fp)) != -1) {
+-		if (strstr(buf, "selinuxfs")) {
++
++	num = getline(&buf, &len, fp);
++	while (num != -1) {
++		if (strstr(buf, SELINUXFS)) {
+ 			exists = 1;
+ 			break;
+ 		}
++		num = getline(&buf, &len, fp);
+ 	}
+ 
+-	if (!exists) 
+-		goto out;
+-
++	free(buf);
+ 	fclose(fp);
++	return exists;
++}
++hidden_def(selinuxfs_exists)
++
++static void init_selinuxmnt(void)
++{
++	char *buf=NULL, *p;
++	FILE *fp=NULL;
++	size_t len;
++	ssize_t num;
++
++	if (selinux_mnt)
++		return;
++
++	if (verify_selinuxmnt(SELINUXMNT) == 0) return;
++
++	/* Drop back to detecting it the long way. */
++	if (!selinuxfs_exists())
++		goto out;
+ 
+ 	/* At this point, the usual spot doesn't have an selinuxfs so
+ 	 * we look around for it */
+@@ -79,7 +112,7 @@
+ 		tmp = strchr(p, ' ');
+ 		if (!tmp)
+ 			goto out;
+-		if (!strncmp(tmp + 1, "selinuxfs ", 10)) {
++		if (!strncmp(tmp + 1, SELINUXFS" ", strlen(SELINUXFS)+1)) {
+ 			*tmp = '\0';
+ 			break;
+ 		}
+@@ -87,7 +120,7 @@
+ 
+ 	/* If we found something, dup it */
+ 	if (num > 0)
+-		selinux_mnt = strdup(p);
++		verify_selinuxmnt(p);
+ 
+       out:
+ 	free(buf);
+@@ -104,7 +137,7 @@
+ 
+ hidden_def(fini_selinuxmnt)
+ 
+-void set_selinuxmnt(char *mnt)
++void set_selinuxmnt(const char *mnt)
+ {
+ 	selinux_mnt = strdup(mnt);
+ }
+diff -r -u libselinux-2.0.94/src/policy.h libselinux-2.0.94.new/src/policy.h
+--- libselinux-2.0.94/src/policy.h	2010-03-24 15:52:20.000000000 -0400
++++ libselinux-2.0.94.new/src/policy.h	2014-05-12 14:37:50.771155091 -0400
+@@ -9,6 +9,9 @@
+ /* Initial length guess for getting contexts. */
+ #define INITCONTEXTLEN 255
+ 
++/* selinux file system type */
++#define SELINUXFS "selinuxfs"
++
+ /* selinuxfs magic number */
+ #define SELINUX_MAGIC 0xf97cff8c
+ 
+diff -r -u libselinux-2.0.94/src/selinux_internal.h libselinux-2.0.94.new/src/selinux_internal.h
+--- libselinux-2.0.94/src/selinux_internal.h	2014-05-12 14:48:12.600365649 -0400
++++ libselinux-2.0.94.new/src/selinux_internal.h	2014-05-12 14:44:01.546682621 -0400
+@@ -5,6 +5,7 @@
+ hidden_proto(selinux_mkload_policy)
+     hidden_proto(fini_selinuxmnt)
+     hidden_proto(set_selinuxmnt)
++    hidden_proto(selinuxfs_exists)
+     hidden_proto(security_disable)
+     hidden_proto(security_policyvers)
+     hidden_proto(security_load_policy)
