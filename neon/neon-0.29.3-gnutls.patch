@@ -1,0 +1,52 @@
+
+GnuTLS handshake fixes:
+
+a) Don't fail the handshake if client certs are requested by rejected
+
+b) Initialize failures.
+
+c) Ignore non-fatal TLS warnings.
+
+--- neon-0.29.3/src/ne_gnutls.c.gnutls
++++ neon-0.29.3/src/ne_gnutls.c
+@@ -622,8 +622,9 @@ static int provide_client_cert(gnutls_se
+         }
+     } else {
+         NE_DEBUG(NE_DBG_SSL, "No client certificate supplied.\n");
++        st->ncerts = 0;
+         sess->ssl_cc_requested = 1;
+-        return GNUTLS_E_NO_CERTIFICATE_FOUND;
++        return 0;
+     }
+ 
+     return 0;
+@@ -852,7 +853,7 @@ static int check_chain_expiry(ne_ssl_cer
+ static int check_certificate(ne_session *sess, gnutls_session sock,
+                              ne_ssl_certificate *chain)
+ {
+-    int ret, failures;
++    int ret, failures = 0;
+     ne_uri server;
+     unsigned int status;
+ 
+--- neon-0.29.3/src/ne_socket.c.gnutls
++++ neon-0.29.3/src/ne_socket.c
+@@ -1763,6 +1763,7 @@ int ne_sock_connect_ssl(ne_socket *sock,
+     gnutls_set_default_priority(sock->ssl);
+     gnutls_session_set_ptr(sock->ssl, userdata);
+     gnutls_credentials_set(sock->ssl, GNUTLS_CRD_CERTIFICATE, ctx->cred);
++    gnutls_record_disable_padding(sock->ssl);
+ 
+ #ifdef HAVE_GNUTLS_SIGN_CALLBACK_SET
+     if (ctx->sign_func)
+@@ -1789,7 +1790,9 @@ int ne_sock_connect_ssl(ne_socket *sock,
+     }
+     sock->ops = &iofns_ssl;
+ 
+-    ret = gnutls_handshake(sock->ssl);
++    do {
++        ret = gnutls_handshake(sock->ssl);
++    } while (RETRY_GNUTLS(sock, ret));
+     if (ret < 0) {
+ 	error_gnutls(sock, ret);
+         return NE_SOCK_ERROR;
