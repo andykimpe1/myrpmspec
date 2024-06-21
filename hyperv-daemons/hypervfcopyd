@@ -1,0 +1,132 @@
+#!/bin/bash
+#
+# hv_fcopy_daemon Implementation of file copy service daemon for Linux
+#
+# chkconfig:   345 20 80
+# description: Implementation of file copy service daemon for Linux.
+#
+
+### BEGIN INIT INFO
+# Provides:          hv_fcopy_daemon
+# Required-Start:    $null
+# Should-Start:      $syslog $remote_fs $time
+# Required-Stop:     $null
+# Should-Stop:       $syslog $remote_fs $time
+# Default-Start:     3 4 5
+# Default-Stop:      0 1 2 6
+# Short-Description: hv_fcopy_daemon provides file copy service to the host
+# Description:       Start hv_fcopy_daemon to allow the host to copy files to/from this guest
+### END INIT INFO
+
+. /etc/rc.d/init.d/functions
+
+RETVAL=0
+HV_FCOPY_BIN="/usr/sbin/hv_fcopy_daemon"
+lockfile=/var/lock/subsys/hypervfcopyd
+
+# Check for missing binaries
+test -x $HV_FCOPY_BIN || { echo "$HV_FCOPY_BIN not installed";
+	if [ "$1" = "stop" ]; then exit 0;
+	else exit 5; fi; }
+
+start(){
+	# check if Hyper-V drivers are present
+	if [ -z "`lsmod | grep hv_utils`" ]; then
+		echo "Hyper-V drivers are not loaded."
+		echo -n "Hyper-V FCOPY daemon not started:"
+		warning
+		echo
+		# return LSB exit code "program is not running" ~ 7
+		RETVAL=7
+		return $RETVAL
+	fi
+
+	# check if guest services are enabled
+	if [ ! -e "/dev/vmbus/hv_fcopy" ]; then
+		echo "Hyper-V guest services are not enabled."
+		echo -n "Hyper-V FCOPY daemon not started:"
+		warning
+		echo
+		# return LSB exit code "program is not running" ~ 7
+		RETVAL=7
+		return $RETVAL
+	fi
+	
+	if ! status $HV_FCOPY_BIN >&/dev/null; then
+		echo -n "Starting Hyper-V FCOPY daemon "
+		daemon $HV_FCOPY_BIN
+		RETVAL=$?
+		[ $RETVAL -eq 0 ] && touch $lockfile
+	else
+		echo -n "Hyper-V FCOPY daemon is already started"
+	fi
+	echo
+}
+
+stop(){
+	echo -n "Shutting down Hyper-V FCOPY daemon "
+	killproc $HV_FCOPY_BIN
+	RETVAL=$?
+	echo
+	[ $RETVAL -eq 0 ] && rm -f $lockfile
+}
+
+restart() {
+	echo -n "Hyper-V FCOPY daemon does not support restarting"
+	warning
+	echo
+	RETVAL=3
+	return $RETVAL
+}
+
+reload() {
+	restart
+}
+
+force_reload() {
+	restart
+}
+
+rh_status() {
+	# run checks to determine if the service is running or use generic status
+	status $HV_FCOPY_BIN
+	RETVAL=$?
+	return $RETVAL
+}
+
+rh_status_q() {
+	rh_status >/dev/null 2>&1
+}
+
+case "$1" in
+	start)
+		rh_status_q && exit 0
+		$1
+		;;
+	stop)
+		rh_status_q || exit 0
+		$1
+		;;
+	restart)
+		$1
+		;;
+	reload)
+		rh_status_q || exit 7
+		$1
+		;;
+	force-reload)
+		force_reload
+		;;
+	status)
+		rh_status
+		;;
+	condrestart|try-restart)
+		rh_status_q || exit 0
+		restart
+		;;
+	*)
+		echo $"Usage: $0 {start|stop|status|restart|condrestart|try-restart|reload|force-reload}"
+		exit 2
+esac
+
+exit $RETVAL
