@@ -1,0 +1,79 @@
+From d54650b67d74a926c46a64ada589e612240a2175 Mon Sep 17 00:00:00 2001
+From: Alex Williamson <alex.williamson@redhat.com>
+Date: Mon, 30 Mar 2015 18:05:01 +0200
+Subject: [PATCH] Fix timeouts
+
+Message-id: <20150330180429.20776.40509.stgit@gimli.home>
+Patchwork-id: 64636
+O-Subject: [RHEL6.7 gpxe PATCH] Fix timeouts
+Bugzilla: 1206042
+RH-Acked-by: Gerd Hoffmann <kraxel@redhat.com>
+RH-Acked-by: Jeff Nelson <jenelson@redhat.com>
+RH-Acked-by: Laszlo Ersek <lersek@redhat.com>
+
+Bugzilla: 1206042
+Upstream: N/A
+Brew: http://brewweb.devel.redhat.com/brew/taskinfo?taskID=8925048
+
+The retry timer we use for backoff in the DHCP process is sufficiently
+different from ideal that we need to account for it when calculating
+early exit parameters.  Adjust the timeouts so that we actually exit
+before the timer fails and document the change as precisely as we can.
+This is our local customization to support timeouts closer to the
+spec, so there's no upstream component.
+
+Signed-off-by: Alex Williamson <alex.williamson@redhat.com>
+---
+ src/config/local/dhcp.h |   20 +++++++++++++++-----
+ 1 file changed, 15 insertions(+), 5 deletions(-)
+
+Signed-off-by: Miroslav Rezanina <mrezanin@redhat.com>
+---
+ src/config/local/dhcp.h | 20 +++++++++++++++-----
+ 1 file changed, 15 insertions(+), 5 deletions(-)
+
+diff --git a/src/config/local/dhcp.h b/src/config/local/dhcp.h
+index 027873d..f1862a6 100644
+--- a/src/config/local/dhcp.h
++++ b/src/config/local/dhcp.h
+@@ -31,22 +31,32 @@
+ /*
+  * Same as normal request phase, except non-fatal, so we extend the timer
+  * to 8 and set the early timeout to an elapsed time value that causes a
+- * break after the 4 second timeout.
++ * break after the 4 second timeout.  At least that's what we'd like to do,
++ * but our timer operates at 18Hz and has a minimum resolution of 7 cycles.
++ * Therefore the above quarter-second starting timeout looks more like
++ * 0.39s, 0.78s, 1.56s, 3.11s, 6.22s.  If we had an ideal timer, we could
++ * set the timeout to 7s (0.25 + 0.5 + 1 + 2 + 4 = 7.75s) and exit without
++ * failure when the timer rolls over to 8s.  With our timer, we get 0.39 +
++ * 0.78 + 1.56 + 3.11 = 5.84s.  The next timeout would take us to 12.06s
++ * (+6.22).  That seems like a long time to wait for an optional reply, so
++ * we reduce the early timeout to 5s to exit before the timer exceeds the
++ * max and causes a failure.  This still adds one extra cycle vs the
++ * upstream defaults.
+  */
+ #undef DHCP_PROXY_START_TIMEOUT_SEC
+ #define DHCP_PROXY_START_TIMEOUT_SEC        0
+ #undef DHCP_PROXY_END_TIMEOUT_SEC
+ #define DHCP_PROXY_END_TIMEOUT_SEC  8
+ #undef DHCP_REQ_PROXY_TIMEOUT_SEC
+-#define DHCP_REQ_PROXY_TIMEOUT_SEC  7
++#define DHCP_REQ_PROXY_TIMEOUT_SEC  5
+ 
+ /*
+- * Same as above, retry each server using standard timeouts, extended by
+- * one so that we can increment to the next before a timer induced failure.
++ * Same as above, retry each server using our approximation of standard
++ * timeouts and exit before timer induced failure.
+  */
+ #undef PXEBS_START_TIMEOUT_SEC
+ #define PXEBS_START_TIMEOUT_SEC             0
+ #undef PXEBS_END_TIMEOUT_SEC
+ #define PXEBS_END_TIMEOUT_SEC               8
+ #undef PXEBS_MAX_TIMEOUT_SEC
+-#define PXEBS_MAX_TIMEOUT_SEC               7
++#define PXEBS_MAX_TIMEOUT_SEC               5
+-- 
+1.8.3.1
+

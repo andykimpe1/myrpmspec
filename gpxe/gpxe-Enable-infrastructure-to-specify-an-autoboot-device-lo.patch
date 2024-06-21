@@ -1,0 +1,134 @@
+From d05d519d832cb9ba01d96c271bdd4d0a31b27d95 Mon Sep 17 00:00:00 2001
+From: Alex Williamson <alex.williamson@redhat.com>
+Date: Fri, 1 Aug 2014 18:12:53 -0500
+Subject: [CHANGE 2/5] Enable infrastructure to specify an autoboot device
+ location
+To: rhvirt-patches@redhat.com,
+    jen@redhat.com
+
+Message-id: <20140513195626.6596.92028.stgit@bling.home>
+Patchwork-id: 58833
+O-Subject: [RHEL6.6 gpxe PATCH 2/5] [autoboot] Enable infrastructure to specify an autoboot device location
+Bugzilla: 1057249
+RH-Acked-by: Jeffrey Cody <jcody@redhat.com>
+RH-Acked-by: Stefan Hajnoczi <stefanha@redhat.com>
+RH-Acked-by: Laszlo Ersek <lersek@redhat.com>
+
+Bugzilla: 1057249
+Upstream commit: 123bae9d939235a62e67d0cbfc66f3277bd81844 (ipxe)
+
+iPXE will currently attempt to boot from every network device for
+which it has a driver.  Where a system has more than one network
+device supported by iPXE, this renders BIOS IPL lists ineffective.
+
+Allow an autoboot device location to be specified.  If such a location
+is specified, then only devices matching that location will be used as
+part of the automatic boot sequence.  If no such location is
+specified, then all devices will be used.
+
+Note that this does not affect the "autoboot" command, which will
+continue to use all devices.
+
+Signed-off-by: Alex Williamson <alex.williamson@redhat.com>
+Modified-by: Michael Brown <mcb30@ipxe.org>
+Signed-off-by: Michael Brown <mcb30@ipxe.org>
+Signed-off-by: jen <jen@redhat.com>
+---
+ src/include/usr/autoboot.h |  3 +++
+ src/usr/autoboot.c         | 42 +++++++++++++++++++++++++-----------------
+ 2 files changed, 28 insertions(+), 17 deletions(-)
+
+diff --git a/src/include/usr/autoboot.h b/src/include/usr/autoboot.h
+index 1e9647c..a87b15e 100644
+--- a/src/include/usr/autoboot.h
++++ b/src/include/usr/autoboot.h
+@@ -8,8 +8,11 @@
+  */
+ 
+ #include <gpxe/in.h>
++#include <gpxe/device.h>
+ struct net_device;
+ 
++extern struct device_description autoboot_device;
++
+ extern int shutdown_exit_flags;
+ 
+ extern void autoboot ( void );
+diff --git a/src/usr/autoboot.c b/src/usr/autoboot.c
+index 978db3a..fce957d 100644
+--- a/src/usr/autoboot.c
++++ b/src/usr/autoboot.c
+@@ -37,6 +37,9 @@
+  *
+  */
+ 
++/** Device location of preferred autoboot device */
++struct device_description autoboot_device;
++
+ /** Time to wait for link-up */
+ #define LINK_WAIT_MS 15000
+ 
+@@ -50,15 +53,6 @@ static struct sanboot_protocol sanboot_protocols_end[0] \
+ 	__table_end ( struct sanboot_protocol, sanboot_protocols );
+ 
+ /**
+- * Identify the boot network device
+- *
+- * @ret netdev		Boot network device
+- */
+-static struct net_device * find_boot_netdev ( void ) {
+-	return NULL;
+-}
+-
+-/**
+  * Boot using next-server and filename
+  *
+  * @v filename		Boot filename
+@@ -233,22 +227,36 @@ static void close_all_netdevs ( void ) {
+ 	}
+ }
+ 
++ /**
++ * Test if network device matches the autoboot device location
++ *
++ * @v netdev		Network device
++ * @ret is_autoboot	Network device matches the autoboot device location
++ */
++static int is_autoboot_device ( struct net_device *netdev ) {
++
++	return ( ( netdev->dev->desc.bus_type == autoboot_device.bus_type ) &&
++		 ( netdev->dev->desc.location == autoboot_device.location ) );
++}
++
+ /**
+  * Boot the system
+  */
+ void autoboot ( void ) {
+-	struct net_device *boot_netdev;
+ 	struct net_device *netdev;
+ 
+-	/* If we have an identifable boot device, try that first */
+-	close_all_netdevs();
+-	if ( ( boot_netdev = find_boot_netdev() ) )
+-		netboot ( boot_netdev );
+-
+-	/* If that fails, try booting from any of the other devices */
++	/* Try booting from each network device.  If we have a
++	 * specified autoboot device location, then use only devices
++	 * matching that location.
++	 */
+ 	for_each_netdev ( netdev ) {
+-		if ( netdev == boot_netdev )
++
++		/* Skip any non-matching devices, if applicable */
++		if ( autoboot_device.bus_type &&
++		     ( ! is_autoboot_device ( netdev ) ) )
+ 			continue;
++
++		/* Attempt booting from this device */
+ 		close_all_netdevs();
+ 		netboot ( netdev );
+ 	}
+-- 
+1.9.3
+

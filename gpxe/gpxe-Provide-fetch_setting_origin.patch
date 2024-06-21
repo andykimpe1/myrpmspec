@@ -1,0 +1,148 @@
+From 26d733181d97aa2ff26b751133b68a0911999de5 Mon Sep 17 00:00:00 2001
+Message-Id: <26d733181d97aa2ff26b751133b68a0911999de5.1374746117.git.minovotn@redhat.com>
+From: Alex Williamson <alex.williamson@redhat.com>
+Date: Mon, 1 Jul 2013 22:27:32 +0200
+Subject: [PATCH 1/2] Provide fetch_setting_origin()
+
+RH-Author: Alex Williamson <alex.williamson@redhat.com>
+Message-id: <20130701222732.10615.42723.stgit@bling.home>
+Patchwork-id: 52277
+O-Subject: [RHEL6.5 gpxe PATCH 1/2] [settings] Provide fetch_setting_origin()
+Bugzilla: 972671
+RH-Acked-by: Stefan Hajnoczi <stefanha@redhat.com>
+RH-Acked-by: Michal Novotny <minovotn@redhat.com>
+RH-Acked-by: Laszlo Ersek <lersek@redhat.com>
+
+From: Michael Brown <mcb30@ipxe.org>
+
+Bugzilla: 972671
+Upstream commit: ba8dd804879c1b2e36b414ea6622952836927d45 (ipxe)
+
+Inspired-by: Glenn Brown <glenn@myri.com>
+Signed-off-by: Michael Brown <mcb30@ipxe.org>
+---
+ src/core/settings.c         |   55 ++++++++++++++++++++++++++++++++++++++-----
+ src/include/gpxe/settings.h |    2 ++
+ 2 files changed, 51 insertions(+), 6 deletions(-)
+
+Signed-off-by: Michal Novotny <minovotn@redhat.com>
+---
+ src/core/settings.c         | 55 ++++++++++++++++++++++++++++++++++++++++-----
+ src/include/gpxe/settings.h |  2 ++
+ 2 files changed, 51 insertions(+), 6 deletions(-)
+
+diff --git a/src/core/settings.c b/src/core/settings.c
+index f34eb66..37dbddc 100644
+--- a/src/core/settings.c
++++ b/src/core/settings.c
+@@ -322,10 +322,11 @@ int store_setting ( struct settings *settings, struct setting *setting,
+ }
+ 
+ /**
+- * Fetch value of setting
++ * Fetch value and origin of setting
+  *
+  * @v settings		Settings block, or NULL to search all blocks
+  * @v setting		Setting to fetch
++ * @v origin		Origin of setting to fill in
+  * @v data		Buffer to fill with setting data
+  * @v len		Length of buffer
+  * @ret len		Length of setting data, or negative error
+@@ -333,13 +334,17 @@ int store_setting ( struct settings *settings, struct setting *setting,
+  * The actual length of the setting will be returned even if
+  * the buffer was too small.
+  */
+-int fetch_setting ( struct settings *settings, struct setting *setting,
+-		    void *data, size_t len ) {
++static int fetch_setting_and_origin ( struct settings *settings,
++				      struct setting *setting,
++				      struct settings **origin,
++				      void *data, size_t len ) {
+ 	struct settings *child;
+ 	int ret;
+ 
+ 	/* Avoid returning uninitialised data on error */
+ 	memset ( data, 0, len );
++	if ( origin )
++		*origin = NULL;
+ 
+ 	/* NULL settings implies starting at the global settings root */
+ 	if ( ! settings )
+@@ -347,13 +352,16 @@ int fetch_setting ( struct settings *settings, struct setting *setting,
+ 
+ 	/* Try this block first */
+ 	if ( ( ret = settings->op->fetch ( settings, setting,
+-					   data, len ) ) >= 0 )
++					   data, len ) ) >= 0 ) {
++		if ( origin )
++			*origin = settings;
+ 		return ret;
++	}
+ 
+ 	/* Recurse into each child block in turn */
+ 	list_for_each_entry ( child, &settings->children, siblings ) {
+-		if ( ( ret = fetch_setting ( child, setting,
+-					     data, len ) ) >= 0 )
++		if ( ( ret = fetch_setting_and_origin ( child, setting, origin,
++							data, len ) ) >= 0 )
+ 			return ret;
+ 	}
+ 
+@@ -361,6 +369,41 @@ int fetch_setting ( struct settings *settings, struct setting *setting,
+ }
+ 
+ /**
++ * Fetch value of setting
++ *
++ * @v settings		Settings block, or NULL to search all blocks
++ * @v setting		Setting to fetch
++ * @v data		Buffer to fill with setting data
++ * @v len		Length of buffer
++ * @ret len		Length of setting data, or negative error
++ *
++ * The actual length of the setting will be returned even if
++ * the buffer was too small.
++ */
++int fetch_setting ( struct settings *settings, struct setting *setting,
++		    void *data, size_t len ) {
++	return fetch_setting_and_origin ( settings, setting, NULL, data, len );
++}
++
++/**
++ * Fetch origin of setting
++ *
++ * @v settings		Settings block, or NULL to search all blocks
++ * @v setting		Setting to fetch
++ * @ret origin		Origin of setting, or NULL if not found
++ *
++ * This function can also be used as an existence check for the
++ * setting.
++ */
++struct settings * fetch_setting_origin ( struct settings *settings,
++					 struct setting *setting ) {
++	struct settings *origin;
++
++	fetch_setting_and_origin ( settings, setting, &origin, NULL, 0 );
++	return origin;
++}
++
++/**
+  * Fetch length of setting
+  *
+  * @v settings		Settings block, or NULL to search all blocks
+diff --git a/src/include/gpxe/settings.h b/src/include/gpxe/settings.h
+index 9e62cde..1f0f5f8 100644
+--- a/src/include/gpxe/settings.h
++++ b/src/include/gpxe/settings.h
+@@ -170,6 +170,8 @@ extern int store_setting ( struct settings *settings, struct setting *setting,
+ 			   const void *data, size_t len );
+ extern int fetch_setting ( struct settings *settings, struct setting *setting,
+ 			   void *data, size_t len );
++extern struct settings * fetch_setting_origin ( struct settings *settings,
++						struct setting *setting );
+ extern int fetch_setting_len ( struct settings *settings,
+ 			       struct setting *setting );
+ extern int fetch_string_setting ( struct settings *settings,
+-- 
+1.7.11.7
+

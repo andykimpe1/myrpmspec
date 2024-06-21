@@ -1,0 +1,94 @@
+From ca82bc9ce741c38b2e207bfa5e0ebd9de0b36528 Mon Sep 17 00:00:00 2001
+Message-Id: <ca82bc9ce741c38b2e207bfa5e0ebd9de0b36528.1374746117.git.minovotn@redhat.com>
+In-Reply-To: <26d733181d97aa2ff26b751133b68a0911999de5.1374746117.git.minovotn@redhat.com>
+References: <26d733181d97aa2ff26b751133b68a0911999de5.1374746117.git.minovotn@redhat.com>
+From: Alex Williamson <alex.williamson@redhat.com>
+Date: Mon, 1 Jul 2013 22:27:38 +0200
+Subject: [PATCH 2/2] Use next-server from filename's settings block
+
+RH-Author: Alex Williamson <alex.williamson@redhat.com>
+Message-id: <20130701222738.10615.3635.stgit@bling.home>
+Patchwork-id: 52278
+O-Subject: [RHEL6.5 gpxe PATCH 2/2] [autoboot] Use next-server from filename's settings block
+Bugzilla: 972671
+RH-Acked-by: Stefan Hajnoczi <stefanha@redhat.com>
+RH-Acked-by: Michal Novotny <minovotn@redhat.com>
+RH-Acked-by: Laszlo Ersek <lersek@redhat.com>
+
+From: Michael Brown <mcb30@ipxe.org>
+
+Bugzilla: 972671
+Upstream commit: 936134ed460618e18cc05d677a442d43d5e739a1 (ipxe)
+Backport notes: Upstream patch also switches to a dynamically
+  allocated filename buffer, that aspect is dropped here for
+  simplicity.  The upstream patch is also contained to the
+  fetch_next_server_and_filename() function which was added in
+  e088892a.  That commit is quite intrusive, so I've opted to
+  apply the equivalent changes inline in netboot().
+
+Locate the settings block containing the filename, and search only
+that settings block for the next-server address.  This avoids problems
+caused by misconfigured DHCP servers which provide a next-server
+address (often defaulting to the DHCP server's own IP address) even
+when not providing a filename.
+
+Originally-implemented-by: Alex Williamson <alex.williamson@redhat.com>
+Signed-off-by: Michael Brown <mcb30@ipxe.org>
+---
+ src/usr/autoboot.c |   28 +++++++++++++++++++++-------
+ 1 file changed, 21 insertions(+), 7 deletions(-)
+
+Signed-off-by: Michal Novotny <minovotn@redhat.com>
+---
+ src/usr/autoboot.c | 28 +++++++++++++++++++++-------
+ 1 file changed, 21 insertions(+), 7 deletions(-)
+
+diff --git a/src/usr/autoboot.c b/src/usr/autoboot.c
+index 98e79a7..978db3a 100644
+--- a/src/usr/autoboot.c
++++ b/src/usr/autoboot.c
+@@ -149,7 +149,8 @@ static int netboot ( struct net_device *netdev ) {
+ 	struct setting pxe_boot_menu_setting
+ 		= { .tag = DHCP_PXE_BOOT_MENU };
+ 	char buf[256];
+-	struct in_addr next_server;
++	struct in_addr next_server = { 0 };
++	struct settings *settings = NULL;
+ 	unsigned int pxe_discovery_control;
+ 	int rc;
+ 
+@@ -184,12 +185,25 @@ static int netboot ( struct net_device *netdev ) {
+ 		return pxe_menu_boot ( netdev );
+ 	}
+ 
+-	/* Try to download and boot whatever we are given as a filename */
+-	fetch_ipv4_setting ( NULL, &next_server_setting, &next_server );
+-	fetch_string_setting ( NULL, &filename_setting, buf, sizeof ( buf ) );
+-	if ( buf[0] ) {
+-		printf ( "Booting from filename \"%s\"\n", buf );
+-		return boot_next_server_and_filename ( next_server, buf );
++	/* Determine settings block containing the filename, if any */
++	settings = fetch_setting_origin ( settings, &filename_setting );
++
++	/* If we have a filename, fetch it along with next-server */
++	if ( settings ) {
++		fetch_ipv4_setting ( settings, &next_server_setting,
++				     &next_server );
++		fetch_string_setting ( settings, &filename_setting,
++				       buf, sizeof ( buf ) );
++
++		/* Parse next server and filename */
++		if ( next_server.s_addr )
++			printf ( "Next server: %s\n",
++				 inet_ntoa ( next_server ) );
++		if ( buf[0] ) {
++			printf ( "Filename: %s\n", buf );
++			return boot_next_server_and_filename ( next_server,
++							       buf );
++		}
+ 	}
+ 	
+ 	/* No filename; try the root path */
+-- 
+1.7.11.7
+

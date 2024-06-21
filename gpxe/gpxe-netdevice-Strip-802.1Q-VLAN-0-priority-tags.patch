@@ -1,0 +1,184 @@
+From 995f67fcea898c684a4396c377e8f38844122167 Mon Sep 17 00:00:00 2001
+Message-Id: <995f67fcea898c684a4396c377e8f38844122167.1477594769.git.ymankad@redhat.com>
+From: Ladi Prosek <lprosek@redhat.com>
+Date: Mon, 3 Oct 2016 16:11:55 -0400
+Subject: [CHANGE 1/2] netdevice: Strip 802.1Q VLAN 0 priority tags
+To: rhvirt-patches@redhat.com,
+    ymankad@redhat.com
+
+RH-Author: Ladi Prosek <lprosek@redhat.com>
+Message-id: <1475511115-13114-1-git-send-email-lprosek@redhat.com>
+Patchwork-id: 72456
+O-Subject: [RHEL6.9 gpxe PATCH] netdevice: Strip 802.1Q VLAN 0 priority tags
+Bugzilla: 1354521
+RH-Acked-by: Laszlo Ersek <lersek@redhat.com>
+RH-Acked-by: Stefan Hajnoczi <stefanha@redhat.com>
+RH-Acked-by: Gerd Hoffmann <kraxel@redhat.com>
+RH-Acked-by: Xiao Wang <jasowang@redhat.com>
+
+gPXE was unable to receive priority tagged packets specified in
+the 802.1Q standard and supported by all major networking stacks.
+
+This commit adds a new function net_pull_tags which is called by
+all consumers of incoming packets after stripping their link-layer
+headers.
+
+Upstream iPXE patch:
+http://lists.ipxe.org/pipermail/ipxe-devel/2016-July/005099.html
+
+Downstream iPXE patch:
+cd670f3 in git://git.app.eng.bos.redhat.com/virt/rhel7/ipxe.git
+
+Differences compared to the iPXE patch:
+* added missing ETH_P_8021Q and struct vlan_header definitions
+* net_pull_tags does not take struct net_device and does not call
+  vlan_find because gPXE does not have VLAN support
+* the new code in efi_snp.c uses RC_TO_EFIRC while iPXE converts
+  the return code at the end of the function
+
+Bugzilla: https://bugzilla.redhat.com/show_bug.cgi?id=1354521
+Brew: https://brewweb.engineering.redhat.com/brew/taskinfo?taskID=11842220
+
+Signed-off-by: Ladi Prosek <lprosek@redhat.com>
+Signed-off-by: Yash Mankad <ymankad@redhat.com>
+---
+ src/arch/i386/interface/pxe/pxe_undi.c |  6 ++++++
+ src/include/gpxe/if_ether.h            |  9 ++++++++
+ src/include/gpxe/netdevice.h           |  1 +
+ src/interface/efi/efi_snp.c            |  8 +++++++
+ src/net/netdevice.c                    | 39 ++++++++++++++++++++++++++++++++++
+ 5 files changed, 63 insertions(+)
+
+diff --git a/src/arch/i386/interface/pxe/pxe_undi.c b/src/arch/i386/interface/pxe/pxe_undi.c
+index 4e4a3da..366d852 100644
+--- a/src/arch/i386/interface/pxe/pxe_undi.c
++++ b/src/arch/i386/interface/pxe/pxe_undi.c
+@@ -636,6 +636,12 @@ PXENV_EXIT_t pxenv_undi_isr ( struct s_PXENV_UNDI_ISR *undi_isr ) {
+ 		}
+ 		ll_hlen = ( len - iob_len ( iobuf ) );
+ 
++		/* Strip link-layer-independent headers */
++		if ( ( rc = net_pull_tags ( iobuf, &net_proto ) ) != 0 ) {
++			/* Assume unknown net_proto */
++			net_proto = 0;
++		}
++
+ 		/* Determine network-layer protocol */
+ 		switch ( net_proto ) {
+ 		case htons ( ETH_P_IP ):
+diff --git a/src/include/gpxe/if_ether.h b/src/include/gpxe/if_ether.h
+index 2f3f33d..e43e23c 100644
+--- a/src/include/gpxe/if_ether.h
++++ b/src/include/gpxe/if_ether.h
+@@ -16,6 +16,7 @@
+ #define ETH_P_IP	0x0800	/* Internet Protocl Packet */
+ #define ETH_P_ARP	0x0806	/* Address Resolution Protocol */
+ #define ETH_P_RARP	0x8035	/* Reverse Address resolution Protocol */
++#define ETH_P_8021Q	0x8100	/* 802.1Q VLAN Extended Header */
+ #define ETH_P_IPV6	0x86DD	/* IPv6 over blueblook */
+ #define ETH_P_SLOW	0x8809	/* Ethernet slow protocols */
+ #define ETH_P_AOE	0x88A2	/* ATA over Ethernet */
+@@ -30,4 +31,12 @@ struct ethhdr {
+         uint16_t h_protocol;
+ } __attribute__ ((packed));
+ 
++/** Ethernet 802.1Q (VLAN) header */
++struct vlan_header {
++	/** Tag control information */
++	uint16_t tci;
++	/** Encapsulated protocol */
++	uint16_t net_proto;
++} __attribute__ ((packed));
++
+ #endif	/* _GPXE_IF_ETHER_H */
+diff --git a/src/include/gpxe/netdevice.h b/src/include/gpxe/netdevice.h
+index f1585de..916a809 100644
+--- a/src/include/gpxe/netdevice.h
++++ b/src/include/gpxe/netdevice.h
+@@ -431,6 +431,7 @@ extern int net_tx ( struct io_buffer *iobuf, struct net_device *netdev,
+ 		    struct net_protocol *net_protocol, const void *ll_dest );
+ extern int net_rx ( struct io_buffer *iobuf, struct net_device *netdev,
+ 		    uint16_t net_proto, const void *ll_source );
++extern int net_pull_tags ( struct io_buffer *iobuf, uint16_t *net_proto );
+ 
+ extern struct settings_operations netdev_settings_operations;
+ 
+diff --git a/src/interface/efi/efi_snp.c b/src/interface/efi/efi_snp.c
+index 771b917..2fbcbef 100644
+--- a/src/interface/efi/efi_snp.c
++++ b/src/interface/efi/efi_snp.c
+@@ -678,6 +678,14 @@ efi_snp_receive ( EFI_SIMPLE_NETWORK_PROTOCOL *snp,
+ 		goto out_bad_ll_header;
+ 	}
+ 
++	/* Strip link-layer-independent headers */
++	if ( ( rc = net_pull_tags ( iobuf, &iob_net_proto ) ) ) {
++		DBGC ( snpdev, "SNPDEV %p could not parse tags: %s\n",
++		       snpdev, strerror ( rc ) );
++		efirc = RC_TO_EFIRC ( rc );
++		goto out_bad_ll_header;
++	}
++
+ 	/* Return link-layer header parameters to caller, if required */
+ 	if ( ll_header_len )
+ 		*ll_header_len = ll_protocol->ll_header_len;
+diff --git a/src/net/netdevice.c b/src/net/netdevice.c
+index 9e142d2..87df4fe 100644
+--- a/src/net/netdevice.c
++++ b/src/net/netdevice.c
+@@ -549,6 +549,39 @@ int net_rx ( struct io_buffer *iobuf, struct net_device *netdev,
+ }
+ 
+ /**
++ * Strip extra link-layer-independent tags from a received packet
++ *
++ * @v iobuf		I/O buffer
++ * @v net_proto		Network-layer protocol, in network-byte order
++ * @ret rc		Return status code
++ *
++ * This function should be called after stripping link-layer headers but
++ * before inspecting the network-layer protocol.
++ */
++int net_pull_tags ( struct io_buffer *iobuf, uint16_t *net_proto ) {
++	struct vlan_header *vlanhdr;
++
++	/* Strip 802.1Q VLAN 0 priority tags if present */
++	while ( *net_proto == htons ( ETH_P_8021Q ) ) {
++		if ( iob_len ( iobuf ) < sizeof ( *vlanhdr ) ) {
++			DBG ( "VLAN header too short at %zd bytes (min %zd bytes)\n",
++			      iob_len ( iobuf ), sizeof ( *vlanhdr ) );
++			return -EINVAL;
++		}
++		vlanhdr = ( struct vlan_header * ) iobuf->data;
++		if ( ( ntohs ( vlanhdr->tci ) & 0xfff ) == 0 ) {
++			/* VLAN 0, strip and continue */
++			*net_proto = vlanhdr->net_proto;
++			iob_pull ( iobuf, sizeof ( *vlanhdr ) );
++		} else {
++			/* Real VLAN tag, leave it alone */
++			break;
++		}
++	}
++	return 0;
++}
++
++/**
+  * Single-step the network stack
+  *
+  * @v process		Network stack process
+@@ -592,6 +625,12 @@ static void net_step ( struct process *process __unused ) {
+ 				continue;
+ 			}
+ 
++			/* Remove link-layer-independent headers */
++			if ( ( rc = net_pull_tags ( iobuf, &net_proto ) ) ) {
++				free_iob ( iobuf );
++				continue;
++			}
++
+ 			net_rx ( iobuf, netdev, net_proto, ll_source );
+ 		}
+ 	}
+-- 
+2.7.4
+
