@@ -1,0 +1,64 @@
+diff --git a/hald/device_store.c b/hald/device_store.c
+index 191e251..e03c5fb 100644
+--- a/hald/device_store.c
++++ b/hald/device_store.c
+@@ -54,6 +54,7 @@ hal_device_store_finalize (GObject *obj)
+ 	HalDeviceStore *store = HAL_DEVICE_STORE (obj);
+ 
+ 	g_slist_foreach (store->devices, (GFunc) g_object_unref, NULL);
++	g_hash_table_unref (store->property_index);
+ 
+ 	if (parent_class->finalize)
+ 		parent_class->finalize (obj);
+@@ -137,7 +138,10 @@ hal_device_store_class_init (HalDeviceStoreClass *klass)
+ static void
+ hal_device_store_init (HalDeviceStore *device)
+ {
+-	device->property_index = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
++	device->property_index = g_hash_table_new_full (g_str_hash,
++							g_str_equal,
++							g_free,
++							(GDestroyNotify) g_hash_table_unref);
+ }
+ 
+ GType
+@@ -492,7 +496,10 @@ hal_device_store_index_property (HalDeviceStore *store, const char *key)
+ 	index = g_hash_table_lookup (store->property_index, key);
+ 
+ 	if (!index) {
+-		index = g_hash_table_new (g_str_hash, g_str_equal);
++		index = g_hash_table_new_full (g_str_hash,
++					       g_str_equal,
++					       g_free,
++					       (GDestroyNotify) g_slist_free);
+ 		g_hash_table_insert (store->property_index, g_strdup (key), index);
+ 	}
+ }
+@@ -504,6 +511,7 @@ property_index_modify_string (HalDeviceStore *store, HalDevice *device,
+ 	GHashTable *index;
+ 	const char *value;
+ 	GSList *devices;
++	GSList *devices_new;
+ 
+ 	value = hal_device_property_get_string (device, key);
+ 	index = g_hash_table_lookup (store->property_index, key);
+@@ -511,15 +519,16 @@ property_index_modify_string (HalDeviceStore *store, HalDevice *device,
+ 	if (!index) return;
+ 
+ 	devices = g_hash_table_lookup (index, value);
++	devices_new = g_slist_copy (devices);
+ 
+ 	if (added) { /*add*/
+ 		HAL_DEBUG (("adding %p to (%s,%s)", device, key, value));
+-		devices = g_slist_prepend (devices, device);
++		devices_new = g_slist_prepend (devices_new, device);
+ 	} else { /*remove*/
+ 		HAL_DEBUG (("removing %p from (%s,%s)", device, key, value));
+-		devices = g_slist_remove_all (devices, device);
++		devices_new = g_slist_remove_all (devices_new, device);
+ 	}
+-	g_hash_table_insert (index, (gpointer) value, devices);
++	g_hash_table_insert (index, g_strdup (value), devices_new);
+ }
+ 
+ #if GLIB_CHECK_VERSION (2,14,0)
