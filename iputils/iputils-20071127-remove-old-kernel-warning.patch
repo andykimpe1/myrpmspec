@@ -1,0 +1,105 @@
+diff -urp iputils-s20071127/ping6.c iputils-new/ping6.c
+--- iputils-s20071127/ping6.c	2014-11-18 09:18:01.947483140 +0100
++++ iputils-new/ping6.c	2014-11-18 09:26:23.430698361 +0100
+@@ -474,11 +474,9 @@ int main(int argc, char *argv[])
+ 		exit(2);
+ 	}
+ 
+-	working_recverr = 1;
+ 	hold = 1;
+ 	if (setsockopt(icmp_sock, SOL_IPV6, IPV6_RECVERR, (char *)&hold, sizeof(hold))) {
+ 		fprintf(stderr, "WARNING: your kernel is veeery old. No problems.\n");
+-		working_recverr = 0;
+ 	}
+ 
+ 	/* Estimate memory eaten by single packet. It is rough estimate.
+@@ -501,14 +499,6 @@ int main(int argc, char *argv[])
+ 	 */
+ 
+ 	ICMP6_FILTER_SETBLOCKALL(&filter);
+-
+-	if (!working_recverr) {
+-		ICMP6_FILTER_SETPASS(ICMP6_DST_UNREACH, &filter);
+-		ICMP6_FILTER_SETPASS(ICMP6_PACKET_TOO_BIG, &filter);
+-		ICMP6_FILTER_SETPASS(ICMP6_TIME_EXCEEDED, &filter);
+-		ICMP6_FILTER_SETPASS(ICMP6_PARAM_PROB, &filter);
+-	}
+-
+ 	ICMP6_FILTER_SETPASS(ICMP6_ECHO_REPLY, &filter);
+ 
+ 	err = setsockopt(icmp_sock, IPPROTO_ICMPV6, ICMP6_FILTER, &filter,
+@@ -827,8 +817,6 @@ parse_reply(struct msghdr *msg, int cc,
+ 			    icmph1->icmp6_id != ident)
+ 				return 1;
+ 			acknowledge(ntohs(icmph1->icmp6_seq));
+-			if (working_recverr)
+-				return 0;
+ 			nerrors++;
+ 			if (options & F_FLOOD) {
+ 				printf("\bE");
+diff -urp iputils-s20071127/ping.c iputils-new/ping.c
+--- iputils-s20071127/ping.c	2014-11-18 09:18:01.949483133 +0100
++++ iputils-new/ping.c	2014-11-18 09:27:05.411548951 +0100
+@@ -601,17 +601,6 @@ int receive_error_msg()
+ 
+ 		acknowledge(ntohs(icmph.un.echo.sequence));
+ 
+-		if (!working_recverr) {
+-			struct icmp_filter filt;
+-			working_recverr = 1;
+-			/* OK, it works. Add stronger filter. */
+-			filt.data = ~((1<<ICMP_SOURCE_QUENCH)|
+-				      (1<<ICMP_REDIRECT)|
+-				      (1<<ICMP_ECHOREPLY));
+-			if (setsockopt(icmp_sock, SOL_RAW, ICMP_FILTER, (char*)&filt, sizeof(filt)) == -1)
+-				perror("\rWARNING: setsockopt(ICMP_FILTER)");
+-		}
+-
+ 		net_errors++;
+ 		nerrors++;
+ 		if (options & F_QUIET)
+@@ -763,19 +752,7 @@ parse_reply(struct msghdr *msg, int cc,
+ 					     icp->type != ICMP_SOURCE_QUENCH);
+ 				if (error_pkt) {
+ 					acknowledge(ntohs(icp1->un.echo.sequence));
+-					if (working_recverr) {
+-						return 0;
+-					} else {
+-						static int once;
+-						/* Sigh, IP_RECVERR for raw socket
+-						 * was broken until 2.4.9. So, we ignore
+-						 * the first error and warn on the second.
+-						 */
+-						if (once++ == 1)
+-							fprintf(stderr, "\rWARNING: kernel is not very fresh, upgrade is recommended.\n");
+-						if (once == 1)
+-							return 0;
+-					}
++					return 0;
+ 				}
+ 				nerrors+=error_pkt;
+ 				if (options&F_QUIET)
+diff -urp iputils-s20071127/ping_common.c iputils-new/ping_common.c
+--- iputils-s20071127/ping_common.c	2014-11-18 09:18:01.941483161 +0100
++++ iputils-new/ping_common.c	2014-11-18 09:25:35.017870662 +0100
+@@ -36,9 +36,6 @@ int confirm = 0;
+  * confirm_flag fixes refusing service of kernels without MSG_CONFIRM.
+  * i.e. for linux-2.2 */
+ int confirm_flag = MSG_CONFIRM;
+-/* And this is workaround for bug in IP_RECVERR on raw sockets which is present
+- * in linux-2.2.[0-19], linux-2.4.[0-7] */
+-int working_recverr;
+ 
+ /* timing */
+ int timing;			/* flag to do timing */
+diff -urp iputils-s20071127/ping_common.h iputils-new/ping_common.h
+--- iputils-s20071127/ping_common.h	2007-11-27 01:57:27.000000000 +0100
++++ iputils-new/ping_common.h	2014-11-18 09:25:41.219848589 +0100
+@@ -96,7 +96,6 @@ extern volatile int exiting;
+ extern volatile int status_snapshot;
+ extern int confirm;
+ extern int confirm_flag;
+-extern int working_recverr;
+ 
+ #ifndef MSG_CONFIRM
+ #define MSG_CONFIRM 0

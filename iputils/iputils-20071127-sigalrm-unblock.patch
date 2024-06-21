@@ -1,0 +1,64 @@
+Backported from upstream commit c34b0a8d6458230dc78e8e7da1fc9396983ec5c3
+The ping_common.c hunk was added later, as the original fix didn't apply to ping at all.
+
+Author: Jan Synacek <jsynacek@redhat.com>
+Date:   Fri Apr 25 13:46:05 2014 +0200
+
+    arping: fix arping hang if SIGALRM is blocked
+    
+    Unblock SIGALRM so that the previously called alarm() can prevent
+    recvfrom() from blocking forever in case the inherited procmask is
+    blocking SIGALRM and no packet is received.
+    
+    Reported-by: Rui Prior <rprior@dcc.fc.up.pt>
+    RH-Bugzilla: #1085971
+    Signed-off-by: Jan Synacek <jsynacek@redhat.com>
+
+--- iputils-s20071127/arping.c	2016-09-12 10:19:22.742204059 +0200
++++ iputils-s20071127-new/arping.c	2016-09-12 10:22:33.244999570 +0200
+@@ -631,15 +631,21 @@ main(int argc, char **argv)
+ 		socklen_t alen = sizeof(from);
+ 		int cc;
+ 
++		sigemptyset(&sset);
++		sigaddset(&sset, SIGALRM);
++		sigaddset(&sset, SIGINT);
++		/* Unblock SIGALRM so that the previously called alarm()
++		 * can prevent recvfrom from blocking forever in case the
++		 * inherited procmask is blocking SIGALRM and no packet
++		 * is received. */
++		sigprocmask(SIG_UNBLOCK, &sset, &osset);
++
+ 		if ((cc = recvfrom(s, packet, sizeof(packet), 0,
+ 				   (struct sockaddr *)&from[0], &alen)) < 0) {
+ 			perror("arping: recvfrom");
+ 			continue;
+ 		}
+-		sigemptyset(&sset);
+-		sigaddset(&sset, SIGALRM);
+-		sigaddset(&sset, SIGINT);
+-		sigprocmask(SIG_BLOCK, &sset, &osset);
++		sigprocmask(SIG_BLOCK, &sset, NULL);
+ 		recv_pack(packet, cc, &from[0]);
+ 		sigprocmask(SIG_SETMASK, &osset, NULL);
+ 	}
+--- iputils-s20071127/ping_common.c	2016-12-07 13:43:02.143968190 +0100
++++ iputils-s20071127-new/ping_common.c	2016-12-07 13:53:55.020063423 +0100
+@@ -421,6 +421,7 @@ void setup(int icmp_sock)
+ {
+ 	int hold;
+ 	struct timeval tv;
++	sigset_t sset;
+ 
+ 	if ((options & F_FLOOD) && !(options & F_INTERVAL))
+ 		interval = 0;
+@@ -485,6 +486,9 @@ void setup(int icmp_sock)
+ 	set_signal(SIGALRM, sigexit);
+ 	set_signal(SIGQUIT, sigstatus);
+ 
++	sigemptyset(&sset);
++	sigprocmask(SIG_SETMASK, &sset, NULL);
++
+ 	gettimeofday(&start_time, NULL);
+ 
+ 	if (deadline) {
