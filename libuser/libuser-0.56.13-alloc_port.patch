@@ -1,0 +1,202 @@
+2011-03-19  Miloslav Trmač  <mitr@redhat.com>
+
+       * tests/alloc_port.c: New file.
+       * Makefile.am (noinst_PROGRAMS): Add tests/alloc_port.
+       (tests_alloc_port_LDFLAGS): New definition.
+       * tests/default_pw_test:
+       * tests/default_pw.conf.in (ldap/server)
+       * tests/ldap_test:
+       * tests/ldap.conf.in (ldap/server): Use a dynamically allocated port for
+       the LDAP server.
+
+       * tests/default_pw_test:
+       * tests/ldap_test: Don't set up port 6360 for ldaps, it is not used.
+
+
+diff -urN libuser/Makefile.am libuser-0.56.13/Makefile.am
+--- libuser/Makefile.am	2015-06-27 07:55:15.648097081 +0200
++++ libuser-0.56.13/Makefile.am	2015-06-27 07:53:19.170835382 +0200
+@@ -42,7 +42,7 @@
+ 	apps/lusermod
+ noinst_PROGRAMS = samples/enum samples/field samples/homedir samples/lookup \
+ 	samples/prompt samples/testuser \
+-	tests/config_test
++	tests/alloc_port tests/config_test
+ 
+ noinst_LTLIBRARIES = apps/libapputil.la
+ lib_LTLIBRARIES = lib/libuser.la
+@@ -205,5 +205,7 @@
+ samples_testuser_LDADD = lib/libuser.la $(GMODULE_LIBS)
+ samples_testuser_LDFLAGS = -no-install
+ 
++tests_alloc_port_LDFLAGS = -no-install
++
+ tests_config_test_LDADD = lib/libuser.la $(GNODULE_LIBS)
+ tests_config_test_LDFLAGS = -no-install
+diff -urN libuser/tests/alloc_port.c libuser-0.56.13/tests/alloc_port.c
+--- libuser/tests/alloc_port.c	1970-01-01 01:00:00.000000000 +0100
++++ libuser-0.56.13/tests/alloc_port.c	2015-06-27 07:52:30.052411822 +0200
+@@ -0,0 +1,58 @@
++/* Copyright (C) 2011 Red Hat, Inc.
++ *
++ * This is free software; you can redistribute it and/or modify it under
++ * the terms of the GNU Library General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU Library General Public
++ * License along with this program; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#include <config.h>
++#include <arpa/inet.h>
++#include <netinet/in.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <sys/socket.h>
++#include <unistd.h>
++#undef NDEBUG
++#include <assert.h>
++
++/* Ask the kernel to allocate a port for 127.0.0.1, and return it.  Reusing the
++   port number is inherently racy, but the kernel tends to randomize the
++   returned port number, so this makes collisions (with concurrently running
++   variants of the same test suite) extremely unlikely. */
++int
++main(void)
++{
++  static const int reuse = 1;
++
++  struct sockaddr_in sin;
++  socklen_t len;
++  int sock;
++
++  sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
++  assert(sock != -1);
++
++  assert(setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) == 0);
++
++  sin.sin_family = AF_INET;
++  sin.sin_addr.s_addr = inet_addr("127.0.0.1");
++  sin.sin_port = htons(0);
++  assert(bind(sock, (const struct sockaddr *)&sin, sizeof(sin)) == 0);
++
++  len = sizeof(sin);
++  assert(getsockname(sock, (struct sockaddr *)&sin, &len) == 0);
++  printf("%d\n", (int)ntohs(sin.sin_port));
++
++  close(sock);
++
++  return EXIT_SUCCESS;
++}
+diff -urN libuser/tests/default_pw.conf.in libuser-0.56.13/tests/default_pw.conf.in
+--- libuser/tests/default_pw.conf.in	2015-06-27 07:55:15.648097081 +0200
++++ libuser-0.56.13/tests/default_pw.conf.in	2015-06-27 07:52:30.053411790 +0200
+@@ -34,7 +34,7 @@
+ # LU_ADMINISTRATORUID =
+ 
+ [ldap]
+-server = 127.0.0.1:3890
++server = 127.0.0.1:@LDAP_PORT@
+ basedn = dc=libuser
+ bindtype = simple
+ binddn = cn=Manager,dc=libuser
+diff -urN libuser/tests/default_pw_test libuser-0.56.13/tests/default_pw_test
+--- libuser/tests/default_pw_test	2015-06-27 07:55:15.657096792 +0200
++++ libuser-0.56.13/tests/default_pw_test	2015-06-27 07:52:30.051411854 +0200
+@@ -69,8 +69,8 @@
+ get_ldap_password() # entry filter
+ {
+     echo "Checking $1 ..." >&2
+-    ldapsearch -LLL -h 127.0.0.1 -p 3890 -x -b 'dc=libuser' "$1" userPassword \
+-	| sed -n 's/userPassword:: //p'
++    ldapsearch -LLL -h 127.0.0.1 -p "$ldap_port" -x -b 'dc=libuser' "$1" \
++	userPassword | sed -n 's/userPassword:: //p'
+ }
+ 
+ valid_password() # encoded value
+@@ -79,6 +79,7 @@
+     [ "x$v" = "x$1" ]
+ }
+ 
++ldap_port=
+ # Try all concievable combinations and orders, assuming "shadow" requires
+ # "files".
+ for modules in \
+@@ -95,22 +96,23 @@
+     touch "$workdir"/files/{passwd,shadow,group,gshadow}
+     case $modules in
+ 	*ldap*)
++	    # This is racy, but much better than a static port
++	    [ -z "$ldap_port" ] && ldap_port=$(tests/alloc_port)
+ 	    # FIXME: path
+-	    /usr/sbin/slapd \
+-		-h 'ldap://127.0.0.1:3890/ ldaps://127.0.0.1:6360/' \
++	    /usr/sbin/slapd -h ldap://127.0.0.1:"$ldap_port"/ \
+ 		-f "$workdir"/slapd.conf &
+ 	    sleep 3 # Time for slapd to initialize
+ 	    slapd_pid=$(cat "$workdir"/slapd.pid)
+ 	    trap 'status=$?; kill $slapd_pid; rm -rf "$workdir"; exit $status' 0
+-	    ldapadd -h 127.0.0.1 -p 3890 -f "$srcdir/ldap_skel.ldif" -x \
++	    ldapadd -h 127.0.0.1 -p "$ldap_port" -f "$srcdir/ldap_skel.ldif" -x \
+ 		-D cn=Manager,dc=libuser -w password
+ 	    ;;
+     esac
+ 
+     # Set up the client
+     sed -e "s|@WORKDIR@|$workdir|g; s|@TOP_BUILDDIR@|$(pwd)|g" \
+-	-e "s|@MODULES@|$modules|g" < "$srcdir"/default_pw.conf.in \
+-	> "$LIBUSER_CONF"
++	-e "s|@MODULES@|$modules|g; s|@LDAP_PORT@|$ldap_port|g" \
++	< "$srcdir"/default_pw.conf.in > "$LIBUSER_CONF"
+ 
+     # Point "$HOME/ldaprc" to "$srcdir"/ldaprc
+     HOME="$srcdir" python "$srcdir"/default_pw_test.py
+diff -urN libuser/tests/ldap.conf.in libuser-0.56.13/tests/ldap.conf.in
+--- libuser/tests/ldap.conf.in	2009-12-11 11:05:48.000000000 +0100
++++ libuser-0.56.13/tests/ldap.conf.in	2015-06-27 07:52:30.053411790 +0200
+@@ -34,7 +34,7 @@
+ # LU_ADMINISTRATORUID =
+ 
+ [ldap]
+-server = 127.0.0.1:3890
++server = 127.0.0.1:@LDAP_PORT@
+ basedn = dc=libuser
+ bindtype = simple
+ binddn = cn=Manager,dc=libuser
+diff -urN libuser/tests/ldap_test libuser-0.56.13/tests/ldap_test
+--- libuser/tests/ldap_test	2015-06-27 07:55:15.657096792 +0200
++++ libuser-0.56.13/tests/ldap_test	2015-06-27 07:52:30.051411854 +0200
+@@ -48,21 +48,21 @@
+ # Set up an LDAP server
+ mkdir "$workdir"/db
+ sed "s|@WORKDIR@|$workdir|g" < "$srcdir"/slapd.conf.in > "$workdir"/slapd.conf
++ldap_port=$(tests/alloc_port) # This is racy, but much better than a static port
+ # FIXME: path
+-/usr/sbin/slapd -h 'ldap://127.0.0.1:3890/ ldaps://127.0.0.1:6360/' \
+-    -f "$workdir"/slapd.conf &
++/usr/sbin/slapd -h ldap://127.0.0.1:"$ldap_port"/ -f "$workdir"/slapd.conf &
+ sleep 3 # Time for slapd to initialize
+ slapd_pid=$(cat "$workdir"/slapd.pid)
+ trap 'status=$?; kill $slapd_pid; rm -rf "$workdir"; exit $status' 0
+-ldapadd -h 127.0.0.1 -p 3890 -f "$srcdir/ldap_skel.ldif" -x \
++ldapadd -h 127.0.0.1 -p "$ldap_port" -f "$srcdir/ldap_skel.ldif" -x \
+     -D cn=Manager,dc=libuser -w password
+ 
+ 
+ # Set up the client
+ LIBUSER_CONF=$workdir/libuser.conf
+ export LIBUSER_CONF
+-sed "s|@WORKDIR@|$workdir|g; s|@TOP_BUILDDIR@|$(pwd)|g" \
+-    < "$srcdir"/ldap.conf.in > "$LIBUSER_CONF"
++sed -e "s|@WORKDIR@|$workdir|g; s|@TOP_BUILDDIR@|$(pwd)|g" \
++    -e "s|@LDAP_PORT@|$ldap_port|g" < "$srcdir"/ldap.conf.in > "$LIBUSER_CONF"
+ # Ugly non-portable hacks
+ LD_LIBRARY_PATH=$(pwd)/lib/.libs
+ export LD_LIBRARY_PATH
