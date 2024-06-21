@@ -1,0 +1,1144 @@
+From 3b5cb6e87d779f083c93f7ad8c79d849954bedfe Mon Sep 17 00:00:00 2001
+From: Frantisek Kluknavsky <fkluknav@redhat.com>
+Date: Fri, 3 Apr 2015 21:07:10 +0200
+Subject: [PATCH 1/2] s390 31bit
+
+---
+ mpn/s390/addmul_1.asm |  31 ++++--
+ mpn/s390/copyd.asm    | 145 +++++++++++++++++++++++++
+ mpn/s390/copyi.asm    |  69 ++++++++++++
+ mpn/s390/logops_n.asm | 295 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ mpn/s390/lshift.asm   | 144 ++++++++++++++++++++++++
+ mpn/s390/lshiftc.asm  | 156 ++++++++++++++++++++++++++
+ mpn/s390/mul_1.asm    |  31 ++++--
+ mpn/s390/rshift.asm   | 138 +++++++++++++++++++++++
+ mpn/s390/submul_1.asm |  31 ++++--
+ 9 files changed, 1010 insertions(+), 30 deletions(-)
+ create mode 100644 mpn/s390/copyd.asm
+ create mode 100644 mpn/s390/copyi.asm
+ create mode 100644 mpn/s390/logops_n.asm
+ create mode 100644 mpn/s390/lshift.asm
+ create mode 100644 mpn/s390/lshiftc.asm
+ create mode 100644 mpn/s390/rshift.asm
+
+diff --git a/mpn/s390/addmul_1.asm b/mpn/s390/addmul_1.asm
+index 71d49bb..97189a8 100644
+--- a/mpn/s390/addmul_1.asm
++++ b/mpn/s390/addmul_1.asm
+@@ -4,19 +4,30 @@ dnl  result to a second limb vector.
+ dnl  Copyright 2001 Free Software Foundation, Inc.
+ 
+ dnl  This file is part of the GNU MP Library.
+-
++dnl
+ dnl  The GNU MP Library is free software; you can redistribute it and/or modify
+-dnl  it under the terms of the GNU Lesser General Public License as published
+-dnl  by the Free Software Foundation; either version 3 of the License, or (at
+-dnl  your option) any later version.
+-
++dnl  it under the terms of either:
++dnl
++dnl    * the GNU Lesser General Public License as published by the Free
++dnl      Software Foundation; either version 3 of the License, or (at your
++dnl      option) any later version.
++dnl
++dnl  or
++dnl
++dnl    * the GNU General Public License as published by the Free Software
++dnl      Foundation; either version 2 of the License, or (at your option) any
++dnl      later version.
++dnl
++dnl  or both in parallel, as here.
++dnl
+ dnl  The GNU MP Library is distributed in the hope that it will be useful, but
+ dnl  WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+-dnl  or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public
+-dnl  License for more details.
+-
+-dnl  You should have received a copy of the GNU Lesser General Public License
+-dnl  along with the GNU MP Library.  If not, see http://www.gnu.org/licenses/.
++dnl  or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++dnl  for more details.
++dnl
++dnl  You should have received copies of the GNU General Public License and the
++dnl  GNU Lesser General Public License along with the GNU MP Library.  If not,
++dnl  see https://www.gnu.org/licenses/.
+ 
+ include(`../config.m4')
+ 
+diff --git a/mpn/s390/copyd.asm b/mpn/s390/copyd.asm
+new file mode 100644
+index 0000000..ff252bc
+--- /dev/null
++++ b/mpn/s390/copyd.asm
+@@ -0,0 +1,145 @@
++dnl  S/390-32 mpn_copyd
++
++dnl  Copyright 2011 Free Software Foundation, Inc.
++
++dnl  This file is part of the GNU MP Library.
++dnl
++dnl  The GNU MP Library is free software; you can redistribute it and/or modify
++dnl  it under the terms of either:
++dnl
++dnl    * the GNU Lesser General Public License as published by the Free
++dnl      Software Foundation; either version 3 of the License, or (at your
++dnl      option) any later version.
++dnl
++dnl  or
++dnl
++dnl    * the GNU General Public License as published by the Free Software
++dnl      Foundation; either version 2 of the License, or (at your option) any
++dnl      later version.
++dnl
++dnl  or both in parallel, as here.
++dnl
++dnl  The GNU MP Library is distributed in the hope that it will be useful, but
++dnl  WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
++dnl  or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++dnl  for more details.
++dnl
++dnl  You should have received copies of the GNU General Public License and the
++dnl  GNU Lesser General Public License along with the GNU MP Library.  If not,
++dnl  see https://www.gnu.org/licenses/.
++
++
++include(`../config.m4')
++
++C            cycles/limb
++C            cycles/limb
++C z900		 1.65
++C z990           1.125
++C z9		 ?
++C z10		 ?
++C z196		 ?
++
++C FIXME:
++C  * Avoid saving/restoring callee-saves registers for n < 3.  This could be
++C    done by setting rp=r1, up=r2, i=r0 and r3,r4,r5 for clock regs.
++C    We could then use r3...r10 in main loop.
++
++C INPUT PARAMETERS
++define(`rp_param',	`%r2')
++define(`up_param',	`%r3')
++define(`n',		`%r4')
++
++define(`rp',	`%r8')
++define(`up',	`%r9')
++
++ASM_START()
++PROLOGUE(mpn_copyd)
++	stm	%r6, %r11, 24(%r15)
++
++	lr	%r1, n
++	sll	%r1, 2
++	la	%r10, 8(n)
++	ahi	%r1, -32
++	srl	%r10, 3
++	lhi	%r11, -32
++
++	la	rp, 0(%r1,rp_param)	C FIXME use lay on z990 and later
++	la	up, 0(%r1,up_param)	C FIXME use lay on z990 and later
++
++	lhi	%r7, 7
++	nr	%r7, n			C n mod 8
++	chi	%r7, 2
++	jh	L(b34567)
++	chi	%r7, 1
++	je	L(b1)
++	jh	L(b2)
++
++L(b0):	brct	%r10, L(top)
++	j	L(end)
++
++L(b1):	l	%r0, 28(up)
++	ahi	up, -4
++	st	%r0, 28(rp)
++	ahi	rp, -4
++	brct	%r10, L(top)
++	j	L(end)
++
++L(b2):	lm	%r0, %r1, 24(up)
++	ahi	up, -8
++	stm	%r0, %r1, 24(rp)
++	ahi	rp, -8
++	brct	%r10, L(top)
++	j	L(end)
++
++L(b34567):
++	chi	%r7, 4
++	jl	L(b3)
++	je	L(b4)
++	chi	%r7, 6
++	je	L(b6)
++	jh	L(b7)
++
++L(b5):	lm	%r0, %r4, 12(up)
++	ahi	up, -20
++	stm	%r0, %r4, 12(rp)
++	ahi	rp, -20
++	brct	%r10, L(top)
++	j	L(end)
++
++L(b3):	lm	%r0, %r2, 20(up)
++	ahi	up, -12
++	stm	%r0, %r2, 20(rp)
++	ahi	rp, -12
++	brct	%r10, L(top)
++	j	L(end)
++
++L(b4):	lm	%r0, %r3, 16(up)
++	ahi	up, -16
++	stm	%r0, %r3, 16(rp)
++	ahi	rp, -16
++	brct	%r10, L(top)
++	j	L(end)
++
++L(b6):	lm	%r0, %r5, 8(up)
++	ahi	up, -24
++	stm	%r0, %r5, 8(rp)
++	ahi	rp, -24
++	brct	%r10, L(top)
++	j	L(end)
++
++L(b7):	lm	%r0, %r6, 4(up)
++	ahi	up, -28
++	stm	%r0, %r6, 4(rp)
++	ahi	rp, -28
++	brct	%r10, L(top)
++	j	L(end)
++
++L(top):	lm	%r0, %r7, 0(up)
++	la	up, 0(%r11,up)
++	stm	%r0, %r7, 0(rp)
++	la	rp, 0(%r11,rp)
++	brct	%r10, L(top)
++
++L(end):	lm	%r6, %r11, 24(%r15)
++	br	%r14
++EPILOGUE()
+diff --git a/mpn/s390/copyi.asm b/mpn/s390/copyi.asm
+new file mode 100644
+index 0000000..1df32f1
+--- /dev/null
++++ b/mpn/s390/copyi.asm
+@@ -0,0 +1,69 @@
++dnl  S/390-32 mpn_copyi
++
++dnl  Copyright 2011 Free Software Foundation, Inc.
++
++dnl  This file is part of the GNU MP Library.
++dnl
++dnl  The GNU MP Library is free software; you can redistribute it and/or modify
++dnl  it under the terms of either:
++dnl
++dnl    * the GNU Lesser General Public License as published by the Free
++dnl      Software Foundation; either version 3 of the License, or (at your
++dnl      option) any later version.
++dnl
++dnl  or
++dnl
++dnl    * the GNU General Public License as published by the Free Software
++dnl      Foundation; either version 2 of the License, or (at your option) any
++dnl      later version.
++dnl
++dnl  or both in parallel, as here.
++dnl
++dnl  The GNU MP Library is distributed in the hope that it will be useful, but
++dnl  WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
++dnl  or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++dnl  for more details.
++dnl
++dnl  You should have received copies of the GNU General Public License and the
++dnl  GNU Lesser General Public License along with the GNU MP Library.  If not,
++dnl  see https://www.gnu.org/licenses/.
++
++
++include(`../config.m4')
++
++C            cycles/limb
++C z900		 0.75
++C z990           0.375
++C z9		 ?
++C z10		 ?
++C z196		 ?
++
++C NOTE
++C  * This is based on GNU libc memcpy which was written by Martin Schwidefsky.
++
++C INPUT PARAMETERS
++define(`rp',	`%r2')
++define(`up',	`%r3')
++define(`n',	`%r4')
++
++ASM_START()
++PROLOGUE(mpn_copyi)
++	ltr	%r4, %r4
++	sll	%r4, 2
++	je	L(rtn)
++	ahi	%r4, -1
++	lr	%r5, %r4
++	srl	%r5, 8
++	ltr	%r5, %r5		C < 256 bytes to copy?
++	je	L(1)
++
++L(top):	mvc	0(256, rp), 0(up)
++	la	rp, 256(rp)
++	la	up, 256(up)
++	brct	%r5, L(top)
++
++L(1):	bras	%r5, L(2)		C make r5 point to mvc insn
++	mvc	0(1, rp), 0(up)
++L(2):	ex	%r4, 0(%r5)		C execute mvc with length ((n-1) mod 256)+1
++L(rtn):	br	%r14
++EPILOGUE()
+diff --git a/mpn/s390/logops_n.asm b/mpn/s390/logops_n.asm
+new file mode 100644
+index 0000000..1f2cd2a
+--- /dev/null
++++ b/mpn/s390/logops_n.asm
+@@ -0,0 +1,295 @@
++dnl  S/390-32 logops.
++
++dnl  Copyright 2011 Free Software Foundation, Inc.
++
++dnl  This file is part of the GNU MP Library.
++dnl
++dnl  The GNU MP Library is free software; you can redistribute it and/or modify
++dnl  it under the terms of either:
++dnl
++dnl    * the GNU Lesser General Public License as published by the Free
++dnl      Software Foundation; either version 3 of the License, or (at your
++dnl      option) any later version.
++dnl
++dnl  or
++dnl
++dnl    * the GNU General Public License as published by the Free Software
++dnl      Foundation; either version 2 of the License, or (at your option) any
++dnl      later version.
++dnl
++dnl  or both in parallel, as here.
++dnl
++dnl  The GNU MP Library is distributed in the hope that it will be useful, but
++dnl  WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
++dnl  or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++dnl  for more details.
++dnl
++dnl  You should have received copies of the GNU General Public License and the
++dnl  GNU Lesser General Public License along with the GNU MP Library.  If not,
++dnl  see https://www.gnu.org/licenses/.
++
++include(`../config.m4')
++
++C cycles/limb     variant 1           variant 2       variant 3
++C	        rp!=up  rp=up
++C z900		 ?	 ?		 ?		 ?
++C z990		 2.5	 1		 2.75		 2.75
++C z9		 ?			 ?		 ?
++C z10		 ?			 ?		 ?
++C z196		 ?			 ?		 ?
++
++C INPUT PARAMETERS
++define(`rp',	`%r2')
++define(`up',	`%r3')
++define(`vp',	`%r4')
++define(`nn',	`%r5')
++
++ifdef(`OPERATION_and_n',`
++  define(`func',`mpn_and_n')
++  define(`VARIANT_1')
++  define(`LOGOPC',`nc')
++  define(`LOGOP',`n')')
++ifdef(`OPERATION_andn_n',`
++  define(`func',`mpn_andn_n')
++  define(`VARIANT_2')
++  define(`LOGOP',`n')')
++ifdef(`OPERATION_nand_n',`
++  define(`func',`mpn_nand_n')
++  define(`VARIANT_3')
++  define(`LOGOP',`n')')
++ifdef(`OPERATION_ior_n',`
++  define(`func',`mpn_ior_n')
++  define(`VARIANT_1')
++  define(`LOGOPC',`oc')
++  define(`LOGOP',`o')')
++ifdef(`OPERATION_iorn_n',`
++  define(`func',`mpn_iorn_n')
++  define(`VARIANT_2')
++  define(`LOGOP',`o')')
++ifdef(`OPERATION_nior_n',`
++  define(`func',`mpn_nior_n')
++  define(`VARIANT_3')
++  define(`LOGOP',`o')')
++ifdef(`OPERATION_xor_n',`
++  define(`func',`mpn_xor_n')
++  define(`VARIANT_1')
++  define(`LOGOPC',`xc')
++  define(`LOGOP',`x')')
++ifdef(`OPERATION_xnor_n',`
++  define(`func',`mpn_xnor_n')
++  define(`VARIANT_2')
++  define(`LOGOP',`x')')
++
++MULFUNC_PROLOGUE(mpn_and_n mpn_andn_n mpn_nand_n mpn_ior_n mpn_iorn_n mpn_nior_n mpn_xor_n mpn_xnor_n)
++
++ASM_START()
++PROLOGUE(func)
++ifdef(`VARIANT_1',`
++	cr	rp, up
++	jne	L(normal)
++
++	sll	nn, 2
++	ahi	nn, -1
++	lr	%r1, nn
++	srl	%r1, 8
++	ltr	%r1, %r1		C < 256 bytes to copy?
++	je	L(1)
++
++L(tp):	LOGOPC	0(256, rp), 0(vp)
++	la	rp, 256(rp)
++	la	vp, 256(vp)
++	brct	%r1, L(tp)
++
++L(1):	bras	%r1, L(2)		C make r1 point to mvc insn
++	LOGOPC	0(1, rp), 0(vp)
++L(2):	ex	nn, 0(%r1)		C execute mvc with length ((nn-1) mod 256)+1
++L(rtn):	br	%r14
++
++
++L(normal):
++	stm	%r6, %r8, 12(%r15)
++	ahi	nn, 3
++	lhi	%r7, 3
++	lr	%r0, nn
++	srl	%r0, 2
++	nr	%r7, nn			C nn mod 4
++	je	L(b1)
++	chi	%r7, 2
++	jl	L(b2)
++	jne	L(top)
++
++L(b3):	lm	%r5, %r7, 0(up)
++	la	up, 12(up)
++	LOGOP	%r5, 0(vp)
++	LOGOP	%r6, 4(vp)
++	LOGOP	%r7, 8(vp)
++	stm	%r5, %r7, 0(rp)
++	la	rp, 12(rp)
++	la	vp, 12(vp)
++	j	L(mid)
++
++L(b1):	l	%r5, 0(up)
++	la	up, 4(up)
++	LOGOP	%r5, 0(vp)
++	st	%r5, 0(rp)
++	la	rp, 4(rp)
++	la	vp, 4(vp)
++	j	L(mid)
++
++L(b2):	lm	%r5, %r6, 0(up)
++	la	up, 8(up)
++	LOGOP	%r5, 0(vp)
++	LOGOP	%r6, 4(vp)
++	stm	%r5, %r6, 0(rp)
++	la	rp, 8(rp)
++	la	vp, 8(vp)
++	j	L(mid)
++
++L(top):	lm	%r5, %r8, 0(up)
++	la	up, 16(up)
++	LOGOP	%r5, 0(vp)
++	LOGOP	%r6, 4(vp)
++	LOGOP	%r7, 8(vp)
++	LOGOP	%r8, 12(vp)
++	stm	%r5, %r8, 0(rp)
++	la	rp, 16(rp)
++	la	vp, 16(vp)
++L(mid):	brct	%r0, L(top)
++
++	lm	%r6, %r8, 12(%r15)
++	br	%r14
++')
++
++ifdef(`VARIANT_2',`
++	stm	%r6, %r8, 12(%r15)
++	lhi	%r1, -1
++
++	ahi	nn, 3
++	lhi	%r7, 3
++	lr	%r0, nn
++	srl	%r0, 2
++	nr	%r7, nn			C nn mod 4
++	je	L(b1)
++	chi	%r7, 2
++	jl	L(b2)
++	jne	L(top)
++
++L(b3):	lm	%r5, %r7, 0(vp)
++	la	vp, 12(vp)
++	xr	%r5, %r1
++	xr	%r6, %r1
++	xr	%r7, %r1
++	LOGOP	%r5, 0(up)
++	LOGOP	%r6, 4(up)
++	LOGOP	%r7, 8(up)
++	stm	%r5, %r7, 0(rp)
++	la	rp, 12(rp)
++	la	up, 12(up)
++	j	L(mid)
++
++L(b1):	l	%r5, 0(vp)
++	la	vp, 4(vp)
++	xr	%r5, %r1
++	LOGOP	%r5, 0(up)
++	st	%r5, 0(rp)
++	la	rp, 4(rp)
++	la	up, 4(up)
++	j	L(mid)
++
++L(b2):	lm	%r5, %r6, 0(vp)
++	la	vp, 8(vp)
++	xr	%r5, %r1
++	xr	%r6, %r1
++	LOGOP	%r5, 0(up)
++	LOGOP	%r6, 4(up)
++	stm	%r5, %r6, 0(rp)
++	la	rp, 8(rp)
++	la	up, 8(up)
++	j	L(mid)
++
++L(top):	lm	%r5, %r8, 0(vp)
++	la	vp, 16(vp)
++	xr	%r5, %r1
++	xr	%r6, %r1
++	xr	%r7, %r1
++	xr	%r8, %r1
++	LOGOP	%r5, 0(up)
++	LOGOP	%r6, 4(up)
++	LOGOP	%r7, 8(up)
++	LOGOP	%r8, 12(up)
++	la	up, 16(up)
++	stm	%r5, %r8, 0(rp)
++	la	rp, 16(rp)
++L(mid):	brct	%r0, L(top)
++
++	lm	%r6, %r8, 12(%r15)
++	br	%r14
++')
++
++ifdef(`VARIANT_3',`
++	stm	%r6, %r8, 12(%r15)
++	lhi	%r1, -1
++
++	ahi	nn, 3
++	lhi	%r7, 3
++	lr	%r0, nn
++	srl	%r0, 2
++	nr	%r7, nn			C nn mod 4
++	je	L(b1)
++	chi	%r7, 2
++	jl	L(b2)
++	jne	L(top)
++
++L(b3):	lm	%r5, %r7, 0(vp)
++	la	vp, 12(vp)
++	LOGOP	%r5, 0(up)
++	LOGOP	%r6, 4(up)
++	xr	%r5, %r1
++	xr	%r6, %r1
++	LOGOP	%r7, 8(up)
++	xr	%r7, %r1
++	stm	%r5, %r7, 0(rp)
++	la	rp, 12(rp)
++	la	up, 12(up)
++	j	L(mid)
++
++L(b1):	l	%r5, 0(vp)
++	la	vp, 4(vp)
++	LOGOP	%r5, 0(up)
++	xr	%r5, %r1
++	st	%r5, 0(rp)
++	la	rp, 4(rp)
++	la	up, 4(up)
++	j	L(mid)
++
++L(b2):	lm	%r5, %r6, 0(vp)
++	la	vp, 8(vp)
++	LOGOP	%r5, 0(up)
++	LOGOP	%r6, 4(up)
++	xr	%r5, %r1
++	xr	%r6, %r1
++	stm	%r5, %r6, 0(rp)
++	la	rp, 8(rp)
++	la	up, 8(up)
++	j	L(mid)
++
++L(top):	lm	%r5, %r8, 0(vp)
++	la	vp, 16(vp)
++	LOGOP	%r5, 0(up)
++	LOGOP	%r6, 4(up)
++	xr	%r5, %r1
++	xr	%r6, %r1
++	LOGOP	%r7, 8(up)
++	LOGOP	%r8, 12(up)
++	xr	%r7, %r1
++	xr	%r8, %r1
++	stm	%r5, %r8, 0(rp)
++	la	up, 16(up)
++	la	rp, 16(rp)
++L(mid):	brct	%r0, L(top)
++
++	lm	%r6, %r8, 12(%r15)
++	br	%r14
++')
++
++EPILOGUE()
+diff --git a/mpn/s390/lshift.asm b/mpn/s390/lshift.asm
+new file mode 100644
+index 0000000..da7d76e
+--- /dev/null
++++ b/mpn/s390/lshift.asm
+@@ -0,0 +1,144 @@
++dnl  S/390-32 mpn_lshift.
++
++dnl  Copyright 2011 Free Software Foundation, Inc.
++
++dnl  This file is part of the GNU MP Library.
++dnl
++dnl  The GNU MP Library is free software; you can redistribute it and/or modify
++dnl  it under the terms of either:
++dnl
++dnl    * the GNU Lesser General Public License as published by the Free
++dnl      Software Foundation; either version 3 of the License, or (at your
++dnl      option) any later version.
++dnl
++dnl  or
++dnl
++dnl    * the GNU General Public License as published by the Free Software
++dnl      Foundation; either version 2 of the License, or (at your option) any
++dnl      later version.
++dnl
++dnl  or both in parallel, as here.
++dnl
++dnl  The GNU MP Library is distributed in the hope that it will be useful, but
++dnl  WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
++dnl  or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++dnl  for more details.
++dnl
++dnl  You should have received copies of the GNU General Public License and the
++dnl  GNU Lesser General Public License along with the GNU MP Library.  If not,
++dnl  see https://www.gnu.org/licenses/.
++
++include(`../config.m4')
++
++C            cycles/limb
++C z900		 6
++C z990	         3
++C z9		 ?
++C z10		 ?
++C z196		 ?
++
++C TODO
++C  *
++
++C INPUT PARAMETERS
++define(`rp',	`%r2')
++define(`up',	`%r3')
++define(`n',	`%r4')
++define(`cnt',	`%r5')
++
++ASM_START()
++PROLOGUE(mpn_lshift)
++	lr	%r1, n
++	sll	%r1, 2
++	stm	%r6, %r12, 24(%r15)
++	la	up, 0(%r1,up)		C put up near end of U
++	la	rp, 0(%r1,rp)		C put rp near end of R
++	ahi	up, -20
++	ahi	rp, -16
++	lhi	%r8, 32
++	sr	%r8, cnt
++	l	%r12, 16(up)
++	srl	%r12, 0(%r8)		C return value
++	lhi	%r7, 3
++	nr	%r7, n
++	srl	n, 2
++	je	L(b0)
++	chi	%r7, 2
++	jl	L(b1)
++	je	L(b2)
++
++L(b3):	l	%r10, 16(up)
++	l	%r11, 12(up)
++	l	%r9,   8(up)
++	ahi	up, -8
++	lr	%r8, %r11
++	sldl	%r10, 0(cnt)
++	sldl	%r8,  0(cnt)
++	st	%r10, 12(rp)
++	st	%r8,   8(rp)
++	ahi	rp, -8
++	ltr	n, n
++	je	L(end)
++	j	L(top)
++
++L(b2):	l	%r10, 16(up)
++	l	%r11, 12(up)
++	ahi	up, -4
++	sldl	%r10, 0(cnt)
++	st	%r10, 12(rp)
++	ahi	rp, -4
++	ltr	n, n
++	je	L(end)
++	j	L(top)
++
++L(b1):	ltr	n, n
++	je	L(end)
++	j	L(top)
++
++L(b0):	l	%r10,16(up)
++	l	%r8, 12(up)
++	l	%r6,  8(up)
++	l	%r0,  4(up)
++	ahi	up, -12
++	lr	%r11, %r8
++	lr	%r9,  %r6
++	lr	%r7,  %r0
++	sldl	%r10,0(cnt)
++	sldl	%r8, 0(cnt)
++	sldl	%r6, 0(cnt)
++	st	%r10, 12(rp)
++	st	%r8,   8(rp)
++	st	%r6,   4(rp)
++	ahi	rp, -12
++	ahi	n, -1
++	je	L(end)
++
++	ALIGN(8)
++L(top):	l	%r10, 16(up)
++	l	%r8,  12(up)
++	l	%r6,   8(up)
++	l	%r0,   4(up)
++	l	%r1,   0(up)
++	lr	%r11, %r8
++	lr	%r9,  %r6
++	lr	%r7,  %r0
++	ahi	up, -16
++	sldl	%r10, 0(cnt)
++	sldl	%r8,  0(cnt)
++	sldl	%r6,  0(cnt)
++	sldl	%r0,  0(cnt)
++	st	%r10, 12(rp)
++	st	%r8,   8(rp)
++	st	%r6,   4(rp)
++	st	%r0,   0(rp)
++	ahi	rp, -16
++	brct	n, L(top)
++
++L(end):	l	%r10, 16(up)
++	sll	%r10, 0(cnt)
++	st	%r10, 12(rp)
++
++	lr	%r2, %r12
++	lm	%r6, %r12, 24(%r15)
++	br	%r14
++EPILOGUE()
+diff --git a/mpn/s390/lshiftc.asm b/mpn/s390/lshiftc.asm
+new file mode 100644
+index 0000000..f601673
+--- /dev/null
++++ b/mpn/s390/lshiftc.asm
+@@ -0,0 +1,156 @@
++dnl  S/390-32 mpn_lshiftc.
++
++dnl  Copyright 2011 Free Software Foundation, Inc.
++
++dnl  This file is part of the GNU MP Library.
++dnl
++dnl  The GNU MP Library is free software; you can redistribute it and/or modify
++dnl  it under the terms of either:
++dnl
++dnl    * the GNU Lesser General Public License as published by the Free
++dnl      Software Foundation; either version 3 of the License, or (at your
++dnl      option) any later version.
++dnl
++dnl  or
++dnl
++dnl    * the GNU General Public License as published by the Free Software
++dnl      Foundation; either version 2 of the License, or (at your option) any
++dnl      later version.
++dnl
++dnl  or both in parallel, as here.
++dnl
++dnl  The GNU MP Library is distributed in the hope that it will be useful, but
++dnl  WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
++dnl  or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++dnl  for more details.
++dnl
++dnl  You should have received copies of the GNU General Public License and the
++dnl  GNU Lesser General Public License along with the GNU MP Library.  If not,
++dnl  see https://www.gnu.org/licenses/.
++
++include(`../config.m4')
++
++C            cycles/limb
++C z900		 7
++C z990	         3.375
++C z9		 ?
++C z10		 ?
++C z196		 ?
++
++C TODO
++C  *
++
++C INPUT PARAMETERS
++define(`rp',	`%r2')
++define(`up',	`%r3')
++define(`n',	`%r4')
++define(`cnt',	`%r5')
++
++ASM_START()
++PROLOGUE(mpn_lshiftc)
++	lr	%r1, n
++	sll	%r1, 2
++	stm	%r6, %r13, 24(%r15)
++	la	up, 0(%r1,up)		C put up near end of U
++	la	rp, 0(%r1,rp)		C put rp near end of R
++	ahi	up, -20
++	ahi	rp, -16
++	lhi	%r8, 32
++	sr	%r8, cnt
++	l	%r12, 16(up)
++	srl	%r12, 0(%r8)		C return value
++	lhi	%r13, -1
++	lhi	%r7, 3
++	nr	%r7, n
++	srl	n, 2
++	je	L(b0)
++	chi	%r7, 2
++	jl	L(b1)
++	je	L(b2)
++
++L(b3):	l	%r10, 16(up)
++	l	%r11, 12(up)
++	l	%r9,   8(up)
++	ahi	up, -8
++	lr	%r8, %r11
++	sldl	%r10, 0(cnt)
++	sldl	%r8,  0(cnt)
++	xr	%r10, %r13
++	xr	%r8, %r13
++	st	%r10, 12(rp)
++	st	%r8,   8(rp)
++	ahi	rp, -8
++	ltr	n, n
++	je	L(end)
++	j	L(top)
++
++L(b2):	l	%r10, 16(up)
++	l	%r11, 12(up)
++	ahi	up, -4
++	sldl	%r10, 0(cnt)
++	xr	%r10, %r13
++	st	%r10, 12(rp)
++	ahi	rp, -4
++	ltr	n, n
++	je	L(end)
++	j	L(top)
++
++L(b1):	ltr	n, n
++	je	L(end)
++	j	L(top)
++
++L(b0):	l	%r10,16(up)
++	l	%r8, 12(up)
++	l	%r6,  8(up)
++	l	%r0,  4(up)
++	ahi	up, -12
++	lr	%r11, %r8
++	lr	%r9,  %r6
++	lr	%r7,  %r0
++	sldl	%r10,0(cnt)
++	sldl	%r8, 0(cnt)
++	sldl	%r6, 0(cnt)
++	xr	%r10, %r13
++	xr	%r8, %r13
++	xr	%r6, %r13
++	st	%r10, 12(rp)
++	st	%r8,   8(rp)
++	st	%r6,   4(rp)
++	ahi	rp, -12
++	ahi	n, -1
++	je	L(end)
++
++	ALIGN(8)
++L(top):	l	%r10, 16(up)
++	l	%r8,  12(up)
++	l	%r6,   8(up)
++	l	%r0,   4(up)
++	l	%r1,   0(up)
++	lr	%r11, %r8
++	lr	%r9,  %r6
++	lr	%r7,  %r0
++	ahi	up, -16
++	sldl	%r10, 0(cnt)
++	sldl	%r8,  0(cnt)
++	sldl	%r6,  0(cnt)
++	sldl	%r0,  0(cnt)
++	xr	%r10, %r13
++	xr	%r8, %r13
++	xr	%r6, %r13
++	xr	%r0, %r13
++	st	%r10, 12(rp)
++	st	%r8,   8(rp)
++	st	%r6,   4(rp)
++	st	%r0,   0(rp)
++	ahi	rp, -16
++	brct	n, L(top)
++
++L(end):	l	%r10, 16(up)
++	sll	%r10, 0(cnt)
++	xr	%r10, %r13
++	st	%r10, 12(rp)
++
++	lr	%r2, %r12
++	lm	%r6, %r13, 24(%r15)
++	br	%r14
++EPILOGUE()
+diff --git a/mpn/s390/mul_1.asm b/mpn/s390/mul_1.asm
+index 649671b..e3ad0c5 100644
+--- a/mpn/s390/mul_1.asm
++++ b/mpn/s390/mul_1.asm
+@@ -4,19 +4,30 @@ dnl  result in a second limb vector.
+ dnl  Copyright 2001 Free Software Foundation, Inc.
+ 
+ dnl  This file is part of the GNU MP Library.
+-
++dnl
+ dnl  The GNU MP Library is free software; you can redistribute it and/or modify
+-dnl  it under the terms of the GNU Lesser General Public License as published
+-dnl  by the Free Software Foundation; either version 3 of the License, or (at
+-dnl  your option) any later version.
+-
++dnl  it under the terms of either:
++dnl
++dnl    * the GNU Lesser General Public License as published by the Free
++dnl      Software Foundation; either version 3 of the License, or (at your
++dnl      option) any later version.
++dnl
++dnl  or
++dnl
++dnl    * the GNU General Public License as published by the Free Software
++dnl      Foundation; either version 2 of the License, or (at your option) any
++dnl      later version.
++dnl
++dnl  or both in parallel, as here.
++dnl
+ dnl  The GNU MP Library is distributed in the hope that it will be useful, but
+ dnl  WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+-dnl  or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public
+-dnl  License for more details.
+-
+-dnl  You should have received a copy of the GNU Lesser General Public License
+-dnl  along with the GNU MP Library.  If not, see http://www.gnu.org/licenses/.
++dnl  or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++dnl  for more details.
++dnl
++dnl  You should have received copies of the GNU General Public License and the
++dnl  GNU Lesser General Public License along with the GNU MP Library.  If not,
++dnl  see https://www.gnu.org/licenses/.
+ 
+ include(`../config.m4')
+ 
+diff --git a/mpn/s390/rshift.asm b/mpn/s390/rshift.asm
+new file mode 100644
+index 0000000..5f2cf37
+--- /dev/null
++++ b/mpn/s390/rshift.asm
+@@ -0,0 +1,138 @@
++dnl  S/390-32 mpn_rshift.
++
++dnl  Copyright 2011 Free Software Foundation, Inc.
++
++dnl  This file is part of the GNU MP Library.
++dnl
++dnl  The GNU MP Library is free software; you can redistribute it and/or modify
++dnl  it under the terms of either:
++dnl
++dnl    * the GNU Lesser General Public License as published by the Free
++dnl      Software Foundation; either version 3 of the License, or (at your
++dnl      option) any later version.
++dnl
++dnl  or
++dnl
++dnl    * the GNU General Public License as published by the Free Software
++dnl      Foundation; either version 2 of the License, or (at your option) any
++dnl      later version.
++dnl
++dnl  or both in parallel, as here.
++dnl
++dnl  The GNU MP Library is distributed in the hope that it will be useful, but
++dnl  WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
++dnl  or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++dnl  for more details.
++dnl
++dnl  You should have received copies of the GNU General Public License and the
++dnl  GNU Lesser General Public License along with the GNU MP Library.  If not,
++dnl  see https://www.gnu.org/licenses/.
++
++include(`../config.m4')
++
++C            cycles/limb
++C z900		 6
++C z990	         3
++C z9		 ?
++C z10		 ?
++C z196		 ?
++
++C TODO
++C  *
++
++C INPUT PARAMETERS
++define(`rp',	`%r2')
++define(`up',	`%r3')
++define(`n',	`%r4')
++define(`cnt',	`%r5')
++
++ASM_START()
++PROLOGUE(mpn_rshift)
++	stm	%r6, %r12, 24(%r15)
++	lhi	%r8, 32
++	sr	%r8, cnt
++	l	%r12, 0(up)
++	sll	%r12, 0(%r8)		C return value
++	lhi	%r7, 3
++	nr	%r7, n
++	srl	n, 2
++	je	L(b0)
++	chi	%r7, 2
++	jl	L(b1)
++	je	L(b2)
++
++L(b3):	l	%r11, 0(up)
++	l	%r10, 4(up)
++	l	%r8,  8(up)
++	ahi	up, 8
++	lr	%r9, %r10
++	srdl	%r10, 0(cnt)
++	srdl	%r8,  0(cnt)
++	st	%r11, 0(rp)
++	st	%r9,  4(rp)
++	ahi	rp, 8
++	ltr	n, n
++	je	L(end)
++	j	L(top)
++
++L(b2):	l	%r11, 0(up)
++	l	%r10, 4(up)
++	ahi	up, 4
++	srdl	%r10, 0(cnt)
++	st	%r11, 0(rp)
++	ahi	rp, 4
++	ltr	n, n
++	je	L(end)
++	j	L(top)
++
++L(b1):	ltr	n, n
++	je	L(end)
++	j	L(top)
++
++L(b0):	l	%r11, 0(up)
++	l	%r9,  4(up)
++	l	%r7,  8(up)
++	l	%r1, 12(up)
++	ahi	up, 12
++	lr	%r10, %r9
++	lr	%r8,  %r7
++	lr	%r6,  %r1
++	srdl	%r10, 0(cnt)
++	srdl	%r8,  0(cnt)
++	srdl	%r6,  0(cnt)
++	st	%r11, 0(rp)
++	st	%r9,  4(rp)
++	st	%r7,  8(rp)
++	ahi	rp, 12
++	ahi	n, -1
++	je	L(end)
++
++	ALIGN(8)
++L(top):	l	%r11, 0(up)
++	l	%r9,  4(up)
++	l	%r7,  8(up)
++	l	%r1, 12(up)
++	l	%r0, 16(up)
++	lr	%r10, %r9
++	lr	%r8,  %r7
++	lr	%r6,  %r1
++	ahi	up, 16
++	srdl	%r10, 0(cnt)
++	srdl	%r8,  0(cnt)
++	srdl	%r6,  0(cnt)
++	srdl	%r0,  0(cnt)
++	st	%r11, 0(rp)
++	st	%r9,  4(rp)
++	st	%r7,  8(rp)
++	st	%r1, 12(rp)
++	ahi	rp, 16
++	brct	n, L(top)
++
++L(end):	l	%r11, 0(up)
++	srl	%r11, 0(cnt)
++	st	%r11, 0(rp)
++
++	lr	%r2, %r12
++	lm	%r6, %r12, 24(%r15)
++	br	%r14
++EPILOGUE()
+diff --git a/mpn/s390/submul_1.asm b/mpn/s390/submul_1.asm
+index 5301096..da7d849 100644
+--- a/mpn/s390/submul_1.asm
++++ b/mpn/s390/submul_1.asm
+@@ -4,19 +4,30 @@ dnl  result from a second limb vector.
+ dnl  Copyright 2001 Free Software Foundation, Inc.
+ 
+ dnl  This file is part of the GNU MP Library.
+-
++dnl
+ dnl  The GNU MP Library is free software; you can redistribute it and/or modify
+-dnl  it under the terms of the GNU Lesser General Public License as published
+-dnl  by the Free Software Foundation; either version 3 of the License, or (at
+-dnl  your option) any later version.
+-
++dnl  it under the terms of either:
++dnl
++dnl    * the GNU Lesser General Public License as published by the Free
++dnl      Software Foundation; either version 3 of the License, or (at your
++dnl      option) any later version.
++dnl
++dnl  or
++dnl
++dnl    * the GNU General Public License as published by the Free Software
++dnl      Foundation; either version 2 of the License, or (at your option) any
++dnl      later version.
++dnl
++dnl  or both in parallel, as here.
++dnl
+ dnl  The GNU MP Library is distributed in the hope that it will be useful, but
+ dnl  WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+-dnl  or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public
+-dnl  License for more details.
+-
+-dnl  You should have received a copy of the GNU Lesser General Public License
+-dnl  along with the GNU MP Library.  If not, see http://www.gnu.org/licenses/.
++dnl  or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++dnl  for more details.
++dnl
++dnl  You should have received copies of the GNU General Public License and the
++dnl  GNU Lesser General Public License along with the GNU MP Library.  If not,
++dnl  see https://www.gnu.org/licenses/.
+ 
+ include(`../config.m4')
+ 
+-- 
+1.9.3
+
