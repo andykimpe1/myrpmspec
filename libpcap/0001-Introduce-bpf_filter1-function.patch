@@ -1,0 +1,175 @@
+From 47fcab9eb14c6b902910fcb9b4ff2415e83501ab Mon Sep 17 00:00:00 2001
+From: Michal Sekletar <msekleta@redhat.com>
+Date: Tue, 27 Jan 2015 12:10:00 +0100
+Subject: [PATCH 1/6] Introduce bpf_filter1 function
+
+Function takes additional argument which is a pointer to bpf_aux_data
+structure. This newly introduced struct holds auxiliary data provided by caller
+to specify additional data needed to implement some BPF extensions while
+executing filter in userspace.
+
+bpf_filter1 currently implements support for two BPF extesions, namely
+vlan_tci and vlan_pr.
+---
+ bpf/net/bpf_filter.c | 77 +++++++++++++++++++++++++++++++++++++++++++---------
+ pcap/bpf.h           | 10 +++++++
+ 2 files changed, 74 insertions(+), 13 deletions(-)
+
+diff --git a/bpf/net/bpf_filter.c b/bpf/net/bpf_filter.c
+index 0c4fb00..6ac1653 100644
+--- a/bpf/net/bpf_filter.c
++++ b/bpf/net/bpf_filter.c
+@@ -200,6 +200,17 @@ m_xhalf(m, k, err)
+ }
+ #endif
+ 
++#ifdef __linux__
++#include <linux/if_packet.h>
++#include <linux/filter.h>
++#endif
++
++enum {
++        BPF_S_ANC_NONE,
++        BPF_S_ANC_VLAN_TAG,
++        BPF_S_ANC_VLAN_TAG_PRESENT,
++};
++
+ /*
+  * Execute the filter program starting at pc on the packet p
+  * wirelen is the length of the original packet
+@@ -208,11 +219,12 @@ m_xhalf(m, k, err)
+  * in all other cases, p is a pointer to a buffer and buflen is its size.
+  */
+ u_int
+-bpf_filter(pc, p, wirelen, buflen)
++bpf_filter1(pc, p, wirelen, buflen, aux_data)
+ 	register const struct bpf_insn *pc;
+ 	register const u_char *p;
+ 	u_int wirelen;
+ 	register u_int buflen;
++	register const struct bpf_aux_data *aux_data;
+ {
+ 	register u_int32 A, X;
+ 	register int k;
+@@ -288,22 +300,50 @@ bpf_filter(pc, p, wirelen, buflen)
+ 			continue;
+ 
+ 		case BPF_LD|BPF_B|BPF_ABS:
+-			k = pc->k;
+-			if (k >= buflen) {
++			{
++#if defined(SKF_AD_VLAN_TAG) && defined(SKF_AD_VLAN_TAG_PRESENT)
++				int code = BPF_S_ANC_NONE;
++#define ANCILLARY(CODE) case SKF_AD_OFF + SKF_AD_##CODE:		\
++				code = BPF_S_ANC_##CODE;		\
++                                        if (!aux_data)                  \
++                                                return 0;               \
++                                        break;
++
++				switch (pc->k) {
++					ANCILLARY(VLAN_TAG);
++					ANCILLARY(VLAN_TAG_PRESENT);
++				default :
++#endif
++					k = pc->k;
++					if (k >= buflen) {
+ #if defined(KERNEL) || defined(_KERNEL)
+-				if (m == NULL)
+-					return 0;
+-				n = m;
+-				MINDEX(len, n, k);
+-				A = mtod(n, u_char *)[k];
+-				continue;
++						if (m == NULL)
++							return 0;
++						n = m;
++						MINDEX(len, n, k);
++						A = mtod(n, u_char *)[k];
++						continue;
+ #else
+-				return 0;
++						return 0;
++#endif
++					}
++					A = p[k];
++#if defined(SKF_AD_VLAN_TAG) && defined(SKF_AD_VLAN_TAG_PRESENT)
++				}
++				switch (code) {
++				case BPF_S_ANC_VLAN_TAG:
++					if (aux_data)
++						A = aux_data->vlan_tag;
++					break;
++
++				case BPF_S_ANC_VLAN_TAG_PRESENT:
++					if (aux_data)
++						A = aux_data->vlan_tag_present;
++					break;
++				}
+ #endif
++				continue;
+ 			}
+-			A = p[k];
+-			continue;
+-
+ 		case BPF_LD|BPF_W|BPF_LEN:
+ 			A = wirelen;
+ 			continue;
+@@ -532,6 +572,17 @@ bpf_filter(pc, p, wirelen, buflen)
+ 	}
+ }
+ 
++u_int
++bpf_filter(pc, p, wirelen, buflen)
++	register const struct bpf_insn *pc;
++	register const u_char *p;
++	u_int wirelen;
++	register u_int buflen;
++{
++	return bpf_filter1(pc, p, wirelen, buflen, NULL);
++}
++
++
+ /*
+  * Return true if the 'fcode' is a valid filter program.
+  * The constraints are that each jump be forward and to a valid
+diff --git a/pcap/bpf.h b/pcap/bpf.h
+index ad36eb6..69c2d9b 100644
+--- a/pcap/bpf.h
++++ b/pcap/bpf.h
+@@ -70,6 +70,9 @@
+  *
+  * This also provides our own multiple-include protection.
+  */
++
++#include <stdint.h>
++
+ #if !defined(_NET_BPF_H_) && !defined(_BPF_H_) && !defined(_H_BPF) && !defined(lib_pcap_bpf_h)
+ #define lib_pcap_bpf_h
+ 
+@@ -1312,6 +1315,11 @@ struct bpf_insn {
+ 	bpf_u_int32 k;
+ };
+ 
++struct bpf_aux_data {
++        uint16_t vlan_tag_present;
++        uint16_t vlan_tag;
++};
++
+ /*
+  * Macros for insn array initializers.
+  */
+@@ -1321,9 +1329,11 @@ struct bpf_insn {
+ #if __STDC__ || defined(__cplusplus)
+ extern int bpf_validate(const struct bpf_insn *, int);
+ extern u_int bpf_filter(const struct bpf_insn *, const u_char *, u_int, u_int);
++extern u_int bpf_filter1(const struct bpf_insn *, const u_char *, u_int, u_int, const struct bpf_aux_data *);
+ #else
+ extern int bpf_validate();
+ extern u_int bpf_filter();
++extern u_int bpf_filter();
+ #endif
+ 
+ /*
+-- 
+1.8.3.1
+

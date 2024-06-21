@@ -1,0 +1,250 @@
+From 0ef53c4b867932a4d98f98646d998219f6c0877e Mon Sep 17 00:00:00 2001
+From: Guy Harris <guy@alum.mit.edu>
+Date: Wed, 5 Nov 2014 14:33:14 -0800
+Subject: [PATCH 5/6] Move the socket ops out of gencode.c.
+
+Instead, do it in pcap-linux.c, and have it set a flag in the pcap_t
+structure to indicate to the code in gencode.c that it needs to generate
+special VLAN-handling code.
+---
+ bpf/net/bpf_filter.c |  7 +++++--
+ gencode.c            | 37 ++++++++++++++-----------------------
+ pcap-int.h           | 10 ++++++++++
+ pcap-linux.c         | 19 +++++++++++++++++++
+ pcap.c               | 12 ++++++++++++
+ pcap/bpf.h           |  5 +++++
+ savefile.c           |  5 +++++
+ 7 files changed, 70 insertions(+), 25 deletions(-)
+
+diff --git a/bpf/net/bpf_filter.c b/bpf/net/bpf_filter.c
+index 6ac1653..3907f57 100644
+--- a/bpf/net/bpf_filter.c
++++ b/bpf/net/bpf_filter.c
+@@ -215,11 +215,14 @@ enum {
+  * Execute the filter program starting at pc on the packet p
+  * wirelen is the length of the original packet
+  * buflen is the amount of data present
++ * aux_data is auxiliary data, currently used only when interpreting
++ * filters intended for the Linux kernel in cases where the kernel
++ * rejects the filter; it contains VLAN tag information
+  * For the kernel, p is assumed to be a pointer to an mbuf if buflen is 0,
+  * in all other cases, p is a pointer to a buffer and buflen is its size.
+  */
+ u_int
+-bpf_filter1(pc, p, wirelen, buflen, aux_data)
++bpf_filter_with_aux_data(pc, p, wirelen, buflen, aux_data)
+ 	register const struct bpf_insn *pc;
+ 	register const u_char *p;
+ 	u_int wirelen;
+@@ -579,7 +582,7 @@ bpf_filter(pc, p, wirelen, buflen)
+ 	u_int wirelen;
+ 	register u_int buflen;
+ {
+-	return bpf_filter1(pc, p, wirelen, buflen, NULL);
++	return bpf_filter_with_aux_data(pc, p, wirelen, buflen, NULL);
+ }
+ 
+ 
+diff --git a/gencode.c b/gencode.c
+index 74abf93..d0b5b1a 100644
+--- a/gencode.c
++++ b/gencode.c
+@@ -58,7 +58,6 @@ static const char rcsid[] _U_ =
+ 
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
+-#include <errno.h>
+ 
+ #endif /* WIN32 */
+ 
+@@ -7854,23 +7853,11 @@ gen_ahostop(eaddr, dir)
+ }
+ 
+ #if defined(SKF_AD_VLAN_TAG) && defined(SKF_AD_VLAN_TAG_PRESENT)
+-static int skf_ad_vlan_tag_present_supported(int bpf_extensions) {
+-        return bpf_extensions >= SKF_AD_VLAN_TAG_PRESENT;
+-}
+-
+ static struct block *
+-gen_vlan_bpf_extensions(int vlan_num) {
++gen_vlan_bpf_extensions(int vlan_num)
++{
+         struct block *b0, *b1;
+         struct slist *s;
+-        int val = 0, len, r;
+-
+-        len = sizeof(val);
+-        r = getsockopt(bpf_pcap->fd, SOL_SOCKET, SO_BPF_EXTENSIONS, &val, &len);
+-        if (r < 0)
+-                return NULL;
+-
+-        if (!skf_ad_vlan_tag_present_supported(val))
+-                return NULL;
+ 
+         /* generate new filter code based on extracting packet
+          * metadata */
+@@ -7898,7 +7885,8 @@ gen_vlan_bpf_extensions(int vlan_num) {
+ #endif
+ 
+ static struct block *
+-gen_vlan_no_bpf_extensions(int vlan_num) {
++gen_vlan_no_bpf_extensions(int vlan_num)
++{
+         struct block *b0, *b1;
+ 
+         /* check for VLAN, including QinQ */
+@@ -7975,14 +7963,17 @@ gen_vlan(vlan_num)
+ 	case DLT_NETANALYZER:
+ 	case DLT_NETANALYZER_TRANSPARENT:
+ #if defined(SKF_AD_VLAN_TAG) && defined(SKF_AD_VLAN_TAG_PRESENT)
+-                if (!vlan_stack_depth) {
+-                        b0 = gen_vlan_bpf_extensions(vlan_num);
+-                        if (!b0)
+-                                b0 = gen_vlan_no_bpf_extensions(vlan_num);
+-                }
+-                else
++		if (vlan_stack_depth == 0) {
++			/*
++			 * Do we need special VLAN handling?
++			 */
++                	if (p->bpf_codegen_flags & BPF_SPECIAL_VLAN_HANDLING)
++				b0 = gen_vlan_bpf_extensions(vlan_num);
++			else
++				b0 = gen_vlan_no_bpf_extensions(vlan_num);
++		} else
+ #endif
+-                        b0 = gen_vlan_no_bpf_extensions(vlan_num);
++			b0 = gen_vlan_no_bpf_extensions(vlan_num);
+                 break;
+ 	default:
+ 		bpf_error("no VLAN support for data link type %d",
+diff --git a/pcap-int.h b/pcap-int.h
+index 08bbcc3..cb45812 100644
+--- a/pcap-int.h
++++ b/pcap-int.h
+@@ -182,6 +182,11 @@ struct pcap {
+ 	pcap_direction_t direction;
+ 
+ 	/*
++	 * Flags to affect BPF code generation.
++	 */
++	int bpf_codegen_flags;
++
++	/*
+ 	 * Placeholder for filter code if bpf not in kernel.
+ 	 */
+ 	struct bpf_program fcode;
+@@ -228,6 +233,11 @@ struct pcap {
+ };
+ 
+ /*
++ * BPF code generation flags.
++ */
++#define BPF_SPECIAL_VLAN_HANDLING	0x00000001	/* special VLAN handling for Linux */
++
++/*
+  * This is a timeval as stored in a savefile.
+  * It has to use the same types everywhere, independent of the actual
+  * `struct timeval'; `struct timeval' has 32-bit tv_sec values on some
+diff --git a/pcap-linux.c b/pcap-linux.c
+index 05edd1c..e028f09 100644
+--- a/pcap-linux.c
++++ b/pcap-linux.c
+@@ -2968,6 +2968,9 @@ activate_new(pcap_t *handle)
+ #endif
+ 	int			err = 0;
+ 	struct packet_mreq	mr;
++#ifdef SO_BPF_EXTENSIONS
++	int			bpf_extensions, len;
++#endif
+ 
+ 	/*
+ 	 * Open a socket with protocol family packet. If the
+@@ -3296,6 +3299,22 @@ activate_new(pcap_t *handle)
+ 	}
+ #endif /* defined(SIOCGSTAMPNS) && defined(SO_TIMESTAMPNS) */
+ 
++#ifdef SO_BPF_EXTENSIONS
++	/*
++	 * Can we generate special code for VLAN checks?
++	 * (XXX - what if we need the special code but it's not supported
++	 * by the OS?  Is that possible?)
++	 */
++	if (getsockopt(sock_fd, SOL_SOCKET, SO_BPF_EXTENSIONS, &bpf_extensions, &len) == 0) {
++		if (bpf_extensions >= SKF_AD_VLAN_TAG_PRESENT) {
++			/*
++			 * Yes, we can.  Request that we do so.
++			 */
++			handle->bpf_codegen_flags |= BPF_SPECIAL_VLAN_HANDLING;
++		}
++	}
++#endif /* SO_BPF_EXTENSIONS */
++
+ 	return 1;
+ #else /* HAVE_PF_PACKET_SOCKETS */
+ 	strncpy(ebuf,
+diff --git a/pcap.c b/pcap.c
+index a7c5e40..8f6a86c 100644
+--- a/pcap.c
++++ b/pcap.c
+@@ -558,6 +558,12 @@ pcap_create_common(const char *source, char *ebuf, size_t size)
+ 	p->opt.immediate = 0;
+ 	p->opt.tstamp_type = -1;	/* default to not setting time stamp type */
+ 	p->opt.tstamp_precision = PCAP_TSTAMP_PRECISION_MICRO;
++
++	/*
++	 * Start out with no BPF code generation flags set.
++	 */
++	p->bpf_codegen_flags = 0;
++
+ 	return (p);
+ }
+ 
+@@ -1796,6 +1802,12 @@ pcap_open_dead_with_tstamp_precision(int linktype, int snaplen, u_int precision)
+ 	p->setmintocopy_op = pcap_setmintocopy_dead;
+ #endif
+ 	p->cleanup_op = pcap_cleanup_dead;
++
++	/*
++	 * A "dead" pcap_t never requires special BPF code generation.
++	 */
++	p->bpf_codegen_flags = 0;
++
+ 	p->activated = 1;
+ 	return (p);
+ }
+diff --git a/pcap/bpf.h b/pcap/bpf.h
+index 69c2d9b..63e18a2 100644
+--- a/pcap/bpf.h
++++ b/pcap/bpf.h
+@@ -1315,6 +1315,11 @@ struct bpf_insn {
+ 	bpf_u_int32 k;
+ };
+ 
++/*
++ * Auxiliary data, for use when interpreting a filter intended for the
++ * Linux kernel when the kernel rejects the filter (requiring us to
++ * run it in userland).  It contains VLAN tag information.
++ */
+ struct bpf_aux_data {
+         uint16_t vlan_tag_present;
+         uint16_t vlan_tag;
+diff --git a/savefile.c b/savefile.c
+index 73e3ea9..98f9c82 100644
+--- a/savefile.c
++++ b/savefile.c
+@@ -349,6 +349,11 @@ found:
+ 	 */
+ 	p->oneshot_callback = pcap_oneshot;
+ 
++	/*
++	 * Savefiles never require special BPF code generation.
++	 */
++	p->bpf_codegen_flags = 0;
++
+ 	p->activated = 1;
+ 
+ 	return (p);
+-- 
+1.8.3.1
+
