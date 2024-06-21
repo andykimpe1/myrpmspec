@@ -217,11 +217,11 @@
 #./get-package.sh dcraw-8.96-1.1.el6.src.rpm
 #./get-package.sh dejagnu-1.4.4-17.el6.src.rpm
 #./get-package.sh dejavu-fonts-2.33-1.el6.src.rpm
-./get-package.sh deltarpm-3.5-0.5.20090913git.el6.src.rpm
-./get-package.sh desktop-effects-0.8.4-7.el6.src.rpm
-./get-package.sh desktop-file-utils-0.15-9.el6.src.rpm
-./get-package.sh dev86-0.16.17-15.1.el6.src.rpm
-./get-package.sh devhelp-2.28.1-6.el6.src.rpm
+#./get-package.sh deltarpm-3.5-0.5.20090913git.el6.src.rpm
+#./get-package.sh desktop-effects-0.8.4-7.el6.src.rpm
+#./get-package.sh desktop-file-utils-0.15-9.el6.src.rpm
+#./get-package.sh dev86-0.16.17-15.1.el6.src.rpm
+#./get-package.sh devhelp-2.28.1-6.el6.src.rpm
 ./get-package.sh device-mapper-persistent-data-0.6.2-0.2.rc7.el6.src.rpm
 ./get-package.sh dialog-1.1-10.20080819.el6.src.rpm
 ./get-package.sh diffstat-1.51-2.el6.src.rpm
