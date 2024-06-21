@@ -1,0 +1,79 @@
+diff -up SQLAlchemy-0.5.5/lib/sqlalchemy/sql/expression.py.coerce-limit-offset-to-int SQLAlchemy-0.5.5/lib/sqlalchemy/sql/expression.py
+--- SQLAlchemy-0.5.5/lib/sqlalchemy/sql/expression.py.coerce-limit-offset-to-int	2012-01-28 10:04:20.380137266 -0500
++++ SQLAlchemy-0.5.5/lib/sqlalchemy/sql/expression.py	2012-01-28 10:04:49.046267236 -0500
+@@ -2992,8 +2992,8 @@ class _SelectBaseMixin(object):
+         self.use_labels = use_labels
+         self.for_update = for_update
+         self._autocommit = autocommit
+-        self._limit = limit
+-        self._offset = offset
++        self._limit = util.asint(limit)
++        self._offset = util.asint(offset)
+         self._bind = bind
+ 
+         self._order_by_clause = ClauseList(*util.to_list(order_by) or [])
+@@ -3048,13 +3048,13 @@ class _SelectBaseMixin(object):
+     def limit(self, limit):
+         """return a new selectable with the given LIMIT criterion applied."""
+ 
+-        self._limit = limit
++        self._limit = util.asint(limit)
+ 
+     @_generative
+     def offset(self, offset):
+         """return a new selectable with the given OFFSET criterion applied."""
+ 
+-        self._offset = offset
++        self._offset = util.asint(offset)
+ 
+     @_generative
+     def order_by(self, *clauses):
+diff -up SQLAlchemy-0.5.5/lib/sqlalchemy/util.py.coerce-limit-offset-to-int SQLAlchemy-0.5.5/lib/sqlalchemy/util.py
+--- SQLAlchemy-0.5.5/lib/sqlalchemy/util.py.coerce-limit-offset-to-int	2012-01-28 10:06:51.134420226 -0500
++++ SQLAlchemy-0.5.5/lib/sqlalchemy/util.py	2012-01-28 10:07:07.709275522 -0500
+@@ -1540,3 +1540,10 @@ def _decorate_with_warning(func, wtype, 
+     decorated = warned(func)
+     decorated.__doc__ = doc
+     return decorated
++
++def asint(value):
++    """Coerce to integer."""
++
++    if value is None:
++        return value
++    return int(value)
+diff -up SQLAlchemy-0.5.5/test/sql/test_select.py.coerce-limit-offset-to-int SQLAlchemy-0.5.5/test/sql/test_select.py
+--- SQLAlchemy-0.5.5/test/sql/test_select.py.coerce-limit-offset-to-int	2012-01-28 10:13:22.342515330 -0500
++++ SQLAlchemy-0.5.5/test/sql/test_select.py	2012-01-28 10:13:55.332273980 -0500
+@@ -1,5 +1,5 @@
+ from sqlalchemy.test.testing import eq_, assert_raises, assert_raises_message
+-import datetime, re, operator
++import datetime, re, operator, decimal
+ from sqlalchemy import *
+ from sqlalchemy import exc, sql, util
+ from sqlalchemy.sql import table, column, label, compiler
+@@ -71,6 +71,24 @@ class SelectTest(TestBase, AssertsCompil
+         self.assert_compile(select([table1, table2]), "SELECT mytable.myid, mytable.name, mytable.description, myothertable.otherid, \
+ myothertable.othername FROM mytable, myothertable")
+ 
++    def test_int_limit_offset_coercion(self):
++        for given, exp in [
++            ("5", 5),
++            (5, 5),
++            (5.2, 5),
++            (decimal.Decimal("5"), 5),
++            (None, None),
++        ]:
++            eq_(select().limit(given)._limit, exp)
++            eq_(select().offset(given)._offset, exp)
++            eq_(select(limit=given)._limit, exp)
++            eq_(select(offset=given)._offset, exp)
++
++        assert_raises(ValueError, select().limit, "foo")
++        assert_raises(ValueError, select().offset, "foo")
++        assert_raises(ValueError, select, offset="foo")
++        assert_raises(ValueError, select, limit="foo")
++
+     def test_from_subquery(self):
+         """tests placing select statements in the column clause of another select, for the
+         purposes of selecting from the exported columns of that select."""
