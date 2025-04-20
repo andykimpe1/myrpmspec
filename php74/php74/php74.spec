@@ -24,9 +24,9 @@ Version:       7.4.33
 Release:       22%{?dist}
 License:       GPL-2.0-or-later
 
-Source0:       https://github.com/andykimpe1/myrpmspec/raw/refs/heads/el7/php74/php74/macros-build
-Source1:       https://github.com/andykimpe1/myrpmspec/raw/refs/heads/el7/php74/php74/README
-Source2:       https://github.com/andykimpe1/myrpmspec/raw/refs/heads/el7/php74/php74/LICENSE
+Source0:       macros-build
+Source1:       README
+Source2:       LICENSE
 
 BuildRequires: scl-utils-build
 BuildRequires: help2man
