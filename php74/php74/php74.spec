@@ -1,4 +1,4 @@
-# remirepo spec file for php74 SCL metapackage
+# remirepo spec file for php74 SCL metapackage 
 #
 # SPDX-FileCopyrightText:  Copyright 2018-2025 Remi Collet
 # SPDX-License-Identifier: CECILL-2.1
