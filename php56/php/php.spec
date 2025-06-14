@@ -151,136 +151,136 @@ License: PHP and Zend and BSD and MIT and ASL 1.0
 Group: Development/Languages
 URL: http://www.php.net/
 
-Source0: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.40-strip.tar.xz
-Source1: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php.conf
-Source2: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php.ini
-Source3: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/macros.php
-Source4: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-fpm.conf
-Source5: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-fpm-www.conf
-Source6: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-fpm.service
-Source7: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-fpm.logrotate
-Source8: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-fpm.sysconfig
-Source9: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php.modconf
-Source10: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php.conf2
-Source11: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-fpm.init
-Source12: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-fpm.wants
-Source13: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/strip.sh
+Source0: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.40-strip.tar.xz
+Source1: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php.conf
+Source2: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php.ini
+Source3: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/macros.php
+Source4: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-fpm.conf
+Source5: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-fpm-www.conf
+Source6: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-fpm.service
+Source7: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-fpm.logrotate
+Source8: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-fpm.sysconfig
+Source9: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php.modconf
+Source10: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php.conf2
+Source11: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-fpm.init
+Source12: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-fpm.wants
+Source13: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/strip.sh
 # Configuration files for some extensions
-Source50: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/opcache.ini
-Source51: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/opcache-default.blacklist
+Source50: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/opcache.ini
+Source51: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/opcache-default.blacklist
 
 # Build fixes
-Patch1: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-7.1.7-httpd.patch
-Patch2: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.30-interbase.patch
-Patch3: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.31-openssl11.patch
-Patch5: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.3-includedir.patch
-Patch6: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.3-embed.patch
-Patch7: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.3.0-recode.patch
-Patch8: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.17-libdb.patch
-Patch9: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.5.30-curl.patch
-Patch10: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.37-icu62.patch
-Patch11: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.40-gcc10.patch
+Patch1: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-7.1.7-httpd.patch
+Patch2: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.30-interbase.patch
+Patch3: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.31-openssl11.patch
+Patch5: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.3-includedir.patch
+Patch6: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.3-embed.patch
+Patch7: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.3.0-recode.patch
+Patch8: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.17-libdb.patch
+Patch9: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.5.30-curl.patch
+Patch10: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.37-icu62.patch
+Patch11: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.40-gcc10.patch
 # backported from 8.0
-Patch12: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-net-snmp.patch
+Patch12: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-net-snmp.patch
 
 # Functional changes
-Patch40: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.4.0-dlopen.patch
-Patch41: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.30-dtrace.patch
-Patch42: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.13-systzdata-v12.patch
+Patch40: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.4.0-dlopen.patch
+Patch41: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.30-dtrace.patch
+Patch42: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.13-systzdata-v12.patch
 # See http://bugs.php.net/53436
-Patch43: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.4.0-phpize.patch
+Patch43: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.4.0-phpize.patch
 # Use -lldap_r for OpenLDAP
-Patch45: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.3-ldap_r.patch
+Patch45: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.3-ldap_r.patch
 # Make php_config.h constant across builds
-Patch46: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.3-fixheader.patch
+Patch46: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.3-fixheader.patch
 # drop "Configure command" from phpinfo output
-Patch47: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.3-phpinfo.patch
+Patch47: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.3-phpinfo.patch
 
 # RC Patch
-Patch91: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.3-oci8conf.patch
+Patch91: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.3-oci8conf.patch
 
 # Upstream fixes (100+)
-Patch100: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.31-oci.patch
-Patch103: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug76846.patch
-Patch104: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-mysqlnd-utf8mb4.patch
+Patch100: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.31-oci.patch
+Patch103: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug76846.patch
+Patch104: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-mysqlnd-utf8mb4.patch
 
 # Security fixes (200+)
 # See https://github.com/Microsoft/php-src/commits/PHP-5.6-security-backports
-Patch208: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug77396.patch
-Patch209: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug77431.patch
-Patch210: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug77540.patch
-Patch211: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug77563.patch
-Patch212: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug77586.patch
-Patch213: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug77630.patch
-Patch214: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-news.patch
-Patch215: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-sqlite3-defensive.patch
-Patch216: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug77753.patch
-Patch217: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug77831.patch
-Patch218: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug77950.patch
-Patch219: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug78069.patch
-Patch220: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug77988.patch
-Patch221: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug77967.patch
-Patch222: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug78222.patch
-Patch223: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug78256.patch
-Patch224: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug77919.patch
-Patch225: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug75457.patch
-Patch226: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug78380.patch
-Patch227: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug78599.patch
-Patch228: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug78878.patch
-Patch229: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug78862.patch
-Patch230: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug78863.patch
-Patch231: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug78793.patch
-Patch232: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug78910.patch
-Patch233: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug79099.patch
-Patch234: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug79037.patch
-Patch236: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug79221.patch
-Patch237: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug79082.patch
-Patch238: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug79282.patch
-Patch239: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug79329.patch
-Patch240: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug79330.patch
-Patch241: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug79465.patch
-Patch242: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug78875.patch
-Patch243: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug79797.patch
-Patch244: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug79877.patch
-Patch246: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug79699.patch
-Patch247: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug77423.patch
-Patch248: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug80672.patch
-Patch249: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug80710.patch
-Patch250: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug81122.patch
-Patch251: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug76450.patch
-Patch252: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug81211.patch
-Patch253: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug81026.patch
-Patch254: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug79971.patch
-Patch255: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug81719.patch
-Patch256: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug81720.patch
-Patch257: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug81727.patch
-Patch258: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug81726.patch
-Patch259: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug81740.patch
-Patch260: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug81744.patch
-Patch261: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-bug81746.patch
-Patch262: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-cve-2023-0662.patch
-Patch263: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-cve-2023-3247.patch
-Patch264: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-cve-2023-3823.patch
-Patch265: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-cve-2023-3824.patch
-Patch266: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-cve-2024-2756.patch
-Patch267: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-cve-2024-3096.patch
-Patch268: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-cve-2024-5458.patch
-Patch269: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-cve-2024-8925.patch
-Patch270: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-cve-2024-8926.patch
-Patch271: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-cve-2024-8927.patch
-Patch273: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-cve-2024-11234.patch
-Patch274: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-cve-2024-8932.patch
-Patch275: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-cve-2024-11233.patch
-Patch276: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-ghsa-4w77-75f9-2c8w.patch
+Patch208: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug77396.patch
+Patch209: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug77431.patch
+Patch210: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug77540.patch
+Patch211: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug77563.patch
+Patch212: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug77586.patch
+Patch213: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug77630.patch
+Patch214: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-news.patch
+Patch215: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-sqlite3-defensive.patch
+Patch216: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug77753.patch
+Patch217: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug77831.patch
+Patch218: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug77950.patch
+Patch219: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug78069.patch
+Patch220: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug77988.patch
+Patch221: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug77967.patch
+Patch222: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug78222.patch
+Patch223: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug78256.patch
+Patch224: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug77919.patch
+Patch225: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug75457.patch
+Patch226: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug78380.patch
+Patch227: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug78599.patch
+Patch228: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug78878.patch
+Patch229: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug78862.patch
+Patch230: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug78863.patch
+Patch231: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug78793.patch
+Patch232: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug78910.patch
+Patch233: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug79099.patch
+Patch234: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug79037.patch
+Patch236: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug79221.patch
+Patch237: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug79082.patch
+Patch238: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug79282.patch
+Patch239: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug79329.patch
+Patch240: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug79330.patch
+Patch241: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug79465.patch
+Patch242: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug78875.patch
+Patch243: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug79797.patch
+Patch244: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug79877.patch
+Patch246: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug79699.patch
+Patch247: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug77423.patch
+Patch248: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug80672.patch
+Patch249: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug80710.patch
+Patch250: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug81122.patch
+Patch251: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug76450.patch
+Patch252: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug81211.patch
+Patch253: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug81026.patch
+Patch254: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug79971.patch
+Patch255: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug81719.patch
+Patch256: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug81720.patch
+Patch257: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug81727.patch
+Patch258: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug81726.patch
+Patch259: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug81740.patch
+Patch260: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug81744.patch
+Patch261: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-bug81746.patch
+Patch262: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-cve-2023-0662.patch
+Patch263: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-cve-2023-3247.patch
+Patch264: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-cve-2023-3823.patch
+Patch265: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-cve-2023-3824.patch
+Patch266: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-cve-2024-2756.patch
+Patch267: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-cve-2024-3096.patch
+Patch268: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-cve-2024-5458.patch
+Patch269: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-cve-2024-8925.patch
+Patch270: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-cve-2024-8926.patch
+Patch271: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-cve-2024-8927.patch
+Patch273: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-cve-2024-11234.patch
+Patch274: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-cve-2024-8932.patch
+Patch275: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-cve-2024-11233.patch
+Patch276: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-ghsa-4w77-75f9-2c8w.patch
 
 # Fixes for tests (300+)
 # Factory is droped from system tzdata
 # Relax some tests with erratic results with system tzdata
-Patch300: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.30-datetests.patch
+Patch300: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.30-datetests.patch
 # Revert changes for pcre < 8.34
-Patch301: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-5.6.0-oldpcre.patch
+Patch301: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-5.6.0-oldpcre.patch
 # Renew openssl certs
-Patch302: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php-openssl-cert.patch
+Patch302: https://github.com/andykimpe1/myrpmspec/raw/refs/heads/master/php56/php/php-openssl-cert.patch
 
 # WIP
 
